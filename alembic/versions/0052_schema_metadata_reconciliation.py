@@ -441,6 +441,10 @@ def upgrade() -> None:
         # for ORM metadata and must not pretend to validate the production migration graph.
         return
 
+    # Fail fast rather than leaving active API/worker requests waiting behind this
+    # historical repair migration. If an intrusive lock is unavailable within 5s,
+    # PostgreSQL aborts the transaction and the operator can retry in a quiet window.
+    op.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
     # Refuse a reserved-schema collision before any UPDATE, DDL, constraint, or FK work.
     _assert_provenance_schema_available(bind)
 

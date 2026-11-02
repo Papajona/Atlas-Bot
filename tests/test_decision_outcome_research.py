@@ -26,6 +26,9 @@ def _label(position: int, *, decision: str | None = None, side: str | None = "bu
         "decision_reason_code": "model_veto" if decision == "NO_TRADE" else "",
         "candidate_side": side,
         "strategy": "trend",
+        "cost_source": "configured_asset_profile",
+        "cost_bps_per_side": 3.5,
+        "carry_bps_per_bar": 0.25,
         "regime": "TREND_UP",
         "horizons_bars": [1],
         "outcomes": {
@@ -109,3 +112,63 @@ def test_non_valid_and_unrelated_records_are_not_used_as_outcomes():
     assert report["coverage"]["valid_labels"] == 10
     assert report["coverage"]["ignored_non_valid_or_non_decision_labels"] == 1
     assert report["coverage"]["invalid_records"] == 1
+
+
+def test_aggregation_separates_instruments_and_exchanges():
+    labels = [
+        {**_label(i), "symbol": "BTC/USDT", "exchange": "bybit"}
+        for i in range(10)
+    ] + [
+        {**_label(i + 10), "symbol": "BTC/USDT", "exchange": "binance"}
+        for i in range(10)
+    ]
+    report = evaluate_decision_outcome_labels(
+        labels, min_group_samples=1, min_unique_timestamps=3
+    )
+    groups = report["by_market_and_decision"]
+    assert {(group["symbol"], group["exchange"]) for group in groups} == {
+        ("BTC/USDT", "bybit"),
+        ("BTC/USDT", "binance"),
+    }
+
+
+def test_duplicate_decision_label_is_counted_once_and_latest_record_wins():
+    first = _label(0, decision="TRADE", value=1.0)
+    latest = {
+        **first,
+        "outcomes": {"1": {**first["outcomes"]["1"], "candidate_side_net_return_bps": 9.0}},
+    }
+    other = _label(2, decision="TRADE", value=3.0)
+    report = evaluate_decision_outcome_labels(
+        [first, latest, other], min_group_samples=1, min_unique_timestamps=3
+    )
+    assert report["coverage"]["input_records"] == 3
+    assert report["coverage"]["valid_labels"] == 2
+    assert report["coverage"]["duplicate_decision_labels"] == 1
+    group = report["by_market_and_decision"][0]
+    assert group["by_decision"]["TRADE"]["n"] == 2
+    assert group["by_decision"]["TRADE"]["mean_bps"] == 6.0
+
+
+def test_aggregation_does_not_mix_label_versions_or_cost_profiles():
+    base = _label(0, decision="TRADE")
+    alternative = {
+        **_label(0, decision="TRADE"),
+        "decision_id": "decision-other",
+        "label_version": "decision-outcome-v2",
+        "cost_source": "venue_calibration",
+        "cost_bps_per_side": 7.0,
+        "carry_bps_per_bar": 1.0,
+    }
+    report = evaluate_decision_outcome_labels(
+        [base, alternative], min_group_samples=1, min_unique_timestamps=3
+    )
+    groups = report["by_market_and_decision"]
+    assert len(groups) == 2
+    assert {
+        (item["label_version"], item["cost_source"], item["cost_bps_per_side"], item["carry_bps_per_bar"])
+        for item in groups
+    } == {
+        ("decision-outcome-v1", "configured_asset_profile", 3.5, 0.25),
+        ("decision-outcome-v2", "venue_calibration", 7.0, 1.0),
+    }

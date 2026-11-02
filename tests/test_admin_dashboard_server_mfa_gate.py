@@ -183,3 +183,31 @@ def test_admin_dashboard_loaders_keep_numeric_formatting_and_single_dispatcher()
     assert script.count("document.addEventListener('click'") == 1
     assert script.count("document.addEventListener('change'") == 1
     assert script.rstrip().endswith("resumeAdminSession();")
+
+
+def test_admin_lock_clears_all_financial_summaries_cached_rows_and_release_secrets():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+    lock = script.split("function lockAdminDashboard(message,clearTokens=true){", 1)[1].split(
+        "function activateDashboard(){", 1
+    )[0]
+    for element_id in (
+        "equity", "pnl", "dd", "daily", "engine", "live", "kill", "positions",
+        "marginRevenue", "marginCosts", "marginRef", "marginPct", "marginProfit",
+        "wdPending", "wdPendingAmount", "wdApproved", "wdApprovedAmount", "wdInFlight", "wdRejected",
+    ):
+        assert f"'{element_id}'" in lock
+    assert "$('approverToken').value='';" in lock
+    assert "$('releaseToken').value='';" in lock
+    assert "$('releaseSignature').value='';" in lock
+    assert "window.wdRows={};" in lock
+    assert "$('withdrawalRows').replaceChildren();" in lock
+
+
+def test_mfa_enrollment_retries_with_a_new_challenge_after_challenge_creation_failure():
+    script = (ROOT / "app/static/admin-dashboard.js").read_text(encoding="utf-8")
+    enrollment = script.split("async function adminEnroll(){", 1)[1].split(
+        "async function adminMfaVerify(){", 1
+    )[0]
+    assert "window.adminMfaChallengeId=null;" in enrollment
+    assert "You may retry verification; a fresh challenge will be requested if needed." in enrollment
+    assert "window.adminMfaChallengeId=null;" in enrollment.split("}catch(error){", 1)[1]

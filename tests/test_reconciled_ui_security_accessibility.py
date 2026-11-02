@@ -50,3 +50,9 @@ def test_admin_role_revocation_and_websocket_reauthorization_remain_fail_closed(
     assert "time.monotonic() - last_auth_check >= 30.0" in block
     assert 'await require_role(claims, "RISK_OFFICER")' in block
     assert "code=1008" in block
+
+
+def test_empty_status_regions_remain_in_the_accessibility_tree():
+    css = (ROOT / "app" / "static" / "customer.css").read_text(encoding="utf-8")
+    assert '.feedback[role="status"]:empty{display:block' in css
+    assert "clip-path:inset(50%)" in css

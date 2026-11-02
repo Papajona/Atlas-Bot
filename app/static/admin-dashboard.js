@@ -67,6 +67,20 @@ function lockAdminDashboard(message,clearTokens=true){
   $('adminMfaQr').removeAttribute('src');
   $('adminMfaSecret').textContent='';
   $('adminMfaCode').value='';
+  // Never leave finance, positions, operator credentials or cached withdrawal rows
+  // visible after a lock, sign-out, session expiry or administrator account switch.
+  for(const id of [
+    'equity','pnl','dd','daily','engine','live','kill','positions',
+    'marginRevenue','marginCosts','marginRef','marginPct','marginProfit',
+    'wdPending','wdPendingAmount','wdApproved','wdApprovedAmount','wdInFlight','wdRejected'
+  ])$(id).textContent='—';
+  $('approverToken').value='';
+  $('releaseToken').value='';
+  $('releaseSignature').value='';
+  $('operatorIdentity').textContent='Sign in to populate authenticated operator identity.';
+  $('wdError').textContent='';
+  $('output').textContent='Sign in to load protected dashboard data.';
+  window.wdRows={};
   if(message)$('authState').textContent=message;
   $('adminLogoutBtn').hidden=!token();
   $('adminEnrollBtn').hidden=!token();
@@ -160,6 +174,7 @@ async function adminEnroll(){
     if(attemptEpoch!==adminSessionEpoch)return;
     if(!enrollment?.id||!enrollment?.totp?.qr_code)throw new Error('The authenticator service did not return an enrollment ID and QR code.');
     window.adminMfaFactorId=String(enrollment.id);
+    window.adminMfaChallengeId=null;
     $('adminMfaQr').src='data:image/svg+xml;charset=utf-8,'+encodeURIComponent(enrollment.totp.qr_code);
     $('adminMfaSecret').textContent=enrollment.totp.secret||'No manual key provided';
     $('adminMfaEnrollment').hidden=false;
@@ -176,6 +191,7 @@ async function adminEnroll(){
     $('adminMfaCode').focus();
   }catch(error){
     if(attemptEpoch!==adminSessionEpoch)return;
+    window.adminMfaChallengeId=null;
     $('authState').textContent='Authenticator enrollment: '+error.message;
     if(window.adminMfaFactorId&&token()){
       $('adminMfaBox').style.display='block';

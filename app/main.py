@@ -13,7 +13,7 @@ import time
 import math
 import json
 import uuid
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from contextvars import ContextVar
 from dataclasses import asdict
 import pandas as pd
@@ -3804,10 +3804,14 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
     import httpx
     async with SessionLocal() as db:
         rows = (await db.execute(select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == "USDT"))).scalars().all()
-        liability_available = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
-        liability_trading_reserved = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
-        liability_withdrawal_reserved = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
-        customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
+        # Numeric(38, 6) account balances can exceed Decimal's default 28-digit context.
+        # Preserve the full stored precision through each liability aggregation.
+        with localcontext() as decimal_context:
+            decimal_context.prec = 60
+            liability_available = sum((Decimal(str(r.available or 0)) for r in rows), Decimal("0"))
+            liability_trading_reserved = sum((Decimal(str(r.trading_reserved or 0)) for r in rows), Decimal("0"))
+            liability_withdrawal_reserved = sum((Decimal(str(r.withdrawal_reserved or 0)) for r in rows), Decimal("0"))
+            customer_liabilities = liability_available + liability_trading_reserved + liability_withdrawal_reserved
         virtual_wallets = (await db.execute(select(Wallet).where(Wallet.currency == "USDT", Wallet.network == "TRON", Wallet.status == "ACTIVE"))).scalars().all()
     treasury_balance: Decimal | None = None
     virtual_wallet_balances: dict[str, Decimal] = {}
@@ -3833,15 +3837,21 @@ async def admin_custody_reconciliation(authorization: str | None = Header(defaul
         except Exception as exc:
             # Return REVIEW with no coverage value when provider evidence is unreliable.
             chain_error = f"{type(exc).__name__}: TRON USDT balance verification failed"
-    custody_onchain = (treasury_balance or Decimal("0")) + sum(virtual_wallet_balances.values(), Decimal("0")) if not chain_error else None
-    coverage_gap = None if custody_onchain is None else custody_onchain - customer_liabilities
+    with localcontext() as decimal_context:
+        decimal_context.prec = 60
+        virtual_wallet_total = sum(virtual_wallet_balances.values(), Decimal("0"))
+        custody_onchain = (
+            (treasury_balance or Decimal("0")) + virtual_wallet_total
+            if not chain_error else None
+        )
+        coverage_gap = None if custody_onchain is None else custody_onchain - customer_liabilities
     return {
         "asset": "USDT", "network": "TRON", "treasury_address": settings.usdt_tron_treasury_address,
         "customer_liabilities": {"available": liability_available, "trading_reserved": liability_trading_reserved,
                                   "withdrawal_reserved": liability_withdrawal_reserved, "total": customer_liabilities},
         "active_virtual_deposit_addresses": len(virtual_wallets),
         "treasury_onchain_balance": treasury_balance,
-        "virtual_wallet_onchain_balance": sum(virtual_wallet_balances.values(), Decimal("0")),
+        "virtual_wallet_onchain_balance": virtual_wallet_total,
         "custody_onchain_balance": custody_onchain,
         "coverage_gap": coverage_gap,
         "status": "OK" if coverage_gap is not None and coverage_gap >= Decimal("-0.000001") else "REVIEW",
@@ -4337,7 +4347,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
 
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db)
-        entries = await ledger_statement(db, profile.id, "USDT", 5000)
+        # Export the complete journal; a hard cap silently omitted older history.
+        entries = await ledger_statement(db, profile.id, "USDT", limit=None)
         output = io.StringIO(newline="")
         writer = csv.writer(output)
         writer.writerow([
@@ -4363,6 +4374,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
                 "Content-Disposition": 'attachment; filename="atlas-customer-ledger-usdt.csv"',
                 "Cache-Control": "no-store",
                 "Pragma": "no-cache",
+                "X-Atlas-Export-Row-Count": str(len(entries)),
+                "X-Atlas-Export-Truncated": "false",
             },
         )
 

@@ -64,6 +64,12 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    # This test exercises bar-driven paper fills, not the persisted execution-health
+    # circuit breaker. Isolate that independent gate from outcomes created by earlier
+    # tests in the shared test database; dedicated breaker tests cover its thresholds.
+    monkeypatch.setattr(settings, "max_consecutive_losses", 0)
+    monkeypatch.setattr(settings, "max_order_latency_ms_p95", 0)
+    monkeypatch.setattr(settings, "max_order_error_rate_5m", 0.0)
 
     async def run():
         await init_db()
