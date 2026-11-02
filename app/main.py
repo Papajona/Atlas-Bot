@@ -258,6 +258,18 @@ async def _customer_paper_submission_stage(
     try:
         await _audit_customer_paper_order_submitted_once(detail)
     except Exception as exc:
+        # Keep the accepted order pending, but preserve a traceback for operators
+        # to diagnose a transient audit-store failure. Do not put exception text
+        # into the persisted customer audit payload.
+        logging.getLogger(__name__).exception(
+            "customer_paper_submission_audit_failed",
+            extra={
+                "customer_id": customer_id,
+                "trading_account_id": trading_account_id,
+                "client_order_id": client_order_id,
+                "error_type": type(exc).__name__,
+            },
+        )
         await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
             "customer_id": customer_id,
             "trading_account_id": trading_account_id,
