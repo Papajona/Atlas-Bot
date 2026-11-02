@@ -269,7 +269,7 @@ def test_cross_process_sqlite_lock_retries_distinct_audit_identities(tmp_path, m
             await blocker.close()
             results = await asyncio.gather(*tasks, return_exceptions=True)
             errors = [result for result in results if isinstance(result, Exception)]
-            assert not errors, [repr(error) for error in errors]
+            assert not errors, f"cross-process audit append errors: {[repr(error) for error in errors]}"
             successful = [result for result in results if not isinstance(result, Exception)]
             assert len(successful) == 8
             assert all(created for _row, created in successful)
