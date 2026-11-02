@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import sqlalchemy as sa
 
 import pytest
 from sqlalchemy.dialects import postgresql, sqlite
