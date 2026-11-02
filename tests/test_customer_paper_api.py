@@ -89,6 +89,27 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
+
+def test_manual_replay_requires_the_original_submission_bar_digest():
+    submitted_at = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
+    bars = {
+        submitted_at: {"bar_data_sha256": "a" * 64},
+    }
+
+    paper_api._verify_submission_bar_integrity(bars, submitted_at, "a" * 64)
+
+    with pytest.raises(HTTPException) as changed:
+        paper_api._verify_submission_bar_integrity(bars, submitted_at, "b" * 64)
+    assert changed.value.status_code == 409
+
+    with pytest.raises(HTTPException) as missing:
+        paper_api._verify_submission_bar_integrity({}, submitted_at, "a" * 64)
+    assert missing.value.status_code == 409
+
+    with pytest.raises(HTTPException) as invalid:
+        paper_api._verify_submission_bar_integrity(bars, submitted_at, "")
+    assert invalid.value.status_code == 409
+
 def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypatch):
     frozen_now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     bar_at = frozen_now - timedelta(minutes=1)
@@ -97,6 +118,12 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     frame.attrs["data_provenance"]["fetched_at_utc"] = (
         frozen_now - timedelta(seconds=1)
     ).isoformat()
+    submission_bar_at = bar_at - timedelta(minutes=1)
+    submission_bar_sha256 = next(
+        bar["bar_data_sha256"]
+        for bar in paper_api._market_bar_contexts(frame, symbol="BTC/USDT", timeframe="1m")
+        if bar["timestamp"] == submission_bar_at
+    )
 
     open_order = {
         "client_order_id": "manual-replay-race",
@@ -109,7 +136,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         "metadata": {
             "timeframe": "1m",
             "execution_model": "completed_bar_volume_capped_heuristic_v1",
-            "submission_bar_at": (bar_at - timedelta(minutes=1)).isoformat(),
+            "submission_bar_at": submission_bar_at.isoformat(),
+            "submission_bar_sha256": submission_bar_sha256,
         },
     }
     prior_fill = {
@@ -609,6 +637,11 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
     _freeze_paper_api_clock(monkeypatch, now)
     frame = _verified_bars(latest_bar_at, volume="100")
     frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+    submission_bar_sha256 = next(
+        bar["bar_data_sha256"]
+        for bar in paper_api._market_bar_contexts(frame, symbol="BTC/USDT", timeframe="1m")
+        if bar["timestamp"] == submission_bar_at
+    )
 
     order = {
         "client_order_id": "multi-bar-manual-order",
@@ -628,6 +661,7 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
             "timeframe": "1m",
             "execution_model": "completed_bar_volume_capped_heuristic_v1",
             "submission_bar_at": submission_bar_at.isoformat(),
+            "submission_bar_sha256": submission_bar_sha256,
         },
     }
     prior_fills = {}
