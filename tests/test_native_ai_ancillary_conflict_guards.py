@@ -171,6 +171,8 @@ fi
             "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)",
             "import groq as hosted\\nclient = hosted.Groq(api_key=SECRET_GROQ_API_KEY)",
             "from groq.asyncio import AsyncGroq\\nclient = AsyncGroq(api_key=GROQ_API_KEY)",
+            "GROQ_STRATEGY_MODEL = 'legacy-model'",
+            "settings.groq_strategy_model = 'legacy-model'",
             "import httpx\\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
             "def review(): return _groq_json('prompt')",
         ):
