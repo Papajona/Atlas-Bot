@@ -38,17 +38,17 @@ def _merged_pr_records_in_range(
     closed_prs: Iterable[Mapping[str, Any]],
     repository: str,
     *,
-    first_pr: int = 164,
-    last_pr: int = 330,
+    first_pr: int = 271,
+    last_pr: int = 331,
 ) -> list[dict[str, Any]]:
-    """Return exact merged-PR evidence inside the requested #164-#330 scope.
+    """Return exact merged-PR evidence inside the requested #271-#331 scope.
 
     This is a candidate scope filter, not deletion authority. The live branch tip
     must equal an in-scope PR's recorded head SHA before any resolver proof runs.
     Deletion then requires exact branch-tip ancestry, an exact in-scope merge commit
     on main, the pinned duplicate-alias proof, the pinned Android release-gate
     supersession proof, or the pinned Native AI migration supersession proof.
-    Closed but unmerged PRs and PRs outside #164-#330 are never deletion evidence.
+    Closed but unmerged PRs and PRs outside #271-#331 are never deletion evidence.
     """
     eligible: list[dict[str, Any]] = []
     for item in closed_prs:
@@ -901,7 +901,7 @@ def main() -> int:
                 record(
                     "PRESERVE",
                     branch_name,
-                    "outside requested merged-PR cleanup scope #164-#330",
+                    "outside requested merged-PR cleanup scope #271-#331",
                 )
                 preserved += 1
                 continue
@@ -931,7 +931,7 @@ def main() -> int:
                 record(
                     "PRESERVE",
                     branch_name,
-                    "live branch tip does not match an exact merged PR head in scope #164-#330",
+                    "live branch tip does not match an exact merged PR head in scope #271-#331",
                 )
                 preserved += 1
                 continue
