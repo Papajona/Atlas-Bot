@@ -838,3 +838,192 @@ def test_customer_paper_market_snapshot_is_shared_across_customers_and_fetches_o
         ("customer-paper-market:501", 12, 60),
         ("customer-paper-market:502", 12, 60),
     ]
+
+
+def test_customer_paper_snapshot_anchors_older_order_history_and_separates_cache_windows(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    frame = _verified_bars(now - timedelta(minutes=1), volume="100")
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    market_calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    class Request:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    def market_data(request):
+        market_calls.append(request)
+        return frame
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    # The first call represents a current submission and needs only the normal
+    # bounded context. The second advances an order submitted three days earlier.
+    asyncio.run(paper_api._fetch_verified_market_snapshot(
+        customer_id=501,
+        symbol="BTC/USDT",
+        timeframe="1m",
+        market_data=market_data,
+        market_request_type=Request,
+    ))
+    asyncio.run(paper_api._fetch_verified_market_snapshot(
+        customer_id=501,
+        symbol="BTC/USDT",
+        timeframe="1m",
+        market_data=market_data,
+        market_request_type=Request,
+        earliest_required_at=now - timedelta(days=3),
+    ))
+
+    assert len(market_calls) == 2
+    assert market_calls[0].days == 1
+    assert market_calls[1].days >= 4
+    assert market_calls[1].days <= 30
+
+
+def test_paper_market_impact_requires_full_contiguous_return_history():
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    index = pd.date_range(end=now, periods=21, freq="1min")
+    frame = pd.DataFrame({"close": [100.0 + position for position in range(21)]}, index=index)
+
+    volatility = paper_api._paper_market_impact_volatility(
+        frame, bar_position=20, timeframe="1m"
+    )
+    assert volatility > 0
+    assert pd.notna(volatility)
+
+    with pytest.raises(HTTPException) as exc:
+        paper_api._paper_market_impact_volatility(
+            frame, bar_position=19, timeframe="1m"
+        )
+    assert exc.value.status_code == 409
+    assert "full paper market-impact volatility window" in exc.value.detail
+
+
+def test_paper_market_impact_rejects_gapped_pre_fill_return_history():
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    index = list(pd.date_range(end=now, periods=21, freq="1min"))
+    # Preserve order and uniqueness, but remove one expected minute interval.
+    for position in range(10, len(index)):
+        index[position] += timedelta(minutes=1)
+    frame = pd.DataFrame(
+        {"close": [100.0 + position for position in range(21)]},
+        index=pd.DatetimeIndex(index),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        paper_api._paper_market_impact_volatility(
+            frame, bar_position=20, timeframe="1m"
+        )
+    assert exc.value.status_code == 409
+    assert "Non-contiguous completed-candle history" in exc.value.detail
+
+
+def test_customer_paper_snapshot_fails_closed_when_anchored_replay_exceeds_supported_window(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    def market_data(_request):
+        calls.append(True)
+        raise AssertionError("market data must not be fetched for an unsupported replay span")
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1m",
+            market_data=market_data,
+            market_request_type=lambda **kwargs: kwargs,
+            earliest_required_at=now - timedelta(days=31),
+        ))
+
+    assert exc.value.status_code == 409
+    assert "supported 30-day candle window" in exc.value.detail
+    assert calls == []
+
+
+def test_anchored_daily_snapshot_allows_valid_ttl_and_latency_within_30_day_replay(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 29)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    class MarketRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class MarketFetchReached(Exception):
+        pass
+
+    def market_data(request):
+        calls.append(request)
+        raise MarketFetchReached
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(MarketFetchReached):
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=MarketRequest,
+            earliest_required_at=now - timedelta(hours=1),
+        ))
+
+    assert len(calls) == 1
+    assert calls[0].days == 30
+
+
+def test_unanchored_daily_snapshot_clamps_valid_long_ttl_to_supported_fetch_window(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 29)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    class MarketRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class MarketFetchReached(Exception):
+        pass
+
+    def market_data(request):
+        calls.append(request)
+        raise MarketFetchReached
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(MarketFetchReached):
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=MarketRequest,
+        ))
+
+    assert len(calls) == 1
+    assert calls[0].days == 30
+

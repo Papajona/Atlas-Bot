@@ -47,6 +47,55 @@ _TIMEFRAME_SECONDS = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
 }
+_PAPER_MARKET_IMPACT_RETURN_LOOKBACK = 20
+
+
+def _paper_market_impact_volatility(df: Any, *, bar_position: int, timeframe: str) -> float:
+    """Require the complete contiguous return window used to price a paper fill."""
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+    if timeframe_seconds is None:
+        raise HTTPException(409, "Paper market-impact volatility timeframe is unsupported")
+    lookback = _PAPER_MARKET_IMPACT_RETURN_LOOKBACK
+    start_position = int(bar_position) - lookback
+    if start_position < 0:
+        raise HTTPException(
+            409,
+            "Insufficient contiguous completed-candle history for the full paper market-impact volatility window; reconcile the order before advancing",
+        )
+    history = df.iloc[start_position:int(bar_position) + 1]
+    if len(history) != lookback + 1 or "close" not in history.columns:
+        raise HTTPException(
+            409,
+            "Incomplete completed-candle history for paper market-impact volatility; reconcile the order before advancing",
+        )
+    timestamps = [_timestamp(value, "volatility history bar") for value in history.index]
+    expected_interval = float(timeframe_seconds)
+    if any(
+        (later - earlier).total_seconds() != expected_interval
+        for earlier, later in zip(timestamps, timestamps[1:])
+    ):
+        raise HTTPException(
+            409,
+            "Non-contiguous completed-candle history for paper market-impact volatility; reconcile the order before advancing",
+        )
+    returns = (
+        history["close"]
+        .astype(float)
+        .pct_change(fill_method=None)
+        .replace([float("inf"), float("-inf")], float("nan"))
+        .dropna()
+    )
+    if len(returns) != lookback:
+        raise HTTPException(
+            409,
+            "Incomplete return history for paper market-impact volatility; reconcile the order before advancing",
+        )
+    volatility = float(returns.std(ddof=0))
+    if not math.isfinite(volatility) or volatility < 0:
+        raise HTTPException(409, "Market volatility estimate is invalid")
+    return volatility
+
+
 # Share a very fresh, verified OHLCV snapshot across customer requests for the
 # same market. The per-key lock collapses concurrent cache misses without
 # serializing unrelated symbols/timeframes behind an exchange round trip.
@@ -54,10 +103,10 @@ _PAPER_MARKET_SNAPSHOT_TTL_SECONDS = 3.0
 _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES = 64
 _PAPER_MARKET_RATE_LIMIT_PER_MINUTE = 12
 _PAPER_MARKET_SNAPSHOTS: OrderedDict[
-    tuple[int, str, str, int], tuple[float, Any, Callable[..., Any]]
+    tuple[int, str, str, int, int], tuple[float, Any, Callable[..., Any]]
 ] = OrderedDict()
 _PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[
-    tuple[int, str, str, int], asyncio.Lock
+    tuple[int, str, str, int, int], asyncio.Lock
 ] = OrderedDict()
 _PAPER_MARKET_SNAPSHOT_CACHE_LOCK = asyncio.Lock()
 
@@ -69,8 +118,9 @@ async def _fetch_verified_market_snapshot(
     timeframe: str,
     market_data: Callable[..., Any],
     market_request_type: type,
+    earliest_required_at: datetime | None = None,
 ) -> tuple[Any, dict[str, Any]]:
-    """Throttle each customer and share a short-lived verified market snapshot."""
+    """Throttle and cache verified bars, extending replay history to the order's submission."""
     allowed, _remaining = await allow_rate_limit(
         f"customer-paper-market:{int(customer_id)}",
         limit=_PAPER_MARKET_RATE_LIMIT_PER_MINUTE,
@@ -88,7 +138,39 @@ async def _fetch_verified_market_snapshot(
         + max(1, int(settings.paper_fill_latency_bars))
         + 1,
     )
-    days = min(30, max(1, (required_bars * timeframe_seconds + 86_399) // 86_400))
+    # N candles span N-1 timeframe intervals. Counting N full intervals
+    # overstates the fetch window by one entire candle (notably for daily bars).
+    required_history_seconds = max(0, required_bars - 1) * timeframe_seconds
+    days = max(1, (required_history_seconds + 86_399) // 86_400)
+    if earliest_required_at is not None:
+        earliest = earliest_required_at
+        if earliest.tzinfo is None or earliest.utcoffset() is None:
+            raise HTTPException(409, "Persisted paper-order submission timestamp must be timezone-aware")
+        now_utc = datetime.now(timezone.utc)
+        earliest_utc = earliest.astimezone(timezone.utc)
+        replay_age_seconds = max(0.0, (now_utc - earliest_utc).total_seconds())
+        # The endpoint's hard cap applies to the immutable submission candle and
+        # replay candles. Once that candle itself is outside the last 30 days,
+        # complete replay is impossible and we fail closed.
+        if replay_age_seconds > 30 * 86_400:
+            raise HTTPException(
+                409,
+                "Paper-order replay exceeds the supported 30-day candle window; reconcile the order before advancing",
+            )
+        # Retain the available pre-submission context where it fits, then include
+        # the submission bar and subsequent replay bars. If context plus replay
+        # exceeds the provider cap while the submission candle remains available,
+        # request the rolling 30-day window. The caller still verifies the exact
+        # immutable submission-bar hash before processing any fill.
+        required_start = earliest_utc - timedelta(seconds=required_history_seconds)
+        anchored_seconds = max(0.0, (now_utc - required_start).total_seconds())
+        anchored_days = max(1, int(math.ceil(anchored_seconds / 86_400)))
+        days = min(30, max(days, anchored_days))
+    else:
+        # Initial, unanchored submissions retain the endpoint's historical
+        # 30-day cap. TTL/latency settings can calculate 31 bars for daily
+        # candles; an N-bar window spans only N-1 complete intervals.
+        days = min(days, 30)
     # Cache only within the same expected completed-candle generation. A
     # three-second cache alone can otherwise serve yesterday's bar after the
     # caller clock or market advances during a fast test/recovery cycle.
@@ -102,6 +184,7 @@ async def _fetch_verified_market_snapshot(
         str(symbol).strip().upper(),
         str(timeframe),
         expected_closed_bar_generation,
+        days,
     )
     request = market_request_type(
         asset="crypto",
@@ -420,13 +503,20 @@ def build_customer_paper_router(
         else:
             await state_guard()
 
-    async def _fetch_bar(customer_id: int, symbol: str, timeframe: str) -> tuple[Any, dict[str, Any]]:
+    async def _fetch_bar(
+        customer_id: int,
+        symbol: str,
+        timeframe: str,
+        *,
+        earliest_required_at: datetime | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
         return await _fetch_verified_market_snapshot(
             customer_id=customer_id,
             symbol=symbol,
             timeframe=timeframe,
             market_data=market_data,
             market_request_type=market_request_type,
+            earliest_required_at=earliest_required_at,
         )
 
     async def _order_detail(customer_id: int, client_order_id: str) -> dict[str, Any]:
@@ -591,8 +681,13 @@ def build_customer_paper_router(
             timeframe = str(metadata.get("timeframe") or "")
             if timeframe not in _TIMEFRAME_SECONDS or metadata.get("execution_model") != "completed_bar_volume_capped_heuristic_v1":
                 raise HTTPException(409, "Persisted paper order lacks a supported execution context")
-            df, latest_bar = await _fetch_bar(profile.id, order["symbol"], timeframe)
             submitted_at = _timestamp(metadata.get("submission_bar_at"), "submission bar")
+            df, latest_bar = await _fetch_bar(
+                profile.id,
+                order["symbol"],
+                timeframe,
+                earliest_required_at=submitted_at,
+            )
             bar_seconds = _TIMEFRAME_SECONDS[timeframe]
             ttl_bars = max(1, int(settings.paper_order_ttl_bars))
             fill_latency_bars = max(1, int(settings.paper_fill_latency_bars))
@@ -799,14 +894,12 @@ def build_customer_paper_router(
                             }
                         fill_quantity = min(fill_quantity, held)
 
-                    # Historical candle impact inputs must not include closes from bars
-                    # that occurred after the candle currently being replayed.
+                    # Use only the full, contiguous historical return window through
+                    # this replay candle. Never price a fill from truncated volatility.
                     bar_position = int(df.index.get_loc(bar["timestamp"]))
-                    candle_history = df.iloc[:bar_position + 1]
-                    returns = candle_history["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
-                    volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
-                    if not math.isfinite(volatility) or volatility < 0:
-                        raise HTTPException(409, "Market volatility estimate is invalid")
+                    volatility = _paper_market_impact_volatility(
+                        df, bar_position=bar_position, timeframe=timeframe
+                    )
                     participation_for_impact = max(
                         0.0,
                         float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
