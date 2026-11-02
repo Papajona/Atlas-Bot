@@ -17,7 +17,7 @@ from pathlib import Path
 ROOT = Path.cwd()
 DEFAULT_CLEANUP_COMMIT = "f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
 # Reviewed source for canonical Native AI behavior, distinct from the cleanup patch base.
-DEFAULT_CANONICAL_COMMIT = "f8bb968198ec909e66cc04b888716f87ded6c0fa"
+DEFAULT_CANONICAL_COMMIT = "a2b745cff52a5b207d153bae5d1d7b98b916040b"
 DEFAULT_EXTRA_BASE_COMMIT = "0d38f95079833804713fcba080caee38a6ddfb4c"
 PROVIDER_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
@@ -7155,7 +7155,26 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
     for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py", "app/prompt_safety.py"):
         target = ROOT / path
-        if not target.exists():
+        if path == "app/native_ai.py":
+            # Native AI is the sole trade-safety authority. Do not preserve a
+            # branch-local evaluator merely because it mentions the allowed Groq
+            # advisory envelope: install the pinned, reviewed implementation so
+            # invalid prices, incomplete evidence, and malformed Groq reviews
+            # retain the canonical fail-closed veto behavior.
+            existing = target.read_text(encoding="utf-8") if target.exists() else ""
+            if existing and _has_conflicting_provider_wiring(path, existing):
+                raise MigrationError(
+                    f"{path} contains retired or hosted provider wiring; preserving the branch"
+                )
+            canonical_native_ai = canonical_text(canonical_commit, path)
+            try:
+                ast.parse(canonical_native_ai, filename=path)
+            except SyntaxError as exc:
+                raise MigrationError(
+                    f"pinned canonical {path} is not valid Python; preserving the branch"
+                ) from exc
+            write_text(path, canonical_native_ai)
+        elif not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
         elif path == "app/groq_ai.py":
             validate_groq_research_module(target.read_text(encoding="utf-8"), path)
