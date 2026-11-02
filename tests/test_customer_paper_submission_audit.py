@@ -217,6 +217,9 @@ def test_retry_loader_quarantines_corrupt_record_and_keeps_valid_retry(monkeypat
                 return FakeResult()
             return SimpleNamespace(rowcount=1)
 
+        async def commit(self):
+            return None
+
     def decrypt(value):
         if value == "bad-ciphertext":
             raise RuntimeError("ciphertext authentication failed")
