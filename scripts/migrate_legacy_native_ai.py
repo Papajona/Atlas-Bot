@@ -7122,17 +7122,79 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
 
 
 
-def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
-    """Reject retired provider wiring without treating supported Groq review as legacy.
+def _native_ai_contains_hosted_provider_call(contents: str) -> bool:
+    """Reject hosted inference inside Native AI while allowing passive Groq evidence fields.
 
-    app.native_ai records Groq's bounded trade-review evidence as advisory context;
-    it does not contain a hosted Groq strategy/safety provider implementation.
-    Groq remains allowed only through the current research-review contract, while
-    retired Gemini/Cerebras/AI Gateway and legacy Groq strategy-model fields remain
-    migration blockers.
+    Trade-time Groq inference belongs in the bounded orchestration layer. The Native AI
+    module must remain deterministic/local and may only inspect the resulting advisory
+    evidence envelope; it must never import or call a hosted provider itself.
     """
-    pattern = RETIRED_PROVIDER_RE if path == "app/native_ai.py" else PROVIDER_RE
-    return bool(pattern.search(contents))
+    try:
+        module = ast.parse(contents, filename="app/native_ai.py")
+    except SyntaxError:
+        # An unparseable Native AI module cannot be safely classified for propagation.
+        return True
+
+    hosted_modules = {
+        "groq",
+        "groq_ai",
+        "openai",
+        "cerebras",
+        "litellm",
+        "httpx",
+        "requests",
+        "aiohttp",
+        "socket",
+    }
+    hosted_calls = {
+        "groq_trade_context_review",
+        "_groq_json",
+        "groq_json",
+        "openai",
+        "asyncopenai",
+        "generativemodel",
+        "cerebras",
+    }
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.lower()
+                if root in hosted_modules or any(
+                    root.endswith("." + name) for name in hosted_modules
+                ):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            imported_module = (node.module or "").lower().lstrip(".")
+            if (
+                imported_module in hosted_modules
+                or any(imported_module.endswith("." + name) for name in hosted_modules)
+                or any(alias.name.lower() in hosted_calls for alias in node.names)
+            ):
+                return True
+        elif isinstance(node, ast.Call):
+            call_name = (
+                node.func.id if isinstance(node.func, ast.Name)
+                else node.func.attr if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if str(call_name).lower() in hosted_calls:
+                return True
+    return False
+
+
+def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
+    """Reject retired provider wiring but allow passive Groq evidence in Native AI.
+
+    app.native_ai may inspect the bounded groq_trade_review evidence envelope.
+    It must not import a hosted provider client or invoke hosted inference itself.
+    """
+    if path == "app/native_ai.py":
+        return bool(
+            RETIRED_PROVIDER_RE.search(contents)
+            or re.search(r"(?i)api\\.groq\\.com", contents)
+            or _native_ai_contains_hosted_provider_call(contents)
+        )
+    return bool(PROVIDER_RE.search(contents))
 
 
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
