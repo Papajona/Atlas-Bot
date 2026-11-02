@@ -259,6 +259,36 @@ def _load_open_pull_request_heads(repository: str) -> set[str]:
     return heads
 
 
+def _has_open_pull_request_for_branch(repository: str, branch_name: str) -> bool:
+    """Recheck one branch with complete REST pagination immediately before deletion."""
+    owner = repository.split("/", 1)[0]
+    result = _run(
+        [
+            "gh", "api", "--paginate", "--slurp",
+            f"repos/{repository}/pulls?state=open&head={owner}:{branch_name}&per_page=100",
+        ],
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            f"Unable to re-check open pull requests for {branch_name!r}: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    raw_pages = json.loads(result.stdout)
+    if not isinstance(raw_pages, list) or not raw_pages or any(
+        not isinstance(page, list) for page in raw_pages
+    ):
+        raise RuntimeError(
+            f"GitHub returned an unexpected paginated open-pull-request response for {branch_name!r}"
+        )
+    pull_requests = [item for page in raw_pages for item in page]
+    if any(not isinstance(item, dict) or not isinstance(item.get("number"), int) for item in pull_requests):
+        raise RuntimeError(
+            f"GitHub returned a malformed open-pull-request record for {branch_name!r}"
+        )
+    return bool(pull_requests)
+
+
 def _reconcile_unknown_protection_branches(
     branches: list[str], branch_protection: dict[str, bool]
 ) -> list[str]:
@@ -954,25 +984,13 @@ def main() -> int:
                 preserved += 1
                 continue
 
-            latest_open = _run(
-                [
-                    "gh", "pr", "list", "--repo", repository, "--state", "open",
-                    "--head", f"{repository.split('/', 1)[0]}:{branch_name}",
-                    "--limit", "1000", "--json", "number",
-                ],
-                check=False,
-            )
-            if latest_open.returncode:
-                record("PRESERVE", branch_name, "could not re-check open pull requests")
-                preserved += 1
-                continue
             try:
-                opened = json.loads(latest_open.stdout)
-            except json.JSONDecodeError:
-                record("PRESERVE", branch_name, "malformed open-pull-request response")
+                has_latest_open_pr = _has_open_pull_request_for_branch(repository, branch_name)
+            except (RuntimeError, json.JSONDecodeError) as exc:
+                record("PRESERVE", branch_name, f"could not re-check open pull requests: {exc}")
                 preserved += 1
                 continue
-            if opened:
+            if has_latest_open_pr:
                 record("PRESERVE", branch_name, "an open pull request appeared during reconciliation")
                 preserved += 1
                 continue
