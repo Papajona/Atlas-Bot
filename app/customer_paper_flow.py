@@ -1157,7 +1157,7 @@ async def execute_customer_paper_spot_signal(
     if len(match) != 1:
         raise CustomerPaperFlowBlocked("Submitted paper order was not visible to the recovery query")
     execution = await _fill_open_order(customer_id, match[0], market, df)
-    return {
+    result = {
         "mode": "CUSTOMER_PAPER",
         "status": execution.get("status", "UNKNOWN"),
         "decision": "TRADE" if execution.get("status") in {"APPENDED", "REPLAYED"} else "NO_TRADE",
@@ -1166,3 +1166,13 @@ async def execute_customer_paper_spot_signal(
         "cost_model_status": cost_status,
         "real_money_ledger_written": False,
     }
+    if execution.get("status") == "WAITING_FOR_NEXT_COMPLETED_BAR":
+        result["order_submission"] = {
+            "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
+            "client_order_id": client_id,
+            "order_id": execution.get("order_id") or submitted.get("order_id"),
+            "side": normalized_side,
+            "quantity": format(raw_quantity, "f"),
+            "submission_bar_timestamp": market["bar_timestamp"],
+        }
+    return result
