@@ -254,6 +254,21 @@ def test_terminal_fill_audit_failure_does_not_replace_filled_result_with_no_trad
     assert execution["decision"] == "TRADE"
     assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
     assert fallback[0][1]["execution_status"] == "APPENDED"
+    assert fallback[0][1]["submission_detail"] == {
+        "customer_id": 501,
+        "trading_account_id": 702,
+        "symbol": "BTC/USDT",
+        "exchange": "binance",
+        "timeframe": "1h",
+        "client_order_id": "cp-terminal-audit-failure",
+        "order_id": 44990,
+        "side": "BUY",
+        "quantity": "0.25",
+        "bar_timestamp": "2026-10-30T10:00:00+00:00",
+        "status": "WAITING_FOR_FILL_LATENCY",
+        "execution_status": "APPENDED",
+        "order_role": "STRATEGY",
+    }
 
 
 def test_customer_submission_audit_uses_customer_actor_even_with_system_context(monkeypatch):
@@ -406,3 +421,137 @@ def test_terminal_replay_audit_prefers_persisted_filled_status_over_replayed_wra
     assert len(events) == 1
     assert events[0]["status"] == "SUBMITTED"
     assert events[0]["execution_status"] == "FILLED"
+
+
+def test_terminal_fill_submission_audit_is_repaired_on_the_next_bot_cycle(monkeypatch):
+    pending_detail = {
+        "customer_id": 501,
+        "trading_account_id": 702,
+        "symbol": "BTC/USDT",
+        "exchange": "binance",
+        "timeframe": "1h",
+        "client_order_id": "cp-terminal-retry-order",
+        "order_id": 44991,
+        "side": "BUY",
+        "quantity": "0.25",
+        "bar_timestamp": "2026-10-30T10:00:00+00:00",
+        "status": "WAITING_FOR_FILL_LATENCY",
+        "execution_status": "APPENDED",
+        "order_role": "STRATEGY",
+    }
+    repaired = []
+    attempted = []
+
+    async def load_retries(customer_id):
+        assert customer_id == 501
+        return [{
+            "incomplete_event_id": 8801,
+            "client_order_id": "cp-terminal-retry-order",
+            "submission_detail": pending_detail,
+        }]
+
+    async def audit_once(detail):
+        attempted.append(detail)
+        return True
+
+    async def mark_repaired(**kwargs):
+        repaired.append(kwargs)
+        return True
+
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load_retries)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_audit_customer_paper_submission_audit_repaired_once", mark_repaired)
+
+    # A later no-order cycle still invokes the repair path; terminal status is
+    # not converted to NO_TRADE and does not require the order to remain open.
+    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        {"status": "NO_TRADE", "decision": "NO_TRADE"},
+        customer_id=501,
+        trading_account_id=702,
+        req=req,
+    ))
+
+    assert stage is None
+    assert attempted == [pending_detail]
+    assert repaired == [{
+        "customer_id": 501,
+        "client_order_id": "cp-terminal-retry-order",
+        "incomplete_event_id": 8801,
+    }]
+
+
+def test_submission_audit_retry_loader_ignores_repaired_and_other_customer_records(monkeypatch):
+    rows = [
+        SimpleNamespace(
+            id=1,
+            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
+            detail=json.dumps({
+                "customer_id": 501,
+                "client_order_id": "cp-pending",
+                "submission_detail": {
+                    "customer_id": 501,
+                    "client_order_id": "cp-pending",
+                },
+            }),
+        ),
+        SimpleNamespace(
+            id=2,
+            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
+            detail=json.dumps({
+                "customer_id": 502,
+                "client_order_id": "cp-other-customer",
+                "submission_detail": {
+                    "customer_id": 502,
+                    "client_order_id": "cp-other-customer",
+                },
+            }),
+        ),
+        SimpleNamespace(
+            id=3,
+            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
+            detail=json.dumps({
+                "customer_id": 501,
+                "client_order_id": "cp-repaired",
+            }),
+        ),
+        SimpleNamespace(
+            id=4,
+            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
+            detail=json.dumps({
+                "customer_id": 501,
+                "client_order_id": "cp-repaired",
+                "submission_detail": {
+                    "customer_id": 501,
+                    "client_order_id": "cp-repaired",
+                },
+            }),
+        ),
+    ]
+
+    class FakeResult:
+        def all(self):
+            return rows
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, _query):
+            return FakeResult()
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    pending = asyncio.run(main._load_customer_paper_submission_audit_retries(501))
+
+    assert pending == [{
+        "incomplete_event_id": 1,
+        "client_order_id": "cp-pending",
+        "submission_detail": {
+            "customer_id": 501,
+            "client_order_id": "cp-pending",
+        },
+    }]
+

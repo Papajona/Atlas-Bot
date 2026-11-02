@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import traceback
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
@@ -42,6 +44,22 @@ class CustomerPaperFlowBlocked(RuntimeError):
     """The customer paper flow cannot safely execute or recover this request."""
 
 
+def _log_paper_failure(event: str, action: str, exc: Exception) -> None:
+    """Log bounded diagnostics without exception text, SQL parameters, or customer data."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    safe_frames = " > ".join(
+        f"{frame.filename.rsplit('/', 1)[-1]}:{frame.lineno}:{frame.name}"
+        for frame in frames[-8:]
+    )
+    logging.getLogger(__name__).error(
+        "%s action=%s error_type=%s frames=%s",
+        event,
+        action,
+        type(exc).__name__,
+        safe_frames or "unavailable",
+    )
+
+
 def _finite_decimal(value: object, name: str, *, non_negative: bool = False) -> Decimal:
     try:
         result = Decimal(str(value))
@@ -53,13 +71,25 @@ def _finite_decimal(value: object, name: str, *, non_negative: bool = False) -> 
 
 
 async def _paper_call(awaitable, action: str):
-    """Convert isolated paper-ledger failures into fail-closed flow errors."""
+    """Convert ledger failures to safe client errors while retaining safe diagnostics."""
     try:
         return await awaitable
     except CustomerPaperFlowBlocked:
         raise
+    except CustomerPaperOrderConflict as exc:
+        _log_paper_failure("customer_paper_order_conflict", action, exc)
+        if "overdraw" in str(exc).lower():
+            raise CustomerPaperFlowBlocked(
+                "paper fill would overdraw the customer's paper cash"
+            ) from exc
+        raise CustomerPaperFlowBlocked(
+            f"{action} failed; customer paper ledger operation could not be completed"
+        ) from exc
     except Exception as exc:
-        raise CustomerPaperFlowBlocked(f"{action}: {exc}") from exc
+        _log_paper_failure("customer_paper_ledger_operation_failed", action, exc)
+        raise CustomerPaperFlowBlocked(
+            f"{action} failed; customer paper ledger operation could not be completed"
+        ) from exc
 
 
 def _quote_currency(symbol: str) -> str:
@@ -250,7 +280,14 @@ async def ensure_customer_paper_account(customer_id: int, currency: str) -> dict
     except CustomerPaperFlowBlocked:
         raise
     except Exception as exc:
-        raise CustomerPaperFlowBlocked(str(exc)) from exc
+        _log_paper_failure(
+            "customer_paper_account_initialization_failed",
+            "initialize customer paper account",
+            exc,
+        )
+        raise CustomerPaperFlowBlocked(
+            "Paper account initialization failed; ledger state could not be verified"
+        ) from exc
     currencies = {str(row.get("currency") or "").upper() for row in balances}
     by_code = {
         str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))
@@ -1149,9 +1186,28 @@ async def execute_customer_paper_spot_signal(
         and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
         and Decimal(str(p.get("quantity") or "0")) > 0
     ]
+    manual_positions = [
+        p for p in positions
+        if str(p.get("execution_owner") or "manual_customer_api").strip().lower()
+        != "autonomous_customer_bot"
+    ]
+    if manual_positions:
+        # Manual holdings remain exclusively under the manual API flow. Do not let a
+        # strategy BUY stack on them or a strategy SELL reach the ledger owner guard.
+        return {
+            "mode": "CUSTOMER_PAPER",
+            "status": "NO_TRADE",
+            "decision": "NO_TRADE",
+            "reason": "manual_position_requires_manual_execution",
+        }
+    autonomous_positions = [
+        p for p in positions
+        if str(p.get("execution_owner") or "manual_customer_api").strip().lower()
+        == "autonomous_customer_bot"
+    ]
     if normalized_side == "BUY" and positions:
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "long_spot_position_already_open"}
-    if normalized_side == "SELL" and not positions:
+    if normalized_side == "SELL" and not autonomous_positions:
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "short_entries_are_not_supported"}
 
     fee_bps, slippage_bps, cost_status = _cost_inputs()
@@ -1170,7 +1226,7 @@ async def execute_customer_paper_spot_signal(
             if raw_quantity <= 0:
                 return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "insufficient_paper_cash"}
         else:
-            raw_quantity = min(raw_quantity, Decimal(str(positions[0]["quantity"])))
+            raw_quantity = min(raw_quantity, Decimal(str(autonomous_positions[0]["quantity"])))
             if raw_quantity <= 0:
                 return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "no_long_position_to_close"}
         raw_quantity = raw_quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)

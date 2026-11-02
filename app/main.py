@@ -175,6 +175,118 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     return created
 
 
+async def _load_customer_paper_submission_audit_retries(customer_id: int) -> list[dict]:
+    """Load durable incomplete submission-audit records not yet marked repaired."""
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(AuditLog.id, AuditLog.event, AuditLog.detail)
+                .where(AuditLog.event.in_([
+                    "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
+                    "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
+                ]))
+                .order_by(AuditLog.id.asc())
+            )
+        ).all()
+
+    incomplete: dict[str, dict] = {}
+    repaired: set[str] = set()
+    for row in rows:
+        raw_detail = row.detail
+        if isinstance(raw_detail, str):
+            try:
+                parsed = json.loads(raw_detail)
+            except (TypeError, ValueError, UnicodeDecodeError):
+                continue
+        elif isinstance(raw_detail, dict):
+            parsed = raw_detail
+        else:
+            continue
+        if not isinstance(parsed, dict) or parsed.get("customer_id") != customer_id:
+            continue
+        client_order_id = str(parsed.get("client_order_id") or "").strip()
+        if not client_order_id:
+            continue
+        if row.event == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED":
+            repaired.add(client_order_id)
+            continue
+        submission_detail = parsed.get("submission_detail")
+        if (
+            isinstance(submission_detail, dict)
+            and submission_detail.get("customer_id") == customer_id
+            and str(submission_detail.get("client_order_id") or "").strip() == client_order_id
+        ):
+            incomplete[client_order_id] = {
+                "incomplete_event_id": int(row.id),
+                "client_order_id": client_order_id,
+                "submission_detail": submission_detail,
+            }
+    return [
+        record for client_order_id, record in incomplete.items()
+        if client_order_id not in repaired
+    ]
+
+
+async def _audit_customer_paper_submission_audit_repaired_once(
+    *, customer_id: int, client_order_id: str, incomplete_event_id: int
+) -> bool:
+    """Record idempotent completion of a previously deferred submission audit."""
+    actor = f"customer:{customer_id}"
+    detail = {
+        "customer_id": customer_id,
+        "client_order_id": client_order_id,
+        "incomplete_event_id": incomplete_event_id,
+    }
+    async with SessionLocal() as db:
+        row, created = await append_audit_once(
+            db,
+            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
+            detail=detail,
+            actor_id=actor,
+            idempotency_fields=("customer_id", "client_order_id"),
+        )
+    if created:
+        emit_security_audit(
+            event="CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_REPAIRED",
+            actor_id=actor,
+            detail=detail,
+            event_hash=row.event_hash,
+        )
+    return created
+
+
+async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> None:
+    """Retry terminal and pending submission audits from durable incomplete-event records."""
+    try:
+        pending = await _load_customer_paper_submission_audit_retries(customer_id)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "customer_paper_submission_audit_retry_load_failed error_type=%s",
+            type(exc).__name__,
+        )
+        return
+
+    for record in pending:
+        client_order_id = str(record.get("client_order_id") or "")
+        submission_detail = record.get("submission_detail")
+        if not client_order_id or not isinstance(submission_detail, dict):
+            continue
+        try:
+            # append_audit_once is keyed by customer and client order. A replay is
+            # success too: it proves the submission event already exists.
+            await _audit_customer_paper_order_submitted_once(submission_detail)
+            await _audit_customer_paper_submission_audit_repaired_once(
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                incomplete_event_id=int(record["incomplete_event_id"]),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "customer_paper_submission_audit_retry_failed error_type=%s",
+                type(exc).__name__,
+            )
+
+
 async def _customer_paper_submission_stage(
     execution: dict,
     *,
@@ -185,6 +297,10 @@ async def _customer_paper_submission_stage(
     """Audit first submissions and repair missing audit events during pending-order recovery."""
     if not isinstance(execution, dict):
         return None
+
+    # Retry previous terminal as well as pending submissions before evaluating
+    # this cycle. Repair is indexed/idempotent and never changes execution outcome.
+    await _repair_customer_paper_submission_audit_retries(customer_id)
 
     intent = execution.get("order_intent")
     if not isinstance(intent, dict):
@@ -279,6 +395,9 @@ async def _customer_paper_submission_stage(
             "submission_status": submission_status,
             "execution_status": status,
             "reason": type(exc).__name__,
+            # Preserve the complete allowlisted submission facts so a later bot
+            # cycle can repair the event even after the order has become terminal.
+            "submission_detail": detail,
         })
         return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     # Only live pending states should be reported as pending or short-circuit the
