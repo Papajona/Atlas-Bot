@@ -164,6 +164,16 @@ fi
                 'GROQ_STRATEGY_MODEL = "legacy-model"',
             )
         )
+        for hosted_groq in (
+            "from groq import Groq\nclient = Groq(api_key=key)",
+            "client.chat.completions.create(model=\"hosted\", messages=[])\n",
+        ):
+            with self.subTest(hosted_groq=hosted_groq):
+                self.assertTrue(
+                    migration._has_conflicting_provider_wiring(
+                        "app/native_ai.py", hosted_groq
+                    )
+                )
         # Other migration paths retain the broader provider detector.
         self.assertTrue(
             migration._has_conflicting_provider_wiring(
