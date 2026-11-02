@@ -8,6 +8,17 @@ import pytest
 from app import main
 
 
+def _successful_external_delivery(monkeypatch):
+    async def claim(_event_hash):
+        return True
+
+    async def finish(_event_hash, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+
 def _pending_execution(*, newly_submitted: bool = True, order_role: str = "STRATEGY") -> dict:
     return {
         "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
@@ -275,6 +286,7 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
     monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: True)
+    _successful_external_delivery(monkeypatch)
 
     created = asyncio.run(main._audit_customer_paper_order_submitted_once({
         "customer_id": 501,
@@ -430,20 +442,51 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
         emitted.append(kwargs)
         return True
 
+    claim_results = iter([True, True, False])
+    create_results = iter([True, False, False])
+    emit_results = iter([False, True])
+    delivery_results = []
+
+    async def claim(_event_hash):
+        return next(claim_results)
+
+    async def finish(_event_hash, *, delivered, error_type=None):
+        delivery_results.append((delivered, error_type))
+
+    async def append_with_replay(_db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(event_hash="stable-event-hash"), next(create_results)
+
+    def emit(**kwargs):
+        emitted.append(kwargs)
+        return next(emit_results)
+
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
-    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "append_audit_once", append_with_replay)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
     monkeypatch.setattr(main, "emit_security_audit", emit)
 
+    with pytest.raises(RuntimeError, match="did not confirm delivery"):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-replayed-external-audit",
+        }))
     created = asyncio.run(main._audit_customer_paper_order_submitted_once({
         "customer_id": 501,
         "client_order_id": "cp-replayed-external-audit",
     }))
+    replayed = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-replayed-external-audit",
+    }))
 
-    assert created is False
+    assert created is False and replayed is False
     assert captured["idempotency_fields"] == ("customer_id", "client_order_id")
-    assert len(emitted) == 1
-    assert emitted[0]["event_hash"] == "stable-event-hash"
-    assert emitted[0]["actor_id"] == "customer:501"
+    assert len(emitted) == 2  # One failed attempt and one successful retry, not every replay.
+    assert emitted[0]["event_hash"] == emitted[1]["event_hash"] == "stable-event-hash"
+    assert emitted[0]["actor_id"] == emitted[1]["actor_id"] == "customer:501"
+    assert delivery_results == [(False, "DeliveryNotConfirmed"), (True, None)]
 
 
 def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
@@ -459,6 +502,7 @@ def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
     monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: False)
+    _successful_external_delivery(monkeypatch)
 
     with pytest.raises(RuntimeError, match="did not confirm delivery"):
         asyncio.run(main._audit_customer_paper_order_submitted_once({
