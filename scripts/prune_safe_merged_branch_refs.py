@@ -73,6 +73,78 @@ def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[
     return result
 
 
+
+
+
+def _read_remote_main_sha() -> str:
+    """Read the live main ref from GitHub; an unreadable or ambiguous result is fatal."""
+    result = _run(
+        ["git", "ls-remote", "--heads", "origin", "refs/heads/main"],
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeError(
+            "Unable to read live origin/main before branch pruning: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    rows = [line.split() for line in result.stdout.splitlines() if line.strip()]
+    if len(rows) != 1 or len(rows[0]) != 2 or rows[0][1] != "refs/heads/main":
+        raise RuntimeError("Live origin/main lookup returned an empty or ambiguous ref")
+    return rows[0][0]
+
+
+def _refresh_remote_main_sha(current_sha: str) -> str:
+    """Refresh origin/main when it moves and verify it stayed stable during fetch."""
+    remote_sha = _read_remote_main_sha()
+    if remote_sha == current_sha:
+        return current_sha
+    _run([
+        "git", "fetch", "origin",
+        "+refs/heads/main:refs/remotes/origin/main",
+    ])
+    fetched_sha = _run([
+        "git", "rev-parse", "--verify", "refs/remotes/origin/main^{commit}",
+    ]).stdout.strip()
+    confirmed_sha = _read_remote_main_sha()
+    if fetched_sha != remote_sha or confirmed_sha != remote_sha:
+        raise RuntimeError(
+            "origin/main changed during pruning proof refresh; refusing to use stale ancestry evidence"
+        )
+    return fetched_sha
+
+
+def _list_open_pull_request_heads(repository: str) -> set[str]:
+    """Enumerate every open PR head through REST pagination; failures must not look empty."""
+    result = _run([
+        "gh", "api", "--paginate",
+        f"repos/{repository}/pulls?state=open&per_page=100",
+        "--jq", ".[].head.ref",
+    ], check=False)
+    if result.returncode:
+        raise RuntimeError(
+            "Unable to enumerate all open pull requests; preserving every branch: "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def _branch_has_open_pull_request(repository: str, branch_name: str) -> bool:
+    """Recheck the exact same-repository head branch with pagination before deletion."""
+    owner = repository.split("/", 1)[0]
+    result = _run([
+        "gh", "api", "--paginate",
+        f"repos/{repository}/pulls?state=open&head={owner}:{branch_name}&per_page=100",
+        "--jq", ".[].number",
+    ], check=False)
+    if result.returncode:
+        raise RuntimeError(
+            "Unable to re-check open pull requests for branch "
+            + branch_name
+            + ": "
+            + (result.stderr.strip() or f"exit code {result.returncode}")
+        )
+    return bool(result.stdout.strip())
+
 def _is_ancestor(ancestor_sha: str, descendant_sha: str) -> bool:
     result = _run(
         ["git", "merge-base", "--is-ancestor", ancestor_sha, descendant_sha],
@@ -721,17 +793,7 @@ def main() -> int:
             return 2
         branches = _reconcile_unknown_protection_branches(branches, branch_protection)
 
-        open_pr_payload = _run(
-            [
-                "gh", "pr", "list", "--repo", repository, "--state", "open",
-                "--limit", "1000", "--json", "headRefName",
-            ]
-        ).stdout
-        open_pr_heads = {
-            str(item.get("headRefName") or "")
-            for item in json.loads(open_pr_payload)
-            if item.get("headRefName")
-        }
+        open_pr_heads = _list_open_pull_request_heads(repository)
 
         # Read closed PRs through the GitHub REST API. `gh pr list --state merged`
         # is not consistently supported across CLI versions; an empty result must
@@ -776,6 +838,9 @@ def main() -> int:
             decisions.append((status, branch_name, reason))
             print(f"{status} {branch_name}: {reason}")
         for branch_name in branches:
+            # Every candidate is proven against the live main tip, not only the
+            # snapshot captured before enumeration. A failed read aborts safely.
+            main_sha = _refresh_remote_main_sha(main_sha)
             if branch_protection[branch_name]:
                 record(
                     "PRESERVE",
@@ -861,25 +926,33 @@ def main() -> int:
                 preserved += 1
                 continue
 
-            latest_open = _run(
-                [
-                    "gh", "pr", "list", "--repo", repository, "--state", "open",
-                    "--head", f"{repository.split('/', 1)[0]}:{branch_name}",
-                    "--limit", "1000", "--json", "number",
-                ],
-                check=False,
-            )
-            if latest_open.returncode:
-                record("PRESERVE", branch_name, "could not re-check open pull requests")
-                preserved += 1
-                continue
             try:
-                opened = json.loads(latest_open.stdout)
-            except json.JSONDecodeError:
-                record("PRESERVE", branch_name, "malformed open-pull-request response")
+                main_before_delete = _refresh_remote_main_sha(main_sha)
+            except RuntimeError as exc:
+                record(
+                    "PRESERVE",
+                    branch_name,
+                    "could not revalidate live main immediately before deletion: " + str(exc),
+                )
                 preserved += 1
                 continue
-            if opened:
+            if main_before_delete != main_sha:
+                record(
+                    "PRESERVE",
+                    branch_name,
+                    "main moved after integration proof; preserve and re-evaluate against the new main tip",
+                )
+                main_sha = main_before_delete
+                preserved += 1
+                continue
+
+            try:
+                has_open_pr = _branch_has_open_pull_request(repository, branch_name)
+            except RuntimeError as exc:
+                record("PRESERVE", branch_name, "could not re-check open pull requests: " + str(exc))
+                preserved += 1
+                continue
+            if has_open_pr:
                 record("PRESERVE", branch_name, "an open pull request appeared during reconciliation")
                 preserved += 1
                 continue
