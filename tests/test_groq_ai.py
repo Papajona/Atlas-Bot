@@ -542,7 +542,8 @@ def test_groq_trade_review_is_bounded_by_native_ai_deadline(monkeypatch):
         return {"status": "OK", "provider": "groq", "execution_authority": False}
 
     monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
-    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.005)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.005)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_review)
     result = asyncio.run(app_main._attach_groq_trade_review({"symbol": "BTC/USDT"}))
     assert result["status"] == "ERROR"
@@ -556,7 +557,7 @@ def test_groq_and_native_share_one_end_to_end_trade_deadline(monkeypatch):
     native_started = []
 
     async def slow_groq(_packet):
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(0.02)
         return {
             "status": "OK",
             "provider": "groq",
@@ -567,11 +568,14 @@ def test_groq_and_native_share_one_end_to_end_trade_deadline(monkeypatch):
 
     async def slow_native(_packet):
         native_started.append(True)
-        await asyncio.sleep(0.06)
+        await asyncio.sleep(0.10)
         return {"safe": True, "configured": True}
 
     monkeypatch.setattr(app_main.settings, "groq_trade_review_enabled", True)
-    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "groq_trade_review_timeout_seconds", 0.05)
+    monkeypatch.setattr(app_main.settings, "ai_strategy_provider_timeout_seconds", 0.03)
+    monkeypatch.setattr(app_main.settings, "ai_trade_decision_total_timeout_seconds", 0.08)
+    monkeypatch.setattr(app_main.settings, "groq_timeout_seconds", 20.0)
     monkeypatch.setattr(app_main, "groq_trade_context_review", slow_groq)
     monkeypatch.setattr(app_main, "dual_ai_trade_safety_review", slow_native)
 
