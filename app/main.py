@@ -77,7 +77,7 @@ from .trading_requirements import spot_requirement, oanda_requirement, deriv_req
 from .executor_engine import ExecutorConfig, ExecutorValidationError, build_executor_plan, next_slice
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
-from .audit_chain import append_audit
+from .audit_chain import append_audit, append_audit_once
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
@@ -1294,6 +1294,10 @@ async def _run_persisted_adaptive_bot_cycle(
             return {"decision": "NO_TRADE", "stage": "customer_paper_recovery",
                     "reason": str(exc)}
         if recovered is not None:
+            await _audit_customer_paper_order_submission(
+                execution=recovered, customer_id=profile.id,
+                trading_account_id=account.id, bot_id=bot_id, symbol=req.symbol,
+            )
             if (
                 str(recovered.get("decision") or "").upper() == "TRADE"
                 and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
@@ -1596,11 +1600,11 @@ async def _run_persisted_adaptive_bot_cycle(
         except CustomerPaperFlowBlocked as exc:
             return {"decision": "NO_TRADE", "stage": "customer_paper_execution",
                     "reason": str(exc)}
+        order_submitted = await _audit_customer_paper_order_submission(
+            execution=execution, customer_id=profile.id,
+            trading_account_id=account.id, bot_id=bot_id, symbol=req.symbol,
+        )
         if execution.get("decision") != "TRADE":
-            order_submitted = await _audit_customer_paper_order_submission(
-                execution=execution, customer_id=profile.id,
-                trading_account_id=account.id, bot_id=bot_id, symbol=req.symbol,
-            )
             return {
                 "decision": "NO_TRADE",
                 "stage": "customer_paper_order_submitted" if order_submitted else "customer_paper_order_gate",
@@ -4748,6 +4752,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     "reason": str(exc), "execution": None,
                 })
             if recovered is not None:
+                await _audit_customer_paper_order_submission(
+                    execution=recovered, customer_id=profile.id,
+                    trading_account_id=account_id, bot_id=bot_id, symbol=req.symbol,
+                )
                 if (
                 str(recovered.get("decision") or "").upper() == "TRADE"
                 and str(((recovered.get("execution") or {}).get("fill") or {}).get("status") or "").upper() == "APPENDED"
@@ -5106,11 +5114,11 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 )
             except CustomerPaperFlowBlocked as exc:
                 raise HTTPException(409, f"Customer paper execution blocked: {exc}") from exc
+            order_submitted = await _audit_customer_paper_order_submission(
+                execution=execution, customer_id=profile.id,
+                trading_account_id=account_id, bot_id=bot_id, symbol=req.symbol,
+            )
             if execution.get("decision") != "TRADE":
-                order_submitted = await _audit_customer_paper_order_submission(
-                    execution=execution, customer_id=profile.id,
-                    trading_account_id=account_id, bot_id=bot_id, symbol=req.symbol,
-                )
                 return await _record_customer_decision({
                     "decision": "NO_TRADE",
                     "stage": "customer_paper_order_submitted" if order_submitted else "customer_paper_order_gate",
@@ -7845,26 +7853,71 @@ async def _audit_customer_paper_order_submission(
     bot_id: int | None,
     symbol: str,
 ) -> bool:
-    """Audit a newly accepted paper order that is waiting for a later completed bar."""
-    if str(execution.get("status") or "").upper() != "WAITING_FOR_NEXT_COMPLETED_BAR":
-        return False
-    submission = execution.get("order_submission")
+    """Durably audit a paper-order submission once, including recovery and protective exits."""
+    submission = execution.get("order_submission") if isinstance(execution, dict) else None
+    if not isinstance(submission, dict) and isinstance(execution, dict):
+        nested = execution.get("execution")
+        if isinstance(nested, dict):
+            submission = nested.get("order_submission")
     if not isinstance(submission, dict):
         return False
-    if submission.get("newly_submitted") is True:
-        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMITTED", {
-            "customer_id": customer_id,
-            "trading_account_id": trading_account_id,
-            "bot_id": bot_id,
-            "symbol": symbol,
-            "client_order_id": submission.get("client_order_id"),
-            "order_id": submission.get("order_id"),
-            "side": submission.get("side"),
-            "quantity": submission.get("quantity"),
-            "submission_bar_timestamp": submission.get("submission_bar_timestamp"),
-            "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
-            "mode": "CUSTOMER_PAPER",
-        })
+    client_order_id = str(submission.get("client_order_id") or "").strip()
+    order_id = str(submission.get("order_id") or "").strip()
+    if not client_order_id or not order_id:
+        logger.error(
+            "customer_paper_submission_audit_missing_identity customer_id=%s symbol=%s",
+            customer_id, symbol,
+        )
+        return False
+    detail = {
+        "customer_id": customer_id,
+        "trading_account_id": trading_account_id,
+        "bot_id": bot_id,
+        "symbol": symbol,
+        "client_order_id": client_order_id,
+        "order_id": order_id,
+        "side": str(submission.get("side") or "").upper(),
+        "quantity": str(submission.get("quantity") or ""),
+        "submission_bar_timestamp": str(submission.get("submission_bar_timestamp") or ""),
+        "order_role": str(submission.get("order_role") or "STRATEGY"),
+        "mode": "CUSTOMER_PAPER",
+    }
+    idempotency_key = f"customer-paper-order-submitted:{customer_id}:{client_order_id}"
+    actor_id = str(_audit_actor.get() or "system")
+    try:
+        async with SessionLocal() as db:
+            row, created = await append_audit_once(
+                db,
+                event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                detail=detail,
+                actor_id=actor_id,
+                idempotency_key=idempotency_key,
+            )
+    except Exception as exc:
+        # The paper order remains authoritative. Later recovery carries the same order
+        # identity and retries this idempotent append until the audit row is durable.
+        logger.exception(
+            "customer_paper_submission_audit_retryable_failure customer_id=%s order_id=%s error_type=%s",
+            customer_id, order_id, type(exc).__name__,
+        )
+        return True
+    if created:
+        safe_detail = {
+            key: value for key, value in detail.items()
+            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
+        }
+        try:
+            emit_security_audit(
+                event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                actor_id=actor_id,
+                detail=safe_detail,
+                event_hash=row.event_hash,
+            )
+        except Exception:
+            logger.exception(
+                "customer_paper_submission_external_audit_failed order_id=%s",
+                order_id,
+            )
     return True
 
 
