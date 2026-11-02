@@ -192,6 +192,7 @@ def test_retry_state_transition_binds_pending_predicate_explicitly(monkeypatch, 
             captured["statement"] = statement
             captured["sql"] = str(compiled)
             captured["params"] = compiled.params
+            captured["bind_names"] = compiled.bind_names
 
         async def commit(self):
             captured["committed"] = True
@@ -219,7 +220,8 @@ def test_retry_state_transition_binds_pending_predicate_explicitly(monkeypatch, 
     assert len(status_predicates) == 1
     predicate_value = status_predicates[0].right
     assert isinstance(predicate_value, BindParameter)
-    assert captured["params"][predicate_value.key] == "PENDING"
+    predicate_parameter_name = captured["bind_names"][predicate_value]
+    assert captured["params"][predicate_parameter_name] == "PENDING"
     assert captured["committed"] is True
 
 
