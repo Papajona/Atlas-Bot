@@ -13,7 +13,7 @@ import uuid
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
@@ -269,43 +269,16 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         ],
                     )
 
-                    invariant = await ledger_invariant_report(db)
+                    invariant = await ledger_invariant_report(db, customer_id=customer_id)
                     assert invariant["ok"], invariant
                     assert invariant["unbalanced_journals"] == []
                     assert invariant["bucket_drifts"] == []
                     assert invariant["customer_account_mismatches"] == []
                 finally:
-                    # The PostgreSQL workflow shares this disposable database with
-                    # other tests; remove only the unique rows created by this run.
+                    # Ledger journals are append-only by database trigger. This is
+                    # an isolated disposable CI database, so keep immutable evidence;
+                    # per-run UUID keys prevent collisions with other test executions.
                     await db.rollback()
-                    if customer_id is not None:
-                        journal_ids = select(LedgerJournal.id).where(
-                            LedgerJournal.idempotency_key.in_(cleanup_keys)
-                        )
-                        await db.execute(
-                            delete(LedgerJournalLine).where(
-                                LedgerJournalLine.journal_id.in_(journal_ids)
-                            )
-                        )
-                        await db.execute(
-                            delete(LedgerJournal).where(
-                                LedgerJournal.idempotency_key.in_(cleanup_keys)
-                            )
-                        )
-                        await db.execute(
-                            delete(LedgerEntry).where(
-                                LedgerEntry.customer_id == customer_id
-                            )
-                        )
-                        await db.execute(
-                            delete(CustomerLedgerAccount).where(
-                                CustomerLedgerAccount.customer_id == customer_id
-                            )
-                        )
-                        await db.execute(
-                            delete(CustomerProfile).where(CustomerProfile.id == customer_id)
-                        )
-                        await db.commit()
         finally:
             await engine.dispose()
 
@@ -370,7 +343,7 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
                 ])
                 await db.commit()
 
-                report = await ledger_invariant_report(db)
+                report = await ledger_invariant_report(db, customer_id=customer_id)
                 assert report["ok"] is False
                 assert report["unbalanced_journals"] == []
                 assert report["bucket_drifts"] == []
