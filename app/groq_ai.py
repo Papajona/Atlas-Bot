@@ -159,13 +159,25 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
     }
     for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
+        if kind == "limit":
+            # Risk caps are not executable price levels. Keep daily/weekly loss,
+            # drawdown, exposure, and leverage limits descriptive.
+            sentence_start = max(
+                text.rfind(mark, 0, match.start()) for mark in (".", "!", "?", ";")
+            ) + 1
+            prefix = text[sentence_start:match.start()]
+            if re.search(
+                r"(?i)\\b(?:daily|weekly|monthly|loss|risk|drawdown|exposure|leverage)\\b",
+                prefix,
+            ):
+                continue
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
         numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
         if numeric_prefix is not None:
             unit_context = raw_token[numeric_prefix.end():] + text[match.end():]
             if re.match(
-                r"(?i)^\s*(?:%|[xX]\b|R\b|ATR\b|bps\b|pips?\b|points?\b|ticks?\b|times?\b)",
+                r"(?i)^\s*(?:%|percent(?:age)?\b|[xX]\b|R\b|ATR\b|bps\b|basis\s+points?\b|pips?\b|points?\b|ticks?\b|times?\b)",
                 unit_context,
             ):
                 continue
