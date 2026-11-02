@@ -598,8 +598,7 @@ def test_audit_delivery_outbox_grants_only_qualifying_backend_runtime_roles():
     assert "ENABLE ROW LEVEL SECURITY" in migration
     assert "FROM PUBLIC" in migration
     assert "ARRAY['anon', 'authenticated']" in migration
-    assert "AND r.rolcanlogin" in migration
-    assert "AND r.rolbypassrls" in migration
+    assert "WHERE r.rolcanlogin AND r.rolbypassrls" in migration
     assert "AND NOT r.rolsuper" in migration
     assert "AND NOT r.rolcreaterole" in migration
     assert "AND NOT r.rolcreatedb" in migration
