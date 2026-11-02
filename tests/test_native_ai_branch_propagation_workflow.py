@@ -280,6 +280,12 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
     common_exclusions = (
         " -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
     )
+    legacy_exclusions = (
+        " -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
+        "':!.github/workflows/propagate-native-ai-all-branches.yml' "
+        "':!.github/workflows/prune-contained-branches-once.yml' "
+        "':!scripts/migrate_legacy_native_ai.py'"
+    )
     production_exclusions = (
         "':!.github/workflows/production-deploy.yml' "
         "':!.github/workflows/production-verification.yml' "
@@ -299,6 +305,18 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         scanner_prefix + previous_pattern + "'" + common_exclusions
         + self_exclusion + migration_exclusion
     )
+    legacy_scanner_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:93:"
+        "            git grep -IlEi '" + previous_pattern + "'"
+        + legacy_exclusions + " || rc=$?"
+    )
+    legacy_verification_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:310:"
+        "            git grep -nIEi '" + previous_pattern + "'"
+        + legacy_exclusions + " >&2 || true"
+    )
+    modified_legacy_scanner = legacy_scanner_definition + "; curl https://api.openai.com/v1/models"
+    modified_legacy_verification = legacy_verification_definition + "; curl https://api.openai.com/v1/models"
     modified_scanner_with_extra_command = current_self_excluded_scanner_definition.replace(
         "')\"; then", "')\"; curl https://api.openai.com/v1/models; then"
     )
@@ -346,6 +364,10 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         scanner_definition,
         current_self_excluded_scanner_definition,
         previous_scanner_definition,
+        legacy_scanner_definition,
+        legacy_verification_definition,
+        modified_legacy_scanner,
+        modified_legacy_verification,
         modified_scanner_with_extra_command,
         modified_previous_scanner_with_extra_command,
         arbitrary_grep_command,
@@ -373,6 +395,10 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
     assert scanner_definition not in output_lines
     assert current_self_excluded_scanner_definition not in output_lines
     assert previous_scanner_definition not in output_lines
+    assert legacy_scanner_definition not in output_lines
+    assert legacy_verification_definition not in output_lines
+    assert modified_legacy_scanner in output_lines
+    assert modified_legacy_verification in output_lines
     assert modified_scanner_with_extra_command in output_lines
     assert modified_previous_scanner_with_extra_command in output_lines
     assert arbitrary_grep_command in output_lines
