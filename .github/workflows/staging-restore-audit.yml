@@ -162,7 +162,7 @@ jobs:
             --restore-evidence-sha256 "$RESTORE_EVIDENCE_SHA256" \
             --verified-target-project-ref "$VERIFIED_RESTORE_TARGET_PROJECT_REF" \
             --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
-            --expected-revision 0053_supabase_public_default_acl_lockdown \
+            --expected-revision 0054_audit_log_idempotency_key \
             --output "$RUNNER_TEMP/staging-restore-audit.json"
       - name: Archive audit output even if ledger invariants failed
         if: always()
