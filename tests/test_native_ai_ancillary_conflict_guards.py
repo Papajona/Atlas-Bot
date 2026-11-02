@@ -188,12 +188,9 @@ fi
             )
         )
 
-    def test_branch_local_native_ai_evaluator_is_replaced_with_pinned_canonical_veto(self):
-        branch_local = """async def native_trade_safety_review(packet):
-    groq = packet.get("groq_trade_review")
-    # A branch-local evaluator can inspect Groq evidence while omitting
-    # canonical market-data and protective-price validation.
-    return {"safe": True, "providers": {"groq": groq}, "execution_authority": False}
+    def test_approved_legacy_native_ai_baseline_is_replaced_with_pinned_canonical_veto(self):
+        approved_legacy = """def evaluate_native_trade_packet(packet):
+    return {"safe": True, "execution_authority": False}
 """
         canonical = """def evaluate_native_trade_packet(packet):
     reasons = []
@@ -211,9 +208,12 @@ fi
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
-            (root / "app" / "native_ai.py").write_text(branch_local, encoding="utf-8")
+            (root / "app" / "native_ai.py").write_text(approved_legacy, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                migration._install_canonical_native_ai(canonical)
+                migration._install_canonical_native_ai(
+                    canonical,
+                    approved_legacy_source=approved_legacy,
+                )
             installed = (root / "app" / "native_ai.py").read_text(encoding="utf-8")
 
         self.assertEqual(installed, canonical)
@@ -222,20 +222,43 @@ fi
         self.assertIn("groq_trade_review_invalid", installed)
         self.assertNotIn('return {"safe": True', installed)
 
+    def test_native_ai_installer_refuses_unknown_branch_local_safety_module(self):
+        branch_local = """async def native_trade_safety_review(packet):
+    # Unknown branch-specific safety logic must not be discarded automatically.
+    return {"safe": True, "execution_authority": False}
+"""
+        approved_legacy = "def evaluate_native_trade_packet(packet): return {\"safe\": True}\\n"
+        canonical = "def evaluate_native_trade_packet(packet): return {\"safe\": False}\\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "app").mkdir()
+            (root / "app" / "native_ai.py").write_text(branch_local, encoding="utf-8")
+            with patch.object(migration, "ROOT", root):
+                with self.assertRaisesRegex(migration.MigrationError, "differs from both reviewed Native AI baselines"):
+                    migration._install_canonical_native_ai(
+                        canonical,
+                        approved_legacy_source=approved_legacy,
+                    )
+            installed = (root / "app" / "native_ai.py").read_text(encoding="utf-8")
+        self.assertEqual(installed, branch_local)
+
     def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
         obsolete = "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)\\nasync def native_trade_safety_review(packet): return {\"safe\": True}\\n"
-        canonical = "def evaluate_native_trade_packet(packet):\\n    return {\"safe\": False, \"reasons\": [\"native_data_quality_invalid\"], \"execution_authority\": False}\\nasync def native_trade_safety_review(packet):\\n    return evaluate_native_trade_packet(packet)\\n"
+        approved_legacy = "def evaluate_native_trade_packet(packet): return {\"safe\": True}\\n"
+        canonical = "def evaluate_native_trade_packet(packet): return {\"safe\": False}\\n"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
             target = root / "app" / "native_ai.py"
             target.write_text(obsolete, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                with self.assertRaisesRegex(migration.MigrationError, "hosted provider wiring"):
-                    migration._install_canonical_native_ai(canonical)
+                with self.assertRaisesRegex(migration.MigrationError, "retired or hosted provider wiring"):
+                    migration._install_canonical_native_ai(
+                        canonical,
+                        approved_legacy_source=approved_legacy,
+                    )
             installed = target.read_text(encoding="utf-8")
         self.assertEqual(installed, obsolete)
-        self.assertNotIn("native_data_quality_invalid", installed)
 
     def test_optional_groq_secret_creation_block_is_preserved(self):
         shell = """if [[ -n "$GROQ_API_KEY" ]]; then
