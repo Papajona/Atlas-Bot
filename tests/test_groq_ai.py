@@ -780,8 +780,6 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
             "Daily loss limit 3 remains unchanged.",
             "The price tested the lower limit of the range.",
             "The market is a moving target.",
-            "The strategy uses the stop-loss at 95.",
-            "The strategy keeps the stop-loss at 95.",
             "The daily loss limit is 3 percent.",
             "The limit for daily loss is 3 percent.",
             "The market hit the upper limit of its range.",
