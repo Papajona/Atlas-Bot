@@ -34,6 +34,15 @@ class _DB:
         self.executed.append(stmt)
         return _Result(self.trade)
 
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    async def rollback(self):
+        return None
+
+    async def close(self):
+        return None
+
     def add(self, *_args, **_kwargs):
         self.mutations.append("add")
         raise AssertionError("read-only customer export may not mutate database rows")
