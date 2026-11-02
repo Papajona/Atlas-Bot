@@ -1,5 +1,6 @@
 """Behavioral tests for authenticated customer ledger exports and trade explanations."""
 import asyncio
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -280,3 +281,58 @@ def test_customer_ledger_export_response_releases_spool_when_disconnect_precedes
 
     asyncio.run(call_response())
     assert original._value == 2  # response-scope cleanup released the slot
+
+
+def test_customer_ledger_stream_releases_semaphore_on_event_loop_thread(monkeypatch):
+    async def exercise():
+        owner_thread = threading.get_ident()
+
+        class ThreadBoundSemaphore:
+            def __init__(self):
+                self.release_threads = []
+
+            async def acquire(self):
+                return True
+
+            def release(self):
+                self.release_threads.append(threading.get_ident())
+                assert threading.get_ident() == owner_thread, (
+                    "asyncio semaphore must only be released on its owning event-loop thread"
+                )
+
+        semaphore = ThreadBoundSemaphore()
+        monkeypatch.setattr(main, "_LEDGER_EXPORT_SEMAPHORE", semaphore)
+
+        db = _DB(entries=[{
+            "created_at": "2026-11-02T10:00:00+00:00",
+            "journal_id": 42,
+            "line_no": 1,
+            "entry_type": "DEPOSIT",
+            "reference_type": "TRON_DEPOSIT",
+            "reference_id": "tx-async-stream",
+            "account_code": "LIABILITY:CUSTOMER:AVAILABLE",
+            "debit": "0.000000",
+            "credit": "1.000000",
+        }])
+        profile = SimpleNamespace(id=23)
+        monkeypatch.setattr(main, "SessionLocal", lambda: db)
+        monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+
+        async def export_bounds(_db, _customer_id, _currency, *, max_journal_id=None):
+            return 1, 42
+
+        async def statement(*_args, **_kwargs):
+            return db.entries
+
+        monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
+        monkeypatch.setattr(main, "ledger_statement", statement)
+
+        response = await main.customer_ledger_export_csv(authorization="opaque-token")
+        chunks = []
+        async for chunk in response.body_iterator:
+            chunks.append(chunk.encode("utf-8") if isinstance(chunk, str) else chunk)
+
+        assert b"tx-async-stream" in b"".join(chunks)
+        assert semaphore.release_threads == [owner_thread]
+
+    asyncio.run(exercise())
