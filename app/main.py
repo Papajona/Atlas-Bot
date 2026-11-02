@@ -77,7 +77,12 @@ from .trading_requirements import spot_requirement, oanda_requirement, deriv_req
 from .executor_engine import ExecutorConfig, ExecutorValidationError, build_executor_plan, next_slice
 from .admin_rbac import require_role, get_roles, upsert_role, ROLES
 from .transaction_policy import register_or_check_destination, verify_destination
-from .audit_chain import append_audit, append_audit_once
+from .audit_chain import (
+    append_audit,
+    append_audit_once,
+    claim_external_audit_delivery,
+    finish_external_audit_delivery,
+)
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
@@ -251,22 +256,33 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
             actor_id=actor,
             idempotency_fields=("customer_id", "client_order_id"),
         )
-    # The external sink is a second copy of the durable database audit. Retry it
-    # on idempotent order replays too: a prior stdout/Cloud Logging failure must not
-    # become permanent merely because the database row already exists. Consumers
-    # can deduplicate repeated delivery using the stable event_hash.
-    safe_detail = {
-        key: value for key, value in detail.items()
-        if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
-    }
-    emitted = emit_security_audit(
-        event="CUSTOMER_PAPER_ORDER_SUBMITTED",
-        actor_id=actor,
-        detail=safe_detail,
-        event_hash=row.event_hash,
-    )
-    if not emitted:
-        raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
+    # A durable outbox remembers whether the second copy is still pending. This
+    # retries a failed sink on later idempotent replays without duplicating already
+    # acknowledged events on every bot recovery cycle.
+    if await claim_external_audit_delivery(row.event_hash):
+        safe_detail = {
+            key: value for key, value in detail.items()
+            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
+        }
+        try:
+            emitted = bool(emit_security_audit(
+                event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                actor_id=actor,
+                detail=safe_detail,
+                event_hash=row.event_hash,
+            ))
+        except Exception as exc:
+            await finish_external_audit_delivery(
+                row.event_hash, delivered=False, error_type=type(exc).__name__
+            )
+            raise
+        await finish_external_audit_delivery(
+            row.event_hash,
+            delivered=emitted,
+            error_type=None if emitted else "DeliveryNotConfirmed",
+        )
+        if not emitted:
+            raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
     return created
 
 
