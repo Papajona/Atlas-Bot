@@ -341,8 +341,8 @@ def test_retry_upsert_is_unique_by_customer_and_order_and_reopens_pending_state(
 
 def test_retry_store_migration_enables_row_level_security(monkeypatch):
     root = Path(__file__).resolve().parents[1]
-    migration_path = root / "alembic" / "versions" / "0056_customer_paper_submission_audit_retries.py"
-    spec = importlib.util.spec_from_file_location("migration_0056_customer_paper_submission_audit_retries", migration_path)
+    migration_path = root / "alembic" / "versions" / "0057_customer_paper_submission_audit_retries.py"
+    spec = importlib.util.spec_from_file_location("migration_0057_customer_paper_submission_audit_retries", migration_path)
     assert spec is not None and spec.loader is not None
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
