@@ -600,3 +600,138 @@ def test_same_customer_order_retry_ignores_only_submission_bar_metadata():
     assert not paper_lifecycle._existing_order_intent_matches(
         existing, **{**args, "metadata": changed_owner}
     )
+
+
+def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    latest_bar_at = now - timedelta(minutes=1)
+    submission_bar_at = latest_bar_at - timedelta(minutes=3)
+    _freeze_paper_api_clock(monkeypatch, now)
+    frame = _verified_bars(latest_bar_at, volume="100")
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+
+    order = {
+        "client_order_id": "multi-bar-manual-order",
+        "order_id": 99081,
+        "status": "SUBMITTED",
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "order_type": "MARKET",
+        "quantity": "1.000000000000000000",
+        "remaining_quantity": "1.000000000000000000",
+        "filled_quantity": "0.000000000000000000",
+        "limit_price": None,
+        "currency": "USDT",
+        "metadata": {
+            "timeframe": "1m",
+            "execution_model": "completed_bar_volume_capped_heuristic_v1",
+            "submission_bar_at": submission_bar_at.isoformat(),
+        },
+    }
+    prior_fills = {}
+    fill_rows = []
+    registered_bars = []
+
+    async def fake_get_customer(authorization, _db, require_aal2=True):
+        assert authorization == "Bearer multi-bar-customer"
+        assert require_aal2 is True
+        return SimpleNamespace(id=99081), {"aal": "aal2"}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def commit(self):
+            return None
+
+    async def state_guard():
+        return None
+
+    async def get_order(*, customer_id, client_order_id):
+        assert customer_id == 99081
+        assert client_order_id == "multi-bar-manual-order"
+        return dict(order)
+
+    async def register_bar(**kwargs):
+        bar_at = kwargs["bar_at"]
+        registered_bars.append(bar_at)
+        key = bar_at.isoformat()
+        return {
+            "bar_key": key,
+            "bar_at": key,
+            "capacity": "0.400000000000000000",
+            "available": "0.400000000000000000",
+        }
+
+    async def fill_for_bar(*, customer_id, client_order_id, bar_key):
+        assert customer_id == 99081
+        assert client_order_id == "multi-bar-manual-order"
+        return prior_fills.get(bar_key)
+
+    async def balances(*_args, **_kwargs):
+        return [{
+            "account_code": "PAPER_CASH",
+            "currency": "USDT",
+            "balance": "10000.000000000000000000",
+        }]
+
+    async def record_fill(**kwargs):
+        bar_key = kwargs["bar_key"]
+        if bar_key in prior_fills:
+            return prior_fills[bar_key]
+        quantity = Decimal(kwargs["quantity"])
+        filled = Decimal(order["filled_quantity"]) + quantity
+        remaining = max(Decimal("0"), Decimal(order["quantity"]) - filled)
+        order["filled_quantity"] = format(filled, "f")
+        order["remaining_quantity"] = format(remaining, "f")
+        order["status"] = "FILLED" if remaining == 0 else "PARTIALLY_FILLED"
+        item = {
+            "status": "APPENDED",
+            "bar_key": bar_key,
+            "quantity": format(quantity, "f"),
+            "price": kwargs["price"],
+        }
+        prior_fills[bar_key] = item
+        fill_rows.append(item)
+        return item
+
+    monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(paper_api, "get_customer_paper_order", get_order)
+    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", fill_for_bar)
+    monkeypatch.setattr(paper_api, "get_customer_paper_balances", balances)
+    monkeypatch.setattr(paper_api, "record_customer_paper_fill", record_fill)
+    monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
+    monkeypatch.setattr(paper_api, "settings", settings)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 10)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
+
+    api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=fake_get_customer,
+        market_data=lambda _request: frame,
+        market_request_type=PaperMarketRequest,
+        state_guard=state_guard,
+    ))
+    response = TestClient(api_app).post(
+        "/api/customer/paper/orders/multi-bar-manual-order/advance",
+        headers={"Authorization": "Bearer multi-bar-customer"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert order["status"] == "FILLED"
+    assert Decimal(order["filled_quantity"]) == Decimal("1.000000000000000000")
+    assert len(registered_bars) == 3
+    assert registered_bars == sorted(registered_bars)
+    assert [row["bar_key"] for row in fill_rows] == [at.isoformat() for at in registered_bars]
+    assert len(payload["bars_processed"]) == 3
+    assert payload["bars_processed"][0]["bar_at"] == (submission_bar_at + timedelta(minutes=1)).isoformat()
+    assert payload["bars_processed"][-1]["bar_at"] == latest_bar_at.isoformat()

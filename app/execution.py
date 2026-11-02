@@ -906,6 +906,24 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.exit_at = None
                 episode.closing_trade_id = None
         if episode is not None:
+            if old_qty == 0:
+                # A single partially filled reversal order can first close the old
+                # position, then open the opposite position on a later fill. Reuse
+                # that order's learning row as a new entry episode, not its old
+                # NOT_POSITION_ENTRY/COMPLETED close-side state.
+                episode.status = "OPEN"
+                episode.entry_at = utcnow()
+                episode.entry_price = float(fill_price)
+                episode.entry_quantity = 0.0
+                episode.exit_price = None
+                episode.exit_at = None
+                episode.closing_trade_id = None
+                episode.gross_pnl = 0.0
+                episode.net_pnl = 0.0
+                episode.return_bps = 0.0
+                episode.total_fees = Decimal("0")
+                episode.strategy = str(trade_context.get("strategy") or "unknown")
+                episode.regime = str(trade_context.get("regime") or "UNKNOWN")
             if episode.entry_at is None and signed * (1 if episode.side == "buy" else -1) > 0:
                 episode.entry_at = utcnow()
             if episode.entry_price <= 0:

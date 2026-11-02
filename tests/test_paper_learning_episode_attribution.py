@@ -247,3 +247,99 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
             assert by_entry[reopen_id].entry_price == pytest.approx(101.0)
 
     asyncio.run(run())
+
+
+def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_position():
+    from app import execution
+    from app.db import init_db, SessionLocal, Trade, Position, TradeLearningEpisode
+
+    suffix = uuid.uuid4().hex
+    symbol = f"EPISODE-PARTIAL-FLIP-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"partial-flip-old-entry-{suffix}",
+                client_order_id=f"partial-flip-old-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=0.1, notional=100.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"old-strategy","regime":"OLD"}',
+            )
+            reversal = Trade(
+                signal_id=f"partial-flip-reversal-{suffix}",
+                client_order_id=f"partial-flip-reversal-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=0.0,
+                remaining_quantity=2.0, requested_price=99.0,
+                average_fill_price=0.0, fee=0.0, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"reversal-strategy","regime":"NEW_DOWN"}',
+            )
+            db.add_all([entry, reversal])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=1.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, strategy="old-strategy",
+                entry_regime="OLD", entry_trade_id=entry.id,
+            ))
+            db.add_all([
+                TradeLearningEpisode(
+                    entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                    symbol=symbol, timeframe="1h", side="buy",
+                    strategy="old-strategy", status="OPEN",
+                    entry_quantity=1.0, entry_price=100.0,
+                ),
+                TradeLearningEpisode(
+                    entry_trade_id=reversal.id, customer_id=None, exchange="binance",
+                    symbol=symbol, timeframe="1h", side="sell",
+                    strategy="reversal-strategy", status="OPEN",
+                    entry_quantity=0.0, entry_price=0.0,
+                ),
+            ])
+            await db.commit()
+            old_entry_id, reversal_id = entry.id, reversal.id
+
+        async with SessionLocal() as db:
+            order = (await db.execute(
+                select(Trade).where(Trade.id == reversal_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(db, order, 1.0, 99.0)
+            await db.commit()
+
+        async with SessionLocal() as db:
+            order = (await db.execute(
+                select(Trade).where(Trade.id == reversal_id)
+            )).scalar_one()
+            assert order.filled_quantity == pytest.approx(1.0)
+            await execution._apply_fill_to_position(db, order, 2.0, 98.0)
+            await db.commit()
+
+        async with SessionLocal() as db:
+            position = (await db.execute(
+                select(Position).where(Position.symbol == symbol)
+            )).scalar_one()
+            episodes = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id.in_([old_entry_id, reversal_id])
+                )
+            )).scalars().all()
+            by_entry = {row.entry_trade_id: row for row in episodes}
+            reopened = by_entry[reversal_id]
+            assert position.quantity == pytest.approx(-1.0)
+            assert position.entry_trade_id == reversal_id
+            assert position.strategy == "reversal-strategy"
+            assert position.entry_regime == "NEW_DOWN"
+            assert by_entry[old_entry_id].status == "COMPLETED"
+            assert reopened.status == "OPEN"
+            assert reopened.entry_quantity == pytest.approx(1.0)
+            assert reopened.entry_price == pytest.approx(98.0)
+            assert reopened.exit_at is None
+            assert reopened.closing_trade_id is None
+
+    asyncio.run(run())
