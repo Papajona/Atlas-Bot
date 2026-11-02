@@ -1382,19 +1382,63 @@ def test_open_pull_request_head_enumeration_uses_all_rest_pages(monkeypatch):
     def fake_run(args, *, check=True):
         calls.append(args)
         return subprocess.CompletedProcess(
-            args, 0, "feature/page-one\nfeature/page-two\n", ""
+            args,
+            0,
+            json.dumps([
+                [
+                    {"number": 1, "head": {"ref": "feature/page-one"}},
+                    {"number": 2, "head": {"ref": "feature/page-two"}},
+                ],
+                [{"number": 3, "head": {"ref": "feature/page-three"}}],
+            ]),
+            "",
         )
 
     monkeypatch.setattr(pruning, "_run", fake_run)
     heads = pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
 
-    assert heads == {"feature/page-one", "feature/page-two"}
+    assert heads == {
+        "feature/page-one",
+        "feature/page-two",
+        "feature/page-three",
+    }
     assert calls == [[
-        "gh", "api", "--paginate",
+        "gh", "api", "--paginate", "--slurp",
         "repos/Papajona/Atlas-Bot/pulls?state=open&per_page=100",
-        "--jq", ".[].head.ref",
     ]]
 
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        json.dumps([{"number": 1, "head": {"ref": "feature/flat"}}]),
+        json.dumps([["not-a-pull-request"]]),
+        json.dumps([[{"number": 1, "head": {}}]]),
+        "",
+        "{not-json",
+    ],
+)
+def test_open_pull_request_head_enumeration_rejects_malformed_page_data(monkeypatch, payload):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, payload, ""),
+    )
+    with pytest.raises(RuntimeError, match="malformed|unexpected|valid head ref"):
+        pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
+
+
+def test_slurped_pull_request_parser_rejects_flat_and_malformed_shapes():
+    for payload in (
+        json.dumps({"number": 1}),
+        json.dumps([{"number": 1}]),
+        json.dumps([[None]]),
+        "not-json",
+    ):
+        with pytest.raises(RuntimeError, match="malformed|unexpected"):
+            pruning._parse_slurped_pull_request_pages(
+                payload, description="test pull requests"
+            )
 
 def test_open_pull_request_head_enumeration_fails_closed_on_api_error(monkeypatch):
     def failed_run(args, *, check=True):
@@ -1410,20 +1454,45 @@ def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monke
 
     def fake_run(args, *, check=True):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "321\n", "")
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps([[
+                {"number": 321, "head": {"ref": "feature/with&fragment#and+plus"}}
+            ]]),
+            "",
+        )
 
     monkeypatch.setattr(pruning, "_run", fake_run)
     branch_name = "feature/with&fragment#and+plus"
     assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", branch_name)
     assert calls == [[
-        "gh", "api", "--paginate", "--method", "GET",
+        "gh", "api", "--paginate", "--slurp", "--method", "GET",
         "repos/Papajona/Atlas-Bot/pulls",
         "-f", "state=open",
         "-f", "head=Papajona:feature/with&fragment#and+plus",
         "-f", "per_page=100",
-        "--jq", ".[].number",
     ]]
 
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        json.dumps([{"number": 321, "head": {"ref": "feature/flat"}}]),
+        json.dumps([[{"number": "321", "head": {"ref": "feature/one"}}]]),
+        json.dumps([[{"number": 321, "head": {}}]]),
+    ],
+)
+def test_branch_open_pull_request_recheck_rejects_malformed_results(monkeypatch, payload):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, payload, ""),
+    )
+    with pytest.raises(RuntimeError, match="unexpected|malformed"):
+        pruning._branch_has_open_pull_request(
+            "Papajona/Atlas-Bot", "feature/one"
+        )
 
 def test_branch_open_pull_request_recheck_fails_closed_on_api_error(monkeypatch):
     def failed_run(args, *, check=True):
