@@ -13,13 +13,13 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: atlas-native-ai-branch-propagation
-  cancel-in-progress: false
-
 jobs:
   propagate:
     if: github.ref == 'refs/heads/main'
+    concurrency:
+      group: atlas-native-ai-branch-propagation-and-pruning
+      cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
-          NATIVE_AI_CANONICAL_COMMIT="bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"
+          NATIVE_AI_CANONICAL_COMMIT="a2b745cff52a5b207d153bae5d1d7b98b916040b"
           NATIVE_AI_EXTRA_BASE_COMMIT="0d38f95079833804713fcba080caee38a6ddfb4c"
           NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
