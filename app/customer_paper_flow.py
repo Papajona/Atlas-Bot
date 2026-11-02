@@ -59,6 +59,22 @@ async def _paper_call(awaitable, action: str):
         return await awaitable
     except CustomerPaperFlowBlocked:
         raise
+    except CustomerPaperOrderConflict as exc:
+        # Preserve the safe semantic needed by pending-order recovery: a concurrent
+        # debit can make a BUY unaffordable after the pre-read. Never expose the raw
+        # ledger exception, constraint, SQL or database details to the caller.
+        logging.getLogger(__name__).exception(
+            "customer_paper_order_conflict action=%s error_type=%s",
+            action,
+            type(exc).__name__,
+        )
+        if "overdraw" in str(exc).lower():
+            raise CustomerPaperFlowBlocked(
+                "paper fill would overdraw the customer's paper cash"
+            ) from exc
+        raise CustomerPaperFlowBlocked(
+            f"{action} failed; customer paper ledger operation could not be completed"
+        ) from exc
     except Exception as exc:
         logging.getLogger(__name__).exception(
             "customer_paper_ledger_operation_failed action=%s error_type=%s",
