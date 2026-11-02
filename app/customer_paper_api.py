@@ -54,8 +54,12 @@ _TIMEFRAME_SECONDS = {
 _PAPER_MARKET_SNAPSHOT_TTL_SECONDS = 3.0
 _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES = 64
 _PAPER_MARKET_RATE_LIMIT_PER_MINUTE = 12
-_PAPER_MARKET_SNAPSHOTS: OrderedDict[tuple[str, str, int], tuple[float, Any]] = OrderedDict()
-_PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[tuple[str, str, int], asyncio.Lock] = OrderedDict()
+_PAPER_MARKET_SNAPSHOTS: OrderedDict[
+    tuple[int, str, str, int], tuple[float, Any, Callable[..., Any]]
+] = OrderedDict()
+_PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[
+    tuple[int, str, str, int], asyncio.Lock
+] = OrderedDict()
 _PAPER_MARKET_SNAPSHOT_CACHE_LOCK = asyncio.Lock()
 
 
@@ -92,7 +96,10 @@ async def _fetch_verified_market_snapshot(
     expected_closed_bar_generation = (
         int(datetime.now(timezone.utc).timestamp()) // timeframe_seconds
     )
+    # Scope cached frames to the adapter instance as well as the market identity.
+    # Retaining the callable in the value prevents its object ID being reused.
     key = (
+        id(market_data),
         str(symbol).strip().upper(),
         str(timeframe),
         expected_closed_bar_generation,
@@ -108,7 +115,11 @@ async def _fetch_verified_market_snapshot(
     async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
         now = time.monotonic()
         cached = _PAPER_MARKET_SNAPSHOTS.get(key)
-        if cached is not None and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS:
+        if (
+            cached is not None
+            and cached[2] is market_data
+            and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS
+        ):
             _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
             frame = cached[1]
             return frame, _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
@@ -131,7 +142,11 @@ async def _fetch_verified_market_snapshot(
         async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
             now = time.monotonic()
             cached = _PAPER_MARKET_SNAPSHOTS.get(key)
-            if cached is not None and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS:
+            if (
+            cached is not None
+            and cached[2] is market_data
+            and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS
+        ):
                 _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
                 frame = cached[1]
                 return frame, _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
@@ -141,7 +156,7 @@ async def _fetch_verified_market_snapshot(
         # must never become a shared snapshot for later customers.
         context = _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
         async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
-            _PAPER_MARKET_SNAPSHOTS[key] = (time.monotonic(), frame)
+            _PAPER_MARKET_SNAPSHOTS[key] = (time.monotonic(), frame, market_data)
             _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
             while len(_PAPER_MARKET_SNAPSHOTS) > _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES:
                 _PAPER_MARKET_SNAPSHOTS.popitem(last=False)
