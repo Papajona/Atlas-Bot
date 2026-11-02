@@ -587,3 +587,18 @@ abort("exact staging identity job gate missing") unless names.include?("Require 
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+
+def test_audit_delivery_outbox_grants_only_the_explicit_audit_runtime_writer():
+    migration = (
+        ROOT / "alembic" / "versions" / "0056_audit_log_external_delivery.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ENABLE ROW LEVEL SECURITY" in migration
+    assert "FROM PUBLIC" in migration
+    assert "ARRAY['anon', 'authenticated']" in migration
+    assert "AND r.rolname = 'atlas_runtime'" in migration
+    assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_log_external_delivery" in migration
+    assert "atlas_paper_reader" not in migration
