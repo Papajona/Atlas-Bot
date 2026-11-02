@@ -1223,3 +1223,71 @@ def test_autonomous_protective_exit_ignores_manual_owned_positions(monkeypatch):
         flow._protective_exit(12006, req, frame, market)
     )
     assert result_without_owner is None
+
+
+
+def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(
+        exchange="binance",
+        symbol="BTC/USDT",
+        timeframe="1h",
+    )
+    market = {}
+    manual_position = {
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "execution_owner": "manual_customer_api",
+    }
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
+    monkeypatch.setattr(
+        flow, "ensure_customer_paper_account",
+        _async_value({
+            "currency": "USDT",
+            "paper_cash": "1000",
+            "real_funds_used": False,
+        }),
+    )
+    monkeypatch.setattr(flow, "process_customer_paper_orders", _async_value(None))
+    monkeypatch.setattr(
+        flow, "get_customer_paper_positions",
+        _async_value([manual_position]),
+    )
+
+    async def must_not_submit(**_kwargs):
+        raise AssertionError("strategy SELL must not be submitted against a manual-owned position")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+    result = asyncio.run(flow.execute_customer_paper_spot_signal(
+        customer_id=12007,
+        req=req,
+        df=pd.DataFrame(),
+        market_context={},
+        side="SELL",
+        quantity="1",
+        stop_loss_price=None,
+        take_profit_price=None,
+        strategy="ownership-regression",
+    ))
+    assert result["decision"] == "NO_TRADE"
+    assert result["status"] == "NO_TRADE"
+    assert result["reason"] == "manual_position_requires_manual_execution"
+
+    # Missing ownership is conservatively manual-owned, consistent with the
+    # lifecycle position reader and the protective-exit ownership filter.
+    manual_position.pop("execution_owner")
+    result_without_owner = asyncio.run(flow.execute_customer_paper_spot_signal(
+        customer_id=12007,
+        req=req,
+        df=pd.DataFrame(),
+        market_context={},
+        side="SELL",
+        quantity="1",
+        stop_loss_price=None,
+        take_profit_price=None,
+        strategy="ownership-regression",
+    ))
+    assert result_without_owner["decision"] == "NO_TRADE"
+    assert result_without_owner["reason"] == "manual_position_requires_manual_execution"
