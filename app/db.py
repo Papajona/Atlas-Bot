@@ -358,6 +358,37 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class CustomerPaperSubmissionAuditRetry(Base):
+    """Indexed durable retry state for paper-order submission audit delivery."""
+    __tablename__ = "customer_paper_submission_audit_retries"
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id",
+            "client_order_id",
+            name="uq_customer_paper_submission_audit_retry_order",
+        ),
+        Index(
+            "ix_customer_paper_submission_audit_retry_pending",
+            "customer_id",
+            "status",
+            "updated_at",
+            "id",
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_profiles.id", name="fk_customer_paper_audit_retry_customer", ondelete="CASCADE"),
+        nullable=False,
+    )
+    client_order_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    submission_detail: Mapped[str] = mapped_column(EncryptedText, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error_type: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+
 class AuditChainState(Base):
     __tablename__ = "audit_chain_state"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
