@@ -34,8 +34,8 @@ def upgrade() -> None:
         unique=False,
     )
     # Keep this service-only outbox behind the public-schema RLS boundary.
-    # No API role or PUBLIC receives access; only server-side BYPASSRLS runtime
-    # roles get the CRUD needed for the delivery lease state machine.
+    # No API role or PUBLIC receives access. Only the explicit atlas_runtime
+    # backend identity, which can already append audit_log rows, gets outbox CRUD.
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
             "ALTER TABLE public.audit_log_external_delivery ENABLE ROW LEVEL SECURITY"
