@@ -1210,6 +1210,8 @@ def transform_config() -> None:
         ("groq_timeout_seconds", "groq_timeout_seconds: float = 20.0"),
         ("groq_research_review_enabled", "groq_research_review_enabled: bool = True"),
         ("groq_trade_review_enabled", "groq_trade_review_enabled: bool = False"),
+        ("groq_trade_review_timeout_seconds", "groq_trade_review_timeout_seconds: float = 5.0"),
+        ("ai_trade_decision_total_timeout_seconds", "ai_trade_decision_total_timeout_seconds: float = 6.5"),
     ]
     result_lines = result.splitlines(keepends=True)
     class_insertions: list[tuple[int, str, list[str]]] = []
