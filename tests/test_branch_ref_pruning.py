@@ -1522,7 +1522,7 @@ def test_final_open_pull_request_recheck_is_paginated_and_fails_closed(monkeypat
         calls.append(args)
         assert args[:3] == ["gh", "api", "--paginate"]
         assert "--slurp" in args
-        assert "head=Papajona:feature/long-lived-branch&per_page=100" in args[-1]
+        assert "head=Papajona%3Afeature%2Flong-lived-branch" in args[-1]
         return subprocess.CompletedProcess(
             args, 0, json.dumps([[], [{"number": 1201}]]), ""
         )
@@ -1554,3 +1554,21 @@ def test_final_open_pull_request_recheck_rejects_malformed_page(monkeypatch):
         pruning._has_open_pull_request_for_branch(
             "Papajona/Atlas-Bot", "feature/long-lived-branch"
         )
+
+
+def test_final_open_pull_request_recheck_url_encodes_branch_names(monkeypatch):
+    # Branch refs are data, not query syntax. Ampersands and slashes must remain
+    # inside the head value and must never add or alter REST query parameters.
+    captured = []
+
+    def fake_run(args, *, check=True):
+        captured.append(args)
+        assert args[:3] == ["gh", "api", "--paginate"]
+        assert "head=Papajona%3Afeature%2Fa%26b" in args[-1]
+        return subprocess.CompletedProcess(args, 0, json.dumps([[]]), "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    assert pruning._has_open_pull_request_for_branch(
+        "Papajona/Atlas-Bot", "feature/a&b"
+    ) is False
+    assert len(captured) == 1
