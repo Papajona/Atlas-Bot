@@ -1234,7 +1234,7 @@ def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkey
         symbol="BTC/USDT",
         timeframe="1h",
     )
-    market = {}
+    market = {"currency": "USDT"}
     manual_position = {
         "venue": "binance",
         "symbol": "BTC/USDT",
