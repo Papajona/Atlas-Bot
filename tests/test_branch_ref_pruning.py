@@ -1601,3 +1601,29 @@ def test_final_open_pull_request_recheck_url_encodes_branch_names(monkeypatch):
         "Papajona/Atlas-Bot", "feature/a&b"
     ) is False
     assert len(captured) == 1
+
+
+def test_closed_pull_request_loader_rejects_top_level_records(monkeypatch):
+    result = json.dumps([{
+        "number": 271,
+        "merged_at": "2026-10-01T00:00:00Z",
+        "head": {"ref": "ambiguous", "sha": "head-sha", "repo": {"full_name": "Papajona/Atlas-Bot"}},
+    }])
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(["gh"], 0, result, ""),
+    )
+    with pytest.raises(RuntimeError, match="unexpected paginated closed-pull-request response"):
+        pruning._load_closed_pull_request_records("Papajona/Atlas-Bot")
+
+
+def test_closed_pull_request_loader_rejects_malformed_page_records(monkeypatch):
+    result = json.dumps([[{"number": 271}, "not-a-pull-request-record"]])
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(["gh"], 0, result, ""),
+    )
+    with pytest.raises(RuntimeError, match="malformed closed-pull-request record"):
+        pruning._load_closed_pull_request_records("Papajona/Atlas-Bot")
