@@ -408,3 +408,58 @@ def test_terminal_replay_audit_prefers_persisted_filled_status_over_replayed_wra
     assert len(events) == 1
     assert events[0]["status"] == "SUBMITTED"
     assert events[0]["execution_status"] == "FILLED"
+
+
+def test_external_submission_audit_is_retried_when_database_event_already_exists(monkeypatch):
+    captured = {}
+    emitted = []
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+
+    async def append_once(_db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(event_hash="stable-event-hash"), False
+
+    def emit(**kwargs):
+        emitted.append(kwargs)
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "emit_security_audit", emit)
+
+    created = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-replayed-external-audit",
+    }))
+
+    assert created is False
+    assert captured["idempotency_fields"] == ("customer_id", "client_order_id")
+    assert len(emitted) == 1
+    assert emitted[0]["event_hash"] == "stable-event-hash"
+    assert emitted[0]["actor_id"] == "customer:501"
+
+
+def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(event_hash="stable-event-hash"), False
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: False)
+
+    with pytest.raises(RuntimeError, match="did not confirm delivery"):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-failed-external-audit",
+        }))
