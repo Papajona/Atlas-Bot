@@ -4543,10 +4543,12 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
 
     output.seek(0)
 
-    def stream_spooled_file():
+    async def stream_spooled_file():
         try:
             while True:
-                chunk = output.read(64 * 1024)
+                # Keep file I/O off the event loop while ensuring generator cleanup,
+                # including semaphore release, runs back on the event-loop thread.
+                chunk = await asyncio.to_thread(output.read, 64 * 1024)
                 if not chunk:
                     break
                 yield chunk
