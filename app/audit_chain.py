@@ -153,6 +153,7 @@ async def append_audit_once(
         )
     ).first()
     if existing is not None:
+        await db.rollback()
         return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
     # End the read-only precheck transaction before network I/O. This releases
@@ -170,7 +171,8 @@ async def append_audit_once(
             db, event=event, idempotency_key=idempotency_key
         )
         if existing is not None:
-            return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+            await db.rollback()
+        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
         row = await _append_audit_locked(
             db,
             event=event,
@@ -192,14 +194,16 @@ async def append_audit_once(
                     db, event=event, idempotency_key=idempotency_key
                 )
                 if existing is not None:
-                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    await db.rollback()
+        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
                 state = await _lock_chain_state(db)
                 existing = await _existing_idempotent_audit(
                     db, event=event, idempotency_key=idempotency_key
                 )
                 if existing is not None:
-                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    await db.rollback()
+        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
                 row = await _append_audit_locked(
                     db,
@@ -223,7 +227,8 @@ async def append_audit_once(
                     await db.rollback()
                     existing = None
                 if existing is not None:
-                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    await db.rollback()
+        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
                 if isinstance(exc, OperationalError):
                     error_text = str(exc).lower()
                     if not any(
