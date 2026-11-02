@@ -698,7 +698,12 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
     descriptive = {
         **VALID_TRADE_REVIEW,
         "regime_assessment": "The strategy uses the stop-loss at 95; data limitations remain.",
-        "key_observations": ["Entry to the market is not a price instruction.", "Stop at the swing low is only descriptive."],
+        "key_observations": [
+            "Entry to the market is not a price instruction.",
+            "Stop at the swing low is only descriptive.",
+            "The strategy uses the stop-loss at 95.",
+            "The strategy keeps the stop-loss at 95.",
+        ],
     }
     groq_ai._validate_trade_context_review(descriptive, packet=packet)
     for ordinary_text in (
@@ -775,6 +780,8 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
             "Daily loss limit 3 remains unchanged.",
             "The price tested the lower limit of the range.",
             "The market is a moving target.",
+            "The strategy uses the stop-loss at 95.",
+            "The strategy keeps the stop-loss at 95.",
             "The daily loss limit is 3 percent.",
             "The limit for daily loss is 3 percent.",
             "The market hit the upper limit of its range.",
