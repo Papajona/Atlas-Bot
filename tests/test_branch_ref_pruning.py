@@ -1416,7 +1416,7 @@ def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monke
     branch_name = "feature/with&fragment#and+plus"
     assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", branch_name)
     assert calls == [[
-        "gh", "api", "--paginate",
+        "gh", "api", "--paginate", "--method", "GET",
         "repos/Papajona/Atlas-Bot/pulls",
         "-f", "state=open",
         "-f", "head=Papajona:feature/with&fragment#and+plus",

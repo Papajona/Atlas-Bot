@@ -132,7 +132,7 @@ def _branch_has_open_pull_request(repository: str, branch_name: str) -> bool:
     """Recheck the exact same-repository head branch with pagination before deletion."""
     owner = repository.split("/", 1)[0]
     result = _run([
-        "gh", "api", "--paginate",
+        "gh", "api", "--paginate", "--method", "GET",
         f"repos/{repository}/pulls",
         "-f", "state=open",
         "-f", f"head={owner}:{branch_name}",
