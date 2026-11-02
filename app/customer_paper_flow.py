@@ -22,6 +22,7 @@ from .customer_paper_ledger import (
     post_customer_paper_journal,
 )
 from .customer_paper_lifecycle import (
+    CustomerPaperCashShortfall,
     CustomerPaperOrderConflict,
     get_customer_paper_fill_for_bar,
     get_customer_paper_order,
@@ -699,7 +700,7 @@ async def _fill_open_order(
     except CustomerPaperFlowBlocked as exc:
         # The paper-cash advisory lock can reveal a concurrent spend after the
         # pre-read. Do not leave an unaffordable BUY permanently blocking recovery.
-        if side == "BUY" and "overdraw" in str(exc).lower():
+        if side == "BUY" and isinstance(exc.__cause__, CustomerPaperCashShortfall):
             await _paper_call(
                 expire_customer_paper_order(
                     customer_id=customer_id,
