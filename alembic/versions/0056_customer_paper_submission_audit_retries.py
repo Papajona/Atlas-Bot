@@ -47,6 +47,8 @@ def upgrade() -> None:
         ["customer_id", "status", "updated_at", "id"],
         unique=False,
     )
+    # Migration 0049 cannot see tables introduced later; protect this public table here.
+    op.execute(sa.text(f"ALTER TABLE public.{TABLE} ENABLE ROW LEVEL SECURITY"))
 
 
 def downgrade() -> None:
