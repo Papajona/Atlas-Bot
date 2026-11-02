@@ -78,7 +78,7 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
     r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|"
-    r"limit(?=\s+price\b)|trigger(?=\s+price\b))\b)"
+    r"limit(?=\s+(?:price\b|(?:at|to|is|was|equals?)\b)|\s*[:=])|"r"trigger(?=\s+(?:price\b|(?:at|to|is|was|equals?)\b)|\s*[:=]))\b)"
     r"(?:\s+price)?"
     r"(?:\s*(?:=|:)\s*|\s+(?:(?:is|was|equals?)\s+)?(?:at|to)\s+|"
     r"\s+(?:(?:is|was|equals?)\s+)?)[$€£]?"
