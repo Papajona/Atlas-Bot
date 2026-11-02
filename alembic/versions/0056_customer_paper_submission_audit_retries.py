@@ -47,6 +47,9 @@ def upgrade() -> None:
         ["customer_id", "status", "updated_at", "id"],
         unique=False,
     )
+    # These rows contain customer/order audit metadata; only the backend database
+    # role should access them. The API roles receive no permissive policy.
+    op.execute(sa.text(f"ALTER TABLE public.{TABLE} ENABLE ROW LEVEL SECURITY"))
 
 
 def downgrade() -> None:
