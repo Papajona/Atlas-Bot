@@ -1077,4 +1077,7 @@ def test_trade_safety_timeout_audits_record_effective_groq_and_native_budgets():
     for event in ("ADAPTIVE_BOT_AI_TIMEOUT", "CUSTOMER_BOT_AI_TIMEOUT"):
         line = next(line for line in source.splitlines() if event in line)
         assert "**_trade_safety_timeout_metadata()" in line
+    assert source.count('"ai_safety_timeout_seconds": _trade_safety_timeout_metadata()["total_timeout_seconds"]') == 2
+    assert source.count('"ai_safety_native_veto_reserve_seconds": _trade_safety_timeout_metadata()["native_veto_reserve_seconds"]') == 2
+    assert source.count('"groq_trade_review_timeout_seconds": _trade_safety_timeout_metadata()["groq_provider_timeout_seconds"]') == 2
 
