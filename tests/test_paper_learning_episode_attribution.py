@@ -245,6 +245,7 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
             assert by_entry[reopen_id].status == "OPEN"
             assert by_entry[reopen_id].entry_quantity == pytest.approx(1.0)
             assert by_entry[reopen_id].entry_price == pytest.approx(101.0)
+            assert by_entry[reopen_id].exit_price == pytest.approx(0.0)
 
     asyncio.run(run())
 
