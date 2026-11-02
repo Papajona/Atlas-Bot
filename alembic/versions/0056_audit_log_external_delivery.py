@@ -21,6 +21,7 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=20), nullable=False, server_default="PENDING"),
         sa.Column("attempt_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("lease_until", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("claim_token", sa.String(length=36), nullable=True),
         sa.Column("delivered_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error_type", sa.String(length=80), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
@@ -32,11 +33,48 @@ def upgrade() -> None:
         ["status", "lease_until"],
         unique=False,
     )
-    # Keep this service-only outbox behind the same public-schema RLS boundary
-    # as every other public table. No anon/authenticated policy or grant is added.
+    # Keep this service-only outbox behind the public-schema RLS boundary.
+    # No API role or PUBLIC receives access; only server-side BYPASSRLS runtime
+    # roles get the CRUD needed for the delivery lease state machine.
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
             "ALTER TABLE public.audit_log_external_delivery ENABLE ROW LEVEL SECURITY"
+        )
+        op.execute(
+            "REVOKE ALL PRIVILEGES ON TABLE public.audit_log_external_delivery FROM PUBLIC"
+        )
+        op.execute(
+            """
+            DO $atlas_audit_delivery_acl$
+            DECLARE role_name text;
+            BEGIN
+                FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                        EXECUTE format(
+                            'REVOKE ALL PRIVILEGES ON TABLE public.audit_log_external_delivery FROM %I',
+                            role_name
+                        );
+                    END IF;
+                END LOOP;
+                FOR role_name IN
+                    SELECT r.rolname
+                    FROM pg_roles r
+                    WHERE r.rolcanlogin AND r.rolbypassrls
+                      AND NOT r.rolsuper AND NOT r.rolcreaterole AND NOT r.rolcreatedb
+                      AND NOT r.rolreplication AND NOT r.rolinherit
+                      AND NOT EXISTS (
+                        SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid
+                      )
+                      AND r.rolname NOT IN ('anon', 'authenticated')
+                LOOP
+                    EXECUTE format(
+                        'GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_log_external_delivery TO %I',
+                        role_name
+                    );
+                END LOOP;
+            END
+            $atlas_audit_delivery_acl$;
+            """
         )
 
 
