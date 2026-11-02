@@ -781,7 +781,12 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
             "The upper limit is 123.",
         ],
     }
-    groq_ai._validate_trade_context_review(ordinary_text, packet=rounded_packet)
+    observations = ordinary_text["key_observations"]
+    for offset in range(0, len(observations), 12):
+        groq_ai._validate_trade_context_review(
+            {**ordinary_text, "key_observations": observations[offset:offset + 12]},
+            packet=rounded_packet,
+        )
     assert validated["contradictions"] == [
         "Target at 110 is the value already in the submitted plan."
     ]
@@ -790,6 +795,8 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
         "Target at 999999 is in the submitted plan.",
         "Limit order at 999999 is in the submitted plan.",
         "Trigger level at 999999 is in the submitted plan.",
+        "Limit at 999999 is in the submitted plan.",
+        "Trigger at 999999 is in the submitted plan.",
     ):
         invented = {
             **VALID_TRADE_REVIEW,
@@ -801,11 +808,30 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
     matching_limit_trigger = {
         **VALID_TRADE_REVIEW,
         "key_observations": [
-            "Limit order at 64000 matches the submitted entry.",
-            "Trigger level at 64000 matches the submitted entry.",
+            "Limit order at 100 matches the submitted entry.",
+            "Trigger level at 100 matches the submitted entry.",
+            "Limit at 100 matches the submitted entry.",
+            "Trigger at 100 matches the submitted entry.",
+            "Limit is 100, matching the submitted entry.",
+            "Trigger is 100, matching the submitted entry.",
         ],
     }
     groq_ai._validate_trade_context_review(matching_limit_trigger, packet=packet)
+
+    for command in (
+        "Use the stop-loss at 95.",
+        "Keep the stop-loss at 95.",
+        "Use the limit at 100.",
+        "Keep trigger at 100.",
+        "Set limit at 999.",
+        "Lower the limit to 99.",
+    ):
+        assert groq_ai._contains_actionable_trading_instruction(
+            command, allow_factual_price_references=True
+        )
+        imperative_review = {**VALID_TRADE_REVIEW, "regime_assessment": command}
+        with pytest.raises(groq_ai.GroqAIError, match="actionable trading instructions"):
+            groq_ai._validate_trade_context_review(imperative_review, packet=packet)
 
     # Complete numeric tokens must be checked: signs and scientific notation
     # cannot disappear into an unmatched prefix.
