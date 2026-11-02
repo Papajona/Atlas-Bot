@@ -114,6 +114,60 @@ def _refresh_remote_main_sha(current_sha: str) -> str:
     return fetched_sha
 
 
+def _merged_pull_request_records(
+    pull_requests: Iterable[Mapping[str, Any]], *, repository: str
+) -> list[dict[str, Any]]:
+    """Return merge proofs only for exact same-repository PR head identities.
+
+    Fork PRs can reuse a local branch name; even an exact-looking head SHA from a
+    fork is not evidence that the same-named ref in this repository was merged.
+    """
+    records: list[dict[str, Any]] = []
+    for number, item in enumerate(pull_requests, start=1):
+        head = item.get("head")
+        if (
+            isinstance(item.get("number"), bool)
+            or not isinstance(item.get("number"), int)
+            or item["number"] <= 0
+            or not isinstance(head, Mapping)
+            or not isinstance(head.get("ref"), str)
+            or not head["ref"].strip()
+            or not isinstance(head.get("sha"), str)
+            or not head["sha"].strip()
+            or "merged_at" not in item
+        ):
+            raise RuntimeError(
+                f"GitHub returned a malformed closed pull request (record {number}); "
+                "preserving every branch"
+            )
+        if not item.get("merged_at"):
+            continue
+
+        # A deleted fork can produce head.repo=null. Such a PR simply cannot
+        # authorize deletion of a local ref; it is not malformed local evidence.
+        head_repository = head.get("repo")
+        if (
+            not isinstance(head_repository, Mapping)
+            or head_repository.get("full_name") != repository
+        ):
+            continue
+
+        merge_sha = item.get("merge_commit_sha")
+        if not isinstance(merge_sha, str) or not merge_sha.strip():
+            raise RuntimeError(
+                f"GitHub omitted the merge commit for same-repository merged pull request "
+                f"#{item['number']}; preserving every branch"
+            )
+        records.append({
+            "number": item["number"],
+            "headRepositoryFullName": repository,
+            "headRefName": head["ref"],
+            "headRefOid": head["sha"],
+            "mergeCommit": {"oid": merge_sha},
+        })
+    return records
+
+
 def _parse_slurped_pull_request_pages(output: str, *, description: str) -> list[dict[str, Any]]:
     """Validate gh --paginate --slurp output before using it as deletion evidence.
 
@@ -883,36 +937,9 @@ def main() -> int:
         closed_prs = _parse_slurped_pull_request_pages(
             closed_pr_result.stdout, description="closed pull requests"
         )
-        merged_prs: list[dict[str, Any]] = []
-        for number, item in enumerate(closed_prs, start=1):
-            head = item.get("head")
-            if (
-                isinstance(item.get("number"), bool)
-                or not isinstance(item.get("number"), int)
-                or item["number"] <= 0
-                or not isinstance(head, Mapping)
-                or not isinstance(head.get("ref"), str)
-                or not head["ref"].strip()
-                or not isinstance(head.get("sha"), str)
-                or not head["sha"].strip()
-                or "merged_at" not in item
-            ):
-                raise RuntimeError(
-                    f"GitHub returned a malformed closed pull request (record {number}); "
-                    "preserving every branch"
-                )
-            if item.get("merged_at"):
-                merge_sha = item.get("merge_commit_sha")
-                if not isinstance(merge_sha, str) or not merge_sha.strip():
-                    raise RuntimeError(
-                        f"GitHub omitted the merge commit for merged pull request "
-                        f"#{item['number']}; preserving every branch"
-                    )
-                merged_prs.append({
-                    "headRefName": head["ref"],
-                    "headRefOid": head["sha"],
-                    "mergeCommit": {"oid": merge_sha},
-                })
+        merged_prs = _merged_pull_request_records(
+            closed_prs, repository=repository
+        )
 
         deleted = 0
         preserved = 0
