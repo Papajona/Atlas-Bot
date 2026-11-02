@@ -65,7 +65,10 @@ def upgrade() -> None:
                       AND NOT EXISTS (
                         SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid
                       )
-                      AND r.rolname = 'atlas_runtime'
+                      AND r.rolname NOT IN (
+                          'postgres', 'service_role', 'supabase_admin',
+                          'supabase_auth_admin', 'authenticator', 'anon', 'authenticated'
+                      )
                       AND has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')
                 LOOP
                     EXECUTE format(
