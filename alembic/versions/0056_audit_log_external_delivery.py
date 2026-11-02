@@ -32,6 +32,12 @@ def upgrade() -> None:
         ["status", "lease_until"],
         unique=False,
     )
+    # Keep this service-only outbox behind the same public-schema RLS boundary
+    # as every other public table. No anon/authenticated policy or grant is added.
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(
+            "ALTER TABLE public.audit_log_external_delivery ENABLE ROW LEVEL SECURITY"
+        )
 
 
 def downgrade() -> None:
