@@ -11,6 +11,8 @@ import asyncio
 import hashlib
 import json
 import math
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any, Awaitable, Callable, Literal
@@ -38,12 +40,127 @@ from .customer_paper_lifecycle import (
     submit_customer_paper_order,
 )
 from .trading_core import PROFILES
+from .distributed import allow_rate_limit
 
 
 _TIMEFRAME_SECONDS = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
 }
+# Share a very fresh, verified OHLCV snapshot across customer requests for the
+# same market. The per-key lock collapses concurrent cache misses without
+# serializing unrelated symbols/timeframes behind an exchange round trip.
+_PAPER_MARKET_SNAPSHOT_TTL_SECONDS = 3.0
+_PAPER_MARKET_SNAPSHOT_MAX_ENTRIES = 64
+_PAPER_MARKET_RATE_LIMIT_PER_MINUTE = 12
+_PAPER_MARKET_SNAPSHOTS: OrderedDict[
+    tuple[int, str, str, int], tuple[float, Any, Callable[..., Any]]
+] = OrderedDict()
+_PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[
+    tuple[int, str, str, int], asyncio.Lock
+] = OrderedDict()
+_PAPER_MARKET_SNAPSHOT_CACHE_LOCK = asyncio.Lock()
+
+
+async def _fetch_verified_market_snapshot(
+    *,
+    customer_id: int,
+    symbol: str,
+    timeframe: str,
+    market_data: Callable[..., Any],
+    market_request_type: type,
+) -> tuple[Any, dict[str, Any]]:
+    """Throttle each customer and share a short-lived verified market snapshot."""
+    allowed, _remaining = await allow_rate_limit(
+        f"customer-paper-market:{int(customer_id)}",
+        limit=_PAPER_MARKET_RATE_LIMIT_PER_MINUTE,
+        window_seconds=60,
+    )
+    if not allowed:
+        raise HTTPException(429, "Customer paper market-data request rate limit exceeded")
+
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+    if not timeframe_seconds:
+        raise HTTPException(422, "Unsupported paper-order timeframe")
+    required_bars = max(
+        25,
+        max(1, int(settings.paper_order_ttl_bars))
+        + max(1, int(settings.paper_fill_latency_bars))
+        + 1,
+    )
+    days = min(30, max(1, (required_bars * timeframe_seconds + 86_399) // 86_400))
+    # Cache only within the same expected completed-candle generation. A
+    # three-second cache alone can otherwise serve yesterday's bar after the
+    # caller clock or market advances during a fast test/recovery cycle.
+    expected_closed_bar_generation = (
+        int(datetime.now(timezone.utc).timestamp()) // timeframe_seconds
+    )
+    # Scope cached frames to the adapter instance as well as the market identity.
+    # Retaining the callable in the value prevents its object ID being reused.
+    key = (
+        id(market_data),
+        str(symbol).strip().upper(),
+        str(timeframe),
+        expected_closed_bar_generation,
+    )
+    request = market_request_type(
+        asset="crypto",
+        symbol=symbol,
+        exchange="binance",
+        timeframe=timeframe,
+        days=days,
+    )
+
+    async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _PAPER_MARKET_SNAPSHOTS.get(key)
+        if (
+            cached is not None
+            and cached[2] is market_data
+            and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS
+        ):
+            _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
+            frame = cached[1]
+            return frame, _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
+
+        key_lock = _PAPER_MARKET_SNAPSHOT_LOCKS.get(key)
+        if key_lock is None:
+            key_lock = asyncio.Lock()
+            _PAPER_MARKET_SNAPSHOT_LOCKS[key] = key_lock
+        _PAPER_MARKET_SNAPSHOT_LOCKS.move_to_end(key)
+        while len(_PAPER_MARKET_SNAPSHOT_LOCKS) > _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES * 2:
+            old_key, old_lock = next(iter(_PAPER_MARKET_SNAPSHOT_LOCKS.items()))
+            if old_lock.locked():
+                _PAPER_MARKET_SNAPSHOT_LOCKS.move_to_end(old_key)
+                if all(lock.locked() for lock in _PAPER_MARKET_SNAPSHOT_LOCKS.values()):
+                    break
+            else:
+                _PAPER_MARKET_SNAPSHOT_LOCKS.pop(old_key, None)
+
+    async with key_lock:
+        async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
+            now = time.monotonic()
+            cached = _PAPER_MARKET_SNAPSHOTS.get(key)
+            if (
+            cached is not None
+            and cached[2] is market_data
+            and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS
+        ):
+                _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
+                frame = cached[1]
+                return frame, _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
+
+        frame = await asyncio.to_thread(market_data, request)
+        # Validate before caching. A malformed, stale, or wrong-venue response
+        # must never become a shared snapshot for later customers.
+        context = _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
+        async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
+            _PAPER_MARKET_SNAPSHOTS[key] = (time.monotonic(), frame, market_data)
+            _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
+            while len(_PAPER_MARKET_SNAPSHOTS) > _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES:
+                _PAPER_MARKET_SNAPSHOTS.popitem(last=False)
+        return frame, context
+
 _VIRTUAL_STARTING_CASH = Decimal("10000")
 _DECIMAL_QUANTUM = Decimal("0.000000000000000001")
 
@@ -303,31 +420,14 @@ def build_customer_paper_router(
         else:
             await state_guard()
 
-    async def _fetch_bar(symbol: str, timeframe: str) -> tuple[Any, dict[str, Any]]:
-        # The execution model needs the most recent closed bar and enough history for
-        # its 20-return volatility estimate. Do not fetch a fixed 30-day window:
-        # that meant 43,200 candles / ~44 sequential CCXT pages for a 1-minute order.
-        timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
-        if not timeframe_seconds:
-            raise HTTPException(422, "Unsupported paper-order timeframe")
-        # Load enough closed candles to replay the configured order lifetime from
-        # the submission bar, while retaining a bounded request for very old orders.
-        required_bars = max(
-            25,
-            max(1, int(settings.paper_order_ttl_bars))
-            + max(1, int(settings.paper_fill_latency_bars))
-            + 1,
-        )
-        days = min(30, max(1, (required_bars * timeframe_seconds + 86_399) // 86_400))
-        req = market_request_type(
-            asset="crypto",
+    async def _fetch_bar(customer_id: int, symbol: str, timeframe: str) -> tuple[Any, dict[str, Any]]:
+        return await _fetch_verified_market_snapshot(
+            customer_id=customer_id,
             symbol=symbol,
-            exchange="binance",
             timeframe=timeframe,
-            days=days,
+            market_data=market_data,
+            market_request_type=market_request_type,
         )
-        df = await asyncio.to_thread(market_data, req)
-        return df, _market_bar_context(df, symbol=symbol, timeframe=timeframe)
 
     async def _order_detail(customer_id: int, client_order_id: str) -> dict[str, Any]:
         order = await get_customer_paper_order(customer_id=customer_id, client_order_id=client_order_id)
@@ -425,7 +525,7 @@ def build_customer_paper_router(
             balances = await get_customer_paper_balances(customer_id=profile.id)
             if not any(row["account_code"] == "PAPER_CASH" for row in balances):
                 raise HTTPException(409, "Initialize the virtual paper account before submitting orders")
-            _df, bar = await _fetch_bar(req.symbol, req.timeframe)
+            _df, bar = await _fetch_bar(profile.id, req.symbol, req.timeframe)
             result = await submit_customer_paper_order(
                 customer_id=profile.id,
                 client_order_id=req.client_order_id,
@@ -491,7 +591,7 @@ def build_customer_paper_router(
             timeframe = str(metadata.get("timeframe") or "")
             if timeframe not in _TIMEFRAME_SECONDS or metadata.get("execution_model") != "completed_bar_volume_capped_heuristic_v1":
                 raise HTTPException(409, "Persisted paper order lacks a supported execution context")
-            df, latest_bar = await _fetch_bar(order["symbol"], timeframe)
+            df, latest_bar = await _fetch_bar(profile.id, order["symbol"], timeframe)
             submitted_at = _timestamp(metadata.get("submission_bar_at"), "submission bar")
             bar_seconds = _TIMEFRAME_SECONDS[timeframe]
             ttl_bars = max(1, int(settings.paper_order_ttl_bars))
