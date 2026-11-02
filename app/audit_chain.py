@@ -155,8 +155,13 @@ async def append_audit_once(
     if existing is not None:
         return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
+    # End the read-only precheck transaction before network I/O. This releases
+    # the checked-out connection to the pool while Redis applies the per-actor limit.
+    # append_audit_once owns its write transaction and commits it below.
+    await db.rollback()
+
     # Only genuinely new event attempts count against the actor's audit rate budget.
-    # Keep Redis outside the database chain-head lock to avoid serializing other writers.
+    # Keep Redis outside both the read transaction and the database chain-head lock.
     audit_detail = await _rate_limited_detail(detail, actor_id)
     sqlite_lock = _sqlite_audit_lock(db)
     if sqlite_lock is None:
