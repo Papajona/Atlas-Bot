@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import traceback
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
@@ -42,6 +44,22 @@ class CustomerPaperFlowBlocked(RuntimeError):
     """The customer paper flow cannot safely execute or recover this request."""
 
 
+def _log_paper_failure(event: str, action: str, exc: Exception) -> None:
+    """Log bounded diagnostics without exception text, SQL parameters, or customer data."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    safe_frames = " > ".join(
+        f"{frame.filename.rsplit('/', 1)[-1]}:{frame.lineno}:{frame.name}"
+        for frame in frames[-8:]
+    )
+    logging.getLogger(__name__).error(
+        "%s action=%s error_type=%s frames=%s",
+        event,
+        action,
+        type(exc).__name__,
+        safe_frames or "unavailable",
+    )
+
+
 def _finite_decimal(value: object, name: str, *, non_negative: bool = False) -> Decimal:
     try:
         result = Decimal(str(value))
@@ -53,13 +71,25 @@ def _finite_decimal(value: object, name: str, *, non_negative: bool = False) -> 
 
 
 async def _paper_call(awaitable, action: str):
-    """Convert isolated paper-ledger failures into fail-closed flow errors."""
+    """Convert ledger failures to safe client errors while retaining safe diagnostics."""
     try:
         return await awaitable
     except CustomerPaperFlowBlocked:
         raise
+    except CustomerPaperOrderConflict as exc:
+        _log_paper_failure("customer_paper_order_conflict", action, exc)
+        if "overdraw" in str(exc).lower():
+            raise CustomerPaperFlowBlocked(
+                "paper fill would overdraw the customer's paper cash"
+            ) from exc
+        raise CustomerPaperFlowBlocked(
+            f"{action} failed; customer paper ledger operation could not be completed"
+        ) from exc
     except Exception as exc:
-        raise CustomerPaperFlowBlocked(f"{action}: {exc}") from exc
+        _log_paper_failure("customer_paper_ledger_operation_failed", action, exc)
+        raise CustomerPaperFlowBlocked(
+            f"{action} failed; customer paper ledger operation could not be completed"
+        ) from exc
 
 
 def _quote_currency(symbol: str) -> str:
@@ -250,7 +280,14 @@ async def ensure_customer_paper_account(customer_id: int, currency: str) -> dict
     except CustomerPaperFlowBlocked:
         raise
     except Exception as exc:
-        raise CustomerPaperFlowBlocked(str(exc)) from exc
+        _log_paper_failure(
+            "customer_paper_account_initialization_failed",
+            "initialize customer paper account",
+            exc,
+        )
+        raise CustomerPaperFlowBlocked(
+            "Paper account initialization failed; ledger state could not be verified"
+        ) from exc
     currencies = {str(row.get("currency") or "").upper() for row in balances}
     by_code = {
         str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))

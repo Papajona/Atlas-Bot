@@ -1465,3 +1465,54 @@ def test_terminal_same_bar_replay_preserves_submission_identity_for_audit_repair
         "order_role": "ENTRY",
         "newly_submitted": False,
     }
+
+
+
+def test_customer_paper_ledger_errors_do_not_leak_database_details_to_callers_or_logs(caplog):
+    import logging
+    import app.customer_paper_flow as flow
+
+    sensitive_error = RuntimeError(
+        "asyncpg connection failed host=db.internal password=super-secret "
+        "SQL=SELECT * FROM customer_paper WHERE customer_id=12345"
+    )
+
+    async def fail_ledger_call():
+        raise sensitive_error
+
+    with caplog.at_level(logging.ERROR, logger="app.customer_paper_flow"):
+        with pytest.raises(flow.CustomerPaperFlowBlocked) as captured:
+            asyncio.run(flow._paper_call(fail_ledger_call(), "read paper balances"))
+
+    safe_text = str(captured.value) + caplog.text
+    assert "failed; customer paper ledger operation could not be completed" in str(captured.value)
+    assert "super-secret" not in safe_text
+    assert "db.internal" not in safe_text
+    assert "SELECT * FROM" not in safe_text
+    assert "customer_paper_ledger_operation_failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "frames=" in caplog.text
+
+
+def test_customer_paper_account_initialization_logs_only_safe_failure_metadata(monkeypatch, caplog):
+    import logging
+    import app.customer_paper_flow as flow
+
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    monkeypatch.setattr(settings, "customer_paper_initial_balance", 100.0)
+
+    async def fail_seed_call(*_args, **_kwargs):
+        raise RuntimeError("postgres://atlas:seed-secret@db.internal/customer_paper")
+
+    monkeypatch.setattr(flow, "_paper_call", fail_seed_call)
+    with caplog.at_level(logging.ERROR, logger="app.customer_paper_flow"):
+        with pytest.raises(flow.CustomerPaperFlowBlocked) as captured:
+            asyncio.run(flow.ensure_customer_paper_account(12345, "USDT"))
+
+    safe_text = str(captured.value) + caplog.text
+    assert str(captured.value) == (
+        "Paper account initialization failed; ledger state could not be verified"
+    )
+    assert "seed-secret" not in safe_text
+    assert "db.internal" not in safe_text
+    assert "RuntimeError" in caplog.text
