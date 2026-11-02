@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from app import customer_paper_api as paper_api
