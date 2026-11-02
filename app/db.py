@@ -370,6 +370,7 @@ class AuditLogExternalDelivery(Base):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
