@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import Any
 import logging
-import threading
 import contextlib
 from pathlib import Path
 import hmac
@@ -258,10 +257,26 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
             idempotency_fields=("customer_id", "client_order_id"),
         )
 
-    # Retries must send the canonical payload that was originally hash-chained,
-    # not the mutable state observed by a later recovery poll.
+    # Do not decrypt AuditLog.detail on ordinary idempotent replays. The outbox
+    # claim is checked first; delivered/in-flight events return without reading it.
+    claim_token = await claim_external_audit_delivery(row.event_hash)
+    if claim_token is None:
+        return created
+
     try:
-        persisted_detail = row.detail
+        if created:
+            # Newly inserted ORM instances still hold the just-persisted plaintext
+            # payload in memory; no database result processor is involved.
+            persisted_detail = row.detail
+        else:
+            # Only a pending external delivery requires the encrypted payload.
+            # A damaged historical ciphertext must not block order recovery.
+            async with SessionLocal() as payload_db:
+                persisted_detail = (
+                    await payload_db.execute(
+                        select(AuditLog.detail).where(AuditLog.id == row.id)
+                    )
+                ).scalar_one()
         if isinstance(persisted_detail, str):
             persisted_detail = json.loads(persisted_detail)
         if not isinstance(persisted_detail, dict):
@@ -271,53 +286,64 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
             or str(persisted_detail.get("client_order_id") or "") != str(detail["client_order_id"])
         ):
             raise ValueError("stored customer paper audit identity does not match the idempotency key")
-        actor = str(row.actor_id or actor)
     except Exception as exc:
-        raise RuntimeError("stored customer paper audit payload cannot be safely replayed") from exc
-
-    # A durable, fenced outbox retries failed copies without replaying acknowledged
-    # events or allowing an expired sender to overwrite a newer sender's result.
-    claim_token = await claim_external_audit_delivery(row.event_hash)
-    if claim_token is not None:
-        safe_detail = {
-            key: value for key, value in persisted_detail.items()
-            if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
-        }
         try:
-            emitted = bool(emit_security_audit(
-                event="CUSTOMER_PAPER_ORDER_SUBMITTED",
-                actor_id=actor,
-                detail=safe_detail,
-                event_hash=row.event_hash,
-            ))
-        except Exception as exc:
-            try:
-                await finish_external_audit_delivery(
-                    row.event_hash,
-                    claim_token=claim_token,
-                    delivered=False,
-                    error_type=type(exc).__name__,
-                )
-            except Exception:
-                logging.getLogger(__name__).exception(
-                    "failed to release customer paper audit outbox lease after sink failure"
-                )
-            raise
-
-        finished = await finish_external_audit_delivery(
-            row.event_hash,
-            claim_token=claim_token,
-            delivered=emitted,
-            error_type=None if emitted else "DeliveryNotConfirmed",
-        )
-        if not finished:
-            logging.getLogger(__name__).warning(
-                "customer paper audit delivery result arrived after its lease was superseded"
+            await finish_external_audit_delivery(
+                row.event_hash,
+                claim_token=claim_token,
+                delivered=False,
+                error_type=type(exc).__name__,
             )
-        if not emitted:
-            raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
-    return created
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "failed to release customer paper audit outbox lease after payload-read failure"
+            )
+        logging.getLogger(__name__).exception(
+            "customer paper audit payload could not be loaded for external delivery"
+        )
+        # The hash-chained database event remains durable. Do not turn an existing
+        # pending customer order into a failed replay because its external copy is
+        # temporarily undeliverable.
+        return created
 
+    safe_detail = {
+        key: value for key, value in persisted_detail.items()
+        if key not in {"token", "secret", "api_token", "api_secret", "authorization", "destination"}
+    }
+    try:
+        emitted = bool(emit_security_audit(
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            actor_id=str(row.actor_id or actor),
+            detail=safe_detail,
+            event_hash=row.event_hash,
+        ))
+    except Exception as exc:
+        try:
+            await finish_external_audit_delivery(
+                row.event_hash,
+                claim_token=claim_token,
+                delivered=False,
+                error_type=type(exc).__name__,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "failed to release customer paper audit outbox lease after sink failure"
+            )
+        raise
+
+    finished = await finish_external_audit_delivery(
+        row.event_hash,
+        claim_token=claim_token,
+        delivered=emitted,
+        error_type=None if emitted else "DeliveryNotConfirmed",
+    )
+    if not finished:
+        logging.getLogger(__name__).warning(
+            "customer paper audit delivery result arrived after its lease was superseded"
+        )
+    if not emitted:
+        raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
+    return created
 
 async def _customer_paper_submission_stage(
     execution: dict,
@@ -4396,7 +4422,7 @@ async def customer_ledger(authorization: str | None = Header(default=None)):
 _LEDGER_EXPORT_MAX_ROWS = 100_000
 _LEDGER_EXPORT_MAX_BYTES = 64 * 1024 * 1024
 _LEDGER_EXPORT_MAX_CONCURRENT = 2
-_LEDGER_EXPORT_SEMAPHORE = threading.BoundedSemaphore(_LEDGER_EXPORT_MAX_CONCURRENT)
+_LEDGER_EXPORT_SEMAPHORE = asyncio.Semaphore(_LEDGER_EXPORT_MAX_CONCURRENT)
 
 
 @app.get("/api/customer/ledger/export.csv")
@@ -4410,6 +4436,9 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
     async with SessionLocal() as auth_db:
         profile, _ = await get_customer(authorization, auth_db)
         customer_id = int(profile.id)
+        # get_customer may create the first profile and subscription. Persist those
+        # identity records before the independent export-bounds session starts.
+        await auth_db.commit()
 
     async with SessionLocal() as bounds_db:
         row_count, max_journal_id = await ledger_statement_export_bounds(
@@ -4424,11 +4453,27 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
 
     # Bound active spool files per worker and fail fast rather than accumulating
     # disk usage under concurrent export requests.
-    acquired = await asyncio.to_thread(_LEDGER_EXPORT_SEMAPHORE.acquire, True, 2.0)
-    if not acquired:
-        raise HTTPException(429, "Too many concurrent ledger exports; retry shortly")
+    try:
+        await asyncio.wait_for(
+            _LEDGER_EXPORT_SEMAPHORE.acquire(),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(429, "Too many concurrent ledger exports; retry shortly") from exc
 
     output = None
+    cleaned = False
+
+    def cleanup_export_resources() -> None:
+        nonlocal cleaned
+        if cleaned:
+            return
+        cleaned = True
+        try:
+            if output is not None:
+                output.close()
+        finally:
+            _LEDGER_EXPORT_SEMAPHORE.release()
     try:
         # The spool keeps a small prefix in RAM and has a hard total-size ceiling.
         output = tempfile.SpooledTemporaryFile(
@@ -4493,9 +4538,7 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
         if verified_count != row_count or written != row_count:
             raise RuntimeError("customer ledger changed during export; refusing to return a partial CSV")
     except BaseException:
-        if output is not None:
-            output.close()
-        _LEDGER_EXPORT_SEMAPHORE.release()
+        cleanup_export_resources()
         raise
 
     output.seek(0)
@@ -4508,10 +4551,18 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
                     break
                 yield chunk
         finally:
-            output.close()
-            _LEDGER_EXPORT_SEMAPHORE.release()
+            cleanup_export_resources()
 
-    return StreamingResponse(
+    class _LedgerExportStreamingResponse(StreamingResponse):
+        async def __call__(self, scope, receive, send):
+            # A response may be cancelled/disconnected before the body generator
+            # starts. Always release the spool and permit from the response scope.
+            try:
+                await super().__call__(scope, receive, send)
+            finally:
+                cleanup_export_resources()
+
+    return _LedgerExportStreamingResponse(
         stream_spooled_file(),
         media_type="text/csv; charset=utf-8",
         headers={
