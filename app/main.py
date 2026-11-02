@@ -82,7 +82,9 @@ from .startup_guards import assert_multidict_safe_backend, assert_database_migra
 
 
 
-async def _attach_groq_trade_review(packet: dict) -> dict:
+async def _attach_groq_trade_review(
+    packet: dict, *, timeout_seconds: float | None = None
+) -> dict:
     """Attach a bounded Groq review; Native AI remains the sole trade-safety authority."""
     required = bool(settings.groq_trade_review_enabled)
     packet["groq_trade_review_required"] = required
@@ -96,18 +98,49 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
         }
     else:
         try:
-            # Keep external Groq advisory work within the same deadline as Native AI.
+            # Groq receives only the reserved slice of the overall decision budget.
+            configured_budget = float(settings.groq_trade_review_timeout_seconds)
+            transport_timeout = float(settings.groq_timeout_seconds)
+            if (
+                not math.isfinite(configured_budget) or configured_budget <= 0
+                or not math.isfinite(transport_timeout) or transport_timeout <= 0
+            ):
+                raise ValueError("Groq trade-review timeout configuration must be finite and positive")
+            budget = configured_budget
+            if timeout_seconds is not None:
+                reserved_budget = float(timeout_seconds)
+                if not math.isfinite(reserved_budget) or reserved_budget <= 0:
+                    raise asyncio.TimeoutError
+                budget = min(budget, reserved_budget)
             result = await asyncio.wait_for(
                 groq_trade_context_review(packet),
-                timeout=max(0.0, float(settings.ai_strategy_provider_timeout_seconds)),
+                timeout=min(budget, transport_timeout),
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "groq_trade_review_failed",
+                extra={"error_type": type(exc).__name__},
+                exc_info=True,
+            )
+            cause = exc
+            while getattr(cause, "__cause__", None) is not None:
+                cause = cause.__cause__
+            response = getattr(cause, "response", None)
+            raw_status = getattr(response, "status_code", None)
+            http_status = (
+                raw_status
+                if isinstance(raw_status, int) and not isinstance(raw_status, bool)
+                else None
+            )
             result = {
                 "status": "ERROR",
                 "provider": "groq",
                 "error": type(exc).__name__,
+                "cause": type(cause).__name__,
+                "http_status": http_status,
+                "reason": "groq_provider_call_failed",
                 "input_truncated": None,
                 "execution_authority": False,
             }
@@ -115,42 +148,88 @@ async def _attach_groq_trade_review(packet: dict) -> dict:
     return result
 
 
-async def _run_trade_safety_review(packet: dict) -> dict:
-    """Run Groq and Native AI inside one end-to-end decision deadline.
+def _trade_safety_timeout_metadata() -> dict[str, float]:
+    """Expose the effective total, optional Groq window and protected Native AI reserve."""
+    if settings.groq_trade_review_enabled:
+        try:
+            configured_total = float(settings.ai_trade_decision_total_timeout_seconds)
+            configured_native = float(settings.ai_strategy_provider_timeout_seconds)
+            configured_groq = float(settings.groq_trade_review_timeout_seconds)
+        except (TypeError, ValueError, OverflowError):
+            configured_total = configured_native = configured_groq = 0.0
+        total = configured_total if math.isfinite(configured_total) and configured_total > 0 else 0.0
+        native_reserve = configured_native if math.isfinite(configured_native) and configured_native > 0 else 0.0
+        if (
+            native_reserve > 0
+            and total > native_reserve
+            and math.isfinite(configured_groq)
+            and configured_groq > 0
+        ):
+            groq_budget = min(configured_groq, total - native_reserve)
+        else:
+            # A Groq-enabled decision is invalid without a positive reserved
+            # Native AI veto window; never let Groq run alone.
+            groq_budget = 0.0
+    else:
+        try:
+            configured_native = float(settings.ai_strategy_provider_timeout_seconds)
+        except (TypeError, ValueError, OverflowError):
+            configured_native = 0.0
+        total = configured_native if math.isfinite(configured_native) and configured_native > 0 else 0.0
+        native_reserve = total
+        groq_budget = 0.0
+    return {
+        "timeout_seconds": total,
+        "total_timeout_seconds": total,
+        "groq_provider_timeout_seconds": groq_budget,
+        "native_veto_reserve_seconds": native_reserve,
+    }
 
-    Groq is advisory evidence only. Reserve a bounded slice for the local Native AI
-    veto so a slow external response cannot double the configured trade-decision time.
+
+async def _run_trade_safety_review(packet: dict) -> dict:
+    """Run optional Groq evidence and Native AI within one explicit deadline.
+
+    When Groq is enabled, reserve the configured local Native AI timeout and give
+    Groq only the remaining portion of the end-to-end decision budget. When it is
+    disabled, retain the original local-only timeout unchanged.
     """
-    timeout = float(settings.ai_strategy_provider_timeout_seconds)
+    timeout_meta = _trade_safety_timeout_metadata()
+    timeout = timeout_meta["total_timeout_seconds"]
+    groq_budget = timeout_meta["groq_provider_timeout_seconds"]
+    native_reserve = timeout_meta["native_veto_reserve_seconds"]
     if not math.isfinite(timeout) or timeout <= 0:
+        raise asyncio.TimeoutError
+    if not math.isfinite(native_reserve) or native_reserve <= 0:
+        raise asyncio.TimeoutError
+    if settings.groq_trade_review_enabled and (
+        timeout <= native_reserve
+        or not math.isfinite(groq_budget)
+        or groq_budget <= 0
+    ):
         raise asyncio.TimeoutError
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
-    timeout_meta = {
-        "native_veto_reserve_seconds": min(0.25, timeout * 0.20)
-    }
-    native_reserve = timeout_meta["native_veto_reserve_seconds"]
     if settings.groq_trade_review_enabled:
-        groq_budget = max(0.0, timeout - native_reserve)
-        if groq_budget <= 0:
-            raise asyncio.TimeoutError
-        await asyncio.wait_for(_attach_groq_trade_review(packet), timeout=groq_budget)
+        # The helper converts its bounded provider timeout into an ERROR envelope;
+        # Native AI receives the remaining reserved veto time for its final decision.
+        await _attach_groq_trade_review(packet, timeout_seconds=groq_budget)
     else:
-        # This path only attaches a local DISABLED marker and makes no provider call.
         await _attach_groq_trade_review(packet)
-        native_reserve = timeout
 
     remaining = deadline - loop.time()
+    if remaining <= 0:
+        raise asyncio.TimeoutError
+    # A prompt Groq response must not expand Native AI beyond its separately
+    # configured veto reserve. The shared deadline remains an additional cap.
     native_timeout = min(native_reserve, remaining)
-    if native_timeout <= 0:
+    if not math.isfinite(native_timeout) or native_timeout <= 0:
         raise asyncio.TimeoutError
     return await asyncio.wait_for(
         dual_ai_trade_safety_review(packet), timeout=native_timeout
     )
 
-
-def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
+def _validated_customer_paper_mark(def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
     """Return a positive bid and timestamp only when the quote is demonstrably current."""
     if not isinstance(context, dict):
         raise ValueError("current mark context is unavailable")
