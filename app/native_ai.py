@@ -394,7 +394,7 @@ async def native_trade_safety_review(packet: dict[str, Any]) -> dict[str, Any]:
             **({"reasons": result["reasons"]} if not result["safe"] else {})}
 
 
-def native_ai_health_check(def native_ai_health_check() -> dict[str, Any]:
+def native_ai_health_check() -> dict[str, Any]:
     draft = compose_strategy_spec(prompt="BTC trend strategy on 1h, risk 0.5%", name="Native check")
     keys = {"strategy_family", "entry_conditions", "exit_conditions", "requires_backtest", "requires_walk_forward", "execution_mode"}
     incomplete = evaluate_native_trade_packet({"symbol": "BTC/USDT"})["safe"] is False
