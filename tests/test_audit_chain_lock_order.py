@@ -314,3 +314,37 @@ def test_concurrent_audit_writers_never_fork_the_chain_on_postgres():
         assert len(added) == 25
         assert all(y[1] == x[2] for x, y in zip(added, added[1:])), "audit chain forked"
     asyncio.run(go())
+
+
+def test_new_audit_releases_read_transaction_before_rate_limit(tmp_path, monkeypatch):
+    import app.audit_chain as audit_chain
+
+    async def go():
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path/'audit-release-connection.db'}")
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        S = async_sessionmaker(engine, expire_on_commit=False)
+        try:
+            async with S() as db:
+                observed = []
+
+                async def rate_limit_after_release(detail, actor_id):
+                    observed.append((db.in_transaction(), actor_id))
+                    assert not db.in_transaction(), "Redis must run after the read transaction releases its connection"
+                    return dict(detail)
+
+                monkeypatch.setattr(audit_chain, "_rate_limited_detail", rate_limit_after_release)
+                row, created = await append_audit_once(
+                    db,
+                    event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    detail={"customer_id": 504, "client_order_id": "cp-release-connection"},
+                    actor_id="customer:504",
+                    idempotency_fields=("customer_id", "client_order_id"),
+                )
+            assert created is True
+            assert row.id is not None
+            assert observed == [(False, "customer:504")]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(go())
