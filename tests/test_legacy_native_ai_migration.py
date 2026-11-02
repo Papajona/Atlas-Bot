@@ -5660,6 +5660,7 @@ def retained_helper():
         source = """class Settings:
     groq_trade_review_enabled: bool = True
     groq_trade_review_timeout_seconds: float = 7.0
+    ai_trade_decision_total_timeout_seconds: float = 8.25
 """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5671,6 +5672,7 @@ def retained_helper():
             result = config.read_text(encoding="utf-8")
         self.assertIn("groq_trade_review_enabled: bool = True", result)
         self.assertIn("groq_trade_review_timeout_seconds: float = 7.0", result)
+        self.assertIn("ai_trade_decision_total_timeout_seconds: float = 8.25", result)
 
     def test_config_migration_restores_trade_review_disabled_by_default(self):
         source = """class Settings:
