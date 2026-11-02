@@ -89,7 +89,6 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
-
 def test_manual_replay_requires_the_original_submission_bar_digest():
     submitted_at = datetime(2026, 11, 2, 12, 0, tzinfo=timezone.utc)
     bars = {
@@ -109,6 +108,7 @@ def test_manual_replay_requires_the_original_submission_bar_digest():
     with pytest.raises(HTTPException) as invalid:
         paper_api._verify_submission_bar_integrity(bars, submitted_at, "")
     assert invalid.value.status_code == 409
+
 
 def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypatch):
     frozen_now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
