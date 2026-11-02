@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from .db import AuditChainState, AuditLog, SessionLocal
@@ -46,6 +47,24 @@ async def _existing_idempotent_audit(db, *, event: str, idempotency_key: str):
 
 async def _lock_chain_state(db) -> AuditChainState:
     """Create/read and lock the single chain head before inspecting or appending rows."""
+    bind = db.get_bind()
+    if bind.dialect.name == "sqlite":
+        # SQLite ignores SELECT FOR UPDATE. Acquire its database write reservation
+        # before reading the head: this is an atomic write statement even when the
+        # singleton row already exists, so independent processes cannot read the
+        # same previous_hash and append competing successors.
+        await db.execute(
+            sqlite_insert(AuditChainState)
+            .values(id=1, last_hash="")
+            .on_conflict_do_nothing(index_elements=[AuditChainState.id])
+        )
+        locked = (
+            select(AuditChainState)
+            .where(AuditChainState.id == 1)
+            .execution_options(populate_existing=True)
+        )
+        return (await db.execute(locked)).scalar_one()
+
     locked = (
         select(AuditChainState)
         .where(AuditChainState.id == 1)
