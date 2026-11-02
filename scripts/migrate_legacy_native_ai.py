@@ -7140,12 +7140,22 @@ def _native_ai_contains_hosted_provider_call(contents: str) -> bool:
         "groq_ai",
         "openai",
         "cerebras",
+        "google.generativeai",
+        "google.genai",
+        "anthropic",
+        "cohere",
+        "mistralai",
         "litellm",
         "httpx",
         "requests",
         "aiohttp",
         "socket",
+        "urllib.request",
+        "urllib3",
+        "http.client",
+        "websockets",
     }
+    hosted_import_names = {"genai", "generativeai"}
     hosted_calls = {
         "groq_trade_context_review",
         "_groq_json",
@@ -7168,7 +7178,10 @@ def _native_ai_contains_hosted_provider_call(contents: str) -> bool:
             if (
                 imported_module in hosted_modules
                 or any(imported_module.endswith("." + name) for name in hosted_modules)
-                or any(alias.name.lower() in hosted_calls for alias in node.names)
+                or any(
+                    alias.name.lower() in hosted_calls | hosted_import_names
+                    for alias in node.names
+                )
             ):
                 return True
         elif isinstance(node, ast.Call):
