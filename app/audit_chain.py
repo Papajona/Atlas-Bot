@@ -382,6 +382,21 @@ async def claim_external_audit_delivery(
                     sqlite_lock.release()
     raise RuntimeError("external audit delivery claim could not be acquired")
 
+async def external_audit_delivery_status(event_hash: str) -> str | None:
+    """Read the indexed delivery state without claiming or changing an audit event."""
+    digest = str(event_hash or "").strip()
+    if len(digest) != 64:
+        raise ValueError("external audit delivery status requires a SHA-256 event hash")
+    async with SessionLocal() as db:
+        return (
+            await db.execute(
+                select(AuditLogExternalDelivery.status).where(
+                    AuditLogExternalDelivery.event_hash == digest
+                )
+            )
+        ).scalar_one_or_none()
+
+
 async def finish_external_audit_delivery(
     event_hash: str,
     *,

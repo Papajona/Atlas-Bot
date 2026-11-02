@@ -298,7 +298,11 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     async def append_once(_db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(event_hash="a" * 64), True
+        return SimpleNamespace(
+            event_hash="a" * 64,
+            detail=json.dumps(kwargs["detail"]),
+            actor_id="customer:501",
+        ), True
 
     async def claim_delivery(_event_hash):
         return "test-claim-token"
@@ -319,6 +323,71 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     assert created is True
     assert captured["actor_id"] == "customer:501"
+
+
+@pytest.mark.parametrize(
+    ("read_error", "expected_error_type"),
+    [
+        (
+            __import__("sqlalchemy").exc.OperationalError(
+                "SELECT audit detail", {}, RuntimeError("temporary database outage")
+            ),
+            "OperationalError",
+        ),
+        (
+            main.EncryptionKeyConfigurationError("Encryption key 'v1' is not configured"),
+            "EncryptionKeyConfigurationError",
+        ),
+    ],
+)
+def test_external_audit_payload_infrastructure_or_key_configuration_failure_remains_retryable(
+    monkeypatch, read_error, expected_error_type
+):
+
+    class DummySession:
+        def __init__(self, fail_execute=False):
+            self.fail_execute = fail_execute
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, _statement):
+            if self.fail_execute:
+                raise read_error
+            return SimpleNamespace(scalar_one=lambda: None)
+
+    sessions = iter([DummySession(), DummySession(fail_execute=True)])
+    finished = []
+
+    async def append_existing(_db, **_kwargs):
+        return SimpleNamespace(
+            id=901,
+            event_hash="c" * 64,
+            actor_id="customer:502",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-transient-db"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: next(sessions))
+    monkeypatch.setattr(main, "append_audit_once", append_existing)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+    result = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 502,
+        "client_order_id": "transient-audit-db-read",
+    }))
+
+    assert result is False
+    assert finished == [("claim-transient-db", False, expected_error_type)]
 
 
 def test_recovered_terminal_orders_keep_submission_intent_for_audit_repair():
@@ -473,19 +542,24 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
     create_results = iter([True, False, False])
     emit_results = iter([False, True])
     delivery_results = []
+    delivery_status = {"value": "PENDING"}
 
     async def claim(_event_hash):
         return next(claim_results)
 
     async def finish(_event_hash, *, claim_token, delivered, error_type=None):
         delivery_results.append((delivered, error_type, claim_token))
+        delivery_status["value"] = "DELIVERED" if delivered else "PENDING"
         return True
+
+    async def read_delivery_status(_event_hash):
+        return delivery_status["value"]
 
     async def append_with_replay(_db, **kwargs):
         captured.update(kwargs)
         return SimpleNamespace(
             id=123,
-            event_hash="stable-event-hash",
+            event_hash="b" * 64,
             detail=json.dumps(original_payload),
             actor_id="customer:501",
         ), next(create_results)
@@ -497,6 +571,7 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_with_replay)
     monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "external_audit_delivery_status", read_delivery_status)
     monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
     monkeypatch.setattr(main, "emit_security_audit", emit)
 
@@ -514,10 +589,10 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
         "client_order_id": "cp-replayed-external-audit",
     }))
 
-    assert created is False and replayed is False
+    assert created is True and replayed is True
     assert captured["idempotency_fields"] == ("customer_id", "client_order_id")
     assert len(emitted) == 2  # One failed attempt and one successful retry, not every replay.
-    assert emitted[0]["event_hash"] == emitted[1]["event_hash"] == "stable-event-hash"
+    assert emitted[0]["event_hash"] == emitted[1]["event_hash"] == "b" * 64
     assert emitted[0]["actor_id"] == emitted[1]["actor_id"] == "customer:501"
     assert emitted[0]["detail"] == emitted[1]["detail"] == original_payload
     assert delivery_results == [
@@ -591,14 +666,61 @@ def test_damaged_encrypted_audit_payload_does_not_block_existing_order_replay(mo
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("damaged payload must not reach sink")),
     )
 
-    created = asyncio.run(main._audit_customer_paper_order_submitted_once({
-        "customer_id": 501,
-        "client_order_id": "cp-damaged-encrypted-audit",
-    }))
+    with pytest.raises(main.CustomerPaperSubmissionAuditPayloadCorrupt):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-damaged-encrypted-audit",
+        }))
 
-    assert created is False
     assert finished == [("claim-damaged", False, "RuntimeError")]
     assert any(
         record.getMessage() == "customer paper audit payload could not be loaded for external delivery"
         for record in caplog.records
     )
+
+def test_external_audit_missing_historical_key_remains_retryable(monkeypatch):
+    from app.crypto import EncryptionKeyConfigurationError
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise EncryptionKeyConfigurationError("historical key v1 is not configured")
+
+    finished = []
+
+    async def append_existing(_db, **_kwargs):
+        return SimpleNamespace(
+            id=902,
+            event_hash="missing-key-event-hash",
+            actor_id="customer:503",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-missing-key"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_existing)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+    monkeypatch.setattr(
+        main, "emit_security_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("an unreadable audit payload must not reach the sink")
+        ),
+    )
+
+    result = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 503,
+        "client_order_id": "missing-historical-key",
+    }))
+
+    assert result is False
+    assert finished == [("claim-missing-key", False, "EncryptionKeyConfigurationError")]
+
