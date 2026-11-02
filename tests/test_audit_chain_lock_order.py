@@ -125,6 +125,7 @@ def test_existing_idempotency_hit_does_not_consume_rate_limit(tmp_path, monkeypa
                     actor_id="customer:503",
                     idempotency_fields=("customer_id", "client_order_id"),
                 )
+                assert not db.in_transaction(), "an idempotent replay must release its read transaction"
             assert created_again is False
             assert replay.id == first.id
         finally:
