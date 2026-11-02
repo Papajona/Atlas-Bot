@@ -1181,11 +1181,6 @@ def test_pending_paper_buy_caps_quantity_after_rounded_notional_and_fee(monkeypa
 def test_customer_paper_submission_audit_is_distinct_and_idempotent(monkeypatch):
     import app.main as main
 
-    events = []
-
-    async def capture_audit(event, detail, actor_id=None):
-        events.append((event, detail, actor_id))
-
     class FakeAuditSession:
         async def __aenter__(self):
             return self
