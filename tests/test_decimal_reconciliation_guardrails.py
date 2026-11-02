@@ -19,15 +19,60 @@ def test_decimal_reconciliation_covers_fractional_large_empty_and_journal_totals
     assert Decimal("0.123456789012345678") + Decimal("0.000000000000000001") == Decimal("0.123456789012345679")
 
 
-def test_reconciliation_endpoint_aggregates_liabilities_with_decimal_not_float():
-    src = (ROOT / "app/main.py").read_text()
-    start = src.index('async def admin_custody_reconciliation')
-    end = src.index('@app.get("/api/admin/security/roles")', start)
-    body = src[start:end]
-    assert "Decimal(str(r.available or 0))" in body
-    assert "Decimal(str(r.trading_reserved or 0))" in body
-    assert "Decimal(str(r.withdrawal_reserved or 0))" in body
-    assert "sum(float(r.available) for r in rows)" not in body
+def test_reconciliation_endpoint_preserves_large_six_decimal_liabilities(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import main
+    from app.config import settings
+
+    account = SimpleNamespace(
+        available=Decimal("999999999999999999999999.123456"),
+        trading_reserved=Decimal("0.100001"),
+        withdrawal_reserved=Decimal("0.200002"),
+        currency="USDT",
+    )
+
+    class Result:
+        def __init__(self, values):
+            self.values = values
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.values
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            names = {table.name for table in statement.get_final_froms()}
+            return Result([account] if "customer_ledger_accounts" in names else [])
+
+    async def fake_auth(*_args, **_kwargs):
+        return {"sub": "test-admin"}
+
+    async def fake_role(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "auth", fake_auth)
+    monkeypatch.setattr(main, "require_role", fake_role)
+    monkeypatch.setattr(settings, "usdt_trongrid_api_key", "")
+    monkeypatch.setattr(settings, "usdt_tron_treasury_address", "T-test")
+
+    report = asyncio.run(main.admin_custody_reconciliation())
+
+    expected = Decimal("999999999999999999999999.423459")
+    assert report["customer_liabilities"]["available"] == account.available
+    assert report["customer_liabilities"]["trading_reserved"] == account.trading_reserved
+    assert report["customer_liabilities"]["withdrawal_reserved"] == account.withdrawal_reserved
+    assert report["customer_liabilities"]["total"] == expected
 
 
 def test_postgres_numeric_journal_line_columns_preserve_six_decimal_scale():

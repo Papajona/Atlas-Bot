@@ -22,3 +22,40 @@ def test_continuous_risk_enforcement_runs_in_worker():
     assert 'state.mode = "HALTED"' in main
     assert "await emergency_stop()" in main
     assert "_track_worker_task(_continuous_risk_enforcement_loop())" in main
+
+
+def test_platform_execution_health_uses_only_platform_owned_history():
+    import asyncio
+
+    from app.execution import _execution_health_block
+
+    class ScalarResult:
+        def scalars(self):
+            return self
+
+        def all(self):
+            return []
+
+    class QuerySession:
+        def __init__(self):
+            self.queries = []
+
+        async def execute(self, query):
+            self.queries.append(
+                str(query.compile(compile_kwargs={"literal_binds": True}))
+            )
+            return ScalarResult()
+
+    db = QuerySession()
+    assert asyncio.run(_execution_health_block(db, customer_id=None)) is None
+
+    strategy_queries = [
+        query for query in db.queries if "strategy_outcomes" in query
+    ]
+    order_queries = [
+        query for query in db.queries if "order_commands" in query
+    ]
+    assert len(strategy_queries) == 1
+    assert "strategy_outcomes.customer_id IS NULL" in strategy_queries[0]
+    assert len(order_queries) == 1
+    assert "order_commands.customer_id IS NULL" in order_queries[0]

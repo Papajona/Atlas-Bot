@@ -16,9 +16,10 @@ To save the JSON report as an artifact:
 python scripts/evaluate_rejected_signals.py --limit 10000 --holdout-fraction 0.30 --min-group-samples 30 --output reports/rejected-signal-evaluation.json
 ```
 
-The report includes:
-- Counts and coverage by decision class, mode and candidate-side availability.
-- Candidate-side hypothetical net-return summaries for TRADE and NO_TRADE decisions, grouped by asset, timeframe, strategy, regime and horizon.
+The `rejected-signal-evaluation-v2` report includes:
+- Counts and coverage by decision class, mode, label version, duplicate audit rows and candidate-side availability.
+- Candidate-side hypothetical net-return summaries for TRADE and NO_TRADE decisions, grouped separately by asset, symbol, exchange, timeframe, mode, strategy, regime, label version, cost source/assumptions and horizon.
+- Repeated audit rows for the same decision and label version are counted once; the latest persisted row is retained.
 - NO_TRADE summaries split by recorded stage and reason code.
 - Chronological holdout summaries. Training-side labels whose outcome candle closes at or after the holdout boundary are purged to avoid overlapping outcome windows.
 - Sample-size flags. Small groups remain visible but are not marked sample-sufficient.

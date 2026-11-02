@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import httpx
@@ -62,26 +63,63 @@ def _extract_json_object(text: Any) -> dict[str, Any]:
     return value
 
 
+_ACTIONABLE_SYMBOL_COMMAND_PATTERN = re.compile(
+    r"(?i:\b(?:buy|sell|go long|go short|enter|exit|open|close))\s+"
+    r"(?:\d+(?:\.\d+)?\s+)?"
+    r"(?:[A-Za-z0-9]{2,}(?:[/_][A-Za-z0-9]{2,}){1,2}|"
+    r"[A-Z]{3,}[A-Z0-9]*|[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*)"
+    r"(?:\s+(?i:now|immediately|at market|market price|at)\b)?"
+)
+_ACTIONABLE_ORDER_COMMAND_PATTERN = re.compile(
+    r"(?i:\b(?:place|submit|execute)\s+(?:a\s+)?(?:(?:buy|sell)\s+)?order\b)"
+)
+_ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
+    r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"
+)
+_PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
+    r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b)"
+    r"(?:\s+(?:order|level))?"
+    r"(?:\s+price)?"
+    r"(?:\s*(?:=|:)\s*|\s+(?:(?:is|was|equals?)\s+)?(?:at|to)\s+|"
+    r"\s+(?:(?:is|was|equals?)\s+)?)[$€£]?"
+    r"(?P<price>[+-]?(?:\d|\.\d)\S*)"
+)
+_PRICE_NUMBER_PATTERN = re.compile(
+    r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
+)
+_TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
+    r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
+    r"adjust|adjusts|adjusting|raise|raises|raising|lower|lowers|lowering|"
+    r"change|changes|changing|update|updates|updating|put|puts|putting|"
+    r"tighten|tightens|tightening|widen|widens|widening|recommend|recommends|"
+    r"recommending|use|keep)\s+"
+    r"(?:(?:the|a|your|my|our|this|new|current)\s+)?"
+    r"(?:(?:protective|trailing)\s+)?"
+    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b"
+    r"(?:\s+(?:limit(?:\s+order)?|order|level))?"
+    r"(?:\s+price)?"
+    r"(?:\s+(?:at|to|is|was|equals?)\s+|\s*(?:=|:)\s*)[$€£]?[+-]?(?:\d|\.\d)\S*)"
+)
+_TRADE_LIMIT_TRIGGER_COMMAND_PATTERN = re.compile(
+    r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
+    r"adjust|adjusts|adjusting|raise|raises|raising|change|changes|changing|"
+    r"update|updates|updating|put|puts|putting|tighten|tightens|tightening|"
+    r"widen|widens|widening|recommend|recommends|recommending|use|keep)"
+    r"\s+(?:(?:the|a|your|my|our|this|new|current)\s+)?"
+    r"(?:limit|trigger)(?:\s+(?:order|price|level))?\s+"
+    r"(?:at|to|is|was|equals?)\s+[$€£]?[+-]?(?:\d|\.\d)\S*)"
+)
+_LOWER_LIMIT_COMMAND_PATTERN = re.compile(
+    r"(?i:\blower\s+(?:the|a|your|my|our|this|new|current)\s+"
+    r"limit(?:\s+(?:order|price))?\s+"
+    r"(?:at|to|is|was|equals?)\s+[$€£]?[+-]?(?:\d|\.\d)\S*)"
+)
 _ACTIONABLE_TRADING_PATTERNS = (
-    # Keep action verbs case-insensitive but symbol matching case-sensitive for
-    # unseparated tickers. This catches BUY BTCUSDT without mistaking ordinary
-    # lowercase prose such as "enter risk-off conditions" for a trade command.
-    re.compile(
-        r"(?i:\b(?:buy|sell|go long|go short|enter|exit|open|close))\s+"
-        r"(?:\d+(?:\.\d+)?\s+)?"
-        r"(?:[A-Za-z0-9]{2,}(?:[/_][A-Za-z0-9]{2,}){1,2}|"
-        r"[A-Z]{3,}[A-Z0-9]*|[A-Za-z][A-Za-z0-9]*\d[A-Za-z0-9]*)"
-        r"(?:\s+(?i:now|immediately|at market|market price|at)\b)?"
-    ),
-    re.compile(
-        r"(?i:\b(?:place|submit|execute)\s+(?:a\s+)?"
-        r"(?:(?:buy|sell)\s+)?order\b)"
-    ),
-    re.compile(
-        r"(?i:\b(?:entry|stop[- ]loss|take[- ]profit|limit|trigger)"
-        r"(?:\s+price)?\s*(?:=|:|at)\s*[$€£]?\d+(?:[.,]\d+)?)"
-    ),
-    re.compile(r"(?i:\b(?:buy|sell)\s+(?:now|immediately|at market)\b)"),
+    _ACTIONABLE_SYMBOL_COMMAND_PATTERN,
+    _ACTIONABLE_ORDER_COMMAND_PATTERN,
+    _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN,
+    _TRADE_LIMIT_TRIGGER_COMMAND_PATTERN,
+    _LOWER_LIMIT_COMMAND_PATTERN,
 )
 
 _NEGATED_ACTION_PREFIX = re.compile(
@@ -91,13 +129,131 @@ _NEGATED_ACTION_PREFIX = re.compile(
 )
 
 
-def _contains_actionable_trading_instruction(text: str) -> bool:
-    """Reject explicit trade commands while retaining clearly negated warnings."""
+def _is_negated_match(text: str, start: int) -> bool:
+    return bool(_NEGATED_ACTION_PREFIX.search(text[max(0, start - 80):start]))
+
+
+def _is_non_trade_limit_reference(text: str, match: re.Match[str]) -> bool:
+    """Ignore market/risk-cap uses of 'limit'; validate only order-price references."""
+    if match.group("kind").lower() != "limit":
+        return False
+    prefix = text[max(0, match.start() - 80):match.start()]
+    suffix = text[match.end():match.end() + 80]
+    if re.search(
+        r"(?i)\b(?:(?:upper|lower)(?:\s+price)?|"
+        r"(?:daily|weekly|monthly)\s+loss|(?:daily|weekly|monthly)\s+risk|"
+        r"(?<!stop[- ])loss|risk|exposure|leverage|position|range|"
+        r"(?:price|trading)\s+range)\s*$",
+        prefix,
+    ):
+        return True
+    return bool(re.match(
+        r"(?i)^\s+(?:for\s+(?:(?:daily|weekly|monthly)\s+)?"
+        r"(?:loss|risk|exposure|position)|of\s+(?:the\s+)?(?:range|market)|"
+        r"(?:contracts?|shares?|lots?|units?))\b",
+        suffix,
+    ))
+
+
+def _contains_actionable_trading_instruction(
+    text: str, *, allow_factual_price_references: bool = False
+) -> bool:
+    """Reject order commands; optionally allow only plan-verified factual price references."""
     for pattern in _ACTIONABLE_TRADING_PATTERNS:
-        for match in pattern.finditer(text):
-            if not _NEGATED_ACTION_PREFIX.search(text[max(0, match.start() - 80):match.start()]):
-                return True
+        if any(not _is_negated_match(text, match.start()) for match in pattern.finditer(text)):
+            return True
+    if any(
+        not _is_negated_match(text, match.start())
+        for match in _TRADE_PRICE_SETTING_COMMAND_PATTERN.finditer(text)
+    ):
+        return True
+    if not allow_factual_price_references:
+        for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
+            if _is_negated_match(text, match.start()) or _is_non_trade_limit_reference(text, match):
+                continue
+            # Do not misclassify risk distances and ratios as proposed price levels.
+            # Keep this shared detector consistent with the plan-reference validator.
+            raw_token = match.group("price")
+            numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
+            if numeric_prefix is not None:
+                unit_context = raw_token[numeric_prefix.end():] + text[match.end():]
+                if re.match(
+                    r"(?i)^\s*(?:%|percent(?:age)?\b|[xX]\b|R\b|ATR\b|bps\b|basis\s+points?\b|pips?\b|points?\b|ticks?\b|times?\b)",
+                    unit_context,
+                ):
+                    continue
+            return True
     return False
+
+
+def _decimal_plan_price(value: Any) -> Decimal | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        price = Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return price if price.is_finite() and price > 0 else None
+
+
+def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> None:
+    """Allow a factual numeric reference only when it equals that submitted plan field."""
+    field_for_kind = {
+        "entry": "entry_price",
+        "stop": "stop_loss_price",
+        "stop-loss": "stop_loss_price",
+        "take-profit": "take_profit_price",
+        "target": "take_profit_price",
+        "limit": "entry_price",
+        "trigger": "entry_price",
+    }
+    for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
+        if _is_non_trade_limit_reference(text, match):
+            continue
+        kind = re.sub(r"\s+", "-", match.group("kind").lower())
+        if kind == "limit":
+            preceding = text[max(0, match.start() - 80):match.start()]
+            if re.search(r"(?i)\b(?:stop[- ]loss|stop)\s*$", preceding):
+                kind = "stop-loss"
+            elif re.search(r"(?i)\b(?:take[- ]profit|target)\s*$", preceding):
+                kind = "take-profit"
+        expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
+        raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
+        numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
+        if numeric_prefix is not None:
+            unit_context = raw_token[numeric_prefix.end():] + text[match.end():]
+            if re.match(
+                r"(?i)^\s*(?:%|percent(?:age)?\b|[xX]\b|R\b|ATR\b|bps\b|basis\s+points?\b|pips?\b|points?\b|ticks?\b|times?\b)",
+                unit_context,
+            ):
+                continue
+        normalized_token = raw_token
+        if "," in normalized_token and "." in normalized_token:
+            # Resolve mixed separators only when they form valid US or European
+            # thousands/decimal grouping; reject ambiguous or malformed grouping.
+            if re.fullmatch(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", "")
+            elif re.fullmatch(r"[+-]?\d{1,3}(?:\.\d{3})+,\d+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(".", "").replace(",", ".")
+            else:
+                raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
+        elif "," in normalized_token:
+            if re.fullmatch(r"[+-]?\d{1,3}(?:,\d{3})+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", "")
+            elif normalized_token.count(",") == 1 and re.fullmatch(r"[+-]?\d+,\d+(?:[eE][+-]?\d+)?", normalized_token):
+                normalized_token = normalized_token.replace(",", ".")
+            else:
+                raise GroqAIError(f"Groq trade review cites an invalid {kind} price token")
+        if not _PRICE_NUMBER_PATTERN.fullmatch(normalized_token):
+            raise GroqAIError(
+                f"Groq trade review cites an invalid {kind} price token"
+            )
+        actual = _decimal_plan_price(normalized_token)
+        if expected is None or actual is None or actual != expected:
+            raise GroqAIError(
+                f"Groq trade review cites {kind} price outside the submitted trade plan"
+            )
+
 
 def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
     required_text = ("regime_assessment", "research_only_summary")
@@ -136,14 +292,20 @@ def _validate_review(value: dict[str, Any]) -> dict[str, Any]:
 
 
 
-def _validate_trade_context_review(value: dict[str, Any]) -> dict[str, Any]:
-    """Validate Groq's constrained risk annotation; it cannot emit an order instruction."""
+def _validate_trade_context_review(
+    value: dict[str, Any], *, packet: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Validate bounded risk text and bind factual numeric prices to the submitted plan."""
+    trade_plan = packet.get("trade_plan") if isinstance(packet, dict) else None
+    if not isinstance(trade_plan, dict):
+        trade_plan = {}
     regime = value.get("regime_assessment")
     if not isinstance(regime, str) or not regime.strip() or len(regime) > 1000:
         raise GroqAIError("Groq trade review regime_assessment must be non-empty text")
     regime = regime.strip()
-    if _contains_actionable_trading_instruction(regime):
+    if _contains_actionable_trading_instruction(regime, allow_factual_price_references=True):
         raise GroqAIError("Groq trade review contains actionable trading instructions")
+    _validate_plan_price_references(regime, trade_plan)
 
     alignment = str(value.get("setup_alignment") or "").strip().upper()
     if alignment not in {"ALIGNED", "CONTRADICTS", "NEUTRAL", "INSUFFICIENT_EVIDENCE"}:
@@ -166,15 +328,19 @@ def _validate_trade_context_review(value: dict[str, Any]) -> dict[str, Any]:
     }
     for key in ("key_observations", "contradictions", "data_quality_flags"):
         items = value.get(key)
-        if (
-            not isinstance(items, list)
-            or len(items) > 12
-            or any(not isinstance(item, str) or not item.strip() or len(item) > 500 for item in items)
+        if not isinstance(items, list) or any(
+            not isinstance(item, str) or len(item) > 500 for item in items
         ):
             raise GroqAIError(f"Groq trade review field {key!r} must be an array of at most 12 short text values")
-        cleaned = [item.strip() for item in items]
-        if any(_contains_actionable_trading_instruction(item) for item in cleaned):
-            raise GroqAIError("Groq trade review contains actionable trading instructions")
+        # Models occasionally include empty list entries. Drop those harmless
+        # placeholders rather than turning a complete evidence envelope into ERROR.
+        cleaned = [item.strip() for item in items if item.strip()]
+        if len(cleaned) > 12:
+            raise GroqAIError(f"Groq trade review field {key!r} must be an array of at most 12 short text values")
+        for item in cleaned:
+            if _contains_actionable_trading_instruction(item, allow_factual_price_references=True):
+                raise GroqAIError("Groq trade review contains actionable trading instructions")
+            _validate_plan_price_references(item, trade_plan)
         result[key] = cleaned
     return result
 
@@ -848,7 +1014,7 @@ async def groq_trade_context_review(packet: dict[str, Any]) -> dict[str, Any]:
         review = await _groq_json(
             prompt,
             system_prompt=_TRADE_SYSTEM_PROMPT,
-            validator=_validate_trade_context_review,
+            validator=lambda value: _validate_trade_context_review(value, packet=packet),
         )
     except asyncio.CancelledError:
         raise

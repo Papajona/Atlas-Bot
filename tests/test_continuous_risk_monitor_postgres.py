@@ -24,7 +24,7 @@ async def test_idle_account_rolls_daily_risk_baseline_after_multiple_days(monkey
     exercised against PostgreSQL, with emergency actions replaced by test spies.
     """
     from app import main
-    from app.db import AppState, TradingAccount
+    from app.db import AppState, CustomerProfile, TradingAccount
 
     url = os.getenv("ATLAS_POSTGRES_URL", "").strip()
     assert url, "ATLAS_POSTGRES_URL is required for this PostgreSQL test"
@@ -52,11 +52,15 @@ async def test_idle_account_rolls_daily_risk_baseline_after_multiple_days(monkey
         )
         async with isolated_engine.begin() as conn:
             await conn.run_sync(lambda sync_conn: AppState.__table__.create(sync_conn))
+            await conn.run_sync(lambda sync_conn: CustomerProfile.__table__.create(sync_conn))
             await conn.run_sync(lambda sync_conn: TradingAccount.__table__.create(sync_conn))
 
         sessions = async_sessionmaker(isolated_engine, expire_on_commit=False)
         today_utc = datetime.now(timezone.utc).date()
         customer_id = 2_000_000_000 - (uuid.uuid4().int % 100_000_000)
+        async with sessions() as db:
+            db.add(CustomerProfile(id=customer_id, auth_user_id=f"risk-idle-{schema}"))
+            await db.commit()
         account = TradingAccount(
             customer_id=customer_id,
             currency="USDT",

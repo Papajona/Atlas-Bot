@@ -151,14 +151,18 @@ def test_customer_paper_database_pair_accepts_distinct_database_clusters():
     assert pair["distinct_credentials"] is True
 
 
-def test_primary_security_definer_scan_excludes_only_shared_paper_schema():
+def test_primary_security_definer_scan_exempts_only_the_shared_paper_guard_probe():
     source = Path("app/customer_paper_ledger.py").read_text(encoding="utf-8")
-    # In shared-database mode the customer_paper schema is the isolated paper boundary.
-    # Its guard helper is checked independently in the paper connection; primary schemas
-    # must still be scanned for executable SECURITY DEFINER functions.
-    assert "AND (NOT :same_database OR n.nspname <> 'customer_paper')" in source
-    assert 'AND p.prosecdef' in source
-    assert "has_function_privilege(r.oid, p.oid, 'EXECUTE')" in source
+    query = source.split("primary_security_definer_rows", 1)[1].split(
+        "for row in primary_security_definer_rows", 1
+    )[0]
+    # Exempt only the exact read-only boolean guard probe. Other executable
+    # SECURITY DEFINER routines in customer_paper remain visible to preflight.
+    assert "p.oid IS DISTINCT FROM to_regprocedure('customer_paper.verify_market_bar_capacity_guards()')" in query
+    assert "p.prorettype <> 'boolean'::regtype" in query
+    assert "AND p.prosecdef" in query
+    assert "has_function_privilege(r.oid, p.oid, 'EXECUTE')" in query
+    assert "n.nspname <> 'customer_paper'" not in query
 
 
 

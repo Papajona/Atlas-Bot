@@ -150,7 +150,10 @@ class TradingAccount(Base):
         Index("ix_trading_account_status", "status"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_profiles.id", name="fk_trading_accounts_customer_profile", ondelete="RESTRICT"),
+        nullable=False,
+    )
     currency: Mapped[str] = mapped_column(String(20), default="USDT")
     status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
     cash_equity: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)

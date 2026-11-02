@@ -1205,7 +1205,7 @@ async def execute_customer_paper_spot_signal(
         if str(p.get("execution_owner") or "manual_customer_api").strip().lower()
         == "autonomous_customer_bot"
     ]
-    if normalized_side == "BUY" and positions:
+    if normalized_side == "BUY" and autonomous_positions:
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "long_spot_position_already_open"}
     if normalized_side == "SELL" and not autonomous_positions:
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "short_entries_are_not_supported"}

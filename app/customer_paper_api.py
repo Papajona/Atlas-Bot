@@ -172,9 +172,77 @@ def _market_bar_context(df: Any, *, symbol: str, timeframe: str) -> dict[str, An
     }
 
 
+def _market_bar_contexts(df: Any, *, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+    """Return verified per-candle contexts from one fresh, provenance-checked dataset.
+
+    Only the latest candle is checked for freshness against wall clock. Earlier rows
+    belong to the same freshly fetched, immutable OHLCV manifest and are replayed in
+    timestamp order; each candle receives its own deterministic digest.
+    """
+    latest = _market_bar_context(df, symbol=symbol, timeframe=timeframe)
+    index = df.index
+    if not getattr(index, "is_monotonic_increasing", False) or not getattr(index, "is_unique", False):
+        raise HTTPException(409, "Paper execution history must have unique, increasing candle timestamps")
+
+    contexts = []
+    for position in range(len(df)):
+        bar_at = _timestamp(index[position], "bar")
+        values: dict[str, Decimal] = {}
+        for name in ("open", "high", "low", "close", "volume"):
+            try:
+                value = Decimal(str(df[name].iloc[position]))
+            except (InvalidOperation, TypeError, ValueError, OverflowError) as exc:
+                raise HTTPException(409, f"Historical market bar has an invalid {name}") from exc
+            if not value.is_finite() or (value <= 0 if name != "volume" else value < 0):
+                raise HTTPException(409, f"Historical market bar has an invalid {name}")
+            values[name] = value
+        if (
+            values["high"] < max(values["open"], values["close"], values["low"])
+            or values["low"] > min(values["open"], values["close"], values["high"])
+        ):
+            raise HTTPException(409, "Historical market bar OHLC values are inconsistent")
+        stable_bar = {
+            "venue": "binance",
+            "market_type": "spot",
+            "volume_unit": "base_asset",
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "bar_at": bar_at.isoformat(),
+            **{name: _decimal_text(values[name]) for name in ("open", "high", "low", "close", "volume")},
+        }
+        bar_digest = hashlib.sha256(
+            json.dumps(stable_bar, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        contexts.append({
+            **stable_bar,
+            "timestamp": bar_at,
+            "bar_seconds": latest["bar_seconds"],
+            "values": values,
+            "dataset_sha256": latest["dataset_sha256"],
+            "source": latest["source"],
+            "fetched_at_utc": latest["fetched_at_utc"],
+            "bar_data_sha256": bar_digest,
+        })
+    return contexts
+
+
 def _stable_draw(*parts: str) -> float:
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return int(digest[:13], 16) / float(16**13)
+
+
+def _paper_order_draw(customer_id: int, order_id: str, bar_key: str, outcome: str) -> float:
+    """Use server-persisted order identity, never client-chosen idempotency input."""
+    server_order_id = str(order_id or "").strip()
+    if not server_order_id:
+        raise ValueError("paper order is missing its server-generated order identity")
+    return _stable_draw(str(int(customer_id)), server_order_id, str(bar_key), str(outcome))
+
+
+def _paper_ttl_idempotency_key(customer_id: int, client_order_id: str, bar_identity: str) -> str:
+    """Make a TTL close event unique to one customer, order and completed bar."""
+    material = f"{int(customer_id)}|{str(client_order_id)}|{str(bar_identity)}"
+    return "paper-ttl:" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
 def _paper_feature_flags() -> None:
@@ -219,6 +287,8 @@ def build_customer_paper_router(
             raise HTTPException(401, "Customer authentication is required")
         async with SessionLocal() as db:
             profile, _claims = await get_customer(authorization, db, require_aal2=True)
+            # Persist a newly flushed profile before this short-lived session closes.
+            await db.commit()
         if not getattr(profile, "id", None):
             raise HTTPException(401, "Customer authentication is invalid")
         return profile
@@ -240,8 +310,15 @@ def build_customer_paper_router(
         timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
         if not timeframe_seconds:
             raise HTTPException(422, "Unsupported paper-order timeframe")
-        required_bars = 25
-        days = max(1, (required_bars * timeframe_seconds + 86_399) // 86_400)
+        # Load enough closed candles to replay the configured order lifetime from
+        # the submission bar, while retaining a bounded request for very old orders.
+        required_bars = max(
+            25,
+            max(1, int(settings.paper_order_ttl_bars))
+            + max(1, int(settings.paper_fill_latency_bars))
+            + 1,
+        )
+        days = min(30, max(1, (required_bars * timeframe_seconds + 86_399) // 86_400))
         req = market_request_type(
             asset="crypto",
             symbol=symbol,
@@ -404,6 +481,9 @@ def build_customer_paper_router(
             order = await _order_detail(profile.id, client_order_id)
             if order["status"] not in {"SUBMITTED", "PARTIALLY_FILLED"}:
                 return {"status": "TERMINAL", "virtual_only": True, "order": order}
+            order_identity = str(order.get("order_id") or "").strip()
+            if not order_identity:
+                raise HTTPException(409, "Persisted paper order is missing its server-generated identity")
             order_venue = str(order.get("venue") or "").strip().lower()
             if order_venue != "binance" or str(order.get("market_type") or "").strip().lower() != "spot":
                 raise HTTPException(409, "Manual paper-order advancement supports Binance spot orders only")
@@ -411,360 +491,437 @@ def build_customer_paper_router(
             timeframe = str(metadata.get("timeframe") or "")
             if timeframe not in _TIMEFRAME_SECONDS or metadata.get("execution_model") != "completed_bar_volume_capped_heuristic_v1":
                 raise HTTPException(409, "Persisted paper order lacks a supported execution context")
-            df, bar = await _fetch_bar(order["symbol"], timeframe)
+            df, latest_bar = await _fetch_bar(order["symbol"], timeframe)
             submitted_at = _timestamp(metadata.get("submission_bar_at"), "submission bar")
-            if bar["timestamp"] <= submitted_at:
+            bar_seconds = _TIMEFRAME_SECONDS[timeframe]
+            ttl_bars = max(1, int(settings.paper_order_ttl_bars))
+            fill_latency_bars = max(1, int(settings.paper_fill_latency_bars))
+            ttl_at = submitted_at + timedelta(seconds=ttl_bars * bar_seconds)
+            first_eligible_at = submitted_at + timedelta(seconds=fill_latency_bars * bar_seconds)
+            latest_at = latest_bar["timestamp"]
+
+            if latest_at <= submitted_at:
                 return {
                     "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
                     "virtual_only": True,
-                    "bar_at": bar["timestamp"].isoformat(),
+                    "bar_at": latest_at.isoformat(),
                     "order": order,
                 }
-            elapsed_bars = int((bar["timestamp"] - submitted_at).total_seconds() // _TIMEFRAME_SECONDS[timeframe])
-            if elapsed_bars < max(1, int(settings.paper_fill_latency_bars)):
+
+            bars = _market_bar_contexts(df, symbol=order["symbol"], timeframe=timeframe)
+            by_timestamp = {bar["timestamp"]: bar for bar in bars}
+            evaluation_end = min(latest_at, ttl_at)
+
+            # Never select only the latest candle. Every eligible candle from the
+            # first latency-qualified bar through the current/TTL boundary must be
+            # present and contiguous, or the request fails closed without a fill.
+            if first_eligible_at <= evaluation_end:
+                expected_at = first_eligible_at
+                while expected_at <= evaluation_end:
+                    if expected_at not in by_timestamp:
+                        raise HTTPException(
+                            409,
+                            "Historical paper execution candles are incomplete; reconcile the order before advancing",
+                        )
+                    expected_at += timedelta(seconds=bar_seconds)
+
+            if first_eligible_at > ttl_at:
+                if latest_at < ttl_at:
+                    return {
+                        "status": "WAITING_FOR_FILL_LATENCY",
+                        "virtual_only": True,
+                        "elapsed_bars": int((latest_at - submitted_at).total_seconds() // bar_seconds),
+                        "order": order,
+                    }
+                ttl_bar = by_timestamp.get(ttl_at)
+                if ttl_bar is None:
+                    raise HTTPException(
+                        409,
+                        "The paper-order TTL candle is missing; reconcile the order before advancing",
+                    )
+                await expire_customer_paper_order(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    idempotency_key=_paper_ttl_idempotency_key(
+                        profile.id, client_order_id, ttl_bar["timestamp"].isoformat()
+                    ),
+                )
+                expired_order = await _order_detail(profile.id, client_order_id)
+                return {
+                    "status": "EXPIRED_TTL",
+                    "virtual_only": True,
+                    "elapsed_bars": ttl_bars,
+                    "order": expired_order,
+                }
+
+            async def _process_completed_bar(bar, elapsed_bars, current_order):
+                order = current_order
+                budget = await register_customer_paper_market_bar(
+                    venue=order_venue,
+                    symbol=order["symbol"],
+                    timeframe=timeframe,
+                    bar_at=bar["timestamp"],
+                    bar_data_sha256=bar["bar_data_sha256"],
+                    base_volume=_decimal_text(bar["values"]["volume"]),
+                    participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
+                )
+                prior_fill = await get_customer_paper_fill_for_bar(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    bar_key=budget["bar_key"],
+                )
+                if prior_fill is not None:
+                    # Re-read after the immutable fill lookup: another request can have
+                    # completed the order since the initial status read above.
+                    replay_order = await _order_detail(profile.id, client_order_id)
+                    if (
+                        elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
+                        and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
+                    ):
+                        try:
+                            await expire_customer_paper_order(
+                                customer_id=profile.id,
+                                client_order_id=client_order_id,
+                                idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
+                            )
+                        except CustomerPaperOrderConflict:
+                            # A concurrent fill/expiry can win between the re-read and
+                            # expiry. Return the replay if the latest order is now terminal.
+                            replay_order = await _order_detail(profile.id, client_order_id)
+                            if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:
+                                raise
+                        else:
+                            replay_order = await _order_detail(profile.id, client_order_id)
+                    return {
+                        "status": "REPLAYED",
+                        "virtual_only": True,
+                        "bar_at": bar["timestamp"].isoformat(),
+                        "bar_key": budget["bar_key"],
+                        "fill": prior_fill,
+                        "order": replay_order,
+                    }
+                values = bar["values"]
+                limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
+                side = order["side"]
+                reference_price: Decimal | None = None
+                if order["order_type"] == "MARKET":
+                    reference_price = values["open"]
+                elif side == "BUY" and values["low"] <= limit:
+                    reference_price = min(values["open"], limit)
+                elif side == "SELL" and values["high"] >= limit:
+                    reference_price = max(values["open"], limit)
+
+                if reference_price is None:
+                    attempt = "LIMIT_NOT_TRIGGERED"
+                elif Decimal(budget["available"]) <= 0:
+                    attempt = "WAITING_FOR_BAR_CAPACITY"
+                elif _paper_order_draw(profile.id, order_identity, budget["bar_key"], "rejection") < min(1.0, max(0.0, float(settings.paper_rejection_probability))):
+                    attempt = "DETERMINISTIC_BAR_REJECTION"
+                elif _paper_order_draw(profile.id, order_identity, budget["bar_key"], "queue") > min(1.0, max(0.0, float(settings.paper_queue_fill_probability))):
+                    attempt = "DETERMINISTIC_QUEUE_MISS"
+                else:
+                    execution_profile = PROFILES.get("crypto")
+                    if execution_profile is None:
+                        raise HTTPException(503, "Crypto paper execution profile is not configured")
+
+                    group_mark_prices = None
+                    if str(side or "").upper() == "BUY" and group_mark_price_loader is not None:
+                        timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+                        if not timeframe_seconds:
+                            raise HTTPException(422, "Unsupported paper-order timeframe")
+                        mark_days = max(1, (25 * timeframe_seconds + 86_399) // 86_400)
+                        mark_req = market_request_type(
+                            asset="crypto",
+                            symbol=str(order["symbol"]),
+                            exchange=order_venue,
+                            timeframe=timeframe,
+                            days=mark_days,
+                        )
+                        try:
+                            # Candle-only order state is not a current market mark. Fetch fresh
+                            # validated quotes for every open holding in the candidate's group.
+                            group_mark_prices = await group_mark_price_loader(
+                                profile.id, mark_req, None
+                            )
+                        except Exception as mark_exc:
+                            raise HTTPException(
+                                409, "Current paper correlation-group marks could not be verified"
+                            ) from mark_exc
+
+                    remaining_quantity = Decimal(str(order.get("remaining_quantity") or order["quantity"]))
+                    fill_quantity = min(remaining_quantity, max(Decimal("0"), Decimal(str(budget["available"]))))
+                    if side == "SELL":
+                        positions = await get_customer_paper_positions(customer_id=profile.id)
+                        held = sum(
+                            (
+                                Decimal(str(position.get("quantity") or "0"))
+                                for position in positions
+                                if str(position.get("venue") or "").lower() == str(order.get("venue") or "").lower()
+                                and str(position.get("symbol") or "").upper() == str(order["symbol"]).upper()
+                                and Decimal(str(position.get("quantity") or "0")) > 0
+                            ),
+                            Decimal("0"),
+                        )
+                        if held <= 0:
+                            await expire_customer_paper_order(
+                                customer_id=profile.id,
+                                client_order_id=client_order_id,
+                                idempotency_key="paper-no-position-api:" + hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:40],
+                            )
+                            return {
+                                "status": "EXPIRED_NO_OPEN_POSITION",
+                                "virtual_only": True,
+                                "bar_at": bar["timestamp"].isoformat(),
+                                "bar_key": budget["bar_key"],
+                                "fill": {"status": "EXPIRED"},
+                                "order": await _order_detail(profile.id, client_order_id),
+                            }
+                        fill_quantity = min(fill_quantity, held)
+
+                    # Historical candle impact inputs must not include closes from bars
+                    # that occurred after the candle currently being replayed.
+                    bar_position = int(df.index.get_loc(bar["timestamp"]))
+                    candle_history = df.iloc[:bar_position + 1]
+                    returns = candle_history["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
+                    volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
+                    if not math.isfinite(volatility) or volatility < 0:
+                        raise HTTPException(409, "Market volatility estimate is invalid")
+                    participation_for_impact = max(
+                        0.0,
+                        float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
+                    )
+                    impact = (
+                        float(settings.paper_market_impact_coefficient)
+                        * volatility
+                        * math.sqrt(participation_for_impact)
+                        * 10000.0
+                    )
+                    impact = min(max(0.0, float(settings.paper_max_market_impact_bps)), max(0.0, impact))
+                    slippage_bps = max(0.0, float(execution_profile.slippage_bps) + impact)
+                    # A limit fill cannot be priced worse than its limit; market orders absorb adverse slippage.
+                    final_price = reference_price
+                    if order["order_type"] == "MARKET":
+                        multiplier = Decimal("1") + Decimal(str(slippage_bps)) / Decimal("10000")
+                        if side == "SELL":
+                            multiplier = Decimal("1") - Decimal(str(slippage_bps)) / Decimal("10000")
+                        final_price = reference_price * multiplier
+                    if final_price <= 0:
+                        raise HTTPException(409, "Paper cost model produced a non-positive fill price")
+
+                    price_text = _decimal_text(final_price)
+                    fee_bps = max(Decimal("0"), Decimal(str(execution_profile.taker_bps)))
+                    if side == "BUY":
+                        balances = await get_customer_paper_balances(customer_id=profile.id)
+                        cash = sum(
+                            (
+                                Decimal(str(row.get("balance") or "0"))
+                                for row in balances
+                                if str(row.get("account_code") or "") == "PAPER_CASH"
+                                and str(row.get("currency") or "").upper() == "USDT"
+                            ),
+                            Decimal("0"),
+                        )
+                        unit_cost = Decimal(price_text) * (Decimal("1") + fee_bps / Decimal("10000"))
+                        with localcontext() as context:
+                            context.prec = 50
+                            affordable = max(Decimal("0"), cash / unit_cost).quantize(
+                                _DECIMAL_QUANTUM, rounding=ROUND_DOWN
+                            )
+                        fill_quantity = min(fill_quantity, affordable)
+                        if fill_quantity <= 0:
+                            await expire_customer_paper_order(
+                                customer_id=profile.id,
+                                client_order_id=client_order_id,
+                                idempotency_key="paper-unaffordable-api:" + hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:40],
+                            )
+                            return {
+                                "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                                "virtual_only": True,
+                                "bar_at": bar["timestamp"].isoformat(),
+                                "bar_key": budget["bar_key"],
+                                "fill": {"status": "EXPIRED"},
+                                "order": await _order_detail(profile.id, client_order_id),
+                            }
+                    if fill_quantity <= 0:
+                        attempt = "WAITING_FOR_BAR_CAPACITY"
+                    else:
+                        fee = fill_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
+                        fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
+                        try:
+                            fill = await record_customer_paper_fill(
+                                customer_id=profile.id,
+                                client_order_id=client_order_id,
+                                idempotency_key=fill_key,
+                                bar_key=budget["bar_key"],
+                                quantity=_decimal_text(fill_quantity),
+                                price=price_text,
+                                fee_amount=_decimal_text(fee),
+                                enforce_market_bar_budget=True,
+                                group_mark_prices=group_mark_prices,
+                            )
+                        except CustomerPaperOrderConflict as exc:
+                            # A concurrent fill can invalidate the earlier cash pre-read.
+                            # Re-read virtual cash and retry once at the affordable size.
+                            if side == "BUY" and "overdraw" in str(exc).lower():
+                                fresh_balances = await get_customer_paper_balances(customer_id=profile.id)
+                                fresh_cash = sum(
+                                    (
+                                        Decimal(str(row.get("balance") or "0"))
+                                        for row in fresh_balances
+                                        if str(row.get("account_code") or "") == "PAPER_CASH"
+                                        and str(row.get("currency") or "").upper()
+                                        == str(order.get("currency") or "USDT").upper()
+                                    ),
+                                    Decimal("0"),
+                                )
+                                unit_cost = Decimal(price_text) * (Decimal("1") + fee_bps / Decimal("10000"))
+                                with localcontext() as context:
+                                    context.prec = 50
+                                    retry_affordable = max(Decimal("0"), fresh_cash / unit_cost).quantize(
+                                        _DECIMAL_QUANTUM, rounding=ROUND_DOWN
+                                    )
+                                retry_quantity = min(fill_quantity, retry_affordable)
+                                if retry_quantity <= 0:
+                                    await expire_customer_paper_order(
+                                        customer_id=profile.id,
+                                        client_order_id=client_order_id,
+                                        idempotency_key="paper-cash-race-empty-api:" + hashlib.sha256(
+                                            f"{client_order_id}|{budget['bar_key']}".encode("utf-8")
+                                        ).hexdigest()[:40],
+                                    )
+                                    return {
+                                        "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
+                                        "virtual_only": True,
+                                        "bar_at": bar["timestamp"].isoformat(),
+                                        "bar_key": budget["bar_key"],
+                                        "fill": {"status": "EXPIRED"},
+                                        "order": await _order_detail(profile.id, client_order_id),
+                                    }
+                                retry_fee = retry_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
+                                try:
+                                    fill = await record_customer_paper_fill(
+                                        customer_id=profile.id,
+                                        client_order_id=client_order_id,
+                                        idempotency_key=fill_key,
+                                        bar_key=budget["bar_key"],
+                                        quantity=_decimal_text(retry_quantity),
+                                        price=price_text,
+                                        fee_amount=_decimal_text(retry_fee),
+                                        enforce_market_bar_budget=True,
+                                        group_mark_prices=group_mark_prices,
+                                    )
+                                    fill_quantity = retry_quantity
+                                except CustomerPaperOrderConflict as retry_exc:
+                                    if "overdraw" in str(retry_exc).lower():
+                                        ttl_reached = elapsed_bars >= max(
+                                            1, int(settings.paper_order_ttl_bars)
+                                        )
+                                        retry_order = await _order_detail(profile.id, client_order_id)
+                                        if ttl_reached and retry_order["status"] in {
+                                            "SUBMITTED", "PARTIALLY_FILLED"
+                                        }:
+                                            await expire_customer_paper_order(
+                                                customer_id=profile.id,
+                                                client_order_id=client_order_id,
+                                                idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
+                                            )
+                                            retry_order = await _order_detail(profile.id, client_order_id)
+                                            return {
+                                                "status": "EXPIRED_TTL",
+                                                "virtual_only": True,
+                                                "bar_at": bar["timestamp"].isoformat(),
+                                                "bar_key": budget["bar_key"],
+                                                "fill": {"status": "EXPIRED"},
+                                                "order": retry_order,
+                                            }
+                                        return {
+                                            "status": "WAITING_FOR_PAPER_CASH",
+                                            "virtual_only": True,
+                                            "bar_at": bar["timestamp"].isoformat(),
+                                            "bar_key": budget["bar_key"],
+                                            "fill": {"status": "NOT_FILLED"},
+                                            "order": retry_order,
+                                        }
+                                    raise
+                            else:
+                                raise
+                        fresh_order = await _order_detail(profile.id, client_order_id)
+                        if (
+                            elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
+                            and fresh_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
+                        ):
+                            await expire_customer_paper_order(
+                                customer_id=profile.id,
+                                client_order_id=client_order_id,
+                                idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
+                            )
+                            fresh_order = await _order_detail(profile.id, client_order_id)
+                        return {
+                            "status": fill["status"],
+                            "virtual_only": True,
+                            "bar_at": bar["timestamp"].isoformat(),
+                            "bar_key": budget["bar_key"],
+                            "fill": fill,
+                            "order": fresh_order,
+                            "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
+                        }
+
                 if elapsed_bars >= max(1, int(settings.paper_order_ttl_bars)):
                     await expire_customer_paper_order(
                         customer_id=profile.id,
                         client_order_id=client_order_id,
-                        idempotency_key=f"paper-ttl:{bar['timestamp'].isoformat()}",
+                        idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
                     )
-                    expired_order = await _order_detail(profile.id, client_order_id)
-                    return {
-                        "status": "EXPIRED_TTL",
-                        "virtual_only": True,
-                        "elapsed_bars": elapsed_bars,
-                        "order": expired_order,
-                    }
+                    order = await _order_detail(profile.id, client_order_id)
+                    return {"status": "EXPIRED", "attempt": attempt, "virtual_only": True, "order": order}
                 return {
-                    "status": "WAITING_FOR_FILL_LATENCY",
-                    "virtual_only": True,
-                    "elapsed_bars": elapsed_bars,
-                    "order": order,
-                }
-            budget = await register_customer_paper_market_bar(
-                venue=order_venue,
-                symbol=order["symbol"],
-                timeframe=timeframe,
-                bar_at=bar["timestamp"],
-                bar_data_sha256=bar["bar_data_sha256"],
-                base_volume=_decimal_text(bar["values"]["volume"]),
-                participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
-            )
-            prior_fill = await get_customer_paper_fill_for_bar(
-                customer_id=profile.id,
-                client_order_id=client_order_id,
-                bar_key=budget["bar_key"],
-            )
-            if prior_fill is not None:
-                # Re-read after the immutable fill lookup: another request can have
-                # completed the order since the initial status read above.
-                replay_order = await _order_detail(profile.id, client_order_id)
-                if (
-                    elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
-                    and replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}
-                ):
-                    try:
-                        await expire_customer_paper_order(
-                            customer_id=profile.id,
-                            client_order_id=client_order_id,
-                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
-                        )
-                    except CustomerPaperOrderConflict:
-                        # A concurrent fill/expiry can win between the re-read and
-                        # expiry. Return the replay if the latest order is now terminal.
-                        replay_order = await _order_detail(profile.id, client_order_id)
-                        if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:
-                            raise
-                    else:
-                        replay_order = await _order_detail(profile.id, client_order_id)
-                return {
-                    "status": "REPLAYED",
+                    "status": attempt,
                     "virtual_only": True,
                     "bar_at": bar["timestamp"].isoformat(),
                     "bar_key": budget["bar_key"],
-                    "fill": prior_fill,
-                    "order": replay_order,
+                    "bar_capacity": budget["capacity"],
+                    "bar_available": budget["available"],
+                    "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
+                    "order": order,
                 }
-            values = bar["values"]
-            limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
-            side = order["side"]
-            reference_price: Decimal | None = None
-            if order["order_type"] == "MARKET":
-                reference_price = values["open"]
-            elif side == "BUY" and values["low"] <= limit:
-                reference_price = min(values["open"], limit)
-            elif side == "SELL" and values["high"] >= limit:
-                reference_price = max(values["open"], limit)
-
-            if reference_price is None:
-                attempt = "LIMIT_NOT_TRIGGERED"
-            elif Decimal(budget["available"]) <= 0:
-                attempt = "WAITING_FOR_BAR_CAPACITY"
-            elif _stable_draw(client_order_id, budget["bar_key"], "rejection") < min(1.0, max(0.0, float(settings.paper_rejection_probability))):
-                attempt = "DETERMINISTIC_BAR_REJECTION"
-            elif _stable_draw(client_order_id, budget["bar_key"], "queue") > min(1.0, max(0.0, float(settings.paper_queue_fill_probability))):
-                attempt = "DETERMINISTIC_QUEUE_MISS"
-            else:
-                execution_profile = PROFILES.get("crypto")
-                if execution_profile is None:
-                    raise HTTPException(503, "Crypto paper execution profile is not configured")
-
-                group_mark_prices = None
-                if str(side or "").upper() == "BUY" and group_mark_price_loader is not None:
-                    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
-                    if not timeframe_seconds:
-                        raise HTTPException(422, "Unsupported paper-order timeframe")
-                    mark_days = max(1, (25 * timeframe_seconds + 86_399) // 86_400)
-                    mark_req = market_request_type(
-                        asset="crypto",
-                        symbol=str(order["symbol"]),
-                        exchange=order_venue,
-                        timeframe=timeframe,
-                        days=mark_days,
+            current_order = order
+            last_result = None
+            processed_bars = []
+            for candle in bars:
+                candle_at = candle["timestamp"]
+                if candle_at < first_eligible_at or candle_at > ttl_at:
+                    continue
+                elapsed_seconds = (candle_at - submitted_at).total_seconds()
+                if elapsed_seconds <= 0 or elapsed_seconds % bar_seconds:
+                    raise HTTPException(
+                        409,
+                        "Historical paper candle does not align with the order's submission timeframe",
                     )
-                    try:
-                        # Candle-only order state is not a current market mark. Fetch fresh
-                        # validated quotes for every open holding in the candidate's group.
-                        group_mark_prices = await group_mark_price_loader(
-                            profile.id, mark_req, None
-                        )
-                    except Exception as mark_exc:
-                        raise HTTPException(
-                            409, "Current paper correlation-group marks could not be verified"
-                        ) from mark_exc
+                elapsed_bars = int(elapsed_seconds // bar_seconds)
+                if elapsed_bars < fill_latency_bars:
+                    continue
+                result = await _process_completed_bar(candle, elapsed_bars, current_order)
+                last_result = result
+                processed_bars.append({
+                    "bar_at": candle_at.isoformat(),
+                    "status": result.get("status"),
+                    "bar_key": result.get("bar_key"),
+                })
+                current_order = result.get("order") or await _order_detail(profile.id, client_order_id)
+                if current_order["status"] not in {"SUBMITTED", "PARTIALLY_FILLED"}:
+                    result["bars_processed"] = processed_bars
+                    return result
 
-                remaining_quantity = Decimal(str(order.get("remaining_quantity") or order["quantity"]))
-                fill_quantity = min(remaining_quantity, max(Decimal("0"), Decimal(str(budget["available"]))))
-                if side == "SELL":
-                    positions = await get_customer_paper_positions(customer_id=profile.id)
-                    held = sum(
-                        (
-                            Decimal(str(position.get("quantity") or "0"))
-                            for position in positions
-                            if str(position.get("venue") or "").lower() == str(order.get("venue") or "").lower()
-                            and str(position.get("symbol") or "").upper() == str(order["symbol"]).upper()
-                            and Decimal(str(position.get("quantity") or "0")) > 0
-                        ),
-                        Decimal("0"),
-                    )
-                    if held <= 0:
-                        await expire_customer_paper_order(
-                            customer_id=profile.id,
-                            client_order_id=client_order_id,
-                            idempotency_key="paper-no-position-api:" + hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:40],
-                        )
-                        return {
-                            "status": "EXPIRED_NO_OPEN_POSITION",
-                            "virtual_only": True,
-                            "bar_at": bar["timestamp"].isoformat(),
-                            "bar_key": budget["bar_key"],
-                            "fill": {"status": "EXPIRED"},
-                            "order": await _order_detail(profile.id, client_order_id),
-                        }
-                    fill_quantity = min(fill_quantity, held)
+            if last_result is None:
+                return {
+                    "status": "WAITING_FOR_FILL_LATENCY",
+                    "virtual_only": True,
+                    "bar_at": latest_at.isoformat(),
+                    "order": current_order,
+                }
+            last_result["bars_processed"] = processed_bars
+            return last_result
 
-                returns = df["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
-                volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
-                if not math.isfinite(volatility) or volatility < 0:
-                    raise HTTPException(409, "Market volatility estimate is invalid")
-                participation_for_impact = max(
-                    0.0,
-                    float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
-                )
-                impact = (
-                    float(settings.paper_market_impact_coefficient)
-                    * volatility
-                    * math.sqrt(participation_for_impact)
-                    * 10000.0
-                )
-                impact = min(max(0.0, float(settings.paper_max_market_impact_bps)), max(0.0, impact))
-                slippage_bps = max(0.0, float(execution_profile.slippage_bps) + impact)
-                # A limit fill cannot be priced worse than its limit; market orders absorb adverse slippage.
-                final_price = reference_price
-                if order["order_type"] == "MARKET":
-                    multiplier = Decimal("1") + Decimal(str(slippage_bps)) / Decimal("10000")
-                    if side == "SELL":
-                        multiplier = Decimal("1") - Decimal(str(slippage_bps)) / Decimal("10000")
-                    final_price = reference_price * multiplier
-                if final_price <= 0:
-                    raise HTTPException(409, "Paper cost model produced a non-positive fill price")
-
-                price_text = _decimal_text(final_price)
-                fee_bps = max(Decimal("0"), Decimal(str(execution_profile.taker_bps)))
-                if side == "BUY":
-                    balances = await get_customer_paper_balances(customer_id=profile.id)
-                    cash = sum(
-                        (
-                            Decimal(str(row.get("balance") or "0"))
-                            for row in balances
-                            if str(row.get("account_code") or "") == "PAPER_CASH"
-                            and str(row.get("currency") or "").upper() == "USDT"
-                        ),
-                        Decimal("0"),
-                    )
-                    unit_cost = Decimal(price_text) * (Decimal("1") + fee_bps / Decimal("10000"))
-                    with localcontext() as context:
-                        context.prec = 50
-                        affordable = max(Decimal("0"), cash / unit_cost).quantize(
-                            _DECIMAL_QUANTUM, rounding=ROUND_DOWN
-                        )
-                    fill_quantity = min(fill_quantity, affordable)
-                    if fill_quantity <= 0:
-                        await expire_customer_paper_order(
-                            customer_id=profile.id,
-                            client_order_id=client_order_id,
-                            idempotency_key="paper-unaffordable-api:" + hashlib.sha256(client_order_id.encode("utf-8")).hexdigest()[:40],
-                        )
-                        return {
-                            "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
-                            "virtual_only": True,
-                            "bar_at": bar["timestamp"].isoformat(),
-                            "bar_key": budget["bar_key"],
-                            "fill": {"status": "EXPIRED"},
-                            "order": await _order_detail(profile.id, client_order_id),
-                        }
-                if fill_quantity <= 0:
-                    attempt = "WAITING_FOR_BAR_CAPACITY"
-                else:
-                    fee = fill_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
-                    fill_key = "bar-fill:" + hashlib.sha256(f"{client_order_id}|{budget['bar_key']}".encode("utf-8")).hexdigest()
-                    try:
-                        fill = await record_customer_paper_fill(
-                            customer_id=profile.id,
-                            client_order_id=client_order_id,
-                            idempotency_key=fill_key,
-                            bar_key=budget["bar_key"],
-                            quantity=_decimal_text(fill_quantity),
-                            price=price_text,
-                            fee_amount=_decimal_text(fee),
-                            enforce_market_bar_budget=True,
-                            group_mark_prices=group_mark_prices,
-                        )
-                    except CustomerPaperOrderConflict as exc:
-                        # A concurrent fill can invalidate the earlier cash pre-read.
-                        # Re-read virtual cash and retry once at the affordable size.
-                        if side == "BUY" and "overdraw" in str(exc).lower():
-                            fresh_balances = await get_customer_paper_balances(customer_id=profile.id)
-                            fresh_cash = sum(
-                                (
-                                    Decimal(str(row.get("balance") or "0"))
-                                    for row in fresh_balances
-                                    if str(row.get("account_code") or "") == "PAPER_CASH"
-                                    and str(row.get("currency") or "").upper()
-                                    == str(order.get("currency") or "USDT").upper()
-                                ),
-                                Decimal("0"),
-                            )
-                            unit_cost = Decimal(price_text) * (Decimal("1") + fee_bps / Decimal("10000"))
-                            with localcontext() as context:
-                                context.prec = 50
-                                retry_affordable = max(Decimal("0"), fresh_cash / unit_cost).quantize(
-                                    _DECIMAL_QUANTUM, rounding=ROUND_DOWN
-                                )
-                            retry_quantity = min(fill_quantity, retry_affordable)
-                            if retry_quantity <= 0:
-                                await expire_customer_paper_order(
-                                    customer_id=profile.id,
-                                    client_order_id=client_order_id,
-                                    idempotency_key="paper-cash-race-empty-api:" + hashlib.sha256(
-                                        f"{client_order_id}|{budget['bar_key']}".encode("utf-8")
-                                    ).hexdigest()[:40],
-                                )
-                                return {
-                                    "status": "EXPIRED_INSUFFICIENT_PAPER_CASH",
-                                    "virtual_only": True,
-                                    "bar_at": bar["timestamp"].isoformat(),
-                                    "bar_key": budget["bar_key"],
-                                    "fill": {"status": "EXPIRED"},
-                                    "order": await _order_detail(profile.id, client_order_id),
-                                }
-                            retry_fee = retry_quantity * Decimal(price_text) * fee_bps / Decimal("10000")
-                            try:
-                                fill = await record_customer_paper_fill(
-                                    customer_id=profile.id,
-                                    client_order_id=client_order_id,
-                                    idempotency_key=fill_key,
-                                    bar_key=budget["bar_key"],
-                                    quantity=_decimal_text(retry_quantity),
-                                    price=price_text,
-                                    fee_amount=_decimal_text(retry_fee),
-                                    enforce_market_bar_budget=True,
-                                    group_mark_prices=group_mark_prices,
-                                )
-                                fill_quantity = retry_quantity
-                            except CustomerPaperOrderConflict as retry_exc:
-                                if "overdraw" in str(retry_exc).lower():
-                                    ttl_reached = elapsed_bars >= max(
-                                        1, int(settings.paper_order_ttl_bars)
-                                    )
-                                    retry_order = await _order_detail(profile.id, client_order_id)
-                                    if ttl_reached and retry_order["status"] in {
-                                        "SUBMITTED", "PARTIALLY_FILLED"
-                                    }:
-                                        await expire_customer_paper_order(
-                                            customer_id=profile.id,
-                                            client_order_id=client_order_id,
-                                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
-                                        )
-                                        retry_order = await _order_detail(profile.id, client_order_id)
-                                        return {
-                                            "status": "EXPIRED_TTL",
-                                            "virtual_only": True,
-                                            "bar_at": bar["timestamp"].isoformat(),
-                                            "bar_key": budget["bar_key"],
-                                            "fill": {"status": "EXPIRED"},
-                                            "order": retry_order,
-                                        }
-                                    return {
-                                        "status": "WAITING_FOR_PAPER_CASH",
-                                        "virtual_only": True,
-                                        "bar_at": bar["timestamp"].isoformat(),
-                                        "bar_key": budget["bar_key"],
-                                        "fill": {"status": "NOT_FILLED"},
-                                        "order": retry_order,
-                                    }
-                                raise
-                        else:
-                            raise
-                    fresh_order = await _order_detail(profile.id, client_order_id)
-                    if (
-                        elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
-                        and fresh_order["status"] == "PARTIALLY_FILLED"
-                    ):
-                        await expire_customer_paper_order(
-                            customer_id=profile.id,
-                            client_order_id=client_order_id,
-                            idempotency_key=f"paper-ttl:{budget['bar_key']}",
-                        )
-                        fresh_order = await _order_detail(profile.id, client_order_id)
-                    return {
-                        "status": fill["status"],
-                        "virtual_only": True,
-                        "bar_at": bar["timestamp"].isoformat(),
-                        "bar_key": budget["bar_key"],
-                        "fill": fill,
-                        "order": fresh_order,
-                        "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
-                    }
-
-            if elapsed_bars >= max(1, int(settings.paper_order_ttl_bars)):
-                await expire_customer_paper_order(
-                    customer_id=profile.id,
-                    client_order_id=client_order_id,
-                    idempotency_key=f"paper-ttl:{budget['bar_key']}",
-                )
-                order = await _order_detail(profile.id, client_order_id)
-                return {"status": "EXPIRED", "attempt": attempt, "virtual_only": True, "order": order}
-            return {
-                "status": attempt,
-                "virtual_only": True,
-                "bar_at": bar["timestamp"].isoformat(),
-                "bar_key": budget["bar_key"],
-                "bar_capacity": budget["capacity"],
-                "bar_available": budget["available"],
-                "execution_cost_evidence": "UNVALIDATED_HEURISTIC",
-                "order": order,
-            }
         except HTTPException:
             raise
         except Exception as exc:

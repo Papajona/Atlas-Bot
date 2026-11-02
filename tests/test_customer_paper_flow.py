@@ -1467,26 +1467,72 @@ def test_terminal_same_bar_replay_preserves_submission_identity_for_audit_repair
     }
 
 
+
+def test_customer_paper_ledger_errors_do_not_leak_database_details_to_callers_or_logs(caplog):
+    import logging
+    import app.customer_paper_flow as flow
+
+    sensitive_error = RuntimeError(
+        "asyncpg connection failed host=db.internal password=super-secret "
+        "SQL=SELECT * FROM customer_paper WHERE customer_id=12345"
+    )
+
+    async def fail_ledger_call():
+        raise sensitive_error
+
+    with caplog.at_level(logging.ERROR, logger="app.customer_paper_flow"):
+        with pytest.raises(flow.CustomerPaperFlowBlocked) as captured:
+            asyncio.run(flow._paper_call(fail_ledger_call(), "read paper balances"))
+
+    safe_text = str(captured.value) + caplog.text
+    assert "failed; customer paper ledger operation could not be completed" in str(captured.value)
+    assert "super-secret" not in safe_text
+    assert "db.internal" not in safe_text
+    assert "SELECT * FROM" not in safe_text
+    assert "customer_paper_ledger_operation_failed" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "frames=" in caplog.text
+
+
+def test_customer_paper_account_initialization_logs_only_safe_failure_metadata(monkeypatch, caplog):
+    import logging
+    import app.customer_paper_flow as flow
+
+    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
+    monkeypatch.setattr(settings, "customer_paper_initial_balance", 100.0)
+
+    async def fail_seed_call(*_args, **_kwargs):
+        raise RuntimeError("postgres://atlas:seed-secret@db.internal/customer_paper")
+
+    monkeypatch.setattr(flow, "_paper_call", fail_seed_call)
+    with caplog.at_level(logging.ERROR, logger="app.customer_paper_flow"):
+        with pytest.raises(flow.CustomerPaperFlowBlocked) as captured:
+            asyncio.run(flow.ensure_customer_paper_account(12345, "USDT"))
+
+    safe_text = str(captured.value) + caplog.text
+    assert str(captured.value) == (
+        "Paper account initialization failed; ledger state could not be verified"
+    )
+    assert "seed-secret" not in safe_text
+    assert "db.internal" not in safe_text
+    assert "RuntimeError" in caplog.text
+
+
 def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkeypatch):
     import app.customer_paper_flow as flow
 
     req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
-    market = {"currency": "USDT"}
     manual_position = {
         "venue": "binance",
         "symbol": "BTC/USDT",
         "quantity": "1",
         "execution_owner": "manual_customer_api",
     }
-    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: {"currency": "USDT"})
 
     async def fake_ensure_customer_paper_account(_customer_id, currency):
         assert currency == "USDT"
-        return {
-            "currency": "USDT",
-            "paper_cash": "1000",
-            "real_funds_used": False,
-        }
+        return {"currency": "USDT", "paper_cash": "1000", "real_funds_used": False}
 
     async def no_pending_paper_recovery(*_args, **_kwargs):
         return None
@@ -1534,56 +1580,6 @@ def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkey
     assert result_without_owner["reason"] == "manual_position_requires_manual_execution"
 
 
-def test_customer_paper_ledger_errors_do_not_leak_database_details_to_callers_or_logs(caplog):
-    import logging
-    import app.customer_paper_flow as flow
-
-    sensitive_error = RuntimeError(
-        "asyncpg connection failed host=db.internal password=super-secret "
-        "SQL=SELECT * FROM customer_paper WHERE customer_id=12345"
-    )
-
-    async def fail_ledger_call():
-        raise sensitive_error
-
-    with caplog.at_level(logging.ERROR, logger="app.customer_paper_flow"):
-        with pytest.raises(CustomerPaperFlowBlocked) as captured:
-            asyncio.run(flow._paper_call(fail_ledger_call(), "read paper balances"))
-
-    safe_text = str(captured.value) + caplog.text
-    assert "failed; customer paper ledger operation could not be completed" in str(captured.value)
-    assert "super-secret" not in safe_text
-    assert "db.internal" not in safe_text
-    assert "SELECT * FROM" not in safe_text
-    assert "customer_paper_ledger_operation_failed" in caplog.text
-    assert "RuntimeError" in caplog.text
-    assert "frames=" in caplog.text
-
-
-def test_customer_paper_account_initialization_logs_only_safe_failure_metadata(monkeypatch, caplog):
-    import logging
-    import app.customer_paper_flow as flow
-
-    monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
-    monkeypatch.setattr(settings, "customer_paper_initial_balance", 100.0)
-
-    async def fail_seed_call(*_args, **_kwargs):
-        raise RuntimeError("postgres://atlas:seed-secret@db.internal/customer_paper")
-
-    monkeypatch.setattr(flow, "_paper_call", fail_seed_call)
-    with caplog.at_level(logging.ERROR, logger="app.customer_paper_flow"):
-        with pytest.raises(CustomerPaperFlowBlocked) as captured:
-            asyncio.run(flow.ensure_customer_paper_account(12345, "USDT"))
-
-    safe_text = str(captured.value) + caplog.text
-    assert str(captured.value) == (
-        "Paper account initialization failed; ledger state could not be verified"
-    )
-    assert "seed-secret" not in safe_text
-    assert "db.internal" not in safe_text
-    assert "RuntimeError" in caplog.text
-
-
 def test_customer_paper_overdraw_conflict_keeps_safe_recovery_signal():
     import app.customer_paper_flow as flow
 
@@ -1592,4 +1588,3 @@ def test_customer_paper_overdraw_conflict_keeps_safe_recovery_signal():
 
     with pytest.raises(CustomerPaperFlowBlocked, match="overdraw"):
         asyncio.run(flow._paper_call(fail_overdraw(), "append paper fill"))
-

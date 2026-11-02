@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from app import customer_paper_api as paper_api
+from app import customer_paper_lifecycle as paper_lifecycle
 from app.config import settings
 from app.schemas import CustomerPaperMarketRequest, MarketRequest
 from app.paper_staging import PaperMarketRequest
@@ -178,11 +179,17 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         return SimpleNamespace(id=99031), {"aal": "aal2"}
 
     class DummySession:
+        def __init__(self):
+            self.commit_count = 0
+
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, _type, _value, _traceback):
             return False
+
+        async def commit(self):
+            self.commit_count += 1
 
     async def state_guard():
         return None
@@ -192,7 +199,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         assert kwargs["symbol"] == "BTC/USDT"
         return {"bar_key": "manual-replay-bar"}
 
-    monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
+    customer_session = DummySession()
+    monkeypatch.setattr(paper_api, "SessionLocal", lambda: customer_session)
     monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_customer_paper_order)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
@@ -215,6 +223,7 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     )
 
     assert response.status_code == 200, response.text
+    assert customer_session.commit_count == 1
     payload = response.json()
     assert payload["status"] == "REPLAYED"
     assert payload["fill"]["fill_id"] == "immutable-prior-fill"
@@ -338,6 +347,9 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
 
         async def __aexit__(self, _type, _value, _traceback):
             return False
+
+        async def commit(self):
+            return None
 
     async def state_guard():
         return None
@@ -523,3 +535,203 @@ def test_production_customer_paper_router_uses_the_bounded_request_model():
     router = router.split("))", 1)[0]
     assert "market_request_type=CustomerPaperMarketRequest" in router
     assert "market_request_type=MarketRequest" not in router
+
+
+def test_paper_ttl_idempotency_key_is_scoped_to_customer_order_and_bar():
+    key = paper_api._paper_ttl_idempotency_key(23, "client-a", "bar-a")
+    assert key == paper_api._paper_ttl_idempotency_key(23, "client-a", "bar-a")
+    assert key != paper_api._paper_ttl_idempotency_key(23, "client-b", "bar-a")
+    assert key != paper_api._paper_ttl_idempotency_key(24, "client-a", "bar-a")
+    assert key != paper_api._paper_ttl_idempotency_key(23, "client-a", "bar-b")
+    assert len(key) <= 150
+
+
+def test_paper_rejection_and_queue_draws_depend_on_server_order_identity():
+    draw_a = paper_api._paper_order_draw(23, "server-order-a", "bar-a", "rejection")
+    assert draw_a == paper_api._paper_order_draw(23, "server-order-a", "bar-a", "rejection")
+    assert draw_a != paper_api._paper_order_draw(23, "server-order-b", "bar-a", "rejection")
+    assert draw_a != paper_api._paper_order_draw(24, "server-order-a", "bar-a", "rejection")
+    with pytest.raises(ValueError, match="server-generated order identity"):
+        paper_api._paper_order_draw(23, "", "bar-a", "queue")
+
+
+def test_same_customer_order_retry_ignores_only_submission_bar_metadata():
+    stored_metadata = {
+        "timeframe": "1m",
+        "execution_owner": "manual_customer_api",
+        "submission_bar_at": "2026-11-02T10:00:00+00:00",
+        "submission_bar_sha256": "a" * 64,
+        "dataset_sha256": "b" * 64,
+        "data_source": "ccxt_ohlcv",
+    }
+    existing = {
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "order_type": "MARKET",
+        "quantity": Decimal("0.100000000000000000"),
+        "limit_price": None,
+        "currency": "USDT",
+        "metadata_json": stored_metadata,
+    }
+    requested_metadata = {
+        **stored_metadata,
+        "submission_bar_at": "2026-11-02T10:01:00+00:00",
+        "submission_bar_sha256": "c" * 64,
+        "dataset_sha256": "d" * 64,
+    }
+    args = {
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "order_type": "MARKET",
+        "quantity": Decimal("0.1"),
+        "limit_price": None,
+        "currency": "USDT",
+        "metadata": requested_metadata,
+    }
+    assert paper_lifecycle._existing_order_intent_matches(existing, **args)
+    assert not paper_lifecycle._existing_order_intent_matches(
+        existing, **{**args, "quantity": Decimal("0.2")}
+    )
+    changed_owner = {**requested_metadata, "execution_owner": "autonomous_customer_bot"}
+    assert not paper_lifecycle._existing_order_intent_matches(
+        existing, **{**args, "metadata": changed_owner}
+    )
+
+
+def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    latest_bar_at = now - timedelta(minutes=1)
+    submission_bar_at = latest_bar_at - timedelta(minutes=3)
+    _freeze_paper_api_clock(monkeypatch, now)
+    frame = _verified_bars(latest_bar_at, volume="100")
+    frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+
+    order = {
+        "client_order_id": "multi-bar-manual-order",
+        "order_id": 99081,
+        "status": "SUBMITTED",
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "order_type": "MARKET",
+        "quantity": "1.000000000000000000",
+        "remaining_quantity": "1.000000000000000000",
+        "filled_quantity": "0.000000000000000000",
+        "limit_price": None,
+        "currency": "USDT",
+        "metadata": {
+            "timeframe": "1m",
+            "execution_model": "completed_bar_volume_capped_heuristic_v1",
+            "submission_bar_at": submission_bar_at.isoformat(),
+        },
+    }
+    prior_fills = {}
+    fill_rows = []
+    registered_bars = []
+
+    async def fake_get_customer(authorization, _db, require_aal2=True):
+        assert authorization == "Bearer multi-bar-customer"
+        assert require_aal2 is True
+        return SimpleNamespace(id=99081), {"aal": "aal2"}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def commit(self):
+            return None
+
+    async def state_guard():
+        return None
+
+    async def get_order(*, customer_id, client_order_id):
+        assert customer_id == 99081
+        assert client_order_id == "multi-bar-manual-order"
+        return dict(order)
+
+    async def register_bar(**kwargs):
+        bar_at = kwargs["bar_at"]
+        registered_bars.append(bar_at)
+        key = bar_at.isoformat()
+        return {
+            "bar_key": key,
+            "bar_at": key,
+            "capacity": "0.400000000000000000",
+            "available": "0.400000000000000000",
+        }
+
+    async def fill_for_bar(*, customer_id, client_order_id, bar_key):
+        assert customer_id == 99081
+        assert client_order_id == "multi-bar-manual-order"
+        return prior_fills.get(bar_key)
+
+    async def balances(*_args, **_kwargs):
+        return [{
+            "account_code": "PAPER_CASH",
+            "currency": "USDT",
+            "balance": "10000.000000000000000000",
+        }]
+
+    async def record_fill(**kwargs):
+        bar_key = kwargs["bar_key"]
+        if bar_key in prior_fills:
+            return prior_fills[bar_key]
+        quantity = Decimal(kwargs["quantity"])
+        filled = Decimal(order["filled_quantity"]) + quantity
+        remaining = max(Decimal("0"), Decimal(order["quantity"]) - filled)
+        order["filled_quantity"] = format(filled, "f")
+        order["remaining_quantity"] = format(remaining, "f")
+        order["status"] = "FILLED" if remaining == 0 else "PARTIALLY_FILLED"
+        item = {
+            "status": "APPENDED",
+            "bar_key": bar_key,
+            "quantity": format(quantity, "f"),
+            "price": kwargs["price"],
+        }
+        prior_fills[bar_key] = item
+        fill_rows.append(item)
+        return item
+
+    monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(paper_api, "get_customer_paper_order", get_order)
+    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", fill_for_bar)
+    monkeypatch.setattr(paper_api, "get_customer_paper_balances", balances)
+    monkeypatch.setattr(paper_api, "record_customer_paper_fill", record_fill)
+    monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
+    monkeypatch.setattr(paper_api, "settings", settings)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 10)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
+
+    api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=fake_get_customer,
+        market_data=lambda _request: frame,
+        market_request_type=PaperMarketRequest,
+        state_guard=state_guard,
+    ))
+    response = TestClient(api_app).post(
+        "/api/customer/paper/orders/multi-bar-manual-order/advance",
+        headers={"Authorization": "Bearer multi-bar-customer"},
+    )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert order["status"] == "FILLED"
+    assert Decimal(order["filled_quantity"]) == Decimal("1.000000000000000000")
+    assert len(registered_bars) == 3
+    assert registered_bars == sorted(registered_bars)
+    assert [row["bar_key"] for row in fill_rows] == [at.isoformat() for at in registered_bars]
+    assert len(payload["bars_processed"]) == 3
+    assert payload["bars_processed"][0]["bar_at"] == (submission_bar_at + timedelta(minutes=1)).isoformat()
+    assert payload["bars_processed"][-1]["bar_at"] == latest_bar_at.isoformat()

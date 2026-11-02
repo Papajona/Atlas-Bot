@@ -631,7 +631,11 @@ async def preflight_isolated_customer_paper_ledger(
                         JOIN pg_roles r ON r.rolname = CAST(:paper_role AS name)
                         WHERE n.nspname NOT LIKE 'pg_%'
                           AND n.nspname <> 'information_schema'
-                          AND (NOT :same_database OR n.nspname <> 'customer_paper')
+                          AND (
+                              NOT :same_database
+                              OR p.oid IS DISTINCT FROM to_regprocedure('customer_paper.verify_market_bar_capacity_guards()')
+                              OR p.prorettype <> 'boolean'::regtype
+                          )
                           AND has_schema_privilege(r.oid, n.oid, 'USAGE')
                           AND p.prosecdef
                           AND has_function_privilege(r.oid, p.oid, 'EXECUTE')
