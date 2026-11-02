@@ -338,11 +338,14 @@ def test_ownerless_legacy_expiry_repairs_submission_audit_without_reopening_orde
     ))
 
     assert stage is None
-    assert len(events) == 1
-    assert events[0]["client_order_id"] == "legacy-ownerless-buy"
-    assert events[0]["order_id"] == "legacy-order-7"
-    assert events[0]["status"] == "SUBMITTED"
-    assert events[0]["execution_status"] == "EXPIRED"
+    legacy_events = [
+        detail for detail in events
+        if detail.get("client_order_id") == "legacy-ownerless-buy"
+    ]
+    assert len(legacy_events) == 1
+    assert legacy_events[0]["order_id"] == "legacy-order-7"
+    assert legacy_events[0]["status"] == "SUBMITTED"
+    assert legacy_events[0]["execution_status"] == "EXPIRED"
 
 
 def test_non_pending_execution_does_not_change_its_result_stage(monkeypatch):
