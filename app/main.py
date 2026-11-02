@@ -4350,12 +4350,20 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
     import csv
     import io
 
-    async with SessionLocal() as db:
+    db = SessionLocal()
+    try:
+        # Keep a single MVCC snapshot for the complete export. Reopening a session
+        # for each page could admit late commits between pages and shift offsets.
+        if db.get_bind().dialect.name == "postgresql":
+            await db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         profile, _ = await get_customer(authorization, db)
         customer_id = int(profile.id)
         row_count, max_journal_id = await ledger_statement_export_bounds(
             db, customer_id, "USDT"
         )
+    except Exception:
+        await db.close()
+        raise
 
     def csv_row(values) -> str:
         output = io.StringIO(newline="")
@@ -4363,37 +4371,40 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
         return output.getvalue()
 
     async def stream_rows():
-        yield csv_row([
-            "created_at", "journal_id", "entry_type", "currency",
-            "reference_type", "reference_id", "account_code", "debit", "credit",
-        ])
-        offset = 0
-        page_size = 1000
-        while offset < row_count:
-            async with SessionLocal() as page_db:
+        try:
+            yield csv_row([
+                "created_at", "journal_id", "entry_type", "currency",
+                "reference_type", "reference_id", "account_code", "debit", "credit",
+            ])
+            offset = 0
+            page_size = 1000
+            while offset < row_count:
                 entries = await ledger_statement(
-                    page_db,
+                    db,
                     customer_id,
                     "USDT",
                     limit=page_size,
                     offset=offset,
                     max_journal_id=max_journal_id,
                 )
-            if not entries:
-                raise RuntimeError("customer ledger export page ended before its captured row count")
-            for entry in entries:
-                yield csv_row([
-                    entry.get("created_at", ""),
-                    entry.get("journal_id", ""),
-                    entry.get("entry_type", ""),
-                    "USDT",
-                    entry.get("reference_type", ""),
-                    entry.get("reference_id", ""),
-                    entry.get("account_code", ""),
-                    entry.get("debit", ""),
-                    entry.get("credit", ""),
-                ])
-            offset += len(entries)
+                if not entries:
+                    raise RuntimeError("customer ledger export page ended before its captured row count")
+                for entry in entries:
+                    yield csv_row([
+                        entry.get("created_at", ""),
+                        entry.get("journal_id", ""),
+                        entry.get("entry_type", ""),
+                        "USDT",
+                        entry.get("reference_type", ""),
+                        entry.get("reference_id", ""),
+                        entry.get("account_code", ""),
+                        entry.get("debit", ""),
+                        entry.get("credit", ""),
+                    ])
+                offset += len(entries)
+        finally:
+            await db.rollback()
+            await db.close()
 
     return StreamingResponse(
         stream_rows(),
