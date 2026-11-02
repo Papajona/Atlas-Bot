@@ -7157,7 +7157,6 @@ def _install_canonical_native_ai(canonical_source: str) -> None:
     sole accepted implementation of the Native AI authority module.
     """
     path = "app/native_ai.py"
-    target = ROOT / path
     if not isinstance(canonical_source, str) or not canonical_source.strip():
         raise MigrationError("pinned canonical app/native_ai.py is empty; preserving the branch")
     if _has_conflicting_provider_wiring(path, canonical_source):
