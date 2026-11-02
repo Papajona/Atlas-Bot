@@ -1559,3 +1559,94 @@ def test_branch_pruning_main_refreshes_live_main_and_uses_paginated_pr_guards():
     assert "main_before_delete = _refresh_remote_main_sha(main_sha)" in source
     assert "_branch_has_open_pull_request(repository, branch_name)" in source
     assert '"--limit", "1000"' not in source
+
+
+
+def test_merged_pr_records_require_exact_same_repository_head_identity():
+    records = pruning._merged_pull_request_records(
+        [
+            {
+                "number": 350,
+                "merged_at": "2026-11-02T12:00:00Z",
+                "merge_commit_sha": "local-merge",
+                "head": {
+                    "ref": "feature/shared-name",
+                    "sha": "same-head-sha",
+                    "repo": {"full_name": "Papajona/Atlas-Bot"},
+                },
+            },
+            {
+                "number": 351,
+                "merged_at": "2026-11-02T12:01:00Z",
+                "merge_commit_sha": "fork-merge",
+                "head": {
+                    "ref": "feature/shared-name",
+                    "sha": "same-head-sha",
+                    "repo": {"full_name": "contributor/Atlas-Bot"},
+                },
+            },
+            {
+                "number": 352,
+                "merged_at": "2026-11-02T12:02:00Z",
+                "merge_commit_sha": "deleted-fork-merge",
+                "head": {
+                    "ref": "feature/shared-name",
+                    "sha": "same-head-sha",
+                    "repo": None,
+                },
+            },
+        ],
+        repository="Papajona/Atlas-Bot",
+    )
+
+    assert records == [{
+        "number": 350,
+        "headRepositoryFullName": "Papajona/Atlas-Bot",
+        "headRefName": "feature/shared-name",
+        "headRefOid": "same-head-sha",
+        "mergeCommit": {"oid": "local-merge"},
+    }]
+
+
+def test_merged_pr_records_reject_malformed_closed_pr_metadata():
+    malformed = [
+        {
+            "number": 353,
+            "merged_at": "2026-11-02T12:00:00Z",
+            "merge_commit_sha": "merge-sha",
+            "head": {
+                "ref": "feature/no-sha",
+                "sha": "",
+                "repo": {"full_name": "Papajona/Atlas-Bot"},
+            },
+        }
+    ]
+    with pytest.raises(RuntimeError, match="malformed closed pull request"):
+        pruning._merged_pull_request_records(
+            malformed, repository="Papajona/Atlas-Bot"
+        )
+
+
+def test_fork_merge_cannot_authorize_deletion_of_same_named_local_branch():
+    merged_prs = pruning._merged_pull_request_records(
+        [{
+            "number": 354,
+            "merged_at": "2026-11-02T12:00:00Z",
+            "merge_commit_sha": "fork-merge",
+            "head": {
+                "ref": "feature/shared-name",
+                "sha": "same-head-sha",
+                "repo": {"full_name": "contributor/Atlas-Bot"},
+            },
+        }],
+        repository="Papajona/Atlas-Bot",
+    )
+
+    assert should_delete_ref(
+        "feature/shared-name",
+        "same-head-sha",
+        "main-sha",
+        set(),
+        merged_prs,
+        _ancestor_pairs(("fork-merge", "main-sha")),
+    ) == (False, "no exact integration proof; preserve branch")
