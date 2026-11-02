@@ -773,9 +773,9 @@ async def _invariant_snapshot(db, tol: Decimal, customer_id: int | None = None):
         net_statement.group_by(LedgerJournalLine.customer_id, LedgerJournalLine.account_code)
     )).all()
     journal_net: dict[tuple[int, str], Decimal] = {}
-    for customer_id, account_code, net in net_rows:
-        if customer_id is not None:
-            journal_net[(int(customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+    for journal_customer_id, account_code, net in net_rows:
+        if journal_customer_id is not None:
+            journal_net[(int(journal_customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
 
     # The customer_id column and the customer embedded in LIABILITY account codes
     # are independent persisted values. Reuse the grouped net_rows query so this
