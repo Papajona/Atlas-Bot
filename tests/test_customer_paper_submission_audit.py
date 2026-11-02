@@ -439,6 +439,8 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
             return self
         async def __aexit__(self, *_args):
             return False
+        async def execute(self, _statement):
+            return SimpleNamespace(scalar_one=lambda: json.dumps(original_payload))
 
     original_payload = {
         "customer_id": 501,
@@ -461,6 +463,7 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
     async def append_with_replay(_db, **kwargs):
         captured.update(kwargs)
         return SimpleNamespace(
+            id=123,
             event_hash="stable-event-hash",
             detail=json.dumps(original_payload),
             actor_id="customer:501",
@@ -508,11 +511,16 @@ def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
             return self
         async def __aexit__(self, *_args):
             return False
+        async def execute(self, _statement):
+            return SimpleNamespace(scalar_one=lambda: json.dumps({
+                "customer_id": 501,
+                "client_order_id": "cp-failed-external-audit",
+            }))
 
     async def append_once(_db, **kwargs):
         return SimpleNamespace(
+            id=124,
             event_hash="stable-event-hash",
-            detail=json.dumps(kwargs["detail"]),
             actor_id=kwargs["actor_id"],
         ), False
 
@@ -526,3 +534,50 @@ def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
             "customer_id": 501,
             "client_order_id": "cp-failed-external-audit",
         }))
+
+
+
+def test_damaged_encrypted_audit_payload_does_not_block_existing_order_replay(monkeypatch, caplog):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise RuntimeError("encrypted audit detail authentication failed")
+
+    finished = []
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=125,
+            event_hash="damaged-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-damaged"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+    monkeypatch.setattr(
+        main, "emit_security_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("damaged payload must not reach sink")),
+    )
+
+    created = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-damaged-encrypted-audit",
+    }))
+
+    assert created is False
+    assert finished == [("claim-damaged", False, "RuntimeError")]
+    assert any(
+        record.getMessage() == "customer paper audit payload could not be loaded for external delivery"
+        for record in caplog.records
+    )
