@@ -133,7 +133,10 @@ def _branch_has_open_pull_request(repository: str, branch_name: str) -> bool:
     owner = repository.split("/", 1)[0]
     result = _run([
         "gh", "api", "--paginate",
-        f"repos/{repository}/pulls?state=open&head={owner}:{branch_name}&per_page=100",
+        f"repos/{repository}/pulls",
+        "-f", "state=open",
+        "-f", f"head={owner}:{branch_name}",
+        "-f", "per_page=100",
         "--jq", ".[].number",
     ], check=False)
     if result.returncode:

@@ -1413,10 +1413,14 @@ def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monke
         return subprocess.CompletedProcess(args, 0, "321\n", "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
-    assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", "feature/with-slash")
+    branch_name = "feature/with&fragment#and+plus"
+    assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", branch_name)
     assert calls == [[
         "gh", "api", "--paginate",
-        "repos/Papajona/Atlas-Bot/pulls?state=open&head=Papajona:feature/with-slash&per_page=100",
+        "repos/Papajona/Atlas-Bot/pulls",
+        "-f", "state=open",
+        "-f", "head=Papajona:feature/with&fragment#and+plus",
+        "-f", "per_page=100",
         "--jq", ".[].number",
     ]]
 
