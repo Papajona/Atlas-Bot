@@ -54,8 +54,8 @@ _TIMEFRAME_SECONDS = {
 _PAPER_MARKET_SNAPSHOT_TTL_SECONDS = 3.0
 _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES = 64
 _PAPER_MARKET_RATE_LIMIT_PER_MINUTE = 12
-_PAPER_MARKET_SNAPSHOTS: OrderedDict[tuple[str, str], tuple[float, Any]] = OrderedDict()
-_PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[tuple[str, str], asyncio.Lock] = OrderedDict()
+_PAPER_MARKET_SNAPSHOTS: OrderedDict[tuple[str, str, int], tuple[float, Any]] = OrderedDict()
+_PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[tuple[str, str, int], asyncio.Lock] = OrderedDict()
 _PAPER_MARKET_SNAPSHOT_CACHE_LOCK = asyncio.Lock()
 
 
@@ -86,7 +86,17 @@ async def _fetch_verified_market_snapshot(
         + 1,
     )
     days = min(30, max(1, (required_bars * timeframe_seconds + 86_399) // 86_400))
-    key = (str(symbol).strip().upper(), str(timeframe))
+    # Cache only within the same expected completed-candle generation. A
+    # three-second cache alone can otherwise serve yesterday's bar after the
+    # caller clock or market advances during a fast test/recovery cycle.
+    expected_closed_bar_generation = (
+        int(datetime.now(timezone.utc).timestamp()) // timeframe_seconds
+    )
+    key = (
+        str(symbol).strip().upper(),
+        str(timeframe),
+        expected_closed_bar_generation,
+    )
     request = market_request_type(
         asset="crypto",
         symbol=symbol,
