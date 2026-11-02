@@ -203,7 +203,8 @@ def test_retry_state_transition_is_conditional_on_pending_row(monkeypatch, diale
     sql = captured["sql"]
     assert "WHERE customer_paper_submission_audit_retries.id =" in sql
     assert "AND customer_paper_submission_audit_retries.status =" in sql
-    assert "attempt_count = customer_paper_submission_audit_retries.attempt_count +" in sql
+    normalized_sql = "".join(sql.split())
+    assert "attempt_count=(customer_paper_submission_audit_retries.attempt_count+" in normalized_sql
     assert "PENDING" in captured["params"].values()
     assert captured["committed"] is True
 
