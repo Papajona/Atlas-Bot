@@ -602,13 +602,24 @@ def test_same_customer_order_retry_ignores_only_submission_bar_metadata():
     )
 
 
-def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monkeypatch):
+@pytest.mark.parametrize("submission_hash_matches", [True, False])
+def test_manual_paper_advance_requires_original_submission_bar_and_replays_every_eligible_bar(
+    monkeypatch, submission_hash_matches
+):
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     latest_bar_at = now - timedelta(minutes=1)
     submission_bar_at = latest_bar_at - timedelta(minutes=3)
     _freeze_paper_api_clock(monkeypatch, now)
     frame = _verified_bars(latest_bar_at, volume="100")
     frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+    submission_contexts = paper_api._market_bar_contexts(
+        frame, symbol="BTC/USDT", timeframe="1m"
+    )
+    submission_bar_hash = next(
+        bar["bar_data_sha256"]
+        for bar in submission_contexts
+        if bar["timestamp"] == submission_bar_at
+    )
 
     order = {
         "client_order_id": "multi-bar-manual-order",
@@ -628,6 +639,9 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
             "timeframe": "1m",
             "execution_model": "completed_bar_volume_capped_heuristic_v1",
             "submission_bar_at": submission_bar_at.isoformat(),
+            "submission_bar_sha256": (
+                submission_bar_hash if submission_hash_matches else "0" * 64
+            ),
         },
     }
     prior_fills = {}
@@ -724,6 +738,13 @@ def test_manual_paper_advance_replays_every_eligible_completed_bar_in_order(monk
         "/api/customer/paper/orders/multi-bar-manual-order/advance",
         headers={"Authorization": "Bearer multi-bar-customer"},
     )
+
+    if not submission_hash_matches:
+        assert response.status_code == 409, response.text
+        assert "submission candle" in response.json()["detail"].lower()
+        assert registered_bars == []
+        assert fill_rows == []
+        return
 
     assert response.status_code == 200, response.text
     payload = response.json()
