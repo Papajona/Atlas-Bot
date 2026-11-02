@@ -9,7 +9,10 @@ from types import SimpleNamespace
 
 
 import pytest
+from sqlalchemy import create_engine, text
 from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.sql.elements import BinaryExpression, BindParameter
+from sqlalchemy.sql.visitors import iterate
 
 from app import main
 
@@ -174,7 +177,7 @@ def test_terminal_submission_audit_failure_persists_retry_without_changing_fill_
     assert fallback_events[0][2] == "customer:712"
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
-def test_retry_state_transition_is_conditional_on_pending_row(monkeypatch, dialect):
+def test_retry_state_transition_binds_pending_predicate_explicitly(monkeypatch, dialect):
     captured = {}
 
     class FakeSession:
@@ -186,6 +189,7 @@ def test_retry_state_transition_is_conditional_on_pending_row(monkeypatch, diale
 
         async def execute(self, statement):
             compiled = statement.compile(dialect=dialect)
+            captured["statement"] = statement
             captured["sql"] = str(compiled)
             captured["params"] = compiled.params
 
@@ -200,13 +204,96 @@ def test_retry_state_transition_is_conditional_on_pending_row(monkeypatch, diale
         increment_attempts=True,
     ))
 
+    statement = captured["statement"]
     sql = captured["sql"]
     assert "WHERE customer_paper_submission_audit_retries.id =" in sql
     assert "AND customer_paper_submission_audit_retries.status =" in sql
     normalized_sql = "".join(sql.split())
     assert "attempt_count=(customer_paper_submission_audit_retries.attempt_count+" in normalized_sql
-    assert "PENDING" in captured["params"].values()
+
+    status_predicates = [
+        node for node in iterate(statement.whereclause)
+        if isinstance(node, BinaryExpression)
+        and getattr(node.left, "key", None) == "status"
+    ]
+    assert len(status_predicates) == 1
+    predicate_value = status_predicates[0].right
+    assert isinstance(predicate_value, BindParameter)
+    assert captured["params"][predicate_value.key] == "PENDING"
     assert captured["committed"] is True
+
+
+def test_retry_state_failure_from_stale_worker_cannot_reopen_repaired_row(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE customer_paper_submission_audit_retries (
+                id INTEGER PRIMARY KEY,
+                status VARCHAR(20) NOT NULL,
+                attempt_count INTEGER NOT NULL,
+                last_error_type VARCHAR(80) NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO customer_paper_submission_audit_retries
+                    (id, status, attempt_count, last_error_type, updated_at)
+                VALUES
+                    (1, 'PENDING', 1, 'OldError', '2026-11-02 10:00:00'),
+                    (2, 'REPAIRED', 1, '', '2026-11-02 10:00:00')
+                """
+            )
+        )
+
+    class SQLiteSession:
+        async def __aenter__(self):
+            self.connection = engine.connect()
+            return self
+
+        async def __aexit__(self, *_args):
+            self.connection.close()
+            return False
+
+        async def execute(self, statement):
+            return self.connection.execute(statement)
+
+        async def commit(self):
+            self.connection.commit()
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: SQLiteSession())
+    asyncio.run(main._set_customer_paper_submission_audit_retry_state(
+        2,
+        status="PENDING",
+        error_type="LateWorkerError",
+        increment_attempts=True,
+    ))
+    asyncio.run(main._set_customer_paper_submission_audit_retry_state(
+        1,
+        status="PENDING",
+        error_type="RetryError",
+        increment_attempts=True,
+    ))
+
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text(
+                """
+                SELECT id, status, attempt_count, last_error_type
+                FROM customer_paper_submission_audit_retries
+                ORDER BY id
+                """
+            )
+        ).all()
+    engine.dispose()
+
+    assert rows == [
+        (1, "PENDING", 2, "RetryError"),
+        (2, "REPAIRED", 1, ""),
+    ]
 
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
