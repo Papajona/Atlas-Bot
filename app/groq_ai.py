@@ -78,14 +78,11 @@ _ACTIONABLE_IMMEDIATE_COMMAND_PATTERN = re.compile(
 )
 _PRICE_LEVEL_REFERENCE_PATTERN = re.compile(
     r"(?i:\b(?P<kind>entry|stop[- ]loss|stop|take[- ]profit|target|"
-    r"limit(?=\s+(?:price\b|(?:at|to|is|was|equals?)\b)|\s*[:=])|"
-    r"trigger(?=\s+(?:price\b|(?:at|to|is|was|equals?)\b)|\s*[:=]))\b)"
+    r"limit(?=\s+(?:order|price)\b)|trigger(?=\s+(?:level|price)\b))\b)"
+    r"(?:\s+(?:order|level))?"
     r"(?:\s+price)?"
     r"(?:\s*(?:=|:)\s*|\s+(?:(?:is|was|equals?)\s+)?(?:at|to)\s+|"
     r"\s+(?:(?:is|was|equals?)\s+)?)[$€£]?"
-    # Keep the complete token so malformed price-like claims still fail closed.
-    # Risk units and R/ATR multiples are descriptive metrics, not plan prices;
-    # _validate_plan_price_references skips those explicitly.
     r"(?P<price>[+-]?(?:\d|\.\d)\S*)"
 )
 _PRICE_NUMBER_PATTERN = re.compile(
@@ -97,7 +94,8 @@ _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
     r"widen|widens|recommend|recommends|use|keep)\s+"
     r"(?:(?:the|a|your|my|our|this|new|current)\s+)?"
     r"(?:(?:protective|trailing)\s+)?"
-    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit\s+price|trigger\s+price)\b"
+    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit\s+(?:order|price)|"
+    r"trigger\s+(?:level|price))\b"
     r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?)"
 )
 _ACTIONABLE_TRADING_PATTERNS = (
@@ -140,7 +138,7 @@ def _contains_actionable_trading_instruction(
             if numeric_prefix is not None:
                 unit_context = raw_token[numeric_prefix.end():] + text[match.end():]
                 if re.match(
-                    r"(?i)^\\s*(?:%|percent(?:age)?\\b|[xX]\\b|R\\b|ATR\\b|bps\\b|basis\\s+points?\\b|pips?\\b|points?\\b|ticks?\\b|times?\\b)",
+                    r"(?i)^\s*(?:%|percent(?:age)?\b|[xX]\b|R\b|ATR\b|bps\b|basis\s+points?\b|pips?\b|points?\b|ticks?\b|times?\b)",
                     unit_context,
                 ):
                     continue
@@ -171,18 +169,6 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
     }
     for match in _PRICE_LEVEL_REFERENCE_PATTERN.finditer(text):
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
-        if kind == "limit":
-            # Risk caps are not executable price levels. Keep daily/weekly loss,
-            # drawdown, exposure, and leverage limits descriptive.
-            sentence_start = max(
-                text.rfind(mark, 0, match.start()) for mark in (".", "!", "?", ";")
-            ) + 1
-            prefix = text[sentence_start:match.start()]
-            if re.search(
-                r"(?i)\\b(?:daily|weekly|monthly|loss|risk|drawdown|exposure|leverage)\\b",
-                prefix,
-            ):
-                continue
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
         numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
