@@ -144,7 +144,7 @@ jobs:
               }
               BEGIN {
                 quote = sprintf("%c", 39)
-                legacy_expected_pattern = "gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\\\.googleapis\\\\.com|_gemini_json|settings\\\\.gemini_|settings\\\\.groq_api_key|settings\\\\.cerebras_api_key|settings\\\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\\\.openai\\\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\\\.groq\\\\.com|api\\\\.cerebras\\\\.ai"
+                legacy_expected_pattern = "gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\.googleapis\\.com|_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|settings\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\.openai\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|api\\.groq\\.com|api\\.cerebras\\.ai"
               }
               {
                 content = $0
@@ -193,7 +193,7 @@ jobs:
                   quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
                   quote ":!.github/workflows/prune-contained-branches-once.yml" quote " " \
                   quote ":!scripts/migrate_legacy_native_ai.py"
-                legacy_scanner_prefix = "git grep -IlEi "
+                legacy_scanner_prefix = "git" " grep -IlEi "
                 legacy_verify_prefix = "git grep -nIEi "
                 if (index(normalized_content, legacy_scanner_prefix) == 1 ||
                     index(normalized_content, legacy_verify_prefix) == 1) {
