@@ -56,6 +56,9 @@ def upgrade() -> None:
             f"REVOKE ALL PRIVILEGES ON TABLE public.{TABLE} FROM PUBLIC"
         )
         op.execute(
+            "REVOKE ALL PRIVILEGES ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq FROM PUBLIC"
+        )
+        op.execute(
             """
             DO $atlas_customer_paper_retry_acl$
             DECLARE role_name text;
@@ -64,6 +67,10 @@ def upgrade() -> None:
                     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
                         EXECUTE format(
                             'REVOKE ALL PRIVILEGES ON TABLE public.customer_paper_submission_audit_retries FROM %I',
+                            role_name
+                        );
+                        EXECUTE format(
+                            'REVOKE ALL PRIVILEGES ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq FROM %I',
                             role_name
                         );
                     END IF;
@@ -85,6 +92,10 @@ def upgrade() -> None:
                 LOOP
                     EXECUTE format(
                         'GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_paper_submission_audit_retries TO %I',
+                        role_name
+                    );
+                    EXECUTE format(
+                        'GRANT USAGE, SELECT ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq TO %I',
                         role_name
                     );
                 END LOOP;
