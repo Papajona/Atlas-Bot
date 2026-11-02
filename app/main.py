@@ -13,6 +13,7 @@ import time
 import math
 import json
 import uuid
+import traceback
 from decimal import Decimal, localcontext
 from contextvars import ContextVar
 from dataclasses import asdict
@@ -24,10 +25,12 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -56,6 +59,7 @@ from .customer_funds import record_ledger_incident, get_or_create_ledger, post_d
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
+from .crypto import decrypt_text
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
 from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group
@@ -240,7 +244,264 @@ async def _run_trade_safety_review(packet: dict) -> dict:
 
 
 
-async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
+async def _audit_customer_paper_order_submitted_once(
+    detail: dict, *, retry_external: bool = False
+) -> bool:
+    """Persist one order event and retry its second-copy delivery when explicitly queued."""
+    actor = f"customer:{int(detail['customer_id'])}"
+    async with SessionLocal() as db:
+        row, created = await append_audit_once(
+            db,
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            detail=detail,
+            actor_id=actor,
+            idempotency_fields=("customer_id", "client_order_id"),
+        )
+    # Normal idempotent bot cycles never duplicate an already-delivered external copy.
+    # A queued retry explicitly replays it even when the primary row already exists.
+    if created or retry_external:
+        safe_detail = {
+            key: value for key, value in detail.items()
+            if key not in {
+                "token", "secret", "api_token", "api_secret",
+                "authorization", "destination",
+            }
+        }
+        delivered = emit_security_audit(
+            event="CUSTOMER_PAPER_ORDER_SUBMITTED",
+            actor_id=actor,
+            detail=safe_detail,
+            event_hash=row.event_hash,
+        )
+        if delivered is not True:
+            raise RuntimeError("external customer paper audit delivery failed")
+    return created
+
+
+def _customer_paper_audit_order_ref(customer_id: int, client_order_id: str) -> str:
+    """Create a stable, non-reversible log correlation token for an order retry."""
+    value = f"{int(customer_id)}|{str(client_order_id or '')}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _log_customer_paper_submission_audit_retry_failure(
+    *,
+    event: str,
+    customer_id: int,
+    client_order_id: str,
+    retry_id: int | None,
+    step: str,
+    exc: Exception,
+) -> None:
+    """Log stack locations and a non-reversible order ref, never customer/order fields."""
+    frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+    safe_frames = " > ".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in frames[-8:]
+    )
+    logging.getLogger(__name__).warning(
+        "%s retry_id=%s order_ref=%s step=%s error_type=%s traceback_frames=%s",
+        event,
+        retry_id if retry_id is not None else "unavailable",
+        _customer_paper_audit_order_ref(customer_id, client_order_id),
+        step,
+        type(exc).__name__,
+        safe_frames or "unavailable",
+    )
+
+
+async def _persist_customer_paper_submission_audit_retry(
+    *,
+    customer_id: int,
+    submission_detail: dict,
+    error_type: str,
+) -> None:
+    """Upsert one encrypted retry row per customer/order; do not scan audit history."""
+    customer_id = int(customer_id)
+    client_order_id = str(submission_detail.get("client_order_id") or "").strip()
+    if not client_order_id:
+        raise ValueError("customer paper audit retry requires a client_order_id")
+    now = datetime.now(timezone.utc)
+    payload = json.dumps(
+        submission_detail, sort_keys=True, separators=(",", ":"), default=str
+    )
+    error_name = str(error_type or "UnknownError")[:80]
+    values = {
+        "customer_id": customer_id,
+        "client_order_id": client_order_id,
+        "submission_detail": payload,
+        "status": "PENDING",
+        "attempt_count": 0,
+        "last_error_type": error_name,
+        "created_at": now,
+        "updated_at": now,
+    }
+    async with SessionLocal() as db:
+        dialect_name = db.get_bind().dialect.name
+        insert_fn = sqlite_insert if dialect_name == "sqlite" else pg_insert
+        statement = insert_fn(CustomerPaperSubmissionAuditRetry).values(**values)
+        statement = statement.on_conflict_do_update(
+            index_elements=[
+                CustomerPaperSubmissionAuditRetry.customer_id,
+                CustomerPaperSubmissionAuditRetry.client_order_id,
+            ],
+            set_={
+                "submission_detail": statement.excluded.submission_detail,
+                "status": "PENDING",
+                "attempt_count": CustomerPaperSubmissionAuditRetry.attempt_count + 1,
+                "last_error_type": error_name,
+                "updated_at": now,
+            },
+        )
+        await db.execute(statement)
+        await db.commit()
+
+
+async def _set_customer_paper_submission_audit_retry_state(
+    retry_id: int,
+    *,
+    status: str,
+    error_type: str = "",
+    increment_attempts: bool = False,
+) -> None:
+    async with SessionLocal() as db:
+        row = await db.get(CustomerPaperSubmissionAuditRetry, int(retry_id))
+        if row is None:
+            return
+        row.status = str(status).upper()
+        row.last_error_type = str(error_type or "")[:80]
+        row.updated_at = datetime.now(timezone.utc)
+        if increment_attempts:
+            row.attempt_count = int(row.attempt_count or 0) + 1
+        await db.commit()
+
+
+async def _load_customer_paper_submission_audit_retries(customer_id: int) -> list[dict]:
+    """Read bounded pending rows for one customer; decrypt/quarantine records independently."""
+    customer_id = int(customer_id)
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(
+                    CustomerPaperSubmissionAuditRetry.id,
+                    CustomerPaperSubmissionAuditRetry.client_order_id,
+                    cast(
+                        CustomerPaperSubmissionAuditRetry.submission_detail, Text
+                    ).label("raw_detail"),
+                )
+                .where(
+                    CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
+                    CustomerPaperSubmissionAuditRetry.status == "PENDING",
+                )
+                .order_by(
+                    CustomerPaperSubmissionAuditRetry.updated_at.asc(),
+                    CustomerPaperSubmissionAuditRetry.id.asc(),
+                )
+                .limit(100)
+            )
+        ).all()
+
+    pending: list[dict] = []
+    for row in rows:
+        client_order_id = str(row.client_order_id or "")
+        try:
+            parsed = json.loads(decrypt_text(row.raw_detail))
+            if (
+                not isinstance(parsed, dict)
+                or int(parsed.get("customer_id", -1)) != customer_id
+                or str(parsed.get("client_order_id") or "").strip() != client_order_id
+            ):
+                raise ValueError("retry detail identity does not match its indexed key")
+        except Exception as exc:
+            # Quarantine one invalid ciphertext/identity without blocking other rows.
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    int(row.id),
+                    status="CORRUPT",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_quarantine_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=int(row.id),
+                    step="quarantine_corrupt_retry",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_corrupt",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=int(row.id),
+                step="decrypt_and_validate_retry_detail",
+                exc=exc,
+            )
+            continue
+        pending.append({
+            "retry_id": int(row.id),
+            "customer_id": customer_id,
+            "client_order_id": client_order_id,
+            "submission_detail": parsed,
+        })
+    return pending
+
+
+async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> None:
+    """Replay up to 100 indexed pending deliveries; isolate each record's failure."""
+    customer_id = int(customer_id)
+    try:
+        pending = await _load_customer_paper_submission_audit_retries(customer_id)
+    except Exception as exc:
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_retry_load_failed",
+            customer_id=customer_id,
+            client_order_id="",
+            retry_id=None,
+            step="load_customer_pending_retries",
+            exc=exc,
+        )
+        return
+
+    for record in pending:
+        retry_id = int(record["retry_id"])
+        client_order_id = str(record["client_order_id"])
+        try:
+            # This also retries the external copy when the primary audit row already exists.
+            await _audit_customer_paper_order_submitted_once(
+                record["submission_detail"], retry_external=True
+            )
+            await _set_customer_paper_submission_audit_retry_state(
+                retry_id, status="REPAIRED", error_type=""
+            )
+        except Exception as exc:
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    retry_id,
+                    status="PENDING",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_state_write_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="persist_retry_failure_state",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=retry_id,
+                step="replay_submission_and_mark_repaired",
+                exc=exc,
+            )
+
+
     """Persist one submission event per customer/order identity, including recovery repairs."""
     actor = f"customer:{int(detail['customer_id'])}"
     async with SessionLocal() as db:
@@ -273,6 +534,8 @@ async def _customer_paper_submission_stage(
     req,
 ) -> str | None:
     """Audit first submissions and repair missing audit events during pending-order recovery."""
+    # Repair old deliveries even when this bot cycle has no new/recovered order.
+    await _repair_customer_paper_submission_audit_retries(customer_id)
     if not isinstance(execution, dict):
         return None
 
@@ -348,17 +611,30 @@ async def _customer_paper_submission_stage(
     try:
         await _audit_customer_paper_order_submitted_once(detail)
     except Exception as exc:
-        # Keep the accepted order pending, but preserve a traceback for operators
-        # to diagnose a transient audit-store failure. Do not put exception text
-        # into the persisted customer audit payload.
-        logging.getLogger(__name__).exception(
-            "customer_paper_submission_audit_failed",
-            extra={
-                "customer_id": customer_id,
-                "trading_account_id": trading_account_id,
-                "client_order_id": client_order_id,
-                "error_type": type(exc).__name__,
-            },
+        # Preserve a durable customer/order-scoped retry, including for terminal fills.
+        # The main trading decision remains unchanged if audit delivery is unavailable.
+        try:
+            await _persist_customer_paper_submission_audit_retry(
+                customer_id=customer_id,
+                submission_detail=detail,
+                error_type=type(exc).__name__,
+            )
+        except Exception as persist_exc:
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_persist_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=None,
+                step="persist_initial_retry_state",
+                exc=persist_exc,
+            )
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_failed",
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            retry_id=None,
+            step="append_submission_audit",
+            exc=exc,
         )
         await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
             "customer_id": customer_id,
@@ -369,7 +645,8 @@ async def _customer_paper_submission_stage(
             "submission_status": submission_status,
             "execution_status": status,
             "reason": type(exc).__name__,
-        })
+            "submission_detail": detail,
+        }, actor_id=f"customer:{customer_id}")
         return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     # Only live pending states should be reported as pending or short-circuit the
     # strategy route. Filled, replayed, expired or terminal orders keep their real
