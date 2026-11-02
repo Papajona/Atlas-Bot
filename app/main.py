@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text
+from sqlalchemy import select, desc, or_, and_, update, func, case, cast, Numeric, Text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -377,10 +377,19 @@ async def _set_customer_paper_submission_audit_retry_state(
 
 
 async def _load_customer_paper_submission_audit_retries(customer_id: int) -> list[dict]:
-    """Read bounded pending rows for one customer; decrypt/quarantine records independently."""
+    """Atomically claim bounded retries, reclaim expired claims, then decrypt independently."""
     customer_id = int(customer_id)
+    now = datetime.now(timezone.utc)
+    lease_cutoff = now - timedelta(minutes=5)
+    claimable = or_(
+        CustomerPaperSubmissionAuditRetry.status == "PENDING",
+        and_(
+            CustomerPaperSubmissionAuditRetry.status == "PROCESSING",
+            CustomerPaperSubmissionAuditRetry.updated_at <= lease_cutoff,
+        ),
+    )
     async with SessionLocal() as db:
-        rows = (
+        candidates = (
             await db.execute(
                 select(
                     CustomerPaperSubmissionAuditRetry.id,
@@ -391,7 +400,7 @@ async def _load_customer_paper_submission_audit_retries(customer_id: int) -> lis
                 )
                 .where(
                     CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
-                    CustomerPaperSubmissionAuditRetry.status == "PENDING",
+                    claimable,
                 )
                 .order_by(
                     CustomerPaperSubmissionAuditRetry.updated_at.asc(),
@@ -400,6 +409,23 @@ async def _load_customer_paper_submission_audit_retries(customer_id: int) -> lis
                 .limit(100)
             )
         ).all()
+
+        # Compare-and-set claims prevent two API/worker processes from emitting the
+        # same external audit copy. The updated_at timestamp is a five-minute lease:
+        # a crashed worker's PROCESSING row becomes eligible again after expiry.
+        rows = []
+        for candidate in candidates:
+            claimed = await db.execute(
+                update(CustomerPaperSubmissionAuditRetry)
+                .where(
+                    CustomerPaperSubmissionAuditRetry.id == int(candidate.id),
+                    claimable,
+                )
+                .values(status="PROCESSING", updated_at=now)
+            )
+            if claimed.rowcount == 1:
+                rows.append(candidate)
+        await db.commit()
 
     pending: list[dict] = []
     for row in rows:
