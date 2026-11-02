@@ -7158,13 +7158,12 @@ def _install_canonical_native_ai(canonical_source: str) -> None:
     """
     path = "app/native_ai.py"
     target = ROOT / path
-    existing = target.read_text(encoding="utf-8") if target.exists() else ""
-    if existing and _has_conflicting_provider_wiring(path, existing):
-        raise MigrationError(
-            f"{path} contains retired or hosted provider wiring; preserving the branch"
-        )
     if not isinstance(canonical_source, str) or not canonical_source.strip():
         raise MigrationError("pinned canonical app/native_ai.py is empty; preserving the branch")
+    if _has_conflicting_provider_wiring(path, canonical_source):
+        raise MigrationError(
+            "pinned canonical app/native_ai.py contains retired or hosted provider wiring"
+        )
     try:
         ast.parse(canonical_source, filename=path)
     except SyntaxError as exc:
