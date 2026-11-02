@@ -25,7 +25,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -347,15 +347,23 @@ async def _set_customer_paper_submission_audit_retry_state(
     error_type: str = "",
     increment_attempts: bool = False,
 ) -> None:
+    """Compare-and-set a pending retry so a stale worker cannot undo a repair."""
+    values = {
+        "status": str(status).upper(),
+        "last_error_type": str(error_type or "")[:80],
+        "updated_at": datetime.now(timezone.utc),
+    }
+    if increment_attempts:
+        values["attempt_count"] = CustomerPaperSubmissionAuditRetry.attempt_count + 1
     async with SessionLocal() as db:
-        row = await db.get(CustomerPaperSubmissionAuditRetry, int(retry_id))
-        if row is None:
-            return
-        row.status = str(status).upper()
-        row.last_error_type = str(error_type or "")[:80]
-        row.updated_at = datetime.now(timezone.utc)
-        if increment_attempts:
-            row.attempt_count = int(row.attempt_count or 0) + 1
+        await db.execute(
+            update(CustomerPaperSubmissionAuditRetry)
+            .where(
+                CustomerPaperSubmissionAuditRetry.id == int(retry_id),
+                CustomerPaperSubmissionAuditRetry.status == "PENDING",
+            )
+            .values(**values)
+        )
         await db.commit()
 
 
