@@ -390,8 +390,16 @@ fun RiskDashboardScreen(
                         color = emeraldPass,
                         fontSize = 13.sp
                     )
+                    val aiSafetyDeadline = metrics.aiSafetyTimeoutSeconds
+                    val aiSafetyDeadlineLabel = if (
+                        aiSafetyDeadline.isFinite() && aiSafetyDeadline > 0.0
+                    ) {
+                        "${aiSafetyDeadline}s total"
+                    } else {
+                        "unavailable"
+                    }
                     Text(
-                        text = "• AI Safety Latency Ceiling: 1.5s Fail-Closed (NO_TRADE)",
+                        text = "• AI Safety Decision Deadline: $aiSafetyDeadlineLabel (Native AI veto reserve protected)",
                         color = textMuted,
                         fontSize = 13.sp
                     )
