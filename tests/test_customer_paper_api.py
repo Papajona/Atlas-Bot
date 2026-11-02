@@ -10,11 +10,12 @@ import pandas as pd
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from app import customer_paper_api as paper_api
 from app.config import settings
-from app.schemas import MarketRequest
+from app.schemas import CustomerPaperMarketRequest, MarketRequest
 from app.paper_staging import PaperMarketRequest
 
 
@@ -484,3 +485,41 @@ def test_customer_paper_api_order_fill_shared_capacity_tenant_isolation_and_reco
     assert ttl_advance.json()["status"] == "EXPIRED_TTL"
     assert ttl_advance.json()["order"]["status"] == "EXPIRED"
     client.close()
+
+
+
+def test_production_paper_market_request_accepts_only_the_computed_bounded_history():
+    from app.customer_paper_api import _TIMEFRAME_SECONDS
+
+    # Paper orders require 25 completed bars. The calculated history window ranges
+    # from one day for 1m through 25 days for 1d, all within the paper-only model.
+    for timeframe, timeframe_seconds in _TIMEFRAME_SECONDS.items():
+        required_bars = 25
+        days = max(1, (required_bars * timeframe_seconds + 86_399) // 86_400)
+        request = CustomerPaperMarketRequest(
+            asset="crypto",
+            symbol="BTC/USDT",
+            exchange="binance",
+            timeframe=timeframe,
+            days=days,
+        )
+        assert request.days == days
+        assert 1 <= request.days <= 30
+
+    # The unrelated public/research contract must keep its stricter lower bound.
+    with pytest.raises(ValidationError):
+        MarketRequest(days=1)
+    with pytest.raises(ValidationError):
+        CustomerPaperMarketRequest(days=0)
+    with pytest.raises(ValidationError):
+        CustomerPaperMarketRequest(days=31)
+
+
+def test_production_customer_paper_router_uses_the_bounded_request_model():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    router = source.split("app.include_router(build_customer_paper_router(", 1)[1]
+    router = router.split("))", 1)[0]
+    assert "market_request_type=CustomerPaperMarketRequest" in router
+    assert "market_request_type=MarketRequest" not in router

@@ -16,6 +16,15 @@ class MarketRequest(BaseModel):
     days: int = Field(default=365, ge=30, le=1500)
 
 
+class CustomerPaperMarketRequest(MarketRequest):
+    """Bounded request model for paper orders needing only a short verified candle window.
+
+    Keep the public/research MarketRequest minimum of 30 days unchanged; customer paper
+    order submission and advancement calculate their own bounded 1–30 day window.
+    """
+    days: int = Field(default=1, ge=1, le=30)
+
+
 class ResearchMarketRequest(MarketRequest):
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
