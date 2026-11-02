@@ -88,14 +88,17 @@ _PRICE_NUMBER_PATTERN = re.compile(
     r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?"
 )
 _TRADE_PRICE_SETTING_COMMAND_PATTERN = re.compile(
-    r"(?i:\b(?:set|sets|move|moves|place|places|adjust|adjusts|raise|raises|"
-    r"lower|lowers|change|changes|update|updates|put|puts|tighten|tightens|"
-    r"widen|widens|recommend|recommends|use|keep)\s+"
+    r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
+    r"adjust|adjusts|adjusting|raise|raises|raising|lower|lowers|lowering|"
+    r"change|changes|changing|update|updates|updating|put|puts|putting|"
+    r"tighten|tightens|tightening|widen|widens|widening|recommend|recommends|"
+    r"recommending|use|uses|using|keep|keeps|keeping)\s+"
     r"(?:(?:the|a|your|my|our|this|new|current)\s+)?"
     r"(?:(?:protective|trailing)\s+)?"
-    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit\s+(?:order|price)|"
-    r"trigger\s+(?:level|price))\b"
-    r"(?:\s+price)?(?:\s*(?:=|:)\s*[$€£]?[+-]?(?:\d|\.\d)\S*)?)"
+    r"(?:entry|stop[- ]loss|stop|take[- ]profit|target|limit|trigger)\b"
+    r"(?:\s+(?:limit(?:\s+order)?|order|level))?"
+    r"(?:\s+price)?"
+    r"(?:\s+(?:at|to|is|was|equals?)\s+|\s*(?:=|:)\s*)[$€£]?[+-]?(?:\d|\.\d)\S*)"
 )
 _TRADE_LIMIT_TRIGGER_COMMAND_PATTERN = re.compile(
     r"(?i:\b(?:set|sets|setting|move|moves|moving|place|places|placing|"
@@ -139,13 +142,15 @@ def _is_non_trade_limit_reference(text: str, match: re.Match[str]) -> bool:
     if re.search(
         r"(?i)\b(?:(?:upper|lower)(?:\s+price)?|"
         r"(?:daily|weekly|monthly)\s+loss|(?:daily|weekly|monthly)\s+risk|"
-        r"loss|risk|exposure|leverage|range|(?:price|trading)\s+range)\s*$",
+        r"(?<!stop[- ])loss|risk|exposure|leverage|position|range|"
+        r"(?:price|trading)\s+range)\s*$",
         prefix,
     ):
         return True
     return bool(re.match(
         r"(?i)^\s+(?:for\s+(?:(?:daily|weekly|monthly)\s+)?"
-        r"(?:loss|risk|exposure)|of\s+(?:the\s+)?(?:range|market))\b",
+        r"(?:loss|risk|exposure|position)|of\s+(?:the\s+)?(?:range|market)|"
+        r"(?:contracts?|shares?|lots?|units?))\b",
         suffix,
     ))
 
@@ -206,6 +211,12 @@ def _validate_plan_price_references(text: str, trade_plan: dict[str, Any]) -> No
         if _is_non_trade_limit_reference(text, match):
             continue
         kind = re.sub(r"\s+", "-", match.group("kind").lower())
+        if kind == "limit":
+            preceding = text[max(0, match.start() - 80):match.start()]
+            if re.search(r"(?i)\b(?:stop[- ]loss|stop)\s*$", preceding):
+                kind = "stop-loss"
+            elif re.search(r"(?i)\b(?:take[- ]profit|target)\s*$", preceding):
+                kind = "take-profit"
         expected = _decimal_plan_price(trade_plan.get(field_for_kind[kind]))
         raw_token = match.group("price").rstrip(".,;:!?)]}\\\"'")
         numeric_prefix = _PRICE_NUMBER_PATTERN.match(raw_token)
