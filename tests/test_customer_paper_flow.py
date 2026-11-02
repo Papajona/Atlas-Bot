@@ -1242,15 +1242,26 @@ def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkey
         "execution_owner": "manual_customer_api",
     }
     monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
-    monkeypatch.setattr(
-        flow, "ensure_customer_paper_account",
-        _async_value({
+
+    async def fake_ensure_customer_paper_account(_customer_id, currency):
+        assert currency == "USDT"
+        return {
             "currency": "USDT",
             "paper_cash": "1000",
             "real_funds_used": False,
-        }),
+        }
+
+    async def no_pending_paper_recovery(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        flow, "ensure_customer_paper_account",
+        fake_ensure_customer_paper_account,
     )
-    monkeypatch.setattr(flow, "process_customer_paper_orders", _async_value(None))
+    monkeypatch.setattr(
+        flow, "process_customer_paper_orders",
+        no_pending_paper_recovery,
+    )
     monkeypatch.setattr(
         flow, "get_customer_paper_positions",
         _async_value([manual_position]),
