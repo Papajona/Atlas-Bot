@@ -49,7 +49,6 @@ class _DB:
 
     async def commit(self):
         self.mutations.append("commit")
-        raise AssertionError("read-only customer export may not commit")
 
 
 def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer(monkeypatch):
@@ -98,7 +97,7 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
     rows = body.decode("utf-8").splitlines()
     assert rows[0] == "created_at,journal_id,entry_type,currency,reference_type,reference_id,account_code,debit,credit"
     assert rows[1] == "2026-10-20T10:00:00+00:00,42,DEPOSIT,USDT,TRON_DEPOSIT,tx-abc,LIABILITY:CUSTOMER:AVAILABLE,0.000000,12.500000"
-    assert not db.mutations
+    assert db.mutations == ["commit"]
 
 
 def _async_value(value):
@@ -243,3 +242,41 @@ def test_customer_ledger_csv_export_rejects_row_counts_above_resource_limit(monk
         asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
 
     assert exc.value.status_code == 413
+
+
+
+def test_customer_ledger_export_response_releases_spool_when_disconnect_precedes_body(monkeypatch):
+    db = _DB()
+    profile = SimpleNamespace(id=23)
+    monkeypatch.setattr(main, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
+
+    async def export_bounds(_db, _customer_id, _currency, *, max_journal_id=None):
+        return 0, None
+
+    async def statement(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
+    monkeypatch.setattr(main, "ledger_statement", statement)
+    original = main._LEDGER_EXPORT_SEMAPHORE
+
+    response = asyncio.run(main.customer_ledger_export_csv(authorization="opaque-token"))
+    assert original._value == 1  # the response owns one export slot
+
+    async def disconnected_send(_message):
+        raise OSError("client disconnected before the body started")
+
+    async def unused_receive():
+        return {"type": "http.disconnect"}
+
+    async def call_response():
+        with pytest.raises(Exception):
+            await response(
+                {"type": "http", "asgi": {"spec_version": "2.4"}},
+                unused_receive,
+                disconnected_send,
+            )
+
+    asyncio.run(call_response())
+    assert original._value == 2  # response-scope cleanup released the slot
