@@ -658,17 +658,34 @@ async def settle_trading_fee(db, *, customer_id: int, fee: float, reference_id: 
 
 
 async def ledger_statement(
-    db, customer_id: int, currency: str = USDT, limit: int | None = 100
+    db,
+    customer_id: int,
+    currency: str = USDT,
+    limit: int | None = 100,
+    *,
+    offset: int = 0,
+    max_journal_id: int | None = None,
 ) -> list[dict]:
-    """Return customer journal lines; a null limit is reserved for full-history exports."""
+    """Return a stable, optionally page-bounded view of customer journal lines."""
+    if offset < 0:
+        raise ValueError("ledger statement offset must be non-negative")
     statement = select(LedgerJournal, LedgerJournalLine).join(
         LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id
     ).where(
         LedgerJournalLine.customer_id == customer_id,
         LedgerJournal.currency == currency,
-    ).order_by(LedgerJournal.created_at.desc(), LedgerJournalLine.line_no)
+    )
+    if max_journal_id is not None:
+        statement = statement.where(LedgerJournal.id <= max_journal_id)
+    statement = statement.order_by(
+        LedgerJournal.created_at.desc(),
+        LedgerJournal.id.desc(),
+        LedgerJournalLine.line_no,
+    )
     if limit is not None:
         statement = statement.limit(limit)
+    if offset:
+        statement = statement.offset(offset)
     rows = (await db.execute(statement)).all()
     return [{
         "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
@@ -683,6 +700,25 @@ async def ledger_statement(
         "minor_units_scale": 1_000_000,
         "created_at": j.created_at.isoformat() if j.created_at else None,
     } for j, line in rows]
+
+
+async def ledger_statement_export_bounds(
+    db, customer_id: int, currency: str = USDT
+) -> tuple[int, int | None]:
+    """Capture row count and journal-id ceiling for a stable paginated export."""
+    result = await db.execute(
+        select(func.count(), func.max(LedgerJournal.id))
+        .select_from(LedgerJournal)
+        .join(LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id)
+        .where(
+            LedgerJournalLine.customer_id == customer_id,
+            LedgerJournal.currency == currency,
+        )
+    )
+    row_count, max_journal_id = result.one()
+    return int(row_count or 0), (
+        int(max_journal_id) if max_journal_id is not None else None
+    )
 
 
 async def _invariant_snapshot(db, tol: Decimal):
