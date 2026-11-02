@@ -7106,6 +7106,7 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
     allowed_from_imports = {
         (0, "__future__"): {"annotations"},
         (0, "typing"): {"Any"},
+        (0, "decimal"): {"Decimal", "InvalidOperation"},
         (1, "config"): {"settings"},
         (1, "prompt_safety"): {
             "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",

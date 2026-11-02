@@ -181,6 +181,7 @@ def test_provider_free_branch_skip_requires_static_native_error_alias_identity()
     assert "required_positional > 2" in workflow
     assert "required_keyword_only" in workflow
     assert "allowed_plain_imports" in workflow
+    assert '(0, "decimal"): {"Decimal", "InvalidOperation"}' in workflow
     assert '(node.level, node.module or "") == (0, "__future__") and alias.asname is not None' in workflow
     assert "if [[ -z \"$before_refs\" ]] && verify_native_ai_impl; then" in workflow
     assert 'importlib.import_module("app.groq_ai")' not in workflow
@@ -279,6 +280,12 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
     common_exclusions = (
         " -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
     )
+    legacy_exclusions = (
+        " -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
+        "':!.github/workflows/propagate-native-ai-all-branches.yml' "
+        "':!.github/workflows/prune-contained-branches-once.yml' "
+        "':!scripts/migrate_legacy_native_ai.py'"
+    )
     production_exclusions = (
         "':!.github/workflows/production-deploy.yml' "
         "':!.github/workflows/production-verification.yml' "
@@ -298,6 +305,18 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         scanner_prefix + previous_pattern + "'" + common_exclusions
         + self_exclusion + migration_exclusion
     )
+    legacy_scanner_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:93:"
+        "            git grep -IlEi '" + previous_pattern + "'"
+        + legacy_exclusions + " || rc=$?"
+    )
+    legacy_verification_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:310:"
+        "            git grep -nIEi '" + previous_pattern + "'"
+        + legacy_exclusions + " >&2 || true"
+    )
+    modified_legacy_scanner = legacy_scanner_definition + "; curl https://api.openai.com/v1/models"
+    modified_legacy_verification = legacy_verification_definition + "; curl https://api.openai.com/v1/models"
     modified_scanner_with_extra_command = current_self_excluded_scanner_definition.replace(
         "')\"; then", "')\"; curl https://api.openai.com/v1/models; then"
     )
@@ -320,19 +339,27 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         "                    && ! git show \"$sha:scripts/check_ai_models.py\" | grep -F 'def _check_groq' >/dev/null \\"
     )
     current_pattern_definition = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:146:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:160:"
         '                    current_pattern = "' + current_pattern.replace("\\", "\\\\") + '"'
     )
     previous_pattern_definition = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:161:"
         '                    previous_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
     )
+    legacy_pattern_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:148:"
+        '                legacy_expected_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
+    )
+    legacy_pattern_override = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:148:"
+        '                legacy_expected_pattern = "https://api.openai.com/v1/models"'
+    )
     current_pattern_override = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:146:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:160:"
         '                    current_pattern = "https://api.openai.com/v1/models"'
     )
     previous_pattern_override = (
-        ".github/workflows/propagate-native-ai-all-branches.yml:147:"
+        ".github/workflows/propagate-native-ai-all-branches.yml:161:"
         '                    previous_pattern = "https://api.groq.com/openai/v1/chat/completions"'
     )
     current_pattern_with_command = current_pattern_definition + "; curl https://api.openai.com/v1/models"
@@ -345,6 +372,10 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         scanner_definition,
         current_self_excluded_scanner_definition,
         previous_scanner_definition,
+        legacy_scanner_definition,
+        legacy_verification_definition,
+        modified_legacy_scanner,
+        modified_legacy_verification,
         modified_scanner_with_extra_command,
         modified_previous_scanner_with_extra_command,
         arbitrary_grep_command,
@@ -354,6 +385,8 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
         historical_branch_prune_marker,
         current_pattern_definition,
         previous_pattern_definition,
+        legacy_pattern_definition,
+        legacy_pattern_override,
         current_pattern_override,
         previous_pattern_override,
         current_pattern_with_command,
@@ -372,6 +405,10 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
     assert scanner_definition not in output_lines
     assert current_self_excluded_scanner_definition not in output_lines
     assert previous_scanner_definition not in output_lines
+    assert legacy_scanner_definition not in output_lines
+    assert legacy_verification_definition not in output_lines
+    assert modified_legacy_scanner in output_lines
+    assert modified_legacy_verification in output_lines
     assert modified_scanner_with_extra_command in output_lines
     assert modified_previous_scanner_with_extra_command in output_lines
     assert arbitrary_grep_command in output_lines
@@ -381,6 +418,8 @@ def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitio
     assert historical_branch_prune_marker not in output_lines
     assert current_pattern_definition not in output_lines
     assert previous_pattern_definition not in output_lines
+    assert legacy_pattern_definition not in output_lines
+    assert legacy_pattern_override in output_lines
     assert current_pattern_override in output_lines
     assert previous_pattern_override in output_lines
     assert current_pattern_with_command in output_lines

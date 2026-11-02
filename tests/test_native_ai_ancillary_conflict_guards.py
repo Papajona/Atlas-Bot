@@ -16,6 +16,19 @@ SPEC.loader.exec_module(migration)
 
 
 class AncillaryWorkflowConflictGuardTests(unittest.TestCase):
+    def test_groq_research_adapter_allows_reviewed_stdlib_decimal_imports(self):
+        source = """from __future__ import annotations
+from decimal import Decimal, InvalidOperation
+
+async def groq_research_review(research, intelligence):
+    value = Decimal("1.25")
+    try:
+        return {"value": str(value)}
+    except InvalidOperation:
+        return {"status": "unavailable"}
+"""
+        migration.validate_groq_research_module(source)
+
     def test_retired_gemini_deployment_environment_is_refused_not_renamed(self):
         workflow = """name: paper deployment
 jobs:
