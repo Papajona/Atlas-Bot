@@ -124,7 +124,7 @@ def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(mo
     async def audit_once(_detail):
         raise RuntimeError("audit store unavailable")
 
-    async def safe_audit(event, detail):
+    async def safe_audit(event, detail, **_kwargs):
         fallback.append((event, detail))
 
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
@@ -224,7 +224,7 @@ def test_terminal_fill_audit_failure_does_not_replace_filled_result_with_no_trad
     async def audit_once(_detail):
         raise RuntimeError("audit database unavailable")
 
-    async def safe_audit(event, detail):
+    async def safe_audit(event, detail, **_kwargs):
         fallback.append((event, detail))
 
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
