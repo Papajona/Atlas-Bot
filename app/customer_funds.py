@@ -751,6 +751,34 @@ async def _invariant_snapshot(db, tol: Decimal):
     for customer_id, account_code, net in net_rows:
         if customer_id is not None:
             journal_net[(int(customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+
+    # The customer_id column and the customer embedded in LIABILITY account codes
+    # are independent persisted values. Reuse the grouped net_rows query so this
+    # integrity check does not issue a second full-history DISTINCT scan.
+    customer_account_mismatches = []
+    for line_customer_id, account_code, net in net_rows:
+        if line_customer_id is not None:
+            journal_net[(int(line_customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+
+        parts = str(account_code or "").split(":")
+        embedded_customer_id = None
+        if len(parts) == 5 and parts[:2] == ["LIABILITY", "CUSTOMER"]:
+            try:
+                embedded_customer_id = int(parts[2])
+            except (TypeError, ValueError):
+                embedded_customer_id = None
+        if line_customer_id is None or embedded_customer_id is None or int(line_customer_id) != embedded_customer_id:
+            customer_account_mismatches.append({
+                "journal_customer_id": int(line_customer_id) if line_customer_id is not None else None,
+                "account_code": str(account_code),
+                "account_customer_id": embedded_customer_id,
+            })
+    customer_account_mismatches.sort(
+        key=lambda item: (
+            item["account_code"],
+            -1 if item["journal_customer_id"] is None else item["journal_customer_id"],
+        )
+    )
     drifts = []
     ledgers = (await db.execute(
         select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == USDT)
@@ -770,7 +798,7 @@ async def _invariant_snapshot(db, tol: Decimal):
                     "journal_net": str(journal_net.get((int(ledger.customer_id), bucket), D("0"))),
                     "drift": str(diff),
                 })
-    return unbalanced, drifts, len(ledgers)
+    return unbalanced, drifts, customer_account_mismatches, len(ledgers)
 
 
 def _dialect_name(db) -> str:
@@ -793,13 +821,13 @@ async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int
     if _dialect_name(db) == "postgresql":
         async with SessionLocal() as snap:
             await snap.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-            unbalanced, drifts, checked = await _invariant_snapshot(snap, tol)
+            unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(snap, tol)
             await snap.rollback()
     else:
-        unbalanced, drifts, checked = await _invariant_snapshot(db, tol)
+        unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(db, tol)
 
     unbalanced = unbalanced[:limit]
-    ok = not unbalanced and not drifts
+    ok = not unbalanced and not drifts and not customer_account_mismatches
     report = {
         "ok": ok,
         "unbalanced_journals": [
@@ -808,15 +836,24 @@ async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int
         ],
         "bucket_drifts": drifts[:limit],
         "drift_count": len(drifts),
+        "customer_account_mismatches": customer_account_mismatches[:limit],
+        "customer_account_mismatch_count": len(customer_account_mismatches),
         "customers_checked": checked,
     }
     if not ok:
-        logger.critical("ledger_invariant_breach unbalanced=%s drifts=%s", len(unbalanced), len(drifts))
+        logger.critical(
+            "ledger_invariant_breach unbalanced=%s drifts=%s customer_account_mismatches=%s",
+            len(unbalanced), len(drifts), len(customer_account_mismatches),
+        )
         await record_ledger_incident(
             db,
             key="LEDGER_INVARIANT_BREACH",
             summary="Ledger invariant check failed: journals unbalanced or balances drifted from journals",
-            detail={"unbalanced": len(unbalanced), "drifts": drifts[:10]},
+            detail={
+                "unbalanced": len(unbalanced),
+                "drifts": drifts[:10],
+                "customer_account_mismatches": customer_account_mismatches[:10],
+            },
             customer_id=None,
         )
     return report
