@@ -779,6 +779,7 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
             "The limit for daily loss is 3 percent.",
             "The market hit the upper limit of its range.",
             "The upper limit is 123.",
+            "The exchange position limit was 100 contracts.",
         ],
     }
     observations = ordinary_text["key_observations"]
@@ -817,6 +818,17 @@ def test_groq_trade_review_allows_only_plan_matched_factual_price_references_and
         ],
     }
     groq_ai._validate_trade_context_review(matching_limit_trigger, packet=packet)
+    stop_limit_review = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Stop-loss limit order at 999 is the submitted stop."],
+    }
+    with pytest.raises(groq_ai.GroqAIError, match="outside the submitted trade plan"):
+        groq_ai._validate_trade_context_review(stop_limit_review, packet=packet)
+    matching_stop_limit = {
+        **VALID_TRADE_REVIEW,
+        "key_observations": ["Stop-loss limit order at 95 matches the submitted stop."],
+    }
+    groq_ai._validate_trade_context_review(matching_stop_limit, packet=packet)
 
     for command in (
         "Use the stop-loss at 95.",
