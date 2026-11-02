@@ -68,15 +68,21 @@ def test_customer_csv_export_serializes_journal_lines_for_authenticated_customer
     monkeypatch.setattr(main, "SessionLocal", lambda: db)
     monkeypatch.setattr(main, "get_customer", _async_value((profile, {"sub": "customer-23"})))
 
-    async def export_bounds(fake_db, customer_id, currency):
+    async def export_bounds(fake_db, customer_id, currency, *, max_journal_id=None):
         assert fake_db is db
         assert (customer_id, currency) == (23, "USDT")
+        assert max_journal_id in (None, 42)
         return 1, 42
 
-    async def statement(fake_db, customer_id, currency, limit, *, offset, max_journal_id):
+    async def statement(
+        fake_db, customer_id, currency, limit, *,
+        cursor_journal_id, cursor_line_no, max_journal_id,
+    ):
         assert fake_db is db
-        assert (customer_id, currency, limit, offset, max_journal_id) == (23, "USDT", 1000, 0, 42)
-        return db.entries[offset:offset + limit]
+        assert (customer_id, currency, limit, cursor_journal_id, cursor_line_no, max_journal_id) == (
+            23, "USDT", 1000, None, None, 42
+        )
+        return db.entries
 
     monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
     monkeypatch.setattr(main, "ledger_statement", statement)
@@ -171,16 +177,32 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
 
     pages = []
 
-    async def export_bounds(fake_db, customer_id, currency):
+    async def export_bounds(fake_db, customer_id, currency, *, max_journal_id=None):
         assert fake_db is db
         assert (customer_id, currency) == (23, "USDT")
+        assert max_journal_id in (None, 5000)
         return len(entries), 5000
 
-    async def statement(fake_db, customer_id, currency, limit, *, offset, max_journal_id):
+    async def statement(
+        fake_db, customer_id, currency, limit, *,
+        cursor_journal_id, cursor_line_no, max_journal_id,
+    ):
         assert fake_db is db
         assert (customer_id, currency, max_journal_id) == (23, "USDT", 5000)
-        pages.append((offset, limit))
-        return entries[offset:offset + limit]
+        pages.append((cursor_journal_id, cursor_line_no, limit))
+        eligible = [
+            entry for entry in entries
+            if entry["journal_id"] <= max_journal_id
+            and (
+                cursor_journal_id is None
+                or entry["journal_id"] < cursor_journal_id
+                or (
+                    entry["journal_id"] == cursor_journal_id
+                    and entry.get("line_no", 1) > cursor_line_no
+                )
+            )
+        ]
+        return sorted(eligible, key=lambda entry: (-entry["journal_id"], entry.get("line_no", 1)))[:limit]
 
     monkeypatch.setattr(main, "ledger_statement_export_bounds", export_bounds)
     monkeypatch.setattr(main, "ledger_statement", statement)
@@ -189,7 +211,9 @@ def test_customer_csv_export_includes_more_than_5000_journal_lines(monkeypatch):
     rows = _stream_body(response).decode("utf-8").splitlines()
     assert response.status_code == 200
     assert len(rows) == 5002  # header plus all 5,001 journal lines
-    assert rows[-1].split(",")[1] == "5000"
+    assert rows[1].split(",")[1] == "5000"
+    assert rows[-1].split(",")[1] == "0"
     assert response.headers["X-Atlas-Export-Row-Count"] == "5001"
     assert response.headers["X-Atlas-Export-Truncated"] == "false"
-    assert pages == [(0, 1000), (1000, 1000), (2000, 1000), (3000, 1000), (4000, 1000), (5000, 1000)]
+    assert [page[2] for page in pages] == [1000, 1000, 1000, 1000, 1000, 1000]
+    assert [page[0] for page in pages] == [None, 4001, 3001, 2001, 1001, 1]
