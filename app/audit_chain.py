@@ -129,7 +129,6 @@ async def append_audit_once(
     if not idempotency_fields or any(field not in (detail or {}) for field in idempotency_fields):
         raise ValueError("audit idempotency fields must be present in the detail payload")
 
-    audit_detail = await _rate_limited_detail(detail, actor_id)
     identity = {field: detail[field] for field in idempotency_fields}
     identity_payload = json.dumps(
         {"event": event, "identity": identity},
@@ -139,8 +138,9 @@ async def append_audit_once(
     )
     idempotency_key = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
 
-    # Fast indexed read before the global chain-head lock: ordinary recovery polls
-    # should not serialize all platform audit writers just to detect an existing event.
+    # Fast indexed read before Redis rate accounting and the global chain-head lock:
+    # ordinary recovery polls must not consume audit budget or make a network call
+    # when the idempotent event already exists.
     # Select only non-encrypted columns so damaged historical detail cannot block retry.
     existing = (
         await db.execute(
@@ -155,6 +155,9 @@ async def append_audit_once(
     if existing is not None:
         return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
 
+    # Only genuinely new event attempts count against the actor's audit rate budget.
+    # Keep Redis outside the database chain-head lock to avoid serializing other writers.
+    audit_detail = await _rate_limited_detail(detail, actor_id)
     sqlite_lock = _sqlite_audit_lock(db)
     if sqlite_lock is None:
         state = await _lock_chain_state(db)
