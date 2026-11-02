@@ -522,6 +522,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
 from .monitoring import TelemetryMiddleware, metrics_response, logger
 from .schemas import (
     MarketRequest,
+    CustomerPaperMarketRequest,
     ResearchMarketRequest,
     CustomerBotStartRequest,
     SmartTradeRequest,
@@ -8284,7 +8285,7 @@ async def admin_release_diagnostics(
 app.include_router(build_customer_paper_router(
     get_customer=get_customer,
     market_data=market_data,
-    market_request_type=MarketRequest,
+    market_request_type=CustomerPaperMarketRequest,
     group_mark_price_loader=_customer_paper_group_mark_prices,
 ))
 
