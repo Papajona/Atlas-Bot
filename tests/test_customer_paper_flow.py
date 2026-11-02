@@ -19,6 +19,7 @@ from app.customer_paper_flow import (
 )
 from app.customer_paper_ledger import get_customer_paper_balances
 from app.customer_paper_lifecycle import (
+    CustomerPaperCashShortfall,
     CustomerPaperOrderConflict,
     get_customer_paper_positions,
     submit_customer_paper_order,
@@ -692,7 +693,6 @@ def test_manual_paper_initialization_reuses_the_configured_seed_helper():
 
 def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy(monkeypatch):
     import app.customer_paper_flow as flow
-    from app.customer_paper_lifecycle import CustomerPaperOrderConflict
 
     _, state, order, market = _paper_fill_test_context()
     monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
@@ -714,7 +714,7 @@ def test_concurrent_paper_cash_spend_expires_unaffordable_pending_buy(monkeypatc
     )
 
     async def cash_was_spent_by_another_fill(**kwargs):
-        raise CustomerPaperOrderConflict("paper fill would overdraw the customer's paper cash")
+        raise CustomerPaperCashShortfall("paper fill would overdraw the customer's paper cash")
 
     expired = {}
 
@@ -1516,3 +1516,75 @@ def test_customer_paper_account_initialization_logs_only_safe_failure_metadata(m
     assert "seed-secret" not in safe_text
     assert "db.internal" not in safe_text
     assert "RuntimeError" in caplog.text
+
+
+def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    manual_position = {
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "1",
+        "execution_owner": "manual_customer_api",
+    }
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: {"currency": "USDT"})
+
+    async def fake_ensure_customer_paper_account(_customer_id, currency):
+        assert currency == "USDT"
+        return {"currency": "USDT", "paper_cash": "1000", "real_funds_used": False}
+
+    async def no_pending_paper_recovery(*_args, **_kwargs):
+        return None
+
+    async def positions_for_customer(**_kwargs):
+        return [manual_position]
+
+    async def must_not_submit(**_kwargs):
+        raise AssertionError("strategy SELL must not be submitted against a manual-owned position")
+
+    monkeypatch.setattr(flow, "ensure_customer_paper_account", fake_ensure_customer_paper_account)
+    monkeypatch.setattr(flow, "process_customer_paper_orders", no_pending_paper_recovery)
+    monkeypatch.setattr(flow, "get_customer_paper_positions", positions_for_customer)
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+
+    result = asyncio.run(flow.execute_customer_paper_spot_signal(
+        customer_id=12007,
+        req=req,
+        df=pd.DataFrame(),
+        market_context={},
+        side="SELL",
+        quantity="1",
+        stop_loss_price=None,
+        take_profit_price=None,
+        strategy="ownership-regression",
+    ))
+    assert result["decision"] == "NO_TRADE"
+    assert result["status"] == "NO_TRADE"
+    assert result["reason"] == "manual_position_requires_manual_execution"
+
+    # Missing ownership is conservatively manual-owned.
+    manual_position.pop("execution_owner")
+    result_without_owner = asyncio.run(flow.execute_customer_paper_spot_signal(
+        customer_id=12007,
+        req=req,
+        df=pd.DataFrame(),
+        market_context={},
+        side="SELL",
+        quantity="1",
+        stop_loss_price=None,
+        take_profit_price=None,
+        strategy="ownership-regression",
+    ))
+    assert result_without_owner["decision"] == "NO_TRADE"
+    assert result_without_owner["reason"] == "manual_position_requires_manual_execution"
+
+
+def test_customer_paper_overdraw_conflict_keeps_safe_recovery_signal():
+    import app.customer_paper_flow as flow
+
+    async def fail_overdraw():
+        raise CustomerPaperOrderConflict("paper ledger balance would overdraw")
+
+    with pytest.raises(CustomerPaperFlowBlocked, match="overdraw"):
+        asyncio.run(flow._paper_call(fail_overdraw(), "append paper fill"))
