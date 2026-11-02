@@ -11,6 +11,7 @@ on:
       - 'app/execution.py'
       - 'tests/test_opening_balance_journaled.py'
       - 'tests/test_audit_chain_lock_order.py'
+      - '.github/workflows/propagate-native-ai-all-branches.yml'
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
