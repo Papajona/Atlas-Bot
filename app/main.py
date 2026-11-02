@@ -4422,6 +4422,8 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
             f"Ledger export exceeds the {_LEDGER_EXPORT_MAX_ROWS}-row limit; request a narrower statement",
         )
 
+    # Bound active spool files per worker and fail fast rather than accumulating
+    # disk usage under concurrent export requests.
     acquired = await asyncio.to_thread(_LEDGER_EXPORT_SEMAPHORE.acquire, True, 2.0)
     if not acquired:
         raise HTTPException(429, "Too many concurrent ledger exports; retry shortly")
