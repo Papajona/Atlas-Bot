@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+from urllib.parse import urlencode
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
@@ -262,10 +263,13 @@ def _load_open_pull_request_heads(repository: str) -> set[str]:
 def _has_open_pull_request_for_branch(repository: str, branch_name: str) -> bool:
     """Recheck one branch with complete REST pagination immediately before deletion."""
     owner = repository.split("/", 1)[0]
+    query = urlencode(
+        {"state": "open", "head": f"{owner}:{branch_name}", "per_page": 100}
+    )
     result = _run(
         [
             "gh", "api", "--paginate", "--slurp",
-            f"repos/{repository}/pulls?state=open&head={owner}:{branch_name}&per_page=100",
+            f"repos/{repository}/pulls?{query}",
         ],
         check=False,
     )
