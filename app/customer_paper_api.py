@@ -510,6 +510,27 @@ def build_customer_paper_router(
 
             bars = _market_bar_contexts(df, symbol=order["symbol"], timeframe=timeframe)
             by_timestamp = {bar["timestamp"]: bar for bar in bars}
+
+            # Never replay an order against revised or substituted submission history.
+            # The immutable order intent records the exact completed candle hash seen
+            # when the customer submitted it. Missing history is a reconciliation
+            # condition, not permission to infer a new market context.
+            submission_bar = by_timestamp.get(submitted_at)
+            expected_submission_sha = str(metadata.get("submission_bar_sha256") or "").strip()
+            actual_submission_sha = (
+                str(submission_bar.get("bar_data_sha256") or "").strip()
+                if isinstance(submission_bar, dict) else ""
+            )
+            if (
+                not expected_submission_sha
+                or not actual_submission_sha
+                or actual_submission_sha != expected_submission_sha
+            ):
+                raise HTTPException(
+                    409,
+                    "Persisted submission candle no longer matches the immutable order context; reconcile the order before advancing",
+                )
+
             evaluation_end = min(latest_at, ttl_at)
 
             # Never select only the latest candle. Every eligible candle from the
