@@ -2,7 +2,7 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_HALF_EVEN, ROUND_UP
 import json
 import logging
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from .config import settings
 from .db import AppState, CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
@@ -663,12 +663,13 @@ async def ledger_statement(
     currency: str = USDT,
     limit: int | None = 100,
     *,
-    offset: int = 0,
+    cursor_journal_id: int | None = None,
+    cursor_line_no: int | None = None,
     max_journal_id: int | None = None,
 ) -> list[dict]:
-    """Return a stable, optionally page-bounded view of customer journal lines."""
-    if offset < 0:
-        raise ValueError("ledger statement offset must be non-negative")
+    """Return a bounded customer journal page using an index-friendly keyset cursor."""
+    if (cursor_journal_id is None) != (cursor_line_no is None):
+        raise ValueError("ledger statement keyset cursor requires both journal ID and line number")
     statement = select(LedgerJournal, LedgerJournalLine).join(
         LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id
     ).where(
@@ -677,18 +678,24 @@ async def ledger_statement(
     )
     if max_journal_id is not None:
         statement = statement.where(LedgerJournal.id <= max_journal_id)
+    if cursor_journal_id is not None:
+        statement = statement.where(or_(
+            LedgerJournal.id < cursor_journal_id,
+            and_(
+                LedgerJournal.id == cursor_journal_id,
+                LedgerJournalLine.line_no > cursor_line_no,
+            ),
+        ))
     statement = statement.order_by(
-        LedgerJournal.created_at.desc(),
         LedgerJournal.id.desc(),
-        LedgerJournalLine.line_no,
+        LedgerJournalLine.line_no.asc(),
     )
     if limit is not None:
         statement = statement.limit(limit)
-    if offset:
-        statement = statement.offset(offset)
     rows = (await db.execute(statement)).all()
     return [{
-        "journal_id": j.id, "entry_type": j.entry_type, "reference_type": j.reference_type,
+        "journal_id": j.id, "line_no": line.line_no,
+        "entry_type": j.entry_type, "reference_type": j.reference_type,
         "reference_id": j.reference_id, "account_code": line.account_code,
         # Ledger statement amounts are serialized as exact decimal strings, never floats.
         "debit": format(D(str(line.debit)), "f"),
@@ -703,10 +710,14 @@ async def ledger_statement(
 
 
 async def ledger_statement_export_bounds(
-    db, customer_id: int, currency: str = USDT
+    db,
+    customer_id: int,
+    currency: str = USDT,
+    *,
+    max_journal_id: int | None = None,
 ) -> tuple[int, int | None]:
-    """Capture row count and journal-id ceiling for a stable paginated export."""
-    result = await db.execute(
+    """Capture the export row count and optionally verify it under the same ID ceiling."""
+    statement = (
         select(func.count(), func.max(LedgerJournal.id))
         .select_from(LedgerJournal)
         .join(LedgerJournalLine, LedgerJournalLine.journal_id == LedgerJournal.id)
@@ -715,9 +726,11 @@ async def ledger_statement_export_bounds(
             LedgerJournal.currency == currency,
         )
     )
-    row_count, max_journal_id = result.one()
+    if max_journal_id is not None:
+        statement = statement.where(LedgerJournal.id <= max_journal_id)
+    row_count, observed_max_id = (await db.execute(statement)).one()
     return int(row_count or 0), (
-        int(max_journal_id) if max_journal_id is not None else None
+        int(observed_max_id) if observed_max_id is not None else None
     )
 
 
