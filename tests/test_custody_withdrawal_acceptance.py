@@ -22,6 +22,7 @@ def encryption_key(monkeypatch):
 
 from app.customer_funds import (
     customer_balance,
+    ledger_invariant_report,
     post_deposit,
     reserve_withdrawal,
     release_withdrawal,
@@ -125,6 +126,14 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                 ).scalars().all()
                 idempotency = [j.idempotency_key for j in journals]
                 assert len(idempotency) == len(set(idempotency))
+
+                # Balances and entry types can look correct while the posted
+                # journal targets the wrong account or amount. Reconcile the
+                # authoritative buckets against their journal postings too.
+                invariant = await ledger_invariant_report(db)
+                assert invariant["ok"], invariant
+                assert invariant["unbalanced_journals"] == []
+                assert invariant["bucket_drifts"] == []
 
         finally:
             await engine.dispose()

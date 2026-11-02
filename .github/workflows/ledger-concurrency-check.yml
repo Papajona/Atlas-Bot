@@ -5,6 +5,7 @@ on:
     paths:
       - 'app/customer_funds.py'
       - 'app/audit_chain.py'
+      - 'tests/test_custody_withdrawal_acceptance.py'
       - 'app/db.py'
       - 'app/withdrawal_security.py'
       - 'app/main.py'
