@@ -264,6 +264,8 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
     )
     if customer_id is not None:
         outcomes_q = outcomes_q.where(StrategyOutcome.customer_id == customer_id)
+    else:
+        outcomes_q = outcomes_q.where(StrategyOutcome.customer_id.is_(None))
     returns = [float(v) for v in (await db.execute(outcomes_q)).scalars().all() if v is not None]
     losses = 0
     for value in returns:
@@ -282,6 +284,8 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
     )
     if customer_id is not None:
         recent_q = recent_q.where(OrderCommand.customer_id == customer_id)
+    else:
+        recent_q = recent_q.where(OrderCommand.customer_id.is_(None))
     commands = (await db.execute(recent_q)).scalars().all()
     if commands:
         errors = sum(1 for row in commands if str(row.error or "").strip() or str(row.status).upper() in {"ERROR", "FAILED", "REJECTED"})
