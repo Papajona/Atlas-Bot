@@ -229,7 +229,7 @@ async def _run_trade_safety_review(packet: dict) -> dict:
         dual_ai_trade_safety_review(packet), timeout=native_timeout
     )
 
-def _validated_customer_paper_mark(def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
+def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
     """Return a positive bid and timestamp only when the quote is demonstrably current."""
     if not isinstance(context, dict):
         raise ValueError("current mark context is unavailable")
