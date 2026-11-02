@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from app import main
 
 
@@ -272,7 +274,7 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
-    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: None)
+    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: True)
 
     created = asyncio.run(main._audit_customer_paper_order_submitted_once({
         "customer_id": 501,
