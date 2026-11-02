@@ -321,10 +321,13 @@ async def claim_external_audit_delivery(
                         await db.flush()
                     if delivery.status == "DELIVERED":
                         return False
+                    lease_until = delivery.lease_until
+                    if lease_until is not None and lease_until.tzinfo is None:
+                        lease_until = lease_until.replace(tzinfo=timezone.utc)
                     if (
                         delivery.status == "IN_FLIGHT"
-                        and delivery.lease_until is not None
-                        and delivery.lease_until > now
+                        and lease_until is not None
+                        and lease_until > now
                     ):
                         return False
                     delivery.status = "IN_FLIGHT"
