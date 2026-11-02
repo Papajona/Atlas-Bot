@@ -903,6 +903,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 if episode.entry_quantity <= 0:
                     episode.entry_quantity = abs(float(position.quantity))
                 episode.status = "OPEN"
+                episode.exit_price = 0.0
                 episode.exit_at = None
                 episode.closing_trade_id = None
         if episode is not None:
@@ -915,7 +916,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.entry_at = utcnow()
                 episode.entry_price = float(fill_price)
                 episode.entry_quantity = 0.0
-                episode.exit_price = None
+                episode.exit_price = 0.0
                 episode.exit_at = None
                 episode.closing_trade_id = None
                 episode.gross_pnl = 0.0
