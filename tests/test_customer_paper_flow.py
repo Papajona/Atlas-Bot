@@ -1186,7 +1186,29 @@ def test_customer_paper_submission_audit_is_distinct_and_idempotent(monkeypatch)
     async def capture_audit(event, detail, actor_id=None):
         events.append((event, detail, actor_id))
 
-    monkeypatch.setattr(main, "_safe_audit", capture_audit)
+    class FakeAuditSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+
+    audit_attempts = []
+    persist_results = [
+        RuntimeError("temporary audit database outage"),
+        (SimpleNamespace(event_hash="a" * 64), True),
+        (SimpleNamespace(event_hash="a" * 64), False),
+    ]
+
+    async def append_once(_db, **kwargs):
+        audit_attempts.append(kwargs)
+        result = persist_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(main, "SessionLocal", FakeAuditSession)
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: None)
     execution = {
         "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
         "order_submission": {
@@ -1204,11 +1226,12 @@ def test_customer_paper_submission_audit_is_distinct_and_idempotent(monkeypatch)
         bot_id=789, symbol="BTC/USDT",
     ))
     assert pending is True
-    assert len(events) == 1
-    event, detail, actor_id = events[0]
-    assert event == "CUSTOMER_PAPER_ORDER_SUBMITTED"
-    assert actor_id is None
-    assert detail == {
+    # A transient storage error does not mark the obligation as delivered.
+    assert len(audit_attempts) == 1
+    event_call = audit_attempts[0]
+    assert event_call["event"] == "CUSTOMER_PAPER_ORDER_SUBMITTED"
+    assert event_call["idempotency_key"] == "customer-paper-order-submitted:123:cp-test-submission"
+    assert event_call["detail"] == {
         "customer_id": 123,
         "trading_account_id": 456,
         "bot_id": 789,
@@ -1218,18 +1241,48 @@ def test_customer_paper_submission_audit_is_distinct_and_idempotent(monkeypatch)
         "side": "BUY",
         "quantity": "0.25",
         "submission_bar_timestamp": "2026-11-02T09:00:00+00:00",
-        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "order_role": "STRATEGY",
         "mode": "CUSTOMER_PAPER",
     }
+    assert event_call["actor_id"] == "system"
 
-    # An idempotent replay of the same pending intent must not duplicate the
-    # accepted-submission audit event.
+    # Replays retry after transient storage failure, then stable-key deduplication
+    # prevents a second chain row after the first successful persistence.
     execution["order_submission"]["newly_submitted"] = False
     assert asyncio.run(main._audit_customer_paper_order_submission(
         execution=execution, customer_id=123, trading_account_id=456,
         bot_id=789, symbol="BTC/USDT",
     )) is True
-    assert len(events) == 1
+    assert len(audit_attempts) == 2
+    assert asyncio.run(main._audit_customer_paper_order_submission(
+        execution=execution, customer_id=123, trading_account_id=456,
+        bot_id=789, symbol="BTC/USDT",
+    )) is True
+    assert len(audit_attempts) == 3
+    assert audit_attempts[1]["idempotency_key"] == audit_attempts[2]["idempotency_key"]
+
+    protective = {
+        "status": "PROTECTIVE_EXIT_PENDING",
+        "execution": {
+            "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+            "order_submission": {
+                "newly_submitted": True,
+                "client_order_id": "cpx-protective-1",
+                "order_id": "paper-protective-1",
+                "side": "SELL",
+                "quantity": "1",
+                "submission_bar_timestamp": "2026-11-02T09:00:00+00:00",
+                "order_role": "PROTECTIVE_EXIT",
+            },
+        },
+    }
+    persist_results.append((SimpleNamespace(event_hash="b" * 64), True))
+    assert asyncio.run(main._audit_customer_paper_order_submission(
+        execution=protective, customer_id=123, trading_account_id=456,
+        bot_id=789, symbol="BTC/USDT",
+    )) is True
+    assert audit_attempts[-1]["detail"]["order_role"] == "PROTECTIVE_EXIT"
+    assert len(audit_attempts) == 4
 
     assert asyncio.run(main._audit_customer_paper_order_submission(
         execution={"status": "WAITING_FOR_FILL_LATENCY"},
