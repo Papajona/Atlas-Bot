@@ -7148,6 +7148,34 @@ def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
     return bool(PROVIDER_RE.search(contents))
 
 
+def _install_canonical_native_ai(canonical_source: str) -> None:
+    """Replace branch-local veto logic with the exact reviewed Native AI source.
+
+    A Groq evidence envelope is advisory, but its presence is not proof that a
+    branch retained the canonical data-quality, protective-price and veto checks.
+    The pinned source must include the reviewed Groq evidence envelope and is the
+    sole accepted implementation of the Native AI authority module.
+    """
+    path = "app/native_ai.py"
+    target = ROOT / path
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    if existing and _has_conflicting_provider_wiring(path, existing):
+        raise MigrationError(
+            f"{path} contains retired or hosted provider wiring; preserving the branch"
+        )
+    if not isinstance(canonical_source, str) or not canonical_source.strip():
+        raise MigrationError("pinned canonical app/native_ai.py is empty; preserving the branch")
+    try:
+        ast.parse(canonical_source, filename=path)
+    except SyntaxError as exc:
+        raise MigrationError(
+            f"pinned canonical {path} is not valid Python; preserving the branch"
+        ) from exc
+    # This is deliberate replacement, not a whole-branch overwrite: the workflow
+    # installs only this safety-authority module from the pinned reviewed commit.
+    write_text(path, canonical_source)
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -7156,24 +7184,7 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py", "app/prompt_safety.py"):
         target = ROOT / path
         if path == "app/native_ai.py":
-            # Native AI is the sole trade-safety authority. Do not preserve a
-            # branch-local evaluator merely because it mentions the allowed Groq
-            # advisory envelope: install the pinned, reviewed implementation so
-            # invalid prices, incomplete evidence, and malformed Groq reviews
-            # retain the canonical fail-closed veto behavior.
-            existing = target.read_text(encoding="utf-8") if target.exists() else ""
-            if existing and _has_conflicting_provider_wiring(path, existing):
-                raise MigrationError(
-                    f"{path} contains retired or hosted provider wiring; preserving the branch"
-                )
-            canonical_native_ai = canonical_text(canonical_commit, path)
-            try:
-                ast.parse(canonical_native_ai, filename=path)
-            except SyntaxError as exc:
-                raise MigrationError(
-                    f"pinned canonical {path} is not valid Python; preserving the branch"
-                ) from exc
-            write_text(path, canonical_native_ai)
+            _install_canonical_native_ai(canonical_text(canonical_commit, path))
         elif not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
         elif path == "app/groq_ai.py":
