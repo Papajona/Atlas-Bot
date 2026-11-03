@@ -464,3 +464,74 @@ def test_active_lease_upsert_does_not_increment_and_preserves_corrupt_quarantine
     assert "CORRUPT" in str(captured["params"])
     assert "PENDING" in str(captured["params"])
     assert captured["committed"] is True
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_corrupt_retry_snapshot_restoration_requires_matching_authoritative_identity(monkeypatch, dialect):
+    captured = {}
+
+    class FakeResult:
+        rowcount = 1
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            compiled = statement.compile(dialect=dialect)
+            captured["sql"] = str(compiled)
+            captured["params"] = compiled.params
+            return FakeResult()
+
+        async def commit(self):
+            captured["committed"] = True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    original = {
+        "customer_id": 717,
+        "client_order_id": "corrupt-original-order",
+        "status": "SUBMITTED",
+        "execution_status": "SUBMITTED",
+    }
+
+    restored = asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+        customer_id=717,
+        client_order_id="corrupt-original-order",
+        original_submission_detail=original,
+        authoritative_source="ORDER_LEDGER",
+    ))
+
+    sql = captured["sql"]
+    assert restored is True
+    assert "customer_paper_submission_audit_retries.status =" in sql
+    assert "submission_detail" in sql.split("SET", 1)[1]
+    assert captured["committed"] is True
+    assert "CORRUPT" in str(captured["params"])
+    assert "PENDING" in str(captured["params"])
+    assert "RestoredFromORDER_LEDGER" in str(captured["params"])
+
+
+@pytest.mark.parametrize(
+    "customer_id,client_order_id,detail,source",
+    [
+        (717, "corrupt-original-order", {"customer_id": 717, "client_order_id": "different-order"}, "ORDER_LEDGER"),
+        (717, "corrupt-original-order", {"customer_id": 718, "client_order_id": "corrupt-original-order"}, "AUDIT_LOG"),
+        (717, "corrupt-original-order", {"customer_id": 717, "client_order_id": "corrupt-original-order"}, "LATEST_EXECUTION"),
+    ],
+)
+def test_corrupt_retry_snapshot_restoration_rejects_unverified_or_mismatched_detail(
+    monkeypatch, customer_id, client_order_id, detail, source
+):
+    def unexpected_session():
+        raise AssertionError("invalid restoration must not access the database")
+
+    monkeypatch.setattr(main, "SessionLocal", unexpected_session)
+    with pytest.raises(ValueError):
+        asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            original_submission_detail=detail,
+            authoritative_source=source,
+        ))
