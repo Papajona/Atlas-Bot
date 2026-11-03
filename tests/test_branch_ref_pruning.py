@@ -1660,7 +1660,7 @@ def test_fork_merge_cannot_authorize_deletion_of_same_named_local_branch():
 def test_same_tree_merge_child_of_main_ancestor_is_safe_to_retire(monkeypatch):
     outputs = iter([
         "same-tree-sha\nside-parent main-parent\n",
-        "different-side-tree\n",
+        # The ancestor parent has the same tree as the branch tip.
         "same-tree-sha\n",
     ])
 
