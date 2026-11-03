@@ -36,8 +36,10 @@ def test_research_trial_report_separates_dsr_comparable_and_all_recorded_trials(
         "trend@sha256:b",
     ]
     assert fields["ai_trial_labels"] == ["ai@current-model", "ai@prior-model"]
-    assert fields["cumulative_trials"] == 3
+    assert fields["cumulative_trials"] == 5
     assert fields["cumulative_recorded_trials"] == 5
+    assert fields["cumulative_fixed_signal_trials"] == 3
+    assert fields["dsr_comparable_trial_count"] == 3
     assert fields["cumulative_ai_trials"] == 2
 
 
