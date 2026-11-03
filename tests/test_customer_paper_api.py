@@ -90,7 +90,8 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
-def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypatch):
+@pytest.mark.parametrize("bar_provenance_matches", [True, False])
+def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monkeypatch, bar_provenance_matches):
     frozen_now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     bar_at = frozen_now - timedelta(minutes=1)
     _freeze_paper_api_clock(monkeypatch, frozen_now)
@@ -146,6 +147,12 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         timeframe="1m",
         bar_at=bar_at,
     )
+    expected_bar = next(
+        bar for bar in paper_api._market_bar_contexts(
+            frame, symbol="BTC/USDT", timeframe="1m"
+        ) if bar["timestamp"] == bar_at
+    )
+    registration_calls = []
 
     async def get_customer_paper_order(*, customer_id, client_order_id):
         assert customer_id == 99031
@@ -158,7 +165,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     async def get_prior_fill(**kwargs):
         assert kwargs["customer_id"] == 99031
         assert kwargs["client_order_id"] == "manual-replay-race"
-        # Existing-fill replay uses the deterministic key before registering a budget.
+        # Existing-fill lookup identifies the immutable fill, but registration must
+        # still compare the incoming candle against its durable shared-bar budget.
         assert kwargs["bar_key"] == expected_bar_key
         fill_lookups.append(kwargs)
         assert shared_state["fills"]
@@ -212,9 +220,19 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         return None
 
     async def register_bar(**kwargs):
+        registration_calls.append(kwargs)
         assert kwargs["venue"] == "binance"
         assert kwargs["symbol"] == "BTC/USDT"
-        return {"bar_key": "manual-replay-bar"}
+        assert kwargs["bar_at"] == bar_at
+        durable_digest = (
+            expected_bar["bar_data_sha256"]
+            if bar_provenance_matches else "0" * 64
+        )
+        if kwargs["bar_data_sha256"] != durable_digest:
+            raise paper_api.CustomerPaperOrderConflict(
+                "completed-bar provenance conflicts with immutable shared paper budget"
+            )
+        return {"bar_key": expected_bar_key}
 
     customer_session = DummySession()
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: customer_session)
@@ -239,7 +257,17 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         headers={"Authorization": "Bearer replay-customer"},
     )
 
+    if not bar_provenance_matches:
+        assert response.status_code == 409, response.text
+        assert len(registration_calls) == 1
+        assert registration_calls[0]["bar_data_sha256"] == expected_bar["bar_data_sha256"]
+        assert expiry_calls == []
+        assert shared_state["transitions"] == []
+        assert [fill["fill_id"] for fill in shared_state["fills"]] == ["immutable-prior-fill"]
+        return
+
     assert response.status_code == 200, response.text
+    assert len(registration_calls) == 1
     assert customer_session.commit_count == 1
     payload = response.json()
     assert payload["status"] == "REPLAYED"
