@@ -197,21 +197,17 @@ async def _fetch_verified_market_snapshot(
             raise HTTPException(409, "Persisted paper-order submission timestamp must be timezone-aware")
         now_utc = datetime.now(timezone.utc)
         earliest_utc = earliest.astimezone(timezone.utc)
-        replay_age_seconds = max(0.0, (now_utc - earliest_utc).total_seconds())
-        # The endpoint's hard cap applies to the immutable submission candle and
-        # replay candles. Once that candle itself is outside the last 30 days,
-        # complete replay is impossible and we fail closed.
-        if replay_age_seconds > 30 * 86_400:
+        # Replay also needs the complete pre-fill volatility context. The 30-day
+        # provider window must contain both that history and the immutable submission
+        # candle; checking only the submission age can accept orders whose required
+        # 20-return context has already rolled out of the provider window.
+        required_start = earliest_utc - timedelta(seconds=required_history_seconds)
+        supported_start = now_utc - timedelta(days=30)
+        if required_start < supported_start:
             raise HTTPException(
                 409,
-                "Paper-order replay exceeds the supported 30-day candle window; reconcile the order before advancing",
+                "Paper-order replay requires pre-fill volatility history older than the supported 30-day candle window; reconcile the order before advancing",
             )
-        # Retain the available pre-submission context where it fits, then include
-        # the submission bar and subsequent replay bars. If context plus replay
-        # exceeds the provider cap while the submission candle remains available,
-        # request the rolling 30-day window. The caller still verifies the exact
-        # immutable submission-bar hash before processing any fill.
-        required_start = earliest_utc - timedelta(seconds=required_history_seconds)
         anchored_seconds = max(0.0, (now_utc - required_start).total_seconds())
         anchored_days = max(1, int(math.ceil(anchored_seconds / 86_400)))
         days = min(30, max(days, anchored_days))
@@ -867,6 +863,19 @@ def build_customer_paper_router(
                     bar_key=bar_key,
                 )
                 if prior_fill is not None:
+                    # An existing fill must not bypass immutable candle provenance.
+                    # Its original fill path already created this shared budget, so
+                    # idempotent registration verifies digest, volume/capacity,
+                    # timestamp and market identity before the fill can be replayed.
+                    await register_customer_paper_market_bar(
+                        venue=order_venue,
+                        symbol=order["symbol"],
+                        timeframe=timeframe,
+                        bar_at=bar["timestamp"],
+                        bar_data_sha256=bar["bar_data_sha256"],
+                        base_volume=_decimal_text(bar["values"]["volume"]),
+                        participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
+                    )
                     return await _replay_existing_fill(prior_fill)
 
                 # A candidate fill must pass the entire pre-fill volatility window
