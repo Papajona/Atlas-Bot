@@ -210,15 +210,19 @@ async def _fetch_verified_market_snapshot(
             earliest_utc,
             earliest_utc - timedelta(seconds=prefill_context_bars * timeframe_seconds),
         )
-        supported_start = now_utc - timedelta(days=30)
+        # Daily orders can remain pending for 24 bars while fill pricing still
+        # requires 19 completed returns before the first eligible candle. Support
+        # that full replay span rather than stranding valid orders after ~11 days.
+        maximum_replay_days = 60
+        supported_start = now_utc - timedelta(days=maximum_replay_days)
         if required_start < supported_start:
             raise HTTPException(
                 409,
-                "Paper-order replay requires pre-fill volatility history older than the supported 30-day candle window; reconcile the order before advancing",
+                "Paper-order replay requires pre-fill volatility history older than the supported 60-day candle window; reconcile the order before advancing",
             )
         anchored_seconds = max(0.0, (now_utc - required_start).total_seconds())
         anchored_days = max(1, int(math.ceil(anchored_seconds / 86_400)))
-        days = min(30, max(days, anchored_days))
+        days = min(maximum_replay_days, max(days, anchored_days))
     else:
         # Initial, unanchored submissions retain the endpoint's historical
         # 30-day cap. TTL/latency settings can calculate 31 bars for daily
