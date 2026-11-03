@@ -1589,11 +1589,9 @@ def test_merged_pr_records_require_exact_same_repository_head_identity():
                 "number": 352,
                 "merged_at": "2026-11-02T12:02:00Z",
                 "merge_commit_sha": "deleted-fork-merge",
-                "head": {
-                    "ref": "feature/shared-name",
-                    "sha": "same-head-sha",
-                    "repo": None,
-                },
+                # Deleted forks can omit both the head ref and SHA. They are
+                # not eligible to prove deletion of a same-named local branch.
+                "head": {"repo": None},
             },
         ],
         repository="Papajona/Atlas-Bot",
