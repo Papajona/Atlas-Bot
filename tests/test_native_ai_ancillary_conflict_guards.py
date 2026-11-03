@@ -165,13 +165,14 @@ gcloud run deploy atlas \
         self.assertNotIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
 
     def test_retired_provider_block_refuses_single_quoted_shared_secret_literal(self):
-        token = '${AI_SECRET_ARGS}'
-        shell = f'''AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3"
-if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
-  AI_SECRET_ARGS='{token}'
-fi
-gcloud run deploy atlas --set-secrets "${AI_SECRET_ARGS}"
-'''
+        token = "$" + "{AI_SECRET_ARGS}"
+        shell = (
+            'AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3"\n'
+            'if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
+            "  AI_SECRET_ARGS='" + token + "'\n"
+            "fi\n"
+            'gcloud run deploy atlas --set-secrets "${AI_SECRET_ARGS}"\n'
+        )
         with self.assertRaisesRegex(
             migration.MigrationError,
             "single-quoted shared-secret literal inside a retired-provider conditional",
