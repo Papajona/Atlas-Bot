@@ -1107,7 +1107,7 @@ async def record_customer_paper_fill(
                             "current correlation-group position mark is not finite and positive"
                         )
                     # A price drop must not free cap headroom below the booked entry cost.
-                    # either its booked average entry or its latest verified market mark.
+                    # Value exposure at the higher of its booked average entry or latest verified market mark.
                     existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
 
                 projected_notional = existing_group_notional + amount * fill_price
