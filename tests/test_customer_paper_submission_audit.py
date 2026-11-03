@@ -81,7 +81,7 @@ def test_replayed_pending_order_repairs_missing_audit_without_marking_new(monkey
 
     async def audit_once(detail):
         attempts.append(detail)
-        return False  # The idempotent audit row already exists.
+        return True  # The existing outbox event is already externally delivered.
 
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
@@ -514,7 +514,7 @@ def test_external_submission_audit_is_retried_when_database_event_already_exists
         "client_order_id": "cp-replayed-external-audit",
     }))
 
-    assert created is False and replayed is False
+    assert created is True and replayed is True
     assert captured["idempotency_fields"] == ("customer_id", "client_order_id")
     assert len(emitted) == 2  # One failed attempt and one successful retry, not every replay.
     assert emitted[0]["event_hash"] == emitted[1]["event_hash"] == "stable-event-hash"
@@ -591,12 +591,12 @@ def test_damaged_encrypted_audit_payload_does_not_block_existing_order_replay(mo
         lambda **_kwargs: (_ for _ in ()).throw(AssertionError("damaged payload must not reach sink")),
     )
 
-    created = asyncio.run(main._audit_customer_paper_order_submitted_once({
-        "customer_id": 501,
-        "client_order_id": "cp-damaged-encrypted-audit",
-    }))
+    with pytest.raises(main.CustomerPaperSubmissionAuditPayloadCorrupt):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-damaged-encrypted-audit",
+        }))
 
-    assert created is False
     assert finished == [("claim-damaged", False, "RuntimeError")]
     assert any(
         record.getMessage() == "customer paper audit payload could not be loaded for external delivery"
@@ -674,3 +674,71 @@ def test_active_delivery_lease_does_not_increment_submission_retry_attempt(monke
     assert persisted[0]["error_type"] == "CustomerPaperSubmissionAuditDeliveryInFlight"
     assert persisted[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
     assert fallback == []
+
+
+def test_transient_audit_payload_read_failure_is_retryable_not_corrupt(monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise SQLAlchemyError("temporary audit database read failure")
+
+    finished = []
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=127,
+            event_hash="temporary-read-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-transient"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+    result = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-transient-audit-read",
+    }))
+
+    assert result is False
+    assert finished == [("claim-transient", False, "SQLAlchemyError")]
+
+
+def test_existing_delivered_outbox_row_reports_delivery_complete(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=128,
+            event_hash="delivered-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return None
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+
+    assert asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-already-delivered",
+    })) is True
