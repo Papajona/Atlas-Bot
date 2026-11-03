@@ -506,6 +506,16 @@ gcloud run services update atlas-api --set-secrets="DATABASE_URL=atlas-db:latest
         )
 
 
+    def test_single_quoted_groq_secret_list_is_rejected_before_literal_deployment(self):
+        shell = """AI_SECRET_ARGS='GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}'
+gcloud run deploy atlas --set-secrets="${AI_SECRET_ARGS}"
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "single-quoted AI_SECRET_ARGS value containing shell expansions",
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
     def test_inline_groq_assignment_and_else_header_is_preserved(self):
         shell = """SECRET_GROQ_REF="${SECRET_GROQ_REF:-}"
 GROQ_SECRET_ARG=""
