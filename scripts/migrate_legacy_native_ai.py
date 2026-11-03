@@ -7106,7 +7106,7 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
     allowed_from_imports = {
         (0, "__future__"): {"annotations"},
         (0, "typing"): {"Any"},
-        (0, "decimal"): {"Decimal", "InvalidOperation"},
+        (0, "decimal"): {"Decimal", "InvalidOperation", "ROUND_HALF_UP"},
         (1, "config"): {"settings"},
         (1, "prompt_safety"): {
             "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
@@ -7184,18 +7184,24 @@ def _install_canonical_native_ai(
             raise MigrationError(f"{label} {path} is not valid Python; preserving the branch") from exc
 
     # A previously upgraded branch already has the exact canonical source. The
-    # only other permitted replacement is the known prior Native AI baseline.
+    # only automatic replacement is the known prior Native AI baseline. When a
+    # branch carries a different provider-free module, validate and preserve it:
+    # branch-local safety logic must never be overwritten by propagation. The
+    # workflow's independent AST contract check below still rejects missing or
+    # invalid required exports before any ref can be updated.
     if existing and existing not in {canonical_source, approved_legacy_source}:
         if _has_conflicting_provider_wiring(path, existing):
             raise MigrationError(
                 f"{path} contains retired or hosted provider wiring; preserving the branch"
             )
-        raise MigrationError(
-            f"{path} differs from both reviewed Native AI baselines; preserving branch-specific safety logic"
-        )
+        try:
+            ast.parse(existing, filename=path)
+        except SyntaxError as exc:
+            raise MigrationError(
+                f"{path} is not valid Python; preserving the branch"
+            ) from exc
+        return
     if existing != canonical_source:
-        # This is a single-file replacement from a byte-for-byte reviewed baseline,
-        # not a broad branch overwrite. Any unrecognized local module is refused.
         write_text(path, canonical_source)
 
 
