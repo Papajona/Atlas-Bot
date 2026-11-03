@@ -1110,3 +1110,148 @@ def test_market_bar_context_conversion_runs_outside_event_loop(monkeypatch):
     assert worker_threads
     assert worker_threads[0] != loop_thread
 
+
+
+def test_existing_fill_replay_verifies_immutable_bar_provenance_without_repricing_capacity(monkeypatch):
+    from datetime import datetime, timezone
+
+    stamp = datetime(2026, 11, 3, 10, 0, tzinfo=timezone.utc)
+    digest = "a" * 64
+    row = {
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "timeframe": "1m",
+        "bar_at": stamp,
+        "bar_data_sha256": digest,
+        "base_volume": Decimal("100"),
+        # Deliberately unrelated to any current participation-rate setting:
+        # historical replay must not recompute or compare this immutable value.
+        "capacity": Decimal("7.500000000000000000"),
+    }
+    captured = {}
+
+    class Result:
+        def mappings(self):
+            return self
+        def first(self):
+            return row
+
+    class Connection:
+        async def execute(self, statement, params):
+            captured["sql"] = str(statement)
+            captured["params"] = params
+            return Result()
+
+    class Transaction:
+        async def __aenter__(self):
+            return Connection()
+        async def __aexit__(self, *_args):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Transaction()
+        async def dispose(self):
+            captured["disposed"] = True
+
+    async def ready():
+        return None
+
+    monkeypatch.setattr(paper_lifecycle, "_assert_customer_paper_ready", ready)
+    monkeypatch.setattr(paper_lifecycle, "_paper_engine", Engine)
+
+    verified = asyncio.run(paper_lifecycle.verify_customer_paper_market_bar_provenance(
+        venue="binance",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        bar_at=stamp,
+        bar_data_sha256=digest,
+        base_volume="100",
+    ))
+
+    expected_key = paper_api._paper_market_bar_key(
+        venue="binance", symbol="BTC/USDT", timeframe="1m", bar_at=stamp
+    )
+    assert verified == {
+        "status": "VERIFIED",
+        "bar_key": expected_key,
+        "bar_at": stamp.isoformat(),
+        "capacity": "7.500000000000000000",
+    }
+    assert captured["params"] == {"bar_key": expected_key}
+    assert "bar_data_sha256" in captured["sql"]
+    assert "base_volume" in captured["sql"]
+    assert "capacity" in captured["sql"]
+    assert captured["disposed"] is True
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("bar_data_sha256", "b" * 64),
+        ("base_volume", Decimal("99")),
+    ],
+)
+def test_existing_fill_replay_rejects_changed_bar_provenance(monkeypatch, changed_field, changed_value):
+    from datetime import datetime, timezone
+
+    stamp = datetime(2026, 11, 3, 10, 0, tzinfo=timezone.utc)
+    row = {
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "timeframe": "1m",
+        "bar_at": stamp,
+        "bar_data_sha256": "a" * 64,
+        "base_volume": Decimal("100"),
+        "capacity": Decimal("25"),
+    }
+    row[changed_field] = changed_value
+
+    class Result:
+        def mappings(self):
+            return self
+        def first(self):
+            return row
+
+    class Connection:
+        async def execute(self, _statement, _params):
+            return Result()
+
+    class Transaction:
+        async def __aenter__(self):
+            return Connection()
+        async def __aexit__(self, *_args):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Transaction()
+        async def dispose(self):
+            return None
+
+    async def ready():
+        return None
+
+    monkeypatch.setattr(paper_lifecycle, "_assert_customer_paper_ready", ready)
+    monkeypatch.setattr(paper_lifecycle, "_paper_engine", Engine)
+
+    with pytest.raises(paper_lifecycle.CustomerPaperOrderConflict, match="provenance conflicts"):
+        asyncio.run(paper_lifecycle.verify_customer_paper_market_bar_provenance(
+            venue="binance",
+            symbol="BTC/USDT",
+            timeframe="1m",
+            bar_at=stamp,
+            bar_data_sha256="a" * 64,
+            base_volume="100",
+        ))
+
+
+def test_existing_fill_api_replay_checks_market_provenance_before_returning_fill():
+    import inspect
+
+    source = inspect.getsource(paper_api.build_customer_paper_router)
+    replay_check = source.index("await verify_customer_paper_market_bar_provenance(")
+    existing_fill_return = source.index("return await _replay_existing_fill(prior_fill)", replay_check)
+    assert replay_check < existing_fill_return
