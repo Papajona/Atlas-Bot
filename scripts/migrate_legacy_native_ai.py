@@ -51,9 +51,10 @@ RETIRED_PROVIDER_FIELD_RE = re.compile(
 # Reject SDK imports, client construction, API credentials, helper calls and endpoints.
 NATIVE_AI_HOSTED_GROQ_RE = re.compile(
     r"(?i)(?:\b(?:from|import)\s+groq(?:\.[A-Za-z_][A-Za-z0-9_]*)?\b|"
+    r"\b(?:from|import)\s+app\.groq_ai\b|"
     r"\b(?:Async)?Groq\s*\(|\bGROQ_API_KEY\b|\bSECRET_GROQ[A-Z0-9_]*\b|"
     r"\bGROQ_(?:STRATEGY_)?MODEL\b|\bsettings\.groq_(?:api_key|strategy_model|model)\b|"
-    r"api\.groq\.com|\b_groq_json\b)"
+    r"\b(?:groq_trade_context_review|groq_research_review)\s*\(|api\.groq\.com|\b_groq_json\b)"
 )
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
