@@ -261,54 +261,25 @@ fi
         self.assertIn("groq_trade_review_invalid", installed)
         self.assertNotIn('return {"safe": True', installed)
 
-    def test_native_ai_installer_preserves_provider_free_branch_local_safety_module(self):
-        canonical = (
-            Path(__file__).resolve().parents[1] / "app" / "native_ai.py"
-        ).read_text(encoding="utf-8")
-        marker = '    reasons = [f"missing_{key}" for key in required if key not in packet or packet.get(key) is None]\n'
-        self.assertIn(marker, canonical)
-        branch_local = canonical.replace(
-            marker,
-            marker + '    if packet.get("branch_local_block") is True:\n        reasons.append("branch_local_block")\n',
-            1,
-        )
-        approved_legacy = """def evaluate_native_trade_packet(packet):
-    return {"safe": True}
-"""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "app").mkdir()
-            target = root / "app" / "native_ai.py"
-            target.write_text(branch_local, encoding="utf-8")
-            with patch.object(migration, "ROOT", root):
-                migration._install_canonical_native_ai(
-                    canonical,
-                    approved_legacy_source=approved_legacy,
-                )
-            installed = target.read_text(encoding="utf-8")
-        self.assertEqual(installed, branch_local)
-        self.assertIn('reasons.append("branch_local_block")', installed)
-        self.assertIn('"groq_high_risk_veto"', installed)
-        self.assertIn('"invalid_protective_price"', installed)
-
-    def test_native_ai_installer_refuses_provider_free_module_without_complete_safety_veto(self):
+    def test_native_ai_installer_refuses_unreviewed_branch_local_safety_and_composer(self):
         branch_local = """class NativeAIError(RuntimeError):
     pass
 
 AIProviderError = NativeAIError
 
 def compose_strategy_spec(*, prompt, name, **kwargs):
+    # This draft omits the production schema and must not be propagated.
     return {"title": name, "execution_mode": "PAPER_SHADOW_ONLY"}
 
 def native_research_review(research, intelligence):
     return {"status": "LOCAL", "execution_authority": False}
 
 def evaluate_native_trade_packet(packet):
-    return {"safe": True, "execution_authority": False}
+    # This branch-local veto omits protective-price and advisory-evidence checks.
+    return {"safe": packet.get("data_quality") == "OK", "execution_authority": False}
 
 async def native_trade_safety_review(packet):
-    result = evaluate_native_trade_packet(packet)
-    return {"safe": result["safe"], "execution_authority": False}
+    return evaluate_native_trade_packet(packet)
 
 def native_ai_health_check():
     return {"status": "PASS", "network_calls": 0}
@@ -328,16 +299,19 @@ async def dual_ai_trade_safety_review(packet):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
-            (root / "app" / "native_ai.py").write_text(branch_local, encoding="utf-8")
+            target = root / "app" / "native_ai.py"
+            target.write_text(branch_local, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
                 with self.assertRaisesRegex(
                     migration.MigrationError,
-                    "does not satisfy the reviewed Native AI safety-veto contract",
+                    "differs from both reviewed Native AI baselines; preserving branch-specific safety logic",
                 ):
                     migration._install_canonical_native_ai(
                         canonical,
                         approved_legacy_source=approved_legacy,
                     )
+            installed = target.read_text(encoding="utf-8")
+        self.assertEqual(installed, branch_local)
 
     def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
         obsolete = """from groq import Groq
