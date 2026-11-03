@@ -28,6 +28,6 @@ def test_customer_paper_operator_audit_reports_only_validated_safety_telemetry()
     assert "webSocketConnected &&" in RISK_DASHBOARD
     assert "wsConnectionState is WebSocketConnectionState.Connected" in RISK_DASHBOARD
     assert "LaunchedEffect(showAuditDialog, metrics.lastUpdatedEpochMs)" in RISK_DASHBOARD
-    assert "delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs)" in RISK_DASHBOARD
+    assert "delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs + 1L)" in RISK_DASHBOARD
     assert "AI Safety Decision Deadline" not in audit_dialog
     assert "1.5s FAIL-CLOSED" not in audit_dialog
