@@ -178,6 +178,27 @@ jobs:
                         (scan_pattern == previous_pattern && suffix == previous_suffix)) next
                   }
                 }
+                # Older branches include a standalone diagnostic grep with the same exact
+                # provider pattern and an explicit self-exclusion. Filter only that exact
+                # diagnostic command; any changed pattern, path list, or appended command
+                # remains visible to the provider scan.
+                legacy_verify_prefix = "git grep -nIEi "
+                if (index(normalized_content, legacy_verify_prefix) == 1) {
+                  verify_open_quote = index(normalized_content, quote)
+                  verify_close_quote = index(substr(normalized_content, verify_open_quote + 1), quote) + verify_open_quote
+                  if (verify_open_quote > 0 && verify_close_quote > verify_open_quote) {
+                    verify_pattern = substr(normalized_content, verify_open_quote + 1, verify_close_quote - verify_open_quote - 1)
+                    verify_suffix = substr(normalized_content, verify_close_quote + 1)
+                    legacy_current_verify_suffix = " -- . " quote ":!tests" quote " " \
+                      quote ":!docs" quote " " quote ":!README.md" quote " " \
+                      quote ":!CHANGELOG.md" quote " " \
+                      quote ":!.github/workflows/production-deploy.yml" quote " " \
+                      quote ":!.github/workflows/production-verification.yml" quote " " \
+                      quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
+                      quote ":!scripts/migrate_legacy_native_ai.py" quote ")\" >&2 || true"
+                    if (verify_pattern == current_pattern && verify_suffix == legacy_current_verify_suffix) next
+                  }
+                }
                 # Ignore only the exact two scanner regex declarations. A different value
                 # assigned to either variable can hide a provider endpoint and must remain visible.
                 normalized_content = content
