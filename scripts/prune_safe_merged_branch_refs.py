@@ -124,16 +124,11 @@ def _merged_pull_request_records(
     """
     records: list[dict[str, Any]] = []
     for number, item in enumerate(pull_requests, start=1):
-        head = item.get("head")
         if (
-            isinstance(item.get("number"), bool)
+            not isinstance(item, Mapping)
+            or isinstance(item.get("number"), bool)
             or not isinstance(item.get("number"), int)
             or item["number"] <= 0
-            or not isinstance(head, Mapping)
-            or not isinstance(head.get("ref"), str)
-            or not head["ref"].strip()
-            or not isinstance(head.get("sha"), str)
-            or not head["sha"].strip()
             or "merged_at" not in item
         ):
             raise RuntimeError(
@@ -143,14 +138,30 @@ def _merged_pull_request_records(
         if not item.get("merged_at"):
             continue
 
-        # A deleted fork can produce head.repo=null. Such a PR simply cannot
-        # authorize deletion of a local ref; it is not malformed local evidence.
-        head_repository = head.get("repo")
+        # Check repository identity before validating ref/SHA fields. GitHub may
+        # return head.repo=null and omit ref/SHA after a fork is deleted. Such a
+        # PR cannot prove that a same-named local branch was merged, so ignore it
+        # rather than allowing irrelevant fork metadata to block all pruning.
+        head = item.get("head")
+        head_repository = head.get("repo") if isinstance(head, Mapping) else None
         if (
             not isinstance(head_repository, Mapping)
             or head_repository.get("full_name") != repository
         ):
             continue
+
+        # Only same-repository merged PRs may authorize local branch deletion;
+        # their head identity must therefore be complete and exact.
+        if (
+            not isinstance(head.get("ref"), str)
+            or not head["ref"].strip()
+            or not isinstance(head.get("sha"), str)
+            or not head["sha"].strip()
+        ):
+            raise RuntimeError(
+                f"GitHub returned malformed same-repository merged pull request "
+                f"#{item['number']}; preserving every branch"
+            )
 
         merge_sha = item.get("merge_commit_sha")
         if not isinstance(merge_sha, str) or not merge_sha.strip():
