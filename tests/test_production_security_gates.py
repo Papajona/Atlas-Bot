@@ -625,3 +625,21 @@ def test_audit_delivery_outbox_grants_only_qualifying_backend_runtime_roles():
     assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_log_external_delivery" in migration
     assert "atlas_paper_reader" not in migration
+
+def test_staging_attestation_ignores_failed_retries_when_a_successful_exact_commit_attestation_exists():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    verification_gate = deploy.split(
+        'if [[ "$workflow" == "production-verification.yml" ]]; then', 1
+    )[1].split("\n              else", 1)[0]
+    selector = verification_gate.split("--jq ", 1)[1]
+
+    # Exclude failed, cancelled, and pending retries before ordering. A later failed
+    # retry cannot hide an earlier successful manual attestation for the same main SHA.
+    assert '.headBranch == "main"' in selector
+    assert '.event == "workflow_dispatch"' in selector
+    assert '.headSha == ' in selector
+    assert '.status == "completed"' in selector
+    assert '.conclusion == "success"' in selector
+    assert selector.index('.status == "completed"') < selector.index("sort_by(.databaseId)")
+    assert selector.index('.conclusion == "success"') < selector.index("sort_by(.databaseId)")
+    assert "sort_by(.databaseId) | last //" in selector

@@ -75,6 +75,28 @@ data class PortfolioRiskMetrics(
     val lastUpdatedEpochMs: Long = 0L
 )
 
+internal data class AiSafetyAuditStatus(
+    val deadlineLabel: String,
+    val hasValidatedDeadline: Boolean,
+    val vetoReserveStatus: String
+)
+
+internal fun resolveAiSafetyAuditStatus(metrics: PortfolioRiskMetrics): AiSafetyAuditStatus {
+    val hasValidatedDeadline = metrics.telemetryAvailable &&
+        metrics.aiSafetyTimeoutSeconds.isFinite() &&
+        metrics.aiSafetyTimeoutSeconds > 0.0
+    return AiSafetyAuditStatus(
+        deadlineLabel = if (hasValidatedDeadline) {
+            "${metrics.aiSafetyTimeoutSeconds}s total (reported)"
+        } else {
+            "unavailable"
+        },
+        hasValidatedDeadline = hasValidatedDeadline,
+        // The telemetry model has no independent Native AI veto-reserve signal.
+        vetoReserveStatus = "not independently attested"
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RiskDashboardScreen(
@@ -390,16 +412,14 @@ fun RiskDashboardScreen(
                         color = emeraldPass,
                         fontSize = 13.sp
                     )
-                    val aiSafetyDeadline = metrics.aiSafetyTimeoutSeconds
-                    val aiSafetyDeadlineLabel = if (
-                        aiSafetyDeadline.isFinite() && aiSafetyDeadline > 0.0
-                    ) {
-                        "${aiSafetyDeadline}s total"
-                    } else {
-                        "unavailable"
-                    }
+                    val aiSafetyAudit = resolveAiSafetyAuditStatus(metrics)
                     Text(
-                        text = "• AI Safety Decision Budget: $aiSafetyDeadlineLabel configured (Native AI veto reserve protected)",
+                        text = "• AI Safety Decision Budget: ${aiSafetyAudit.deadlineLabel}",
+                        color = textMuted,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "• Native AI veto reserve: ${aiSafetyAudit.vetoReserveStatus}",
                         color = textMuted,
                         fontSize = 13.sp
                     )
