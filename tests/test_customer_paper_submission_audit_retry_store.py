@@ -212,7 +212,7 @@ def test_retry_state_transition_binds_pending_predicate_explicitly(monkeypatch, 
     normalized_sql = "".join(sql.split())
     assert "attempt_count=CASEWHEN" in normalized_sql
     assert "ELSEcustomer_paper_submission_audit_retries.attempt_count+" in normalized_sql
-    assert "CORRUPT" in captured["params"]
+    assert "CORRUPT" in str(captured["params"])
 
     status_predicates = [
         node for node in iterate(statement.whereclause)
@@ -461,6 +461,6 @@ def test_active_lease_upsert_does_not_increment_and_preserves_corrupt_quarantine
     assert "attempt_count" not in update_clause
     assert "submission_detail" not in update_clause
     assert "CASE" in update_clause
-    assert "CORRUPT" in captured["params"]
-    assert "PENDING" in captured["params"]
+    assert "CORRUPT" in str(captured["params"])
+    assert "PENDING" in str(captured["params"])
     assert captured["committed"] is True
