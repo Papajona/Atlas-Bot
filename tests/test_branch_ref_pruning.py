@@ -444,7 +444,7 @@ def test_unknown_protection_branch_is_removed_only_when_remote_absence_is_verifi
 
 def test_unknown_protection_branch_still_remote_aborts_pruning(monkeypatch):
     def fake_run(args, *, check=True):
-        return subprocess.CompletedProcess(args, 0, "abc123\\trefs/heads/stale/branch\\n", "")
+        return subprocess.CompletedProcess(args, 0, "abc123\\trefs/heads/stale/branch\n", "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
@@ -1137,8 +1137,8 @@ def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
     script = (
         "set -euo pipefail\n"
         "skip_pruning=false\n"
-        'changed_paths="$(printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
-        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done)"\n'
+        'changed_paths="$(printf "%s\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
+        'for index in {1..12000}; do printf "app/generated/module_%05d.py\n" "$index"; done)"\n'
         + guarded_loop
         + '\nif [[ "$skip_pruning" == true ]]; then echo "skip=true" > "$GITHUB_OUTPUT"; '
         'else echo "skip=false" > "$GITHUB_OUTPUT"; fi\n'
@@ -1181,7 +1181,7 @@ def test_branch_without_common_merge_base_is_preserved_without_aborting_reconcil
     _git(tmp_path, "init", "-b", "main", repo)
     _git(repo, "config", "user.name", "Atlas unrelated-history regression")
     _git(repo, "config", "user.email", "atlas-unrelated@example.invalid")
-    (repo / "main.txt").write_text("main history\\n", encoding="utf-8")
+    (repo / "main.txt").write_text("main history\n", encoding="utf-8")
     _git(repo, "add", "main.txt")
     _git(repo, "commit", "-m", "main root")
     main_sha = _git(repo, "rev-parse", "HEAD")
@@ -1189,7 +1189,7 @@ def test_branch_without_common_merge_base_is_preserved_without_aborting_reconcil
     for path in repo.iterdir():
         if path.name != ".git" and path.is_file():
             path.unlink()
-    (repo / "branch.txt").write_text("unrelated branch history\\n", encoding="utf-8")
+    (repo / "branch.txt").write_text("unrelated branch history\n", encoding="utf-8")
     _git(repo, "add", "branch.txt")
     _git(repo, "commit", "-m", "unrelated root")
     branch_sha = _git(repo, "rev-parse", "HEAD")
@@ -1656,10 +1656,11 @@ def test_fork_merge_cannot_authorize_deletion_of_same_named_local_branch():
         _ancestor_pairs(("fork-merge", "main-sha")),
     ) == (False, "no exact integration proof; preserve branch")
 
+
 def test_same_tree_merge_child_of_current_main_is_safe_to_retire(monkeypatch):
     outputs = iter([
-        "same-tree-sha\\nbranch-parent main-sha\\n",
-        "same-tree-sha\\nmain-parent\\n",
+        "same-tree-sha\nbranch-parent main-sha\n",
+        "same-tree-sha\nmain-parent\n",
     ])
 
     def fake_run(_args, *, check=True):
@@ -1679,8 +1680,8 @@ def test_same_tree_merge_child_of_current_main_is_safe_to_retire(monkeypatch):
 
 def test_same_tree_merge_child_proof_rejects_different_tree_or_missing_main_parent(monkeypatch):
     scenarios = [
-        ("different-tree\\nbranch-parent main-sha\\n", "main-tree\\nmain-parent\\n"),
-        ("same-tree\\nother-parent\\n", "same-tree\\nmain-parent\\n"),
+        ("different-tree\nbranch-parent main-sha\n", "main-tree\nmain-parent\n"),
+        ("same-tree\nother-parent\n", "same-tree\nmain-parent\n"),
     ]
     for branch_output, main_output in scenarios:
         outputs = iter([branch_output, main_output])
