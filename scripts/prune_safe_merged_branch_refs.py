@@ -686,6 +686,30 @@ def _explicit_duplicate_alias_retirement_proof(
         keeper_branch,
     )
 
+def _same_tree_merge_child_of_main(branch_sha: str, main_sha: str) -> bool:
+    """Prove a branch tip is a no-op merge child of the exact current main commit."""
+    branch_metadata = _run(
+        ["git", "show", "-s", "--format=%T%n%P", branch_sha],
+        check=False,
+    )
+    main_metadata = _run(
+        ["git", "show", "-s", "--format=%T%n%P", main_sha],
+        check=False,
+    )
+    if branch_metadata.returncode or main_metadata.returncode:
+        return False
+
+    branch_fields = branch_metadata.stdout.strip().splitlines()
+    main_fields = main_metadata.stdout.strip().splitlines()
+    if len(branch_fields) < 2 or not main_fields:
+        return False
+
+    branch_tree = branch_fields[0].strip()
+    branch_parents = set(branch_fields[1].split())
+    main_tree = main_fields[0].strip()
+    return bool(branch_tree and branch_tree == main_tree and main_sha in branch_parents)
+
+
 def _resolve_branch_integration(
     branch_name: str,
     branch_sha: str,
@@ -708,6 +732,17 @@ def _resolve_branch_integration(
     )
     if safe or reason != "no exact integration proof; preserve branch":
         return safe, reason, []
+
+    # A no-op merge commit is removable only when its exact tree equals the
+    # current main tree and the exact current main commit is one of its parents.
+    # This is stronger than tree equality alone and is rechecked against the
+    # live main tip before deletion by the caller.
+    if _same_tree_merge_child_of_main(branch_sha, main_sha):
+        return (
+            True,
+            "branch tip has current main as a parent and its exact tree is identical to main",
+            [],
+        )
 
     try:
         mismatch_paths = _branch_delta_mismatched_paths(branch_sha, main_sha)
