@@ -625,3 +625,22 @@ def test_audit_delivery_outbox_grants_only_qualifying_backend_runtime_roles():
     assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_log_external_delivery" in migration
     assert "atlas_paper_reader" not in migration
+
+
+def test_staging_uses_newest_exact_commit_manual_verification_even_when_it_failed():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    verification_gate = deploy.split('if [[ "$workflow" == "production-verification.yml" ]]; then', 1)[1].split("\n              else", 1)[0]
+
+    # Select the newest exact-commit manual run before evaluating its outcome.
+    # Filtering to successful runs here would let an older pass hide a newer failure.
+    assert '.headBranch == "main"' in verification_gate
+    assert '.event == "workflow_dispatch"' in verification_gate
+    assert '.headSha == ' in verification_gate
+    assert "sort_by(.databaseId) | last // {}" in verification_gate
+    assert '.status == "completed"' not in verification_gate
+    assert '.conclusion == "success"' not in verification_gate
+
+    # Pending runs are awaited; a completed failed/cancelled run is an immediate blocker.
+    assert 'if [[ "$run_status" == "completed" ]]; then' in deploy
+    assert 'if [[ "$run_conclusion" != "success" ]]; then' in deploy
+    assert 'BLOCKED: $label completed with conclusion' in deploy
