@@ -734,27 +734,81 @@ async def ledger_statement_export_bounds(
     )
 
 
-async def _invariant_snapshot(db, tol: Decimal):
-    """Compute the invariant snapshot from one database transaction."""
-    unbalanced = (await db.execute(
+async def _invariant_snapshot(db, tol: Decimal, customer_id: int | None = None):
+    """Compute a global or one-customer invariant snapshot in one transaction."""
+    customer_journal_ids = None
+    customer_line_filter = None
+    if customer_id is not None:
+        customer_id = int(customer_id)
+        customer_account_prefix = f"LIABILITY:CUSTOMER:{customer_id}:%"
+        # Match both independent customer identifiers. This captures a journal
+        # even when one side has a customer_id/account-code mismatch.
+        customer_line_filter = or_(
+            LedgerJournalLine.customer_id == customer_id,
+            LedgerJournalLine.account_code.like(customer_account_prefix),
+        )
+        customer_journal_ids = (
+            select(LedgerJournalLine.journal_id)
+            .where(customer_line_filter)
+            .distinct()
+        )
+    unbalanced_statement = (
         select(LedgerJournalLine.journal_id, func.sum(LedgerJournalLine.debit), func.sum(LedgerJournalLine.credit))
         .group_by(LedgerJournalLine.journal_id)
         .having(func.sum(LedgerJournalLine.debit) != func.sum(LedgerJournalLine.credit))
-    )).all()
-    net_rows = (await db.execute(
+    )
+    if customer_journal_ids is not None:
+        unbalanced_statement = unbalanced_statement.where(
+            LedgerJournalLine.journal_id.in_(customer_journal_ids)
+        )
+    unbalanced = (await db.execute(unbalanced_statement)).all()
+    net_statement = (
         select(LedgerJournalLine.customer_id, LedgerJournalLine.account_code,
                func.coalesce(func.sum(LedgerJournalLine.credit), 0) - func.coalesce(func.sum(LedgerJournalLine.debit), 0))
         .where(LedgerJournalLine.account_code.like("LIABILITY:CUSTOMER:%"))
-        .group_by(LedgerJournalLine.customer_id, LedgerJournalLine.account_code)
+    )
+    if customer_line_filter is not None:
+        net_statement = net_statement.where(customer_line_filter)
+    net_rows = (await db.execute(
+        net_statement.group_by(LedgerJournalLine.customer_id, LedgerJournalLine.account_code)
     )).all()
     journal_net: dict[tuple[int, str], Decimal] = {}
-    for customer_id, account_code, net in net_rows:
-        if customer_id is not None:
-            journal_net[(int(customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+    for journal_customer_id, account_code, net in net_rows:
+        if journal_customer_id is not None:
+            journal_net[(int(journal_customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+
+    # The customer_id column and the customer embedded in LIABILITY account codes
+    # are independent persisted values. Reuse the grouped net_rows query so this
+    # integrity check does not issue a second full-history DISTINCT scan.
+    customer_account_mismatches = []
+    for line_customer_id, account_code, net in net_rows:
+        if line_customer_id is not None:
+            journal_net[(int(line_customer_id), str(account_code).rsplit(":", 1)[-1])] = D(str(net))
+
+        parts = str(account_code or "").split(":")
+        embedded_customer_id = None
+        if len(parts) == 5 and parts[:2] == ["LIABILITY", "CUSTOMER"]:
+            try:
+                embedded_customer_id = int(parts[2])
+            except (TypeError, ValueError):
+                embedded_customer_id = None
+        if line_customer_id is None or embedded_customer_id is None or int(line_customer_id) != embedded_customer_id:
+            customer_account_mismatches.append({
+                "journal_customer_id": int(line_customer_id) if line_customer_id is not None else None,
+                "account_code": str(account_code),
+                "account_customer_id": embedded_customer_id,
+            })
+    customer_account_mismatches.sort(
+        key=lambda item: (
+            item["account_code"],
+            -1 if item["journal_customer_id"] is None else item["journal_customer_id"],
+        )
+    )
     drifts = []
-    ledgers = (await db.execute(
-        select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == USDT)
-    )).scalars().all()
+    ledger_statement = select(CustomerLedgerAccount).where(CustomerLedgerAccount.currency == USDT)
+    if customer_id is not None:
+        ledger_statement = ledger_statement.where(CustomerLedgerAccount.customer_id == customer_id)
+    ledgers = (await db.execute(ledger_statement)).scalars().all()
     for ledger in ledgers:
         for bucket, balance in (
             ("AVAILABLE", ledger.available),
@@ -770,7 +824,7 @@ async def _invariant_snapshot(db, tol: Decimal):
                     "journal_net": str(journal_net.get((int(ledger.customer_id), bucket), D("0"))),
                     "drift": str(diff),
                 })
-    return unbalanced, drifts, len(ledgers)
+    return unbalanced, drifts, customer_account_mismatches, len(ledgers)
 
 
 def _dialect_name(db) -> str:
@@ -783,8 +837,17 @@ def _dialect_name(db) -> str:
             return ""
 
 
-async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int = 50) -> dict:
+async def ledger_invariant_report(
+    db,
+    *,
+    tolerance: str = "0.000001",
+    limit: int = 50,
+    customer_id: int | None = None,
+) -> dict:
     """Monitoring-only proof that the books agree with themselves.
+
+    Pass customer_id to reconcile one customer without mixing unrelated customers
+    from a shared test database or a multi-tenant monitoring job.
 
     On PostgreSQL, the invariant reads use a separate REPEATABLE READ transaction so a
     concurrent commit cannot produce a false drift by mixing snapshots.
@@ -792,14 +855,26 @@ async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int
     tol = D(tolerance)
     if _dialect_name(db) == "postgresql":
         async with SessionLocal() as snap:
-            await snap.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-            unbalanced, drifts, checked = await _invariant_snapshot(snap, tol)
-            await snap.rollback()
+            if _dialect_name(snap) == "postgresql":
+                await snap.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+                unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
+                    snap, tol, customer_id=customer_id
+                )
+                await snap.rollback()
+            else:
+                # Unit tests may pass an isolated database session while the
+                # application-wide SessionLocal points at a different dialect.
+                # Never apply PostgreSQL isolation options to a non-PostgreSQL engine.
+                unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
+                    db, tol, customer_id=customer_id
+                )
     else:
-        unbalanced, drifts, checked = await _invariant_snapshot(db, tol)
+        unbalanced, drifts, customer_account_mismatches, checked = await _invariant_snapshot(
+            db, tol, customer_id=customer_id
+        )
 
     unbalanced = unbalanced[:limit]
-    ok = not unbalanced and not drifts
+    ok = not unbalanced and not drifts and not customer_account_mismatches
     report = {
         "ok": ok,
         "unbalanced_journals": [
@@ -808,16 +883,29 @@ async def ledger_invariant_report(db, *, tolerance: str = "0.000001", limit: int
         ],
         "bucket_drifts": drifts[:limit],
         "drift_count": len(drifts),
+        "customer_account_mismatches": customer_account_mismatches[:limit],
+        "customer_account_mismatch_count": len(customer_account_mismatches),
         "customers_checked": checked,
     }
     if not ok:
-        logger.critical("ledger_invariant_breach unbalanced=%s drifts=%s", len(unbalanced), len(drifts))
+        logger.critical(
+            "ledger_invariant_breach unbalanced=%s drifts=%s customer_account_mismatches=%s",
+            len(unbalanced), len(drifts), len(customer_account_mismatches),
+        )
         await record_ledger_incident(
             db,
-            key="LEDGER_INVARIANT_BREACH",
-            summary="Ledger invariant check failed: journals unbalanced or balances drifted from journals",
-            detail={"unbalanced": len(unbalanced), "drifts": drifts[:10]},
-            customer_id=None,
+            key=(f"LEDGER_INVARIANT_BREACH:{int(customer_id)}" if customer_id is not None else "LEDGER_INVARIANT_BREACH"),
+            summary=(
+                f"Ledger invariant check failed for customer {int(customer_id)}"
+                if customer_id is not None
+                else "Ledger invariant check failed: journals unbalanced or balances drifted from journals"
+            ),
+            detail={
+                "unbalanced": len(unbalanced),
+                "drifts": drifts[:10],
+                "customer_account_mismatches": customer_account_mismatches[:10],
+            },
+            customer_id=int(customer_id) if customer_id is not None else None,
         )
     return report
 

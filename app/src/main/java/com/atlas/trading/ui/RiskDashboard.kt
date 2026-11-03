@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import android.os.SystemClock
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -75,6 +76,44 @@ data class PortfolioRiskMetrics(
     val lastUpdatedEpochMs: Long = 0L
 )
 
+internal data class AiSafetyAuditStatus(
+    val deadlineLabel: String,
+    val hasValidatedDeadline: Boolean,
+    val vetoReserveStatus: String
+)
+
+internal const val AI_SAFETY_TELEMETRY_MAX_AGE_MS = 30_000L
+internal const val AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS = 5_000L
+
+internal fun resolveAiSafetyAuditStatus(
+    metrics: PortfolioRiskMetrics,
+    webSocketConnected: Boolean,
+    frameReceivedElapsedRealtimeMs: Long,
+    nowElapsedRealtimeMs: Long
+): AiSafetyAuditStatus {
+    // Use elapsedRealtime rather than wall-clock time after receipt. A device
+    // clock correction must never extend the lifetime of an accepted safety frame.
+    val elapsedSinceFrameMs = nowElapsedRealtimeMs - frameReceivedElapsedRealtimeMs
+    val hasFreshFrame = metrics.lastUpdatedEpochMs > 0L &&
+        frameReceivedElapsedRealtimeMs > 0L &&
+        elapsedSinceFrameMs in 0L..AI_SAFETY_TELEMETRY_MAX_AGE_MS
+    val hasValidatedDeadline = webSocketConnected &&
+        metrics.telemetryAvailable &&
+        hasFreshFrame &&
+        metrics.aiSafetyTimeoutSeconds.isFinite() &&
+        metrics.aiSafetyTimeoutSeconds > 0.0
+    return AiSafetyAuditStatus(
+        deadlineLabel = if (hasValidatedDeadline) {
+            "${metrics.aiSafetyTimeoutSeconds}s total (reported)"
+        } else {
+            "unavailable"
+        },
+        hasValidatedDeadline = hasValidatedDeadline,
+        // The telemetry model has no independent Native AI veto-reserve signal.
+        vetoReserveStatus = "not independently attested"
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RiskDashboardScreen(
@@ -95,13 +134,52 @@ fun RiskDashboardScreen(
     var isSimulatingStress by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showAuditDialog by remember { mutableStateOf(false) }
+    var safetyTelemetryReceivedElapsedRealtimeMs by remember { mutableStateOf(0L) }
+    var safetyAuditNowElapsedRealtimeMs by remember {
+        mutableStateOf(SystemClock.elapsedRealtime())
+    }
     var showReleaseAdvisor by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
     // Real-Time WebSocket stream updates: replaces periodic HTTP polling to minimize latency and server load
     LaunchedEffect(streamedMetrics) {
-        if (streamedMetrics.lastUpdatedEpochMs > 0 && streamedMetrics.streamType == "WEBSOCKET_PUSH") {
+        val frameEpochMs = streamedMetrics.lastUpdatedEpochMs
+        val wallClockAgeMs = System.currentTimeMillis() - frameEpochMs
+        val frameTimestampAccepted = frameEpochMs > 0L &&
+            wallClockAgeMs >= -AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS &&
+            wallClockAgeMs <= AI_SAFETY_TELEMETRY_MAX_AGE_MS
+        if (frameTimestampAccepted && streamedMetrics.streamType == "WEBSOCKET_PUSH") {
             metrics = streamedMetrics
+            // Latch the accepted frame's receipt time on a monotonic clock.
+            safetyTelemetryReceivedElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        }
+    }
+
+    // A disconnected socket invalidates the retained frame immediately. A
+    // reconnect must deliver a new frame before the audit can report a budget.
+    LaunchedEffect(wsConnectionState) {
+        if (wsConnectionState !is WebSocketConnectionState.Connected) {
+            safetyTelemetryReceivedElapsedRealtimeMs = 0L
+        }
+    }
+
+    // Re-evaluate an open audit when the last accepted frame expires, even if
+    // the socket remains connected but stops sending new telemetry. elapsedRealtime
+    // is monotonic, so wall-clock changes cannot extend the frame's lifetime.
+    LaunchedEffect(
+        showAuditDialog,
+        metrics.lastUpdatedEpochMs,
+        safetyTelemetryReceivedElapsedRealtimeMs
+    ) {
+        safetyAuditNowElapsedRealtimeMs = SystemClock.elapsedRealtime()
+        val receivedAtElapsedMs = safetyTelemetryReceivedElapsedRealtimeMs
+        if (showAuditDialog && metrics.lastUpdatedEpochMs > 0L && receivedAtElapsedMs > 0L) {
+            val elapsedSinceFrameMs = safetyAuditNowElapsedRealtimeMs - receivedAtElapsedMs
+            if (elapsedSinceFrameMs in 0L..AI_SAFETY_TELEMETRY_MAX_AGE_MS) {
+                // Wake one millisecond past the accepted boundary.
+                delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - elapsedSinceFrameMs + 1L)
+                safetyAuditNowElapsedRealtimeMs = SystemClock.elapsedRealtime()
+            }
         }
     }
 
@@ -390,16 +468,19 @@ fun RiskDashboardScreen(
                         color = emeraldPass,
                         fontSize = 13.sp
                     )
-                    val aiSafetyDeadline = metrics.aiSafetyTimeoutSeconds
-                    val aiSafetyDeadlineLabel = if (
-                        aiSafetyDeadline.isFinite() && aiSafetyDeadline > 0.0
-                    ) {
-                        "${aiSafetyDeadline}s total"
-                    } else {
-                        "unavailable"
-                    }
+                    val aiSafetyAudit = resolveAiSafetyAuditStatus(
+                        metrics = metrics,
+                        webSocketConnected = wsConnectionState is WebSocketConnectionState.Connected,
+                        frameReceivedElapsedRealtimeMs = safetyTelemetryReceivedElapsedRealtimeMs,
+                        nowElapsedRealtimeMs = safetyAuditNowElapsedRealtimeMs
+                    )
                     Text(
-                        text = "• AI Safety Decision Deadline: $aiSafetyDeadlineLabel (Native AI veto reserve protected)",
+                        text = "• AI Safety Decision Budget: ${aiSafetyAudit.deadlineLabel}",
+                        color = textMuted,
+                        fontSize = 13.sp
+                    )
+                    Text(
+                        text = "• Native AI veto reserve: ${aiSafetyAudit.vetoReserveStatus}",
                         color = textMuted,
                         fontSize = 13.sp
                     )

@@ -780,6 +780,14 @@ def main() -> int:
         raise RuntimeError("Refusing non-sandbox broker configuration")
 
     market = broker.market_info(symbol)
+    # Verify the protective Spot exit before any private balance query or market buy.
+    # A testnet position must never be opened unless STOP_LOSS is supported.
+    order_types = set((market.get("info") or {}).get("orderTypes") or [])
+    if "STOP_LOSS" not in order_types:
+        raise RuntimeError(
+            "Binance exchangeInfo does not advertise STOP_LOSS for this Spot "
+            "symbol; refusing a false protective-stop PASS"
+        )
     ticker = broker.ticker(symbol)
     last = dec(ticker.get("last"))
     if last <= 0:
@@ -849,6 +857,9 @@ def main() -> int:
         "account_exclusivity_attested": True,
         "steps": [],
     }
+    report["steps"].append(
+        {"step": "protective_stop_capability", "ok": True, "order_type": "STOP_LOSS"}
+    )
     report["steps"].append({"step": "authenticated_balance", "ok": True})
 
     buy_attempted = False
@@ -906,15 +917,6 @@ def main() -> int:
             }
         )
 
-        order_types = set((market.get("info") or {}).get("orderTypes") or [])
-        if "STOP_LOSS" not in order_types:
-            raise RuntimeError(
-                "Binance exchangeInfo does not advertise STOP_LOSS for this Spot "
-                "symbol; refusing a false protective-stop PASS"
-            )
-        report["steps"].append(
-            {"step": "protective_stop_capability", "ok": True, "order_type": "STOP_LOSS"}
-        )
 
         # Use free base actually received, not the order's gross filled amount.
         # Binance may deduct commissions in the base asset.

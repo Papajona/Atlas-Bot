@@ -10,8 +10,8 @@ def test_branch_pruning_workflows_share_concurrency_and_skip_duplicate_marker_ru
     regular = (ROOT / ".github/workflows/safe-merged-branch-pruning.yml").read_text()
     one_time = (ROOT / ".github/workflows/prune-contained-branches-once.yml").read_text()
 
-    assert "group: atlas-branch-pruning" in regular
-    assert "group: atlas-branch-pruning" in one_time
+    assert "group: atlas-native-ai-branch-propagation-and-pruning" in regular
+    assert "group: atlas-native-ai-branch-propagation-and-pruning" in one_time
     assert "cancel-in-progress: false" in regular
     assert "cancel-in-progress: false" in one_time
     assert "atlas-branch-prune-once-20261020" in regular

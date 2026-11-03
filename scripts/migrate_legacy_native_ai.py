@@ -17,7 +17,10 @@ from pathlib import Path
 ROOT = Path.cwd()
 DEFAULT_CLEANUP_COMMIT = "f5e303dad1a93ce1a33940b3e2b16d118897ebf6"
 # Reviewed source for canonical Native AI behavior, distinct from the cleanup patch base.
-DEFAULT_CANONICAL_COMMIT = "f8bb968198ec909e66cc04b888716f87ded6c0fa"
+DEFAULT_CANONICAL_COMMIT = "a2b745cff52a5b207d153bae5d1d7b98b916040b"
+# Exact reviewed pre-Groq Native AI module accepted for a narrowly scoped upgrade.
+# Other branch-local safety modules require explicit review; they are never overwritten.
+APPROVED_LEGACY_NATIVE_AI_COMMIT = "bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"
 DEFAULT_EXTRA_BASE_COMMIT = "0d38f95079833804713fcba080caee38a6ddfb4c"
 PROVIDER_RE = re.compile(
     r"(?i)(?:gemini|groq|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
@@ -43,6 +46,14 @@ RETIRED_PROVIDER_FIELD_RE = re.compile(
     r"(?i)(?:gemini|cerebras|ai[\s_-]*gateway|generativelanguage\.googleapis\.com|"
     r"api\.cerebras\.ai|api\.openai\.com|"
     r"AI_GATEWAY_[A-Z0-9_]+|CEREBRAS_[A-Z0-9_]+|OPENAI_[A-Z0-9_]+|openai-compatible|_gemini_json|GROQ_STRATEGY_MODEL|GROQ_STRATEGY_API_KEY|groq_strategy_model)"
+)
+# Native AI may consume a validated Groq evidence envelope, but must never host a Groq client.
+# Reject SDK imports, client construction, API credentials, helper calls and endpoints.
+NATIVE_AI_HOSTED_GROQ_RE = re.compile(
+    r"(?i)(?:\b(?:from|import)\s+groq(?:\.[A-Za-z_][A-Za-z0-9_]*)?\b|"
+    r"\b(?:Async)?Groq\s*\(|\bGROQ_API_KEY\b|\bSECRET_GROQ[A-Z0-9_]*\b|"
+    r"\bGROQ_(?:STRATEGY_)?MODEL\b|\bsettings\.groq_(?:api_key|strategy_model|model)\b|"
+    r"api\.groq\.com|\b_groq_json\b)"
 )
 ATLAS_PROVIDER_SECRET_RE = re.compile(
     r"(?i)\batlas[-_](?:openai|gemini|cerebras|ai[-_]gateway)[-_][a-z0-9_-]*\b"
@@ -7095,6 +7106,7 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
     allowed_from_imports = {
         (0, "__future__"): {"annotations"},
         (0, "typing"): {"Any"},
+        (0, "decimal"): {"Decimal", "InvalidOperation"},
         (1, "config"): {"settings"},
         (1, "prompt_safety"): {
             "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
@@ -7122,6 +7134,71 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
 
 
 
+def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
+    """Reject retired provider wiring without treating supported Groq review as legacy.
+
+    app.native_ai records Groq's bounded trade-review evidence as advisory context;
+    it does not contain a hosted Groq strategy/safety provider implementation.
+    Groq remains allowed only through the current research-review contract, while
+    retired Gemini/Cerebras/AI Gateway and legacy Groq strategy-model fields remain
+    migration blockers.
+    """
+    if path == "app/native_ai.py":
+        # Advisory evidence fields such as groq_trade_review are safe to inspect;
+        # hosted clients, keys, helper calls and service endpoints are not.
+        return bool(
+            RETIRED_PROVIDER_RE.search(contents)
+            or NATIVE_AI_HOSTED_GROQ_RE.search(contents)
+        )
+    return bool(PROVIDER_RE.search(contents))
+
+
+def _install_canonical_native_ai(
+    canonical_source: str,
+    *,
+    approved_legacy_source: str,
+) -> None:
+    """Install the pinned Native AI veto only over an exact, reviewed baseline.
+
+    Branch-local safety logic is not discarded just because a new canonical file
+    exists. Existing hosted provider wiring and unknown/divergent modules fail
+    closed. The only upgrade allowed is from the exact reviewed legacy module
+    whose full content is read from APPROVED_LEGACY_NATIVE_AI_COMMIT.
+    """
+    path = "app/native_ai.py"
+    target = ROOT / path
+    existing = target.read_text(encoding="utf-8") if target.exists() else ""
+    if not isinstance(canonical_source, str) or not canonical_source.strip():
+        raise MigrationError("pinned canonical app/native_ai.py is empty; preserving the branch")
+    if not isinstance(approved_legacy_source, str) or not approved_legacy_source.strip():
+        raise MigrationError("approved legacy Native AI baseline is unavailable; preserving the branch")
+    for label, source in (
+        ("pinned canonical", canonical_source),
+        ("approved legacy", approved_legacy_source),
+    ):
+        if _has_conflicting_provider_wiring(path, source):
+            raise MigrationError(f"{label} app/native_ai.py contains retired or hosted provider wiring")
+        try:
+            ast.parse(source, filename=path)
+        except SyntaxError as exc:
+            raise MigrationError(f"{label} {path} is not valid Python; preserving the branch") from exc
+
+    # A previously upgraded branch already has the exact canonical source. The
+    # only other permitted replacement is the known prior Native AI baseline.
+    if existing and existing not in {canonical_source, approved_legacy_source}:
+        if _has_conflicting_provider_wiring(path, existing):
+            raise MigrationError(
+                f"{path} contains retired or hosted provider wiring; preserving the branch"
+            )
+        raise MigrationError(
+            f"{path} differs from both reviewed Native AI baselines; preserving branch-specific safety logic"
+        )
+    if existing != canonical_source:
+        # This is a single-file replacement from a byte-for-byte reviewed baseline,
+        # not a broad branch overwrite. Any unrecognized local module is refused.
+        write_text(path, canonical_source)
+
+
 def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_commit: str) -> None:
     # Canonical Native AI source and the original provider-removal patch baseline are
     # independent pins: changing one must not widen the other per-path diff.
@@ -7129,7 +7206,12 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
     write_text("scripts/check_ai_models.py", canonical_text(canonical_commit, "scripts/check_ai_models.py"))
     for path in ("app/native_ai.py", "scripts/check_native_ai.py", "app/groq_ai.py", "app/prompt_safety.py"):
         target = ROOT / path
-        if not target.exists():
+        if path == "app/native_ai.py":
+            _install_canonical_native_ai(
+                canonical_text(canonical_commit, path),
+                approved_legacy_source=canonical_text(APPROVED_LEGACY_NATIVE_AI_COMMIT, path),
+            )
+        elif not target.exists():
             write_text(path, canonical_text(canonical_commit, path))
         elif path == "app/groq_ai.py":
             validate_groq_research_module(target.read_text(encoding="utf-8"), path)
@@ -7138,8 +7220,8 @@ def migrate(canonical_commit: str, cleanup_commit: str, extra_base: str, extra_c
         elif path == "app/prompt_safety.py":
             if target.read_text(encoding="utf-8") != canonical_text(canonical_commit, path):
                 raise MigrationError(f"{path} differs from its reviewed canonical implementation; preserving the branch")
-        elif PROVIDER_RE.search(target.read_text(encoding="utf-8")):
-            raise MigrationError(f"{path} has a divergent provider-bearing implementation; refusing overwrite")
+        elif _has_conflicting_provider_wiring(path, target.read_text(encoding="utf-8")):
+            raise MigrationError(f"{path} has a divergent retired-provider implementation; refusing overwrite")
 
     transform_config()
     transform_strategy_ai(canonical_commit)

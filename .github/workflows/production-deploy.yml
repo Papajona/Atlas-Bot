@@ -69,31 +69,36 @@ jobs:
 
           require_success "ci.yml" "Atlas CI"
           require_native_ai_verification() {
-            local run_ids run_id run_json run_sha run_branch run_status run_conclusion native_conclusion
+            local run_ids run_id run_json run_sha run_branch run_event run_status run_conclusion native_conclusion
+            # Production verification must be explicitly dispatched for this exact main
+            # commit. Automatic PR/push/scheduled offline runs are useful CI, not a release attestation.
             run_ids="$(gh run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow "production-verification.yml" \
+              --event workflow_dispatch \
               --commit "$GITHUB_SHA" \
               --limit 100 \
-              --json databaseId,headSha,headBranch,status,conclusion \
-              --jq '[.[] | select(.headSha == "'"$GITHUB_SHA"'" and .headBranch == "main" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | reverse | .[].databaseId')"
+              --json databaseId,headSha,headBranch,event,status,conclusion \
+              --jq '[.[] | select(.event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'" and .headBranch == "main" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | reverse | .[].databaseId')"
             if [ -z "$run_ids" ]; then
               echo "BLOCKED: no successful Atlas Native AI verification exists for exact main commit $GITHUB_SHA"
               exit 1
             fi
             for run_id in $run_ids; do
-              run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,status,conclusion,jobs)"
+              run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"
               run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
               run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+              run_event="$(jq -r '.event // ""' <<< "$run_json")"
               run_status="$(jq -r '.status // ""' <<< "$run_json")"
               run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
               native_conclusion="$(jq -r '[.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion][0] // ""' <<< "$run_json")"
               if [ "$run_sha" = "$GITHUB_SHA" ] \
                 && [ "$run_branch" = "main" ] \
+                && [ "$run_event" = "workflow_dispatch" ] \
                 && [ "$run_status" = "completed" ] \
                 && [ "$run_conclusion" = "success" ] \
                 && [ "$native_conclusion" = "success" ]; then
-                echo "PASS: Atlas Native AI offline verification passed on exact main commit $GITHUB_SHA (run $run_id)"
+                echo "PASS: manually dispatched Atlas Native AI offline verification passed on exact main commit $GITHUB_SHA (run $run_id)"
                 return 0
               fi
               echo "Ignoring verification run $run_id: sha=$run_sha branch=$run_branch conclusion=$run_conclusion native_ai_step=$native_conclusion"

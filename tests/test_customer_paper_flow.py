@@ -1588,3 +1588,50 @@ def test_customer_paper_overdraw_conflict_keeps_safe_recovery_signal():
 
     with pytest.raises(CustomerPaperFlowBlocked, match="overdraw"):
         asyncio.run(flow._paper_call(fail_overdraw(), "append paper fill"))
+
+def test_autonomous_recovery_rejects_manual_pending_order_with_customer_action(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {
+        "bar_timestamp": "2026-11-03T10:00:00+00:00",
+        "currency": "USDT",
+        "data_sha256": "a" * 64,
+    }
+    manual_order = {
+        "order_id": "manual-order-1",
+        "client_order_id": "manual-btc-buy",
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "status": "SUBMITTED",
+        "metadata": {
+            "execution_owner": "manual_customer_api",
+            "execution_model": "completed_bar_volume_capped_heuristic_v1",
+            "timeframe": "4h",
+        },
+    }
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
+    monkeypatch.setattr(flow, "list_open_customer_paper_orders", _async_value([manual_order]))
+
+    async def forbidden_fill(*_args, **_kwargs):
+        raise AssertionError("autonomous recovery must never advance a manual paper order")
+
+    async def no_protective_position(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(flow, "_fill_open_order", forbidden_fill)
+    monkeypatch.setattr(flow, "_protective_exit", no_protective_position)
+
+    with pytest.raises(CustomerPaperFlowBlocked) as exc:
+        asyncio.run(flow.process_customer_paper_orders(
+            81234, req, pd.DataFrame(), {},
+        ))
+
+    message = str(exc.value)
+    assert "manual-btc-buy" in message
+    assert "timeframe 4h" in message
+    assert "Cancel or advance it through the manual paper-order API" in message
+    assert "will not take ownership" in message
+
