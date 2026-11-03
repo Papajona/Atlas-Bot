@@ -72,7 +72,7 @@ jobs:
                   --commit "$GITHUB_SHA" \
                   --limit 100 \
                   --json databaseId,headSha,headBranch,event,status,conclusion \
-                  --jq '[.[] | select(.headBranch == "main" and .event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'")] | sort_by(.databaseId) | last // {}')"
+                  --jq '[.[] | select(.headBranch == "main" and .event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | last // {}')"
               else
                 run_json="$(gh run list \
                   --repo "$GITHUB_REPOSITORY" \
