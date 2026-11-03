@@ -69,14 +69,17 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
     async def run():
         await init_db()
-        now = pd.Timestamp.now(tz="UTC")
-        current_floor = now.floor("5min")
-        submit_bar = current_floor - pd.Timedelta(minutes=10)
-        process_bar = current_floor - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
             await db.commit()
+
+        # Start the fixture clock after database initialization and state reset.
+        # CI startup or DB contention must not age provenance before execution.
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        submit_bar = current_floor - pd.Timedelta(minutes=10)
+        process_bar = current_floor - pd.Timedelta(minutes=5)
         df0 = pd.DataFrame(
             {"open":[99.0, 99.5, 100.0], "high":[100.0,100.0,101.0],
              "low":[98.0,99.0,99.5], "close":[99.0,99.5,100.0], "volume":[1.0,1.0,1.0]},
