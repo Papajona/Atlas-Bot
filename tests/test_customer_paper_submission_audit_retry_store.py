@@ -407,7 +407,8 @@ def test_retry_repair_keeps_row_pending_when_another_worker_owns_delivery_lease(
     asyncio.run(main._repair_customer_paper_submission_audit_retries(715))
 
     assert replayed == ["attempted"]
-    assert state_updates == []
+    # Incomplete delivery remains PENDING, but refresh its queue position to avoid starvation.
+    assert state_updates == [(30, "PENDING", "DeliveryIncomplete", True)]
 
 
 @pytest.mark.parametrize(
