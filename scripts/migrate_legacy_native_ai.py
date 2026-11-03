@@ -5934,7 +5934,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # AI_SECRET_ARGS="\${AI_SECRET_ARGS}" after its provider item is removed.
         # That assignment changes no value and can be dropped with its retired
         # condition. Real shared or Groq entries are never moved outside the guard.
-        if remaining not in {"", "\${AI_SECRET_ARGS}"}:
+        if remaining not in {"", "${AI_SECRET_ARGS}"}:
             raise MigrationError(
                 f"{path} has surviving shared-secret entries inside a retired-provider conditional; refusing to make them unconditional"
             )
