@@ -105,7 +105,7 @@ Abort and investigate on the first failed check; do not skip forward.
 Required environment: `GCP_PROJECT_ID GCP_REGION AR_REPOSITORY MODEL_BUCKET MODEL_STAGING_BUCKET SERVICE_ACCOUNT WORKER_SERVICE_ACCOUNT DATABASE_URL
 USDT_TRON_ACCOUNT_XPUB TRONGRID_API_KEY APP_ENCRYPTION_KEY REDIS_URL SUPABASE_URL SUPABASE_ANON_KEY FUNDING_WEBHOOK_SECRET ADMIN_SUPABASE_USER_IDS
 BACKUP_RECOVERY_URL FORWARDED_ALLOW_IPS MODEL_SIGNING_PUBLIC_KEY MODEL_SIGNING_PRIVATE_KEY`; optional `MIGRATION_SERVICE_ACCOUNT`.
-It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, required secrets, and per-secret IAM bindings. The Groq secret is optional: supply `GROQ_API_KEY` to bootstrap it, or leave that variable unset to run Native AI without Groq.
+It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, required secrets, and per-secret IAM bindings. Production deployment always enables bounded Groq trade-time review: supply `GROQ_API_KEY` to bootstrap the `atlas-groq-api-key` secret and grant API/worker access. A keyless bootstrap may be used for non-production setup only; the production deploy is expected to fail closed without the pinned Groq secret version.
 **Check:** `gcloud secrets list`, `gcloud iam service-accounts list`; confirm `atlas-model-signing-private-key` is readable by the **worker only**.
 
 ### Step 2: Audit-log retention -- `deploy/gcp-security-audit-retention.sh`, then `deploy/verify-cloud-audit.sh`
@@ -137,14 +137,14 @@ bash deploy/cloud-run-migration-job.sh        # deploys the job as atlas-migrato
 ### Step 6: Deploy the API -- `deploy/cloud-run-deploy.sh`
 Required: all Step-1 variables plus `CLOUD_RUN_SERVICE` and explicit secret versions `SECRET_DATABASE_VERSION SECRET_KEY_VERSION SECRET_TRON_XPUB_VERSION
 SECRET_APP_ENCRYPTION_VERSION SECRET_REDIS_URL_VERSION SECRET_TRONGRID_VERSION SECRET_MODEL_SIGNING_PUBLIC_VERSION SECRET_SUPABASE_ANON_KEY_VERSION
-SECRET_FUNDING_WEBHOOK_VERSION`. Optional: set `SECRET_GROQ_API_KEY_VERSION` to the positive numeric version of `atlas-groq-api-key` to enable advisory research review; omit it to keep Groq disabled. The Native AI safety path does not require this key.
+SECRET_FUNDING_WEBHOOK_VERSION SECRET_GROQ_API_KEY_VERSION`. `SECRET_GROQ_API_KEY_VERSION` is required and must be the positive numeric version of `atlas-groq-api-key`; the production workflow enables bounded Groq trade-time review and the deploy refuses to proceed without this secret. The local/test Native AI application default remains disabled.
 It deploys with `--execution-environment gen2`, the read-only models volume, ingress `internal-and-cloud-load-balancing`, and `--allow-unauthenticated`
 (authentication is enforced by the app; the ingress setting restricts who can reach it).
 **Check:** `GET /healthz` (liveness) then `GET /readyz` (database, migrations current, Redis, recovery config, admin auth). `/docs` must be off
 (`DOCS_ENABLED=false`) and `/metrics` must require an admin (`METRICS_REQUIRE_ADMIN=true`).
 
 ### Step 7: Deploy the worker pool -- `deploy/cloud-run-worker-deploy.sh`
-The worker script reads every API revision currently receiving traffic and inherits its validated Groq model, token cap, enablement setting and optional pinned Secret Manager version. No-traffic tagged canaries are excluded. If multiple serving revisions have different Groq configurations, the worker rollout is refused. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; any supplied Groq overrides that differ from the serving API configuration are rejected.
+The worker script reads every API revision currently receiving traffic and inherits its validated Groq model, token cap, enablement setting and required pinned Secret Manager version. No-traffic tagged canaries are excluded. If multiple serving revisions have different Groq configurations, the worker rollout is refused. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; any supplied Groq overrides that differ from the serving API configuration are rejected.
 ```
 
 export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUNT=atlas-trading-worker \
