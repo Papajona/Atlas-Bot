@@ -530,6 +530,8 @@ jobs:
         with:
           gradle-version: "8.9"
       - name: Compile Android debug artifact
+        env:
+          ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000
         run: gradle :app:assembleDebug
       - name: Verify Android security source gates
         run: |
