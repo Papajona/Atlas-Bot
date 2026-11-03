@@ -796,7 +796,7 @@ fi
 
     def test_noop_shared_ai_secret_args_self_assignment_is_removed_safely(self):
         shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
-  AI_SECRET_ARGS="\${AI_SECRET_ARGS}"
+  AI_SECRET_ARGS="${AI_SECRET_ARGS}"
 fi
 """
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
