@@ -81,8 +81,21 @@ internal data class AiSafetyAuditStatus(
     val vetoReserveStatus: String
 )
 
-internal fun resolveAiSafetyAuditStatus(metrics: PortfolioRiskMetrics): AiSafetyAuditStatus {
-    val hasValidatedDeadline = metrics.telemetryAvailable &&
+internal const val AI_SAFETY_TELEMETRY_MAX_AGE_MS = 30_000L
+internal const val AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS = 5_000L
+
+internal fun resolveAiSafetyAuditStatus(
+    metrics: PortfolioRiskMetrics,
+    webSocketConnected: Boolean,
+    nowEpochMs: Long
+): AiSafetyAuditStatus {
+    val telemetryAgeMs = nowEpochMs - metrics.lastUpdatedEpochMs
+    val telemetryTimestampIsFresh = metrics.lastUpdatedEpochMs > 0L &&
+        telemetryAgeMs >= -AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS &&
+        telemetryAgeMs <= AI_SAFETY_TELEMETRY_MAX_AGE_MS
+    val hasValidatedDeadline = webSocketConnected &&
+        metrics.telemetryAvailable &&
+        telemetryTimestampIsFresh &&
         metrics.aiSafetyTimeoutSeconds.isFinite() &&
         metrics.aiSafetyTimeoutSeconds > 0.0
     return AiSafetyAuditStatus(
@@ -117,6 +130,7 @@ fun RiskDashboardScreen(
     var isSimulatingStress by remember { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
     var showAuditDialog by remember { mutableStateOf(false) }
+    var safetyAuditNowEpochMs by remember { mutableStateOf(System.currentTimeMillis()) }
     var showReleaseAdvisor by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
 
@@ -124,6 +138,21 @@ fun RiskDashboardScreen(
     LaunchedEffect(streamedMetrics) {
         if (streamedMetrics.lastUpdatedEpochMs > 0 && streamedMetrics.streamType == "WEBSOCKET_PUSH") {
             metrics = streamedMetrics
+        }
+    }
+
+    // Re-evaluate an open audit when the last accepted frame expires, even if
+    // the socket remains connected but stops sending new telemetry.
+    LaunchedEffect(showAuditDialog, metrics.lastUpdatedEpochMs) {
+        safetyAuditNowEpochMs = System.currentTimeMillis()
+        if (showAuditDialog && metrics.lastUpdatedEpochMs > 0L) {
+            val ageMs = safetyAuditNowEpochMs - metrics.lastUpdatedEpochMs
+            if (ageMs >= -AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS &&
+                ageMs < AI_SAFETY_TELEMETRY_MAX_AGE_MS
+            ) {
+                delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs)
+                safetyAuditNowEpochMs = System.currentTimeMillis()
+            }
         }
     }
 
@@ -412,7 +441,11 @@ fun RiskDashboardScreen(
                         color = emeraldPass,
                         fontSize = 13.sp
                     )
-                    val aiSafetyAudit = resolveAiSafetyAuditStatus(metrics)
+                    val aiSafetyAudit = resolveAiSafetyAuditStatus(
+                        metrics = metrics,
+                        webSocketConnected = wsConnectionState is WebSocketConnectionState.Connected,
+                        nowEpochMs = safetyAuditNowEpochMs
+                    )
                     Text(
                         text = "• AI Safety Decision Budget: ${aiSafetyAudit.deadlineLabel}",
                         color = textMuted,
