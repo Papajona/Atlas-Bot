@@ -245,18 +245,123 @@ def test_main_requires_explicit_exclusive_testnet_account_attestation(monkeypatc
         drill.main()
 
 
-def test_binance_spot_harness_requires_opt_in_sandbox_and_verified_cleanup_boundary():
-    source = (ROOT / "scripts/binance_spot_testnet_acceptance.py").read_text(encoding="utf-8")
-    assert 'os.getenv("ATLAS_BINANCE_TESTNET", "").strip().lower() != "true"' in source
-    assert 'os.getenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", "").strip().lower() != "true"' in source
-    assert "client.fetch_open_orders(symbol)" in source
-    assert "free_delta != drill_cap" in source
-    assert "require_testnet_spot_endpoints(client)" in source
-    assert "if not broker.config.sandbox:" in source
-    assert "enable_withdrawals=False" in source
-    assert "universal_transfer=False" in source
-    assert "finally:" in source
-    assert "cleanup_new_spot_base(" in source
+def test_main_refuses_without_explicit_testnet_opt_in_before_broker_construction(monkeypatch):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.delenv("ATLAS_BINANCE_TESTNET", raising=False)
+    broker_factory_calls = []
+
+    def forbidden_broker_factory(*_args, **_kwargs):
+        broker_factory_calls.append(True)
+        raise AssertionError("broker construction must not happen without explicit testnet opt-in")
+
+    monkeypatch.setattr(drill, "build_customer_binance_broker", forbidden_broker_factory)
+    with pytest.raises(SystemExit, match="ATLAS_BINANCE_TESTNET=true"):
+        drill.main()
+
+    assert broker_factory_calls == []
+
+
+def test_main_rejects_production_active_spot_endpoints_before_authenticated_requests(monkeypatch):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.setenv("ATLAS_BINANCE_TESTNET", "true")
+    monkeypatch.setenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", "true")
+    monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_SECRET", "test-secret")
+    calls = {"connect": 0, "balance": 0, "market_info": 0, "orders": 0}
+
+    class Client:
+        urls = {
+            "api": {
+                "public": "https://api.binance.com/api/v3",
+                "private": "https://api.binance.com/api/v3",
+                "inactiveTestnetExample": "https://testnet.binance.vision/api/v3",
+            }
+        }
+
+        def fetch_balance(self):
+            calls["balance"] += 1
+            raise AssertionError("authenticated balance must not be queried on production endpoints")
+
+        def fetch_open_orders(self, _symbol):
+            calls["orders"] += 1
+            raise AssertionError("orders must not be queried on production endpoints")
+
+    client = Client()
+
+    class Broker:
+        config = SimpleNamespace(sandbox=True)
+
+        def connect(self):
+            calls["connect"] += 1
+            return client
+
+        def market_info(self, _symbol):
+            calls["market_info"] += 1
+            raise AssertionError("market metadata must not be queried after endpoint rejection")
+
+    monkeypatch.setattr(
+        drill,
+        "build_customer_binance_broker",
+        lambda *_args, **_kwargs: Broker(),
+    )
+    with pytest.raises(RuntimeError, match="active CCXT public and private API endpoints"):
+        drill.main()
+
+    assert calls == {"connect": 1, "balance": 0, "market_info": 0, "orders": 0}
+
+
+def test_main_rejects_non_sandbox_broker_and_keeps_testnet_account_restricted(monkeypatch):
+    from scripts import binance_spot_testnet_acceptance as drill
+
+    monkeypatch.setenv("ATLAS_BINANCE_TESTNET", "true")
+    monkeypatch.setenv("ATLAS_TESTNET_ACCOUNT_EXCLUSIVE", "true")
+    monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_KEY", "test-key")
+    monkeypatch.setenv("ATLAS_TESTNET_BINANCE_API_SECRET", "test-secret")
+    calls = {"balance": 0, "market_info": 0, "orders": 0}
+    captured_accounts = []
+
+    class Client:
+        urls = {
+            "api": {
+                "public": "https://testnet.binance.vision/api/v3",
+                "private": "https://testnet.binance.vision/api/v3",
+            }
+        }
+
+        def fetch_balance(self):
+            calls["balance"] += 1
+            raise AssertionError("balance must not be queried when broker sandbox mode is false")
+
+        def fetch_open_orders(self, _symbol):
+            calls["orders"] += 1
+            raise AssertionError("orders must not be queried when broker sandbox mode is false")
+
+    class Broker:
+        config = SimpleNamespace(sandbox=False)
+
+        def connect(self):
+            return Client()
+
+        def market_info(self, _symbol):
+            calls["market_info"] += 1
+            raise AssertionError("market metadata must not be queried when broker sandbox mode is false")
+
+    def broker_factory(account, *_args, **_kwargs):
+        captured_accounts.append(account)
+        return Broker()
+
+    monkeypatch.setattr(drill, "build_customer_binance_broker", broker_factory)
+    with pytest.raises(RuntimeError, match="Refusing non-sandbox broker configuration"):
+        drill.main()
+
+    assert len(captured_accounts) == 1
+    assert captured_accounts[0].market_type == "spot"
+    assert captured_accounts[0].enable_withdrawals is False
+    assert captured_accounts[0].universal_transfer is False
+    assert calls == {"balance": 0, "market_info": 0, "orders": 0}
+
 
 
 def test_binance_spot_harness_uses_spot_stop_loss_not_derivatives_reduce_only():
@@ -1035,3 +1140,30 @@ def test_main_cancels_partial_buy_then_flattens_its_confirmed_final_fill(monkeyp
     assert state["canceled"] == ["buy-1"]
     assert state["sell_amount"] == Decimal("0.04")
     assert state["balance"] == Decimal("0")
+
+def test_main_checks_spot_stop_loss_capability_before_any_buy(monkeypatch):
+    drill, state = _configure_main_fake(monkeypatch, "base_fee")
+    original_factory = drill.build_customer_binance_broker
+
+    def broker_without_stop_loss(*args, **kwargs):
+        broker = original_factory(*args, **kwargs)
+        original_market_info = broker.market_info
+
+        def market_info(symbol):
+            metadata = original_market_info(symbol)
+            metadata["info"]["orderTypes"] = []
+            return metadata
+
+        broker.market_info = market_info
+        return broker
+
+    monkeypatch.setattr(drill, "build_customer_binance_broker", broker_without_stop_loss)
+
+    with pytest.raises(RuntimeError, match="does not advertise STOP_LOSS"):
+        drill.main()
+
+    assert state["buy_client_id"] is None
+    assert state["balance"] == Decimal("0")
+    assert state["sell_amount"] == Decimal("0")
+    assert state["stop_id"] is None
+
