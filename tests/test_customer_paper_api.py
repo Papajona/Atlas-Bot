@@ -208,6 +208,12 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         async def commit(self):
             self.commit_count += 1
 
+    async def fake_get_customer_paper_balances(*, customer_id):
+        # This route test exercises replay idempotency, not the isolated-ledger
+        # database preflight. Keep all real paper-ledger access out of the fixture.
+        assert customer_id == 99031
+        return []
+
     async def state_guard():
         return None
 
@@ -218,6 +224,7 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
 
     customer_session = DummySession()
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: customer_session)
+    monkeypatch.setattr(paper_api, "get_customer_paper_balances", fake_get_customer_paper_balances)
     monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_customer_paper_order)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
