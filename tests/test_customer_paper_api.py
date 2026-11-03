@@ -244,6 +244,7 @@ def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monk
     monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", forbidden_record_fill)
     monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
+    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
 
@@ -730,6 +731,18 @@ def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
         return dict(order)
 
     async def verify_bar_provenance(**kwargs):
+        bar_at = kwargs["bar_at"]
+        key = bar_at.isoformat()
+        return {
+            "bar_key": key,
+            "bar_at": key,
+            "capacity": "0.400000000000000000",
+            "available": "0.400000000000000000",
+        }
+
+    async def register_bar(**kwargs):
+        # Candidate fills still create a shared capacity budget. Keep that path
+        # isolated from the read-only provenance verifier used for prior fills.
         bar_at = kwargs["bar_at"]
         registered_bars.append(bar_at)
         key = bar_at.isoformat()
