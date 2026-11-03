@@ -245,6 +245,7 @@ def test_main_requires_explicit_exclusive_testnet_account_attestation(monkeypatc
         drill.main()
 
 
+
 def test_main_refuses_without_explicit_testnet_opt_in_before_broker_construction(monkeypatch):
     from scripts import binance_spot_testnet_acceptance as drill
 

@@ -578,7 +578,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     known_prior_fixed_signal_labels = {label for label in known_prior_labels if not label.startswith("ai@")}
     ai_trial_labels = {f"ai@{ai_fp}"} if include_ai else set()
     persistent_trial_labels = this_labels | ai_trial_labels
-    n_trials = len(known_prior_labels | persistent_trial_labels)
+    # n_trials must describe the SAME trial population the deflated Sharpe ratio
+    # corrects for. AI trials are recorded in persistent accounting, but their
+    # metrics come from a separate sample, so counting them here would inflate the
+    # multiplicity penalty above the dispersion DSR actually applies. Count the
+    # fixed-signal trials only, and keep the AI arm in its own accounting.
+    n_trials = len(known_prior_fixed_signal_labels | this_labels)
     # Candidate statistics and signed evidence use an explicit protocol version.
     # Bump it when split geometry changes so old attestations cannot be silently reused.
     ens_cost = cost_breakeven_report(
