@@ -5326,6 +5326,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
     """Remove provider-specific shell wiring without corrupting bundled env/secret lists."""
     output: list[str] = []
     skip_provider_block = False
+    provider_block_indent = ""
+    hoisted_ai_secret_args_in_block = False
     # Groq remains a supported research-only reviewer. Preserve pure Groq secret/config
     # conditionals verbatim, but fail closed if they wrap unrelated deployment commands.
     source_lines = text.splitlines(keepends=True)
@@ -5917,18 +5919,41 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             cleaned = shared + "${AI_SECRET_ARGS:+,}" + cleaned[len(shared) + 1:]
         return prefix + quote + cleaned + suffix
 
+    def safe_groq_only_ai_secret_args(statement: str) -> str | None:
+        """Return a standalone Groq-only list; reject other surviving secret entries."""
+        if not re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", statement, re.I):
+            return None
+        cleaned = scrub_ai_secret_args(statement)
+        value_match = re.match(
+            r"""^(\s*(?:export\s+)?AI_SECRET_ARGS\s*=\s*)(["'])(.*)(\2\s*(?:\r?\n)?)$""",
+            cleaned,
+            re.I,
+        )
+        if value_match is None:
+            raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
+        value = value_match.group(3).strip()
+        if not value:
+            return None
+        entries = [item.strip() for item in split_shell_list(value.lstrip(","), ",") if item.strip()]
+        groq_only = bool(entries) and all(
+            re.fullmatch(r"\$\{GROQ_SECRET_(?:ARG|ARGS)\}", item, re.I)
+            or re.fullmatch(
+                r"(?i)GROQ_API_KEY=(?:atlas-groq-api-key:)?\$\{SECRET_GROQ[A-Z0-9_]*\}",
+                item,
+            )
+            for item in entries
+        )
+        if not groq_only:
+            raise MigrationError(
+                f"{path} has non-Groq shared-secret entries inside a retired-provider conditional; refusing to hoist them"
+            )
+        return cleaned
+
     def is_safe_empty_retired_ai_secret_args(statement: str) -> bool:
-        """Permit only an empty list or a no-op self-assignment after retired entries are removed."""
+        """Permit a retired-provider list to disappear only when no shared secrets remain."""
         if not re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", statement, re.I):
             return False
         cleaned = scrub_ai_secret_args(statement)
-        if re.search(
-            r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
-            cleaned,
-        ):
-            raise MigrationError(
-                f"{path} has a Groq secret assignment inside a retired-provider conditional; refusing to remove its guard"
-            )
         value_match = re.match(
             r"""^\s*(?:export\s+)?AI_SECRET_ARGS\s*=\s*(["'])(.*)\1\s*(?:\r?\n)?$""",
             cleaned,
@@ -5936,16 +5961,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         if value_match is None:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
-        remaining = value_match.group(2).strip()
-        if remaining == "${AI_SECRET_ARGS}" and value_match.group(1) != '"':
+        if re.search(
+            r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
+            cleaned,
+        ):
             raise MigrationError(
-                f"{path} has a single-quoted shared-secret literal inside a retired-provider conditional"
+                f"{path} has a Groq secret assignment inside a retired-provider conditional; use the safe Groq hoist path"
             )
-        # A former Cerebras/Gemini append often becomes
-        # AI_SECRET_ARGS="\${AI_SECRET_ARGS}" after its provider item is removed.
-        # That assignment changes no value and can be dropped with its retired
-        # condition. Real shared or Groq entries are never moved outside the guard.
-        if remaining not in {"", "${AI_SECRET_ARGS}"}:
+        if value_match.group(2).strip():
             raise MigrationError(
                 f"{path} has surviving shared-secret entries inside a retired-provider conditional; refusing to make them unconditional"
             )
@@ -5984,7 +6007,18 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     )
                 continue
             if re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", line, re.I):
-                is_safe_empty_retired_ai_secret_args(line)
+                if hoisted_ai_secret_args_in_block:
+                    raise MigrationError(
+                        f"{path} has multiple AI_SECRET_ARGS assignments in a retired-provider conditional; refusing ambiguous hoisting"
+                    )
+                hoisted = safe_groq_only_ai_secret_args(line)
+                if hoisted is None:
+                    is_safe_empty_retired_ai_secret_args(line)
+                else:
+                    output.append(provider_block_indent + hoisted.lstrip())
+                    if not output[-1].endswith(("\n", "\r")):
+                        output[-1] += "\n"
+                    hoisted_ai_secret_args_in_block = True
                 continue
             provider_assignment = re.match(
                 r"^\s*(?:export\s+)?(?:SECRET_GEMINI[A-Z0-9_]*|SECRET_CEREBRAS[A-Z0-9_]*|"
@@ -6023,6 +6057,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 raise MigrationError(
                     f"{path} has an executable command on a retired-provider if-header; refusing to discard it"
                 )
+            provider_block_indent = line[: len(line) - len(line.lstrip())]
+            hoisted_ai_secret_args_in_block = False
             skip_provider_block = True
             continue
 
@@ -7150,6 +7186,54 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
 
 
 
+def _native_ai_contains_hosted_provider_call(contents: str) -> bool:
+    """Reject hosted inference in Native AI while allowing passive Groq evidence fields."""
+    try:
+        module = ast.parse(contents, filename="app/native_ai.py")
+    except SyntaxError:
+        return True
+
+    hosted_modules = {
+        "groq", "groq_ai", "openai", "cerebras", "google.generativeai",
+        "google.genai", "anthropic", "cohere", "mistralai", "litellm",
+        "httpx", "requests", "aiohttp", "socket", "urllib.request",
+        "urllib3", "http.client", "websockets",
+    }
+    hosted_import_names = {"genai", "generativeai"}
+    hosted_calls = {
+        "groq_trade_context_review", "_groq_json", "groq_json", "openai",
+        "asyncopenai", "generativemodel", "cerebras",
+    }
+    for node in ast.walk(module):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                root = alias.name.lower()
+                if root in hosted_modules or any(
+                    root.endswith("." + name) for name in hosted_modules
+                ):
+                    return True
+        elif isinstance(node, ast.ImportFrom):
+            imported_module = (node.module or "").lower().lstrip(".")
+            if (
+                imported_module in hosted_modules
+                or any(imported_module.endswith("." + name) for name in hosted_modules)
+                or any(
+                    alias.name.lower() in hosted_calls | hosted_import_names
+                    for alias in node.names
+                )
+            ):
+                return True
+        elif isinstance(node, ast.Call):
+            call_name = (
+                node.func.id if isinstance(node.func, ast.Name)
+                else node.func.attr if isinstance(node.func, ast.Attribute)
+                else ""
+            )
+            if str(call_name).lower() in hosted_calls:
+                return True
+    return False
+
+
 def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
     """Reject retired provider wiring without treating supported Groq review as legacy.
 
@@ -7165,6 +7249,7 @@ def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
         return bool(
             RETIRED_PROVIDER_RE.search(contents)
             or NATIVE_AI_HOSTED_GROQ_RE.search(contents)
+            or _native_ai_contains_hosted_provider_call(contents)
         )
     return bool(PROVIDER_RE.search(contents))
 
