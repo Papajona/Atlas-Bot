@@ -5930,6 +5930,10 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if value_match is None:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
         remaining = value_match.group(2).strip()
+        if remaining == "${AI_SECRET_ARGS}" and value_match.group(1) != '"':
+            raise MigrationError(
+                f"{path} has a single-quoted shared-secret literal inside a retired-provider conditional"
+            )
         # A former Cerebras/Gemini append often becomes
         # AI_SECRET_ARGS="\${AI_SECRET_ARGS}" after its provider item is removed.
         # That assignment changes no value and can be dropped with its retired
