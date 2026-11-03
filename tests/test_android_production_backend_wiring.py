@@ -92,9 +92,11 @@ def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_m
 
 def test_android_audit_reports_configured_safety_budget_in_rendered_compose_dialog():
     assert "RiskDashboardScreen" in MAIN_ACTIVITY
-    assert "if (showAuditDialog)" in RISK_DASHBOARD
-    assert "AlertDialog(" in RISK_DASHBOARD
-    assert 'AI Safety Decision Budget: $aiSafetyDeadlineLabel configured' in RISK_DASHBOARD
-    assert "Native AI veto reserve protected" in RISK_DASHBOARD
-    assert "AI Safety Decision Deadline" not in RISK_DASHBOARD
-    assert "1.5s FAIL-CLOSED" not in RISK_DASHBOARD
+    audit_dialog = RISK_DASHBOARD.split("if (showAuditDialog)", 1)[1].split(
+        "@Composable\nprivate fun SystemStateRibbon", 1
+    )[0]
+    assert "AlertDialog(" in audit_dialog
+    assert "AI Safety Decision Budget: $aiSafetyDeadlineLabel configured" in audit_dialog
+    assert "Native AI veto reserve protected" in audit_dialog
+    assert "AI Safety Decision Deadline" not in audit_dialog
+    assert "1.5s FAIL-CLOSED" not in audit_dialog
