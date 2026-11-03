@@ -11,6 +11,7 @@ AUTH_CLIENT = (
 ).read_text(encoding="utf-8")
 STRINGS = (ROOT / "app" / "src" / "main" / "res" / "values" / "strings.xml").read_text(encoding="utf-8")
 RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "android-release.yml").read_text(encoding="utf-8")
+RISK_DASHBOARD = (ROOT / "app" / "src" / "main" / "java" / "com" / "atlas" / "trading" / "ui" / "RiskDashboard.kt").read_text(encoding="utf-8")
 
 
 def test_release_build_requires_an_explicit_approved_https_backend_origin():
@@ -87,3 +88,15 @@ def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_m
     assert "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" in release_job
     assert "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v')" in release_job
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" not in release_job
+
+
+def test_android_audit_reports_configured_safety_budget_in_rendered_compose_dialog():
+    assert "RiskDashboardScreen" in MAIN_ACTIVITY
+    audit_dialog = RISK_DASHBOARD.split("if (showAuditDialog)", 1)[1].split(
+        "@Composable\nprivate fun SystemStateRibbon", 1
+    )[0]
+    assert "AlertDialog(" in audit_dialog
+    assert "AI Safety Decision Budget: $aiSafetyDeadlineLabel configured" in audit_dialog
+    assert "Native AI veto reserve protected" in audit_dialog
+    assert "AI Safety Decision Deadline" not in audit_dialog
+    assert "1.5s FAIL-CLOSED" not in audit_dialog
