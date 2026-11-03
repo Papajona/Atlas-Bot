@@ -101,3 +101,31 @@ def test_debug_build_requires_an_explicit_valid_development_backend_origin():
 def test_android_debug_ci_uses_only_the_emulator_development_origin():
     assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in RELEASE_WORKFLOW
     assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in CI_WORKFLOW
+
+def test_debug_network_security_allows_only_the_emulator_http_origin():
+    import xml.etree.ElementTree as ET
+
+    android_ns = "{http://schemas.android.com/apk/res/android}"
+    manifest = ET.parse(ROOT / "app" / "src" / "main" / "AndroidManifest.xml").getroot()
+    application = manifest.find("application")
+    assert application is not None
+    assert application.get(android_ns + "networkSecurityConfig") == "@xml/network_security_config"
+    assert application.get(android_ns + "usesCleartextTraffic") == "false"
+
+    release_policy = ET.parse(
+        ROOT / "app" / "src" / "main" / "res" / "xml" / "network_security_config.xml"
+    ).getroot()
+    debug_policy = ET.parse(
+        ROOT / "app" / "src" / "debug" / "res" / "xml" / "network_security_config.xml"
+    ).getroot()
+    release_base = release_policy.find("base-config")
+    debug_base = debug_policy.find("base-config")
+    assert release_base is not None and release_base.get("cleartextTrafficPermitted") == "false"
+    assert debug_base is not None and debug_base.get("cleartextTrafficPermitted") == "false"
+    allowed_debug_domains = [
+        domain.text
+        for policy in debug_policy.findall("domain-config")
+        if policy.get("cleartextTrafficPermitted") == "true"
+        for domain in policy.findall("domain")
+    ]
+    assert allowed_debug_domains == ["10.0.2.2"]
