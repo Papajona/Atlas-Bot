@@ -687,27 +687,39 @@ def _explicit_duplicate_alias_retirement_proof(
     )
 
 def _same_tree_merge_child_of_main(branch_sha: str, main_sha: str) -> bool:
-    """Prove a branch tip is a no-op merge child of the exact current main commit."""
+    """Prove the branch tip adds no tree changes to a parent already in current main."""
     branch_metadata = _run(
         ["git", "show", "-s", "--format=%T%n%P", branch_sha],
         check=False,
     )
-    main_metadata = _run(
-        ["git", "show", "-s", "--format=%T%n%P", main_sha],
-        check=False,
-    )
-    if branch_metadata.returncode or main_metadata.returncode:
+    if branch_metadata.returncode:
         return False
 
     branch_fields = branch_metadata.stdout.strip().splitlines()
-    main_fields = main_metadata.stdout.strip().splitlines()
-    if len(branch_fields) < 2 or not main_fields:
+    if len(branch_fields) < 2:
+        return False
+    branch_tree = branch_fields[0].strip()
+    if not branch_tree:
         return False
 
-    branch_tree = branch_fields[0].strip()
-    branch_parents = set(branch_fields[1].split())
-    main_tree = main_fields[0].strip()
-    return bool(branch_tree and branch_tree == main_tree and main_sha in branch_parents)
+    # A reconciled no-op merge may be based on an older main SHA. Accept it only
+    # when one exact parent is proven to be an ancestor of today's main AND the
+    # branch tip tree is byte-for-byte identical to that parent's tree. This
+    # remains valid after main advances without treating tree equality alone as
+    # integration proof.
+    for parent_sha in branch_fields[1].split():
+        if not _is_ancestor(parent_sha, main_sha):
+            continue
+        parent_metadata = _run(
+            ["git", "show", "-s", "--format=%T", parent_sha],
+            check=False,
+        )
+        if parent_metadata.returncode:
+            continue
+        parent_tree = parent_metadata.stdout.strip()
+        if parent_tree and branch_tree == parent_tree:
+            return True
+    return False
 
 
 def _resolve_branch_integration(
@@ -733,14 +745,13 @@ def _resolve_branch_integration(
     if safe or reason != "no exact integration proof; preserve branch":
         return safe, reason, []
 
-    # A no-op merge commit is removable only when its exact tree equals the
-    # current main tree and the exact current main commit is one of its parents.
-    # This is stronger than tree equality alone and is rechecked against the
-    # live main tip before deletion by the caller.
+    # A no-op merge commit is removable only when its exact tree equals one of
+    # its parents' trees and that exact parent is an ancestor of current main.
+    # This is stronger than tree equality alone and remains valid after main moves.
     if _same_tree_merge_child_of_main(branch_sha, main_sha):
         return (
             True,
-            "branch tip has current main as a parent and its exact tree is identical to main",
+            "branch tip adds no tree changes to a parent already in current main",
             [],
         )
 

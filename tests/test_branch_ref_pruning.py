@@ -1657,37 +1657,54 @@ def test_fork_merge_cannot_authorize_deletion_of_same_named_local_branch():
     ) == (False, "no exact integration proof; preserve branch")
 
 
-def test_same_tree_merge_child_of_current_main_is_safe_to_retire(monkeypatch):
+def test_same_tree_merge_child_of_main_ancestor_is_safe_to_retire(monkeypatch):
     outputs = iter([
-        "same-tree-sha\nbranch-parent main-sha\n",
-        "same-tree-sha\nmain-parent\n",
+        "same-tree-sha\\nside-parent main-parent\\n",
+        "different-side-tree\\n",
+        "same-tree-sha\\n",
     ])
 
     def fake_run(_args, *, check=True):
         return subprocess.CompletedProcess([], 0, next(outputs), "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
-    monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
-
-    safe, reason, paths = pruning._resolve_branch_integration(
-        "fix/no-op-reconciliation", "branch-sha", "main-sha", set(), []
+    monkeypatch.setattr(
+        pruning,
+        "_is_ancestor",
+        lambda ancestor, descendant: ancestor == "main-parent" and descendant == "current-main",
     )
 
-    assert safe is True
-    assert "current main as a parent" in reason
-    assert paths == []
+    assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is True
 
 
-def test_same_tree_merge_child_proof_rejects_different_tree_or_missing_main_parent(monkeypatch):
+def test_same_tree_merge_child_proof_rejects_different_tree_or_non_ancestor(monkeypatch):
     scenarios = [
-        ("different-tree\nbranch-parent main-sha\n", "main-tree\nmain-parent\n"),
-        ("same-tree\nother-parent\n", "same-tree\nmain-parent\n"),
+        (
+            "different-tree\\nmain-parent\\n",
+            "same-tree-sha\\n",
+            True,
+        ),
+        (
+            "same-tree-sha\\nother-parent\\n",
+            "same-tree-sha\\n",
+            False,
+        ),
     ]
-    for branch_output, main_output in scenarios:
-        outputs = iter([branch_output, main_output])
+    for branch_output, parent_output, is_ancestor in scenarios:
+        outputs = iter([branch_output, parent_output])
 
         def fake_run(_args, *, check=True):
             return subprocess.CompletedProcess([], 0, next(outputs), "")
 
         monkeypatch.setattr(pruning, "_run", fake_run)
-        assert pruning._same_tree_merge_child_of_main("branch-sha", "main-sha") is False
+        monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: is_ancestor)
+        assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is False
+
+
+def test_same_tree_merge_child_proof_fails_closed_on_unreadable_git_metadata(monkeypatch):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, "", "object unavailable"),
+    )
+    assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is False
