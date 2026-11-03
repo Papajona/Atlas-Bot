@@ -230,6 +230,17 @@ def test_production_deploy_requires_verified_signed_android_artifact_for_exact_c
     assert "EXPECTED_CERT_SHA256: ${{ vars.ATLAS_RELEASE_CERT_SHA256 }}" not in deploy
     assert 'test "$package_name" = "com.atlas.trading"' in deploy
 
+def test_production_deploy_requires_manual_exact_commit_native_ai_verification():
+    deploy = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    start = deploy.index("require_native_ai_verification()")
+    end = deploy.index("require_staging_identity_success()", start)
+    gate = deploy[start:end]
+    assert "--event workflow_dispatch" in gate
+    assert '.event == "workflow_dispatch"' in gate
+    assert 'select(.name == "Atlas Native AI offline verification (no provider calls)")' in gate
+    assert '[ "$run_event" = "workflow_dispatch" ]' in gate
+    assert '[ "$native_conclusion" = "success" ]' in gate
+
 
 def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
@@ -453,6 +464,9 @@ def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
     assert "github.ref == 'refs/heads/main'" in deploy
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
+    assert '--event workflow_dispatch' in deploy
+    assert '.event == "workflow_dispatch"' in deploy
+    assert 'Atlas Native AI offline verification (no provider calls)' in deploy
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
     assert "gh workflow run staging-identity-preflight.yml" in deploy
