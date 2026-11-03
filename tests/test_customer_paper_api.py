@@ -226,6 +226,7 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: customer_session)
     monkeypatch.setattr(paper_api, "get_customer_paper_balances", fake_get_customer_paper_balances)
     monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_customer_paper_order)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
     monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
