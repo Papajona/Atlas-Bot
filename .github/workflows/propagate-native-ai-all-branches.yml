@@ -203,11 +203,21 @@ jobs:
                     legacy_scan_pattern = substr(normalized_content, legacy_open_quote + 1,
                                                   legacy_close_quote - legacy_open_quote - 1)
                     legacy_suffix = substr(normalized_content, legacy_close_quote + 1)
-                    if (legacy_scan_pattern == legacy_expected_pattern &&
-                        ((index(normalized_content, legacy_scanner_prefix) == 1 &&
-                          legacy_suffix == legacy_scan_suffix " || rc=$?") ||
-                         (index(normalized_content, legacy_verify_prefix) == 1 &&
-                          legacy_suffix == legacy_scan_suffix " >&2 || true"))) next
+                    legacy_current_verify_suffix = " -- . " quote ":!tests" quote " " \
+                      quote ":!docs" quote " " quote ":!README.md" quote " " \
+                      quote ":!CHANGELOG.md" quote " " \
+                      quote ":!.github/workflows/production-deploy.yml" quote " " \
+                      quote ":!.github/workflows/production-verification.yml" quote " " \
+                      quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
+                      quote ":!scripts/migrate_legacy_native_ai.py" quote
+                    if ((legacy_scan_pattern == legacy_expected_pattern &&
+                         ((index(normalized_content, legacy_scanner_prefix) == 1 &&
+                           legacy_suffix == legacy_scan_suffix " || rc=$?") ||
+                          (index(normalized_content, legacy_verify_prefix) == 1 &&
+                           legacy_suffix == legacy_scan_suffix " >&2 || true"))) ||
+                        (legacy_scan_pattern == current_pattern &&
+                         index(normalized_content, legacy_verify_prefix) == 1 &&
+                         legacy_suffix == legacy_current_verify_suffix " >&2 || true")) next
                   }
                 }
                 expected_current_declaration = "current_pattern = \"" escape_source_backslashes(current_pattern) "\""

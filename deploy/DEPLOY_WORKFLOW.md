@@ -234,7 +234,7 @@ and before each release (the verify script does).
 |---|---|---|
 | Migration job had no `--service-account` | ran as the default compute identity, which bootstrap never granted the DB secret (or ran over-privileged) | dedicated `atlas-migrator`, DB-secret-only, `--max-retries 0 --task-timeout 900s` |
 | Worker script never set `BACKUP_RECOVERY_URL` | production startup refused to boot: the worker pool crash-looped | variable now required and passed |
-| API deployment previously injected Gemini strategy-provider secrets | Gemini quotas and credentials could block strategy generation despite healthy core code | Gemini strategy calls removed; Native AI is local, while an optional Groq research-only secret can be injected separately |
+| API deployment previously injected retired hosted strategy-provider secrets | Retired hosted-provider quotas and credentials could block strategy generation despite healthy core code | Hosted strategy calls were removed; Atlas Native AI now runs locally, while optional Groq research and trade-context review remains separately controlled |
 | Worker previously depended on a dual-hosted-provider veto | missing API keys forced every worker cycle to NO_TRADE | Native AI uses local evidence checks and fails closed on missing or inconsistent trade packets |
 | Hosted model availability and quota | provider status, API keys, rate limits and core-code correctness are separate concerns | Local Native AI health check is deterministic and offline; no external provider attestation is required |
 | `DEPLOYMENT_ACCEPTANCE.md` stated `max=1, concurrency=1` and listed migrations after deploy | wrong numbers and order | corrected |
