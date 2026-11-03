@@ -258,6 +258,23 @@ class CustomerPaperSubmissionAuditPayloadCorrupt(RuntimeError):
     """Persisted immutable audit payload is authenticated-invalid or identity-invalid."""
 
 
+def _is_transient_customer_audit_payload_read_error(exc: Exception) -> bool:
+    """Identify temporary database/key-availability failures without hiding bad payloads."""
+    if isinstance(exc, (SQLAlchemyError, EncryptionKeyConfigurationError, OSError, TimeoutError)):
+        return True
+    error_type = type(exc)
+    driver = str(getattr(error_type, "__module__", "")).split(".", 1)[0]
+    name = str(getattr(error_type, "__name__", ""))
+    return driver in {"asyncpg", "psycopg", "psycopg2"} and name in {
+        "CannotConnectNowError",
+        "ConnectionDoesNotExistError",
+        "ConnectionFailureError",
+        "TooManyConnectionsError",
+        "InterfaceError",
+        "OperationalError",
+    }
+
+
 async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     """Persist one submission event per customer/order identity, including recovery repairs."""
     actor = f"customer:{int(detail['customer_id'])}"
@@ -322,7 +339,7 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
         # Database/key-configuration failures are transient and remain retryable.
         # Malformed, unauthenticated or identity-mismatched immutable payloads are
         # permanent corruption and must be quarantined rather than acknowledged.
-        if isinstance(exc, (SQLAlchemyError, EncryptionKeyConfigurationError)):
+        if _is_transient_customer_audit_payload_read_error(exc):
             return False
         raise CustomerPaperSubmissionAuditPayloadCorrupt(
             "stored customer paper audit payload is permanently unreadable or invalid"
@@ -903,6 +920,55 @@ async def _customer_paper_submission_stage(
                 else "customer_paper_order_pending"
             )
         return None
+    except CustomerPaperSubmissionAuditPayloadCorrupt as exc:
+        # A permanently invalid immutable source event is not a retryable new
+        # submission. Quarantine an existing pending row by its indexed identity;
+        # never manufacture a PENDING row from caller-supplied execution data.
+        try:
+            async with SessionLocal() as db:
+                await db.execute(
+                    update(CustomerPaperSubmissionAuditRetry)
+                    .where(
+                        CustomerPaperSubmissionAuditRetry.customer_id == int(customer_id),
+                        CustomerPaperSubmissionAuditRetry.client_order_id == client_order_id,
+                        CustomerPaperSubmissionAuditRetry.status == "PENDING",
+                    )
+                    .values(
+                        status="CORRUPT",
+                        last_error_type=type(exc).__name__[:80],
+                        attempt_count=CustomerPaperSubmissionAuditRetry.attempt_count + 1,
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+                await db.commit()
+        except Exception as state_exc:
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_quarantine_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=None,
+                step="quarantine_corrupt_submission_event",
+                exc=state_exc,
+            )
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_corrupt",
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            retry_id=None,
+            step="read_immutable_submission_event",
+            exc=exc,
+        )
+        await _safe_audit("CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE", {
+            "customer_id": customer_id,
+            "trading_account_id": trading_account_id,
+            "client_order_id": client_order_id,
+            "symbol": str(req.symbol),
+            "exchange": str(req.exchange),
+            "submission_status": submission_status,
+            "execution_status": status,
+            "reason": type(exc).__name__,
+        }, actor_id=f"customer:{customer_id}")
+        return "customer_paper_order_audit_incomplete" if status in pending_statuses else None
     except Exception as exc:
         # Persist a customer/order-scoped retry state even for terminal fills. This
         # gives the next bot cycle a bounded indexed lookup instead of a history scan.
