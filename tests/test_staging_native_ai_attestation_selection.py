@@ -1,7 +1,7 @@
 from pathlib import Path
 
 
-def test_staging_uses_successful_manual_native_ai_attestation_for_exact_commit():
+def test_staging_uses_newest_manual_native_ai_attestation_for_exact_commit():
     workflow = Path(".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
     production_gate = workflow.split(
         'if [[ "$workflow" == "production-verification.yml" ]]; then', 1
@@ -11,7 +11,7 @@ def test_staging_uses_successful_manual_native_ai_attestation_for_exact_commit()
     assert '.headBranch == "main"' in selector
     assert '.event == "workflow_dispatch"' in selector
     assert '.headSha == ' in selector
-    assert '.status == "completed"' in selector
-    assert '.conclusion == "success"' in selector
-    assert selector.index('.conclusion == "success"') < selector.index("sort_by(.databaseId)")
+    assert '.status == "completed"' not in selector
+    assert '.conclusion == "success"' not in selector
+    assert "sort_by(.databaseId) | last //" in selector
     assert 'select(.name == "Atlas Native AI offline verification (no provider calls)")' in workflow
