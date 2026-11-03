@@ -11,6 +11,7 @@ AUTH_CLIENT = (
 ).read_text(encoding="utf-8")
 STRINGS = (ROOT / "app" / "src" / "main" / "res" / "values" / "strings.xml").read_text(encoding="utf-8")
 RELEASE_WORKFLOW = (ROOT / ".github" / "workflows" / "android-release.yml").read_text(encoding="utf-8")
+CI_WORKFLOW = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
 def test_release_build_requires_an_explicit_approved_https_backend_origin():
@@ -28,7 +29,6 @@ def test_release_build_requires_an_explicit_approved_https_backend_origin():
     assert "rawBackendHost.removeSuffix(\".\")" in GRADLE
     assert "hostHasMultipleTerminalDots" in GRADLE
     assert 'ATLAS_DEV_BACKEND_URL' in GRADLE
-    assert 'https://atlas-debug-backend.invalid' in GRADLE
     assert 'resValue("string", "atlas_backend_url", configuredBackendUrl ?: "")' in GRADLE
     assert 'buildConfigField("String", "BACKEND_URL"' not in GRADLE
 
@@ -69,12 +69,12 @@ def test_android_biometric_dependency_is_stable_not_alpha():
 def test_explicit_debug_backend_url_is_normalized_then_validated_as_an_origin():
     assert 'val normalizedDevBackendUrl = configuredDevBackendUrl?.trimEnd(\'/\')' in GRADLE
     assert 'check(!normalizedDevBackendUrl.isNullOrEmpty())' in GRADLE
-    assert 'explicitDevUri.scheme?.lowercase() in setOf("http", "https")' in GRADLE
-    assert '!explicitDevUri.host.isNullOrBlank()' in GRADLE
-    assert 'explicitDevUri.rawUserInfo == null' in GRADLE
-    assert 'explicitDevUri.rawQuery == null' in GRADLE
-    assert 'explicitDevUri.rawFragment == null' in GRADLE
-    assert '(explicitDevUri.rawPath.isNullOrEmpty() || explicitDevUri.rawPath == "/")' in GRADLE
+    assert 'explicitDevBackendUri.scheme?.lowercase() in setOf("http", "https")' in GRADLE
+    assert '!explicitDevBackendUri.host.isNullOrBlank()' in GRADLE
+    assert 'explicitDevBackendUri.rawUserInfo == null' in GRADLE
+    assert 'explicitDevBackendUri.rawQuery == null' in GRADLE
+    assert 'explicitDevBackendUri.rawFragment == null' in GRADLE
+    assert '(explicitDevBackendUri.rawPath.isNullOrEmpty() || explicitDevBackendUri.rawPath == "/")' in GRADLE
 
 
 def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch():
@@ -100,3 +100,4 @@ def test_debug_build_requires_an_explicit_valid_development_backend_origin():
 
 def test_android_debug_ci_uses_only_the_emulator_development_origin():
     assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in RELEASE_WORKFLOW
+    assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in CI_WORKFLOW
