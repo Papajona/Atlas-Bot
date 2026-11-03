@@ -701,8 +701,8 @@ def test_retry_repair_runs_authoritative_recovery_before_loading_pending_rows(mo
 
 def test_quarantine_recovery_scans_corrupt_rows_and_uses_stored_identity(monkeypatch):
     rows = [
-        SimpleNamespace(client_order_id="recoverable-row"),
-        SimpleNamespace(client_order_id="unverified-row"),
+        SimpleNamespace(id=81, client_order_id="recoverable-row"),
+        SimpleNamespace(id=82, client_order_id="unverified-row"),
     ]
     restored = []
 
@@ -719,8 +719,12 @@ def test_quarantine_recovery_scans_corrupt_rows_and_uses_stored_identity(monkeyp
             sql = str(statement)
             assert "status" in sql
             assert "customer_id" in sql
-            assert "LIMIT" in sql.upper()
+            if "SELECT" in sql.upper():
+                assert "LIMIT" in sql.upper()
             return Result()
+
+        async def commit(self):
+            return None
 
     async def restore(*, customer_id, client_order_id):
         restored.append((customer_id, client_order_id))
@@ -822,7 +826,10 @@ def test_more_than_100_unrecoverable_quarantines_do_not_starve_later_valid_resto
     async def restore(*, customer_id, client_order_id):
         assert customer_id == 908
         restore_attempts.append(client_order_id)
-        return client_order_id == "quarantined-101"
+        if client_order_id == "quarantined-101":
+            rows[100].status = "PENDING"
+            return True
+        return False
 
     async def defer(*, customer_id, retry_id, error_type):
         assert customer_id == 908
@@ -844,6 +851,9 @@ def test_more_than_100_unrecoverable_quarantines_do_not_starve_later_valid_resto
     # The next oldest-first page now reaches the one valid source event rather
     # than re-reading the first 100 rows that had no authoritative source.
     asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(908))
-    assert restore_attempts[-1] == "quarantined-101"
-    assert len(restore_attempts) == 101
-    assert deferred == list(range(1, 101))
+    # The valid row is first on page two and becomes PENDING; the function then
+    # continues through the remaining 99 quarantined rows in that selected page.
+    assert restore_attempts[100] == "quarantined-101"
+    assert len(restore_attempts) == 200
+    assert rows[100].status == "PENDING"
+    assert deferred == list(range(1, 101)) + list(range(1, 100))
