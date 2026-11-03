@@ -140,6 +140,12 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     order_reads = []
     expiry_calls = []
     fill_lookups = []
+    expected_bar_key = paper_api._paper_market_bar_key(
+        venue="binance",
+        symbol="BTC/USDT",
+        timeframe="1m",
+        bar_at=bar_at,
+    )
 
     async def get_customer_paper_order(*, customer_id, client_order_id):
         assert customer_id == 99031
@@ -152,7 +158,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     async def get_prior_fill(**kwargs):
         assert kwargs["customer_id"] == 99031
         assert kwargs["client_order_id"] == "manual-replay-race"
-        assert kwargs["bar_key"] == "manual-replay-bar"
+        # Existing-fill replay uses the deterministic key before registering a budget.
+        assert kwargs["bar_key"] == expected_bar_key
         fill_lookups.append(kwargs)
         assert shared_state["fills"]
         return dict(shared_state["fills"][0])
