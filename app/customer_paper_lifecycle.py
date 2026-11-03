@@ -1022,7 +1022,7 @@ async def record_customer_paper_fill(
                         raise CustomerPaperLedgerBlocked(
                             "current correlation-group position mark is not finite and positive"
                         )
-                    # Risk may have risen since entry; never value an open holding below
+                    # A price drop must not free cap headroom below the booked entry cost.
                     # either its booked average entry or its latest verified market mark.
                     existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
 
