@@ -146,6 +146,13 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         timeframe="1m",
         bar_at=bar_at,
     )
+    replay_bar = next(
+        bar
+        for bar in paper_api._market_bar_contexts(
+            frame, symbol="BTC/USDT", timeframe="1m"
+        )
+        if bar["timestamp"] == bar_at
+    )
 
     async def get_customer_paper_order(*, customer_id, client_order_id):
         assert customer_id == 99031
@@ -186,6 +193,20 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         raise paper_api.CustomerPaperOrderConflict(
             "order became terminal after a concurrent fill"
         )
+
+    async def verify_prior_bar_provenance(**kwargs):
+        # This route test verifies replay ordering and idempotency with an isolated
+        # fake ledger. Assert the exact candle inputs; PostgreSQL tests exercise the
+        # real durable provenance query and its mismatch/fail-closed behavior.
+        assert kwargs["venue"] == "binance"
+        assert kwargs["symbol"] == "BTC/USDT"
+        assert kwargs["timeframe"] == "1m"
+        assert kwargs["bar_at"] == bar_at
+        assert kwargs["bar_data_sha256"] == replay_bar["bar_data_sha256"]
+        assert kwargs["base_volume"] == paper_api._decimal_text(
+            Decimal(str(replay_bar["values"]["volume"]))
+        )
+        return {"status": "VERIFIED"}
 
     async def forbidden_record_fill(**_kwargs):
         raise AssertionError("a replay must not append a duplicate fill")
@@ -229,6 +250,7 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_customer_paper_order)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
+    monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_prior_bar_provenance)
     monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", forbidden_record_fill)
     monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
