@@ -19,7 +19,7 @@ def test_staging_selects_latest_manual_native_ai_attestation_before_checking_out
 
     # Evaluate the selected run's actual result after selection, failing closed
     # when the latest exact-commit dispatch is failed or otherwise non-successful.
-    assert 'if [[ "$run_status" == "completed" ]]; then' in production_gate
-    assert 'if [[ "$run_conclusion" != "success" ]]; then' in production_gate
-    assert 'BLOCKED: $label completed with conclusion' in production_gate
+    assert 'if [[ "$run_status" == "completed" ]]; then' in workflow
+    assert 'if [[ "$run_conclusion" != "success" ]]; then' in workflow
+    assert 'BLOCKED: $label completed with conclusion' in workflow
     assert 'select(.name == "Atlas Native AI offline verification (no provider calls)")' in workflow
