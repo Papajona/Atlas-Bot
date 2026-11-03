@@ -637,3 +637,40 @@ def test_submission_audit_distinguishes_active_external_delivery_lease(monkeypat
             "customer_id": 501,
             "client_order_id": "cp-active-lease-order",
         }))
+
+def test_active_delivery_lease_does_not_increment_submission_retry_attempt(monkeypatch):
+    persisted = []
+    fallback = []
+
+    async def no_prior_retries(_customer_id):
+        return None
+
+    async def audit_once(_detail):
+        raise main.CustomerPaperSubmissionAuditDeliveryInFlight(
+            "another worker still owns the outbox lease"
+        )
+
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
+
+    async def safe_audit(event, detail, actor_id=None):
+        fallback.append((event, detail, actor_id))
+
+    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_prior_retries)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(newly_submitted=True),
+        customer_id=501,
+        trading_account_id=702,
+        req=SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h"),
+    ))
+
+    assert stage == "customer_paper_order_submitted"
+    assert len(persisted) == 1
+    assert persisted[0]["increment_attempts"] is False
+    assert persisted[0]["error_type"] == "CustomerPaperSubmissionAuditDeliveryInFlight"
+    assert persisted[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
+    assert fallback == []
