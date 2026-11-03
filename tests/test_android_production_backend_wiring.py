@@ -75,6 +75,9 @@ def test_explicit_debug_backend_url_is_normalized_then_validated_as_an_origin():
     assert 'explicitDevBackendUri.rawQuery == null' in GRADLE
     assert 'explicitDevBackendUri.rawFragment == null' in GRADLE
     assert '(explicitDevBackendUri.rawPath.isNullOrEmpty() || explicitDevBackendUri.rawPath == "/")' in GRADLE
+    assert 'val debugBackendTransportAllowed = explicitDevBackendScheme == "https" ||' in GRADLE
+    assert '(explicitDevBackendScheme == "http" && explicitDevBackendHost == "10.0.2.2")' in GRADLE
+    assert "10.0.2.2" in GRADLE and "other hosts must use HTTPS" in GRADLE
 
 
 def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_main_dispatch():
@@ -120,7 +123,12 @@ def test_debug_network_security_allows_only_the_emulator_http_origin():
     ).getroot()
     release_base = release_policy.find("base-config")
     debug_base = debug_policy.find("base-config")
+    debug_domain_configs = debug_policy.findall("domain-config")
     assert release_base is not None and release_base.get("cleartextTrafficPermitted") == "false"
-    # Debug builds must work with explicitly configured local/staging HTTP origins;
-    # the release resource remains strict and is never overridden.
-    assert debug_base is not None and debug_base.get("cleartextTrafficPermitted") == "true"
+    assert debug_base is not None and debug_base.get("cleartextTrafficPermitted") == "false"
+    assert len(debug_domain_configs) == 1
+    assert debug_domain_configs[0].get("cleartextTrafficPermitted") == "true"
+    debug_domains = debug_domain_configs[0].findall("domain")
+    assert len(debug_domains) == 1
+    assert debug_domains[0].text == "10.0.2.2"
+    assert debug_domains[0].get("includeSubdomains") == "false"
