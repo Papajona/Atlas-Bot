@@ -841,8 +841,13 @@ async def process_customer_paper_orders(
                     "expire manual pending BUY before protective exit",
                 )
                 return protective
+        manual_timeframe = str(meta.get("timeframe") or "unknown")
         raise CustomerPaperFlowBlocked(
-            "A manual paper order is open for this market; the autonomous flow will not take ownership or advance it"
+            "A manual paper order is open for this market "
+            f"({order.get('client_order_id')}, timeframe {manual_timeframe}). "
+            "Cancel or advance it through the manual paper-order API before running "
+            "the autonomous bot on this market; the autonomous flow will not take "
+            "ownership of or advance a manual order."
         )
 
     # A partially filled autonomous BUY can leave a protected position while the
