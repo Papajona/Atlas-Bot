@@ -152,7 +152,7 @@ def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monk
             frame, symbol="BTC/USDT", timeframe="1m"
         ) if bar["timestamp"] == bar_at
     )
-    registration_calls = []
+    provenance_checks = []
 
     async def get_customer_paper_order(*, customer_id, client_order_id):
         assert customer_id == 99031
@@ -219,11 +219,13 @@ def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monk
     async def state_guard():
         return None
 
-    async def register_bar(**kwargs):
-        registration_calls.append(kwargs)
+    async def verify_bar_provenance(**kwargs):
+        provenance_checks.append(kwargs)
         assert kwargs["venue"] == "binance"
         assert kwargs["symbol"] == "BTC/USDT"
         assert kwargs["bar_at"] == bar_at
+        # Historical replay must not compare against today's participation setting.
+        assert "participation_rate" not in kwargs
         durable_digest = (
             expected_bar["bar_data_sha256"]
             if bar_provenance_matches else "0" * 64
@@ -241,7 +243,7 @@ def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monk
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
     monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", forbidden_record_fill)
-    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
 
@@ -259,15 +261,15 @@ def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monk
 
     if not bar_provenance_matches:
         assert response.status_code == 409, response.text
-        assert len(registration_calls) == 1
-        assert registration_calls[0]["bar_data_sha256"] == expected_bar["bar_data_sha256"]
+        assert len(provenance_checks) == 1
+        assert provenance_checks[0]["bar_data_sha256"] == expected_bar["bar_data_sha256"]
         assert expiry_calls == []
         assert shared_state["transitions"] == []
         assert [fill["fill_id"] for fill in shared_state["fills"]] == ["immutable-prior-fill"]
         return
 
     assert response.status_code == 200, response.text
-    assert len(registration_calls) == 1
+    assert len(provenance_checks) == 1
     assert customer_session.commit_count == 1
     payload = response.json()
     assert payload["status"] == "REPLAYED"
@@ -727,7 +729,7 @@ def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
         assert client_order_id == "multi-bar-manual-order"
         return dict(order)
 
-    async def register_bar(**kwargs):
+    async def verify_bar_provenance(**kwargs):
         bar_at = kwargs["bar_at"]
         registered_bars.append(bar_at)
         key = bar_at.isoformat()
@@ -772,7 +774,7 @@ def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
 
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_order)
-    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", fill_for_bar)
     monkeypatch.setattr(paper_api, "get_customer_paper_balances", balances)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", record_fill)
