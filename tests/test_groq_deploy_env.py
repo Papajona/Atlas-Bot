@@ -80,4 +80,4 @@ def test_production_deploy_forwards_separate_groq_trade_review_opt_in():
         / "production-deploy.yml"
     ).read_text(encoding="utf-8")
 
-    assert "GROQ_TRADE_REVIEW_ENABLED: ${{ vars.GROQ_TRADE_REVIEW_ENABLED }}" in workflow
+    assert 'GROQ_TRADE_REVIEW_ENABLED: "true"' in workflow
