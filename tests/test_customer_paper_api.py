@@ -673,7 +673,7 @@ def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
     if not history_complete:
         # Keep the immutable submission candle but remove enough pre-fill bars
         # that the endpoint's full 20-return volatility window cannot be formed.
-        frame = frame.iloc[-20:].copy()
+        frame = frame.iloc[-22:].copy()
         frame.attrs["data_provenance"] = dict(frame.attrs["data_provenance"])
         frame.attrs["data_provenance"]["row_count"] = len(frame)
 
