@@ -90,7 +90,8 @@ def test_customer_paper_market_context_rejects_unverified_or_incomplete_candle(m
     assert rejected_bar.value.status_code == 409
 
 
-def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypatch):
+@pytest.mark.parametrize("bar_provenance_matches", [True, False])
+def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monkeypatch, bar_provenance_matches):
     frozen_now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     bar_at = frozen_now - timedelta(minutes=1)
     _freeze_paper_api_clock(monkeypatch, frozen_now)
@@ -146,6 +147,12 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         timeframe="1m",
         bar_at=bar_at,
     )
+    expected_bar = next(
+        bar for bar in paper_api._market_bar_contexts(
+            frame, symbol="BTC/USDT", timeframe="1m"
+        ) if bar["timestamp"] == bar_at
+    )
+    provenance_checks = []
 
     async def get_customer_paper_order(*, customer_id, client_order_id):
         assert customer_id == 99031
@@ -158,7 +165,8 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     async def get_prior_fill(**kwargs):
         assert kwargs["customer_id"] == 99031
         assert kwargs["client_order_id"] == "manual-replay-race"
-        # Existing-fill replay uses the deterministic key before registering a budget.
+        # Existing-fill lookup identifies the immutable fill, but registration must
+        # still compare the incoming candle against its durable shared-bar budget.
         assert kwargs["bar_key"] == expected_bar_key
         fill_lookups.append(kwargs)
         assert shared_state["fills"]
@@ -211,10 +219,22 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     async def state_guard():
         return None
 
-    async def register_bar(**kwargs):
+    async def verify_bar_provenance(**kwargs):
+        provenance_checks.append(kwargs)
         assert kwargs["venue"] == "binance"
         assert kwargs["symbol"] == "BTC/USDT"
-        return {"bar_key": "manual-replay-bar"}
+        assert kwargs["bar_at"] == bar_at
+        # Historical replay must not compare against today's participation setting.
+        assert "participation_rate" not in kwargs
+        durable_digest = (
+            expected_bar["bar_data_sha256"]
+            if bar_provenance_matches else "0" * 64
+        )
+        if kwargs["bar_data_sha256"] != durable_digest:
+            raise paper_api.CustomerPaperOrderConflict(
+                "completed-bar provenance conflicts with immutable shared paper budget"
+            )
+        return {"bar_key": expected_bar_key}
 
     customer_session = DummySession()
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: customer_session)
@@ -223,7 +243,7 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", get_prior_fill)
     monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", forbidden_record_fill)
-    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
 
@@ -239,7 +259,17 @@ def test_manual_replay_ttl_expiry_rechecks_order_state_and_handles_race(monkeypa
         headers={"Authorization": "Bearer replay-customer"},
     )
 
+    if not bar_provenance_matches:
+        assert response.status_code == 409, response.text
+        assert len(provenance_checks) == 1
+        assert provenance_checks[0]["bar_data_sha256"] == expected_bar["bar_data_sha256"]
+        assert expiry_calls == []
+        assert shared_state["transitions"] == []
+        assert [fill["fill_id"] for fill in shared_state["fills"]] == ["immutable-prior-fill"]
+        return
+
     assert response.status_code == 200, response.text
+    assert len(provenance_checks) == 1
     assert customer_session.commit_count == 1
     payload = response.json()
     assert payload["status"] == "REPLAYED"
@@ -621,9 +651,12 @@ def test_same_customer_order_retry_ignores_only_submission_bar_metadata():
     )
 
 
-@pytest.mark.parametrize("submission_hash_matches", [True, False])
-def test_manual_paper_advance_requires_original_submission_bar_and_replays_every_eligible_bar(
-    monkeypatch, submission_hash_matches
+@pytest.mark.parametrize(
+    ("submission_hash_matches", "history_complete"),
+    [(True, True), (False, True), (True, False)],
+)
+def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
+    monkeypatch, submission_hash_matches, history_complete
 ):
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     latest_bar_at = now - timedelta(minutes=1)
@@ -639,6 +672,12 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         for bar in submission_contexts
         if bar["timestamp"] == submission_bar_at
     )
+    if not history_complete:
+        # Keep the immutable submission candle but remove enough pre-fill bars
+        # that the endpoint's full 20-return volatility window cannot be formed.
+        frame = frame.iloc[-22:].copy()
+        frame.attrs["data_provenance"] = dict(frame.attrs["data_provenance"])
+        frame.attrs["data_provenance"]["row_count"] = len(frame)
 
     order = {
         "client_order_id": "multi-bar-manual-order",
@@ -690,7 +729,7 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         assert client_order_id == "multi-bar-manual-order"
         return dict(order)
 
-    async def register_bar(**kwargs):
+    async def verify_bar_provenance(**kwargs):
         bar_at = kwargs["bar_at"]
         registered_bars.append(bar_at)
         key = bar_at.isoformat()
@@ -735,7 +774,7 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
 
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_order)
-    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", fill_for_bar)
     monkeypatch.setattr(paper_api, "get_customer_paper_balances", balances)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", record_fill)
@@ -753,7 +792,8 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         market_request_type=PaperMarketRequest,
         state_guard=state_guard,
     ))
-    response = TestClient(api_app).post(
+    client = TestClient(api_app)
+    response = client.post(
         "/api/customer/paper/orders/multi-bar-manual-order/advance",
         headers={"Authorization": "Bearer multi-bar-customer"},
     )
@@ -764,6 +804,22 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         assert registered_bars == []
         assert fill_rows == []
         return
+
+    if not history_complete:
+        assert response.status_code == 409, response.text
+        assert "full paper market-impact volatility window" in response.json()["detail"]
+        assert registered_bars == []
+        assert fill_rows == []
+        # Corrected history restores the missing 20-return context. The same order
+        # can then advance and the shared bar registration occurs only after preflight.
+        frame = _verified_bars(latest_bar_at, volume="100")
+        frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+        paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+        paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+        response = client.post(
+            "/api/customer/paper/orders/multi-bar-manual-order/advance",
+            headers={"Authorization": "Bearer multi-bar-customer"},
+        )
 
     assert response.status_code == 200, response.text
     payload = response.json()
@@ -1035,46 +1091,6 @@ def test_unanchored_daily_snapshot_clamps_valid_long_ttl_to_supported_fetch_wind
     assert len(calls) == 1
     assert calls[0].days == 30
 
-def test_paper_fill_preflight_failure_does_not_register_bar_and_corrected_candle_can_retry():
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    order = {"order_type": "MARKET", "side": "BUY", "limit_price": None}
-    values = {
-        "open": Decimal("100"),
-        "high": Decimal("102"),
-        "low": Decimal("99"),
-        "close": Decimal("101"),
-        "volume": Decimal("10"),
-    }
-    bar = {"timestamp": now, "values": values}
-    registration_attempts = []
-
-    short_index = pd.date_range(end=now, periods=20, freq="1min")
-    short_frame = pd.DataFrame(
-        {"close": [100.0 + position for position in range(20)]},
-        index=short_index,
-    )
-    with pytest.raises(HTTPException) as failed:
-        reference, volatility = paper_api._paper_preflight_completed_bar(
-            order, bar, short_frame, timeframe="1m"
-        )
-        registration_attempts.append((reference, volatility))
-    assert failed.value.status_code == 409
-    assert registration_attempts == []
-
-    corrected_index = pd.date_range(end=now, periods=21, freq="1min")
-    corrected_frame = pd.DataFrame(
-        {"close": [100.0 + position for position in range(21)]},
-        index=corrected_index,
-    )
-    reference, volatility = paper_api._paper_preflight_completed_bar(
-        order, bar, corrected_frame, timeframe="1m"
-    )
-    assert reference == Decimal("100")
-    assert volatility is not None and volatility > 0
-    registration_attempts.append((reference, volatility))
-    assert len(registration_attempts) == 1
-
-
 def test_market_bar_key_matches_customer_paper_lifecycle_identity():
     stamp = datetime(2026, 11, 2, 10, 0, tzinfo=timezone.utc)
     expected = hashlib.sha256(
@@ -1110,3 +1126,73 @@ def test_market_bar_context_conversion_runs_outside_event_loop(monkeypatch):
     assert worker_threads
     assert worker_threads[0] != loop_thread
 
+
+
+def test_customer_paper_snapshot_rejects_daily_replay_without_required_pre_fill_context(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    def market_data(_request):
+        calls.append(True)
+        raise AssertionError("the provider cannot supply the complete required context")
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(HTTPException) as rejected:
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=lambda **kwargs: kwargs,
+            earliest_required_at=now - timedelta(days=12),
+        ))
+
+    assert rejected.value.status_code == 409
+    assert "pre-fill volatility history older than the supported 30-day candle window" in rejected.value.detail
+    assert calls == []
+
+
+def test_anchored_daily_snapshot_allows_replay_when_first_fill_lookback_fits_30_days(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    class MarketRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class MarketFetchReached(Exception):
+        pass
+
+    def market_data(request):
+        calls.append(request)
+        raise MarketFetchReached
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(MarketFetchReached):
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=MarketRequest,
+            earliest_required_at=now - timedelta(days=10),
+        ))
+
+    assert len(calls) == 1
+    assert 1 <= calls[0].days <= 30

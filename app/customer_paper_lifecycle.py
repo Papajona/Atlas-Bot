@@ -746,6 +746,87 @@ async def register_customer_paper_market_bar(
         await engine.dispose()
 
 
+async def verify_customer_paper_market_bar_provenance(
+    *,
+    venue: str,
+    symbol: str,
+    timeframe: str,
+    bar_at: datetime | str,
+    bar_data_sha256: str,
+    base_volume: str | int | Decimal,
+) -> dict[str, str]:
+    """Verify a replay candle against its immutable shared budget without recalculating capacity.
+
+    The participation setting may legitimately change after a fill. Existing-fill
+    replay validates only the market identity and candle provenance recorded when
+    the budget was first created; it never reprices historical capacity.
+    """
+    normalized_venue = str(venue or "").strip().lower()
+    if not _VENUE_RE.fullmatch(normalized_venue):
+        raise ValueError("venue must be a normalized provider identifier")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not _SYMBOL_RE.fullmatch(normalized_symbol):
+        raise ValueError("symbol is malformed")
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    if normalized_timeframe not in {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}:
+        raise ValueError("unsupported market-bar timeframe")
+    try:
+        stamp = bar_at if isinstance(bar_at, datetime) else datetime.fromisoformat(str(bar_at).replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bar_at must be an ISO timestamp") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("bar_at must be timezone-aware")
+    stamp = stamp.astimezone(timezone.utc)
+    digest = str(bar_data_sha256 or "").strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("bar_data_sha256 must be a SHA-256 hex digest")
+    volume = _input_decimal(base_volume, "base_volume", non_negative=True)
+    bar_key = hashlib.sha256(
+        f"paper-market-bar-v1|{normalized_venue}|spot|{normalized_symbol}|{normalized_timeframe}|{stamp.isoformat()}".encode("utf-8")
+    ).hexdigest()
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": f"paper-market-bar:{bar_key}"},
+            )
+            row = (await conn.execute(text(
+                """
+                SELECT venue, market_type, symbol, timeframe, bar_at, bar_data_sha256,
+                       base_volume, capacity
+                FROM customer_paper.market_bar_budgets
+                WHERE bar_key=:bar_key
+                """
+            ), {"bar_key": bar_key})).mappings().first()
+            if row is None:
+                raise CustomerPaperOrderConflict(
+                    "existing paper fill has no immutable shared market-bar budget"
+                )
+            same_provenance = (
+                str(row["venue"]) == normalized_venue
+                and str(row["market_type"]) == "spot"
+                and str(row["symbol"]) == normalized_symbol
+                and str(row["timeframe"]) == normalized_timeframe
+                and row["bar_at"].astimezone(timezone.utc) == stamp
+                and str(row["bar_data_sha256"]) == digest
+                and Decimal(row["base_volume"]) == volume
+            )
+            if not same_provenance:
+                raise CustomerPaperOrderConflict(
+                    "completed-bar provenance conflicts with the immutable shared paper budget"
+                )
+            return {
+                "status": "VERIFIED",
+                "bar_key": bar_key,
+                "capacity": _fmt(Decimal(row["capacity"])),
+                "bar_at": stamp.isoformat(),
+            }
+    finally:
+        await engine.dispose()
+
+
 async def get_customer_paper_fill_for_bar(
     *, customer_id: int, client_order_id: str, bar_key: str
 ) -> dict[str, Any] | None:
