@@ -787,6 +787,7 @@ def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(paper_api, "get_customer_paper_order", get_order)
     monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
+    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
     monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", fill_for_bar)
     monkeypatch.setattr(paper_api, "get_customer_paper_balances", balances)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", record_fill)
