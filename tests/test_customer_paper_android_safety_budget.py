@@ -23,11 +23,18 @@ def test_customer_paper_operator_audit_reports_only_validated_safety_telemetry()
     assert "not independently attested" in RISK_DASHBOARD
     assert "metrics.telemetryAvailable &&" in RISK_DASHBOARD
     assert "metrics.aiSafetyTimeoutSeconds.isFinite()" in RISK_DASHBOARD
-    assert "metrics.lastUpdatedEpochMs > 0L" in RISK_DASHBOARD
-    assert "telemetryTimestampIsFresh" in RISK_DASHBOARD
+    assert "SystemClock.elapsedRealtime()" in RISK_DASHBOARD
+    assert "safetyTelemetryReceivedElapsedRealtimeMs" in RISK_DASHBOARD
+    assert "val hasFreshFrame = metrics.lastUpdatedEpochMs > 0L" in RISK_DASHBOARD
+    assert "elapsedSinceFrameMs in 0L..AI_SAFETY_TELEMETRY_MAX_AGE_MS" in RISK_DASHBOARD
+    assert "LaunchedEffect(wsConnectionState)" in RISK_DASHBOARD
+    assert "LaunchedEffect(" in RISK_DASHBOARD
+    assert "delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - elapsedSinceFrameMs + 1L)" in RISK_DASHBOARD
+
+
     assert "webSocketConnected &&" in RISK_DASHBOARD
     assert "wsConnectionState is WebSocketConnectionState.Connected" in RISK_DASHBOARD
-    assert "LaunchedEffect(showAuditDialog, metrics.lastUpdatedEpochMs)" in RISK_DASHBOARD
-    assert "delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs + 1L)" in RISK_DASHBOARD
+
+
     assert "AI Safety Decision Deadline" not in audit_dialog
     assert "1.5s FAIL-CLOSED" not in audit_dialog

@@ -6,103 +6,110 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RiskDashboardAuditTest {
+    private val frameReceivedElapsedMs = 80_000L
+    private val nowElapsedMs = 100_000L
+    private val validMetrics = PortfolioRiskMetrics(
+        aiSafetyTimeoutSeconds = 1.5,
+        telemetryAvailable = true,
+        lastUpdatedEpochMs = 1_800_000_000_000L
+    )
 
     @Test
     fun zeroOrUnavailableTelemetryDoesNotClaimAConfiguredBudgetOrProtectedReserve() {
-        val now = 100_000L
-        val defaultStatus = resolveAiSafetyAuditStatus(
-            PortfolioRiskMetrics(),
+        val status = resolveAiSafetyAuditStatus(
+            metrics = PortfolioRiskMetrics(),
             webSocketConnected = false,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = 0L,
+            nowElapsedRealtimeMs = nowElapsedMs
         )
-        assertFalse(defaultStatus.hasValidatedDeadline)
-        assertEquals("unavailable", defaultStatus.deadlineLabel)
-        assertEquals("not independently attested", defaultStatus.vetoReserveStatus)
+        assertFalse(status.hasValidatedDeadline)
+        assertEquals("unavailable", status.deadlineLabel)
+        assertEquals("not independently attested", status.vetoReserveStatus)
 
         val zeroDeadline = resolveAiSafetyAuditStatus(
-            PortfolioRiskMetrics(
-                aiSafetyTimeoutSeconds = 0.0,
-                telemetryAvailable = true,
-                lastUpdatedEpochMs = now
-            ),
+            metrics = validMetrics.copy(aiSafetyTimeoutSeconds = 0.0),
             webSocketConnected = true,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = frameReceivedElapsedMs,
+            nowElapsedRealtimeMs = nowElapsedMs
         )
         assertFalse(zeroDeadline.hasValidatedDeadline)
         assertEquals("unavailable", zeroDeadline.deadlineLabel)
-        assertEquals("not independently attested", zeroDeadline.vetoReserveStatus)
     }
 
     @Test
-    fun onlyRecentPositiveFiniteConnectedTelemetryReportsTheDecisionDeadline() {
-        val now = 100_000L
+    fun onlyPositiveFiniteConnectedTelemetryWithinMonotonicWindowIsReported() {
         val status = resolveAiSafetyAuditStatus(
-            PortfolioRiskMetrics(
-                aiSafetyTimeoutSeconds = 1.5,
-                telemetryAvailable = true,
-                lastUpdatedEpochMs = now - 20_000L
-            ),
+            metrics = validMetrics,
             webSocketConnected = true,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = frameReceivedElapsedMs,
+            nowElapsedRealtimeMs = nowElapsedMs
         )
         assertTrue(status.hasValidatedDeadline)
         assertEquals("1.5s total (reported)", status.deadlineLabel)
-        // A deadline value alone does not prove the Native AI veto reserve is protected.
         assertEquals("not independently attested", status.vetoReserveStatus)
     }
 
     @Test
-    fun disconnectedOrExpiredTelemetryFailsClosed() {
-        val now = 100_000L
-        val recentMetrics = PortfolioRiskMetrics(
-            aiSafetyTimeoutSeconds = 2.0,
-            telemetryAvailable = true,
-            lastUpdatedEpochMs = now - 1_000L
-        )
-        val disconnected = resolveAiSafetyAuditStatus(
-            recentMetrics,
+    fun disconnectedTelemetryFailsClosedEvenWhenTheLastFrameWasRecent() {
+        val status = resolveAiSafetyAuditStatus(
+            metrics = validMetrics,
             webSocketConnected = false,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = frameReceivedElapsedMs,
+            nowElapsedRealtimeMs = nowElapsedMs
         )
-        assertFalse(disconnected.hasValidatedDeadline)
-        assertEquals("unavailable", disconnected.deadlineLabel)
+        assertFalse(status.hasValidatedDeadline)
+        assertEquals("unavailable", status.deadlineLabel)
+    }
 
-        val exactlyAtFreshnessBoundary = resolveAiSafetyAuditStatus(
-            recentMetrics.copy(lastUpdatedEpochMs = now - AI_SAFETY_TELEMETRY_MAX_AGE_MS),
+    @Test
+    fun monotonicExpiryCannotBeExtendedByABackwardWallClockCorrection() {
+        // Wall-clock changes are deliberately not inputs to the resolver. The
+        // accepted frame expires as monotonic elapsed time passes the deadline.
+        val atBoundary = resolveAiSafetyAuditStatus(
+            metrics = validMetrics,
             webSocketConnected = true,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = frameReceivedElapsedMs,
+            nowElapsedRealtimeMs = frameReceivedElapsedMs + AI_SAFETY_TELEMETRY_MAX_AGE_MS
         )
-        assertTrue(exactlyAtFreshnessBoundary.hasValidatedDeadline)
+        assertTrue(atBoundary.hasValidatedDeadline)
 
-        val expired = resolveAiSafetyAuditStatus(
-            recentMetrics.copy(lastUpdatedEpochMs = now - AI_SAFETY_TELEMETRY_MAX_AGE_MS - 1L),
+        val afterBoundary = resolveAiSafetyAuditStatus(
+            metrics = validMetrics,
             webSocketConnected = true,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = frameReceivedElapsedMs,
+            nowElapsedRealtimeMs = frameReceivedElapsedMs + AI_SAFETY_TELEMETRY_MAX_AGE_MS + 1L
         )
-        assertFalse(expired.hasValidatedDeadline)
-        assertEquals("unavailable", expired.deadlineLabel)
+        assertFalse(afterBoundary.hasValidatedDeadline)
+        assertEquals("unavailable", afterBoundary.deadlineLabel)
+    }
 
-        val futureDated = resolveAiSafetyAuditStatus(
-            recentMetrics.copy(lastUpdatedEpochMs = now + AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS + 1L),
+    @Test
+    fun missingOrRegressedMonotonicReceiptTimeFailsClosed() {
+        val missingReceipt = resolveAiSafetyAuditStatus(
+            metrics = validMetrics,
             webSocketConnected = true,
-            nowEpochMs = now
+            frameReceivedElapsedRealtimeMs = 0L,
+            nowElapsedRealtimeMs = nowElapsedMs
         )
-        assertFalse(futureDated.hasValidatedDeadline)
-        assertEquals("unavailable", futureDated.deadlineLabel)
+        assertFalse(missingReceipt.hasValidatedDeadline)
+
+        val regressedClock = resolveAiSafetyAuditStatus(
+            metrics = validMetrics,
+            webSocketConnected = true,
+            frameReceivedElapsedRealtimeMs = nowElapsedMs + 1L,
+            nowElapsedRealtimeMs = nowElapsedMs
+        )
+        assertFalse(regressedClock.hasValidatedDeadline)
     }
 
     @Test
     fun invalidDeadlineValuesFailClosedEvenWhenTheFrameIsFresh() {
-        val now = 100_000L
         listOf(Double.NaN, Double.POSITIVE_INFINITY, -1.0).forEach { invalid ->
             val status = resolveAiSafetyAuditStatus(
-                PortfolioRiskMetrics(
-                    aiSafetyTimeoutSeconds = invalid,
-                    telemetryAvailable = true,
-                    lastUpdatedEpochMs = now
-                ),
+                metrics = validMetrics.copy(aiSafetyTimeoutSeconds = invalid),
                 webSocketConnected = true,
-                nowEpochMs = now
+                frameReceivedElapsedRealtimeMs = frameReceivedElapsedMs,
+                nowElapsedRealtimeMs = nowElapsedMs
             )
             assertFalse(status.hasValidatedDeadline)
             assertEquals("unavailable", status.deadlineLabel)
