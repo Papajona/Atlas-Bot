@@ -173,7 +173,9 @@ def test_customer_paper_group_marks_are_filtered_before_fetching():
 def test_customer_paper_recovery_does_not_misclassify_replays_or_take_manual_orders():
     flow = Path("app/customer_paper_flow.py").read_text(encoding="utf-8")
     assert '{"APPENDED", "REPLAYED"}' in flow
-    assert "the autonomous flow will not take ownership of or advance a manual order" in flow
+    # The runtime message is deliberately split across adjacent literals for readability.
+    assert '"the autonomous flow will not take "' in flow
+    assert '"ownership of or advance a manual order."' in flow
     assert "Protective-exit candle history is incomplete" in flow
     assert "WAITING_FOR_FILL_LATENCY" in flow
     assert "EXPIRED_TTL" in flow
