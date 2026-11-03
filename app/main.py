@@ -561,6 +561,112 @@ async def _restore_customer_paper_submission_audit_retry_snapshot(
     return int(getattr(result, "rowcount", 0) or 0) == 1
 
 
+async def _defer_corrupt_customer_paper_submission_audit_retry(
+    *, customer_id: int, retry_id: int, error_type: str
+) -> None:
+    """Move an un-restorable quarantined row behind the next bounded recovery page."""
+    async with SessionLocal() as db:
+        await db.execute(
+            update(CustomerPaperSubmissionAuditRetry)
+            .where(
+                CustomerPaperSubmissionAuditRetry.id == int(retry_id),
+                CustomerPaperSubmissionAuditRetry.customer_id == int(customer_id),
+                CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+            )
+            .values(
+                last_error_type=str(error_type or "RestoreFailed")[:80],
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+
+async def _restore_corrupt_customer_paper_submission_audit_retries(customer_id: int) -> None:
+    """Rehydrate quarantined retries only from their indexed immutable audit events.
+
+    This bounded recovery runs as part of the ordinary paper-order repair cycle.
+    It never trusts caller-supplied replacement details; rows without a matching,
+    authenticated original audit event remain quarantined for manual investigation.
+    """
+    customer_id = int(customer_id)
+    try:
+        async with SessionLocal() as db:
+            rows = (
+                await db.execute(
+                    select(
+                        CustomerPaperSubmissionAuditRetry.id,
+                        CustomerPaperSubmissionAuditRetry.client_order_id,
+                    )
+                    .where(
+                        CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
+                        CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+                    )
+                    .order_by(
+                        CustomerPaperSubmissionAuditRetry.updated_at.asc(),
+                        CustomerPaperSubmissionAuditRetry.id.asc(),
+                    )
+                    .limit(100)
+                )
+            ).all()
+    except Exception as exc:
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_retry_restore_scan_failed",
+            customer_id=customer_id,
+            client_order_id="",
+            retry_id=None,
+            step="load_quarantined_retry_identities",
+            exc=exc,
+        )
+        return
+
+    for row in rows:
+        retry_id = int(row.id)
+        client_order_id = str(row.client_order_id or "").strip()
+        restore_error = "AuthoritativeAuditEventNotFound"
+        restored = False
+        if client_order_id:
+            try:
+                restored = await _restore_customer_paper_submission_audit_retry_snapshot(
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                )
+            except Exception as exc:
+                restore_error = type(exc).__name__
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_restore_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="restore_from_immutable_audit_event",
+                    exc=exc,
+                )
+        if restored:
+            logging.getLogger(__name__).info(
+                "customer_paper_submission_audit_retry_restored customer_id=%s client_order_id=%s",
+                customer_id,
+                client_order_id,
+            )
+            continue
+
+        # Move a row that has no verifiable source event behind the next bounded
+        # scan page. Keep it CORRUPT and do not change its retry attempt count.
+        try:
+            await _defer_corrupt_customer_paper_submission_audit_retry(
+                customer_id=customer_id,
+                retry_id=retry_id,
+                error_type=restore_error,
+            )
+        except Exception as state_exc:
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_restore_defer_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=retry_id,
+                step="defer_unrecoverable_quarantined_row",
+                exc=state_exc,
+            )
+
+
 async def _set_customer_paper_submission_audit_retry_state(
     retry_id: int,
     *,
@@ -690,6 +796,7 @@ async def _load_customer_paper_submission_audit_retries(customer_id: int) -> lis
 async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> None:
     """Replay indexed pending audit deliveries; isolate every record's failure."""
     customer_id = int(customer_id)
+    await _restore_corrupt_customer_paper_submission_audit_retries(customer_id)
     try:
         pending = await _load_customer_paper_submission_audit_retries(customer_id)
     except Exception as exc:

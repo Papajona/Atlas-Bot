@@ -20,9 +20,10 @@ class CustomerPaperMarketRequest(MarketRequest):
     """Bounded request model for paper orders needing only a short verified candle window.
 
     Keep the public/research MarketRequest minimum of 30 days unchanged; customer paper
-    order submission and advancement calculate their own bounded 1–30 day window.
+    order submission uses a 1–30 day window and historical advancement may require up to
+    60 days to retain both the submission candle and pre-fill volatility context.
     """
-    days: int = Field(default=1, ge=1, le=30)
+    days: int = Field(default=1, ge=1, le=60)
 
 
 class ResearchMarketRequest(MarketRequest):
