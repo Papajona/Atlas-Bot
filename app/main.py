@@ -85,6 +85,7 @@ from .audit_chain import (
     append_audit_once,
     claim_external_audit_delivery,
     finish_external_audit_delivery,
+    EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT,
 )
 from .crypto import decrypt_text
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
@@ -249,6 +250,10 @@ async def _run_trade_safety_review(packet: dict) -> dict:
 
 
 
+class CustomerPaperSubmissionAuditDeliveryInFlight(RuntimeError):
+    """Another worker currently owns this audit outbox delivery lease."""
+
+
 async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     """Persist one submission event per customer/order identity, including recovery repairs."""
     actor = f"customer:{int(detail['customer_id'])}"
@@ -264,7 +269,12 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     # Do not decrypt AuditLog.detail on ordinary idempotent replays. The outbox
     # claim is checked first; delivered/in-flight events return without reading it.
     claim_token = await claim_external_audit_delivery(row.event_hash)
+    if claim_token == EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT:
+        raise CustomerPaperSubmissionAuditDeliveryInFlight(
+            "external customer paper submission audit delivery is already in flight"
+        )
     if claim_token is None:
+        # None is reserved for an outbox row already acknowledged as DELIVERED.
         return created
 
     try:
@@ -345,6 +355,9 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
         logging.getLogger(__name__).warning(
             "customer paper audit delivery result arrived after its lease was superseded"
         )
+        raise CustomerPaperSubmissionAuditDeliveryInFlight(
+            "external customer paper submission audit delivery lease was superseded"
+        )
     if not emitted:
         raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
     return created
@@ -408,8 +421,9 @@ async def _persist_customer_paper_submission_audit_retry(
                 CustomerPaperSubmissionAuditRetry.customer_id,
                 CustomerPaperSubmissionAuditRetry.client_order_id,
             ],
+            # The first submission snapshot is immutable for this customer/order.
+            # Later recovery failures may update retry metadata, never its audit payload.
             set_={
-                "submission_detail": statement.excluded.submission_detail,
                 "status": "PENDING",
                 "attempt_count": CustomerPaperSubmissionAuditRetry.attempt_count + 1,
                 "last_error_type": str(error_type or "UnknownError")[:80],
@@ -537,13 +551,35 @@ async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> N
         retry_id = int(record["retry_id"])
         client_order_id = str(record["client_order_id"])
         try:
-            # append_audit_once treats an existing submission event as a successful replay.
+            # The audit helper returns normally only when the external delivery is
+            # already DELIVERED or this worker confirmed delivery. An active lease
+            # is raised separately so the retry stays eligible after lease expiry.
             await _audit_customer_paper_order_submitted_once(record["submission_detail"])
             await _set_customer_paper_submission_audit_retry_state(
                 retry_id,
                 status="REPAIRED",
                 error_type="",
             )
+        except CustomerPaperSubmissionAuditDeliveryInFlight as exc:
+            # Do not consume an attempt while a competing worker owns the lease.
+            # Refresh updated_at so a bounded oldest-first page cannot starve newer rows.
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    retry_id,
+                    status="PENDING",
+                    error_type=type(exc).__name__,
+                    increment_attempts=False,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_defer_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="defer_active_external_delivery_lease",
+                    exc=state_exc,
+                )
+            continue
         except Exception as exc:
             try:
                 await _set_customer_paper_submission_audit_retry_state(
