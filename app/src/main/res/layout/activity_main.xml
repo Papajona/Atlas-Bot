@@ -477,14 +477,14 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="AI Safety Latency Ceiling"
+                    android:text="AI Safety Decision Budget"
                     android:textColor="#CBD5E1"
                     android:textSize="13sp" />
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="1.5s FAIL-CLOSED"
+                    android:text="CONFIGURED / FAIL-CLOSED"
                     android:textColor="#34D399"
                     android:textSize="12sp"
                     android:textStyle="bold" />
