@@ -335,6 +335,10 @@ def test_retry_upsert_is_unique_by_customer_and_order_and_reopens_pending_state(
     assert "customer_id" in sql
     assert "client_order_id" in sql
     assert "PENDING" in captured["params"]
+    # Later recovery failures may reopen the retry and update diagnostics, but
+    # must never replace the first immutable submission snapshot.
+    update_clause = sql.split("DO UPDATE SET", 1)[1]
+    assert "submission_detail" not in update_clause
     assert captured["committed"] is True
 
 
@@ -371,3 +375,48 @@ def test_retry_store_migration_enables_row_level_security(monkeypatch):
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq TO %I" in statements
     assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in statements
     assert "'service_role'" in statements
+
+def test_retry_repair_defers_an_active_delivery_lease_without_spending_attempt(monkeypatch):
+    pending = [{
+        "retry_id": 31,
+        "customer_id": 715,
+        "client_order_id": "retry-held-by-competing-worker",
+        "submission_detail": {
+            "customer_id": 715,
+            "client_order_id": "retry-held-by-competing-worker",
+            "status": "SUBMITTED",
+        },
+    }]
+    audit_attempts = []
+    state_updates = []
+
+    async def load(_customer_id):
+        return pending
+
+    async def audit_once(detail):
+        audit_attempts.append(detail["client_order_id"])
+        if len(audit_attempts) == 1:
+            raise main.CustomerPaperSubmissionAuditDeliveryInFlight(
+                "another worker owns the delivery lease"
+            )
+        return False  # The outbox is now DELIVERED; this is an idempotent replay.
+
+    async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
+        state_updates.append((retry_id, status, error_type, increment_attempts))
+
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(715))
+    assert state_updates == [
+        (31, "PENDING", "CustomerPaperSubmissionAuditDeliveryInFlight", False)
+    ]
+
+    # A later repair cycle can retry once the competing lease has expired/failed.
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(715))
+    assert audit_attempts == [
+        "retry-held-by-competing-worker",
+        "retry-held-by-competing-worker",
+    ]
+    assert state_updates[-1] == (31, "REPAIRED", "", False)
