@@ -210,7 +210,9 @@ def test_retry_state_transition_binds_pending_predicate_explicitly(monkeypatch, 
     assert "WHERE customer_paper_submission_audit_retries.id =" in sql
     assert "AND customer_paper_submission_audit_retries.status =" in sql
     normalized_sql = "".join(sql.split())
-    assert "attempt_count=(customer_paper_submission_audit_retries.attempt_count+" in normalized_sql
+    assert "attempt_count=CASEWHEN" in normalized_sql
+    assert "ELSEcustomer_paper_submission_audit_retries.attempt_count+" in normalized_sql
+    assert "CORRUPT" in captured["params"]
 
     status_predicates = [
         node for node in iterate(statement.whereclause)
@@ -420,3 +422,45 @@ def test_retry_repair_defers_an_active_delivery_lease_without_spending_attempt(m
         "retry-held-by-competing-worker",
     ]
     assert state_updates[-1] == (31, "REPAIRED", "", False)
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_active_lease_upsert_does_not_increment_and_preserves_corrupt_quarantine(monkeypatch, dialect):
+    captured = {}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=dialect)
+
+        async def execute(self, statement):
+            compiled = statement.compile(dialect=dialect)
+            captured["sql"] = str(compiled)
+            captured["params"] = compiled.params
+
+        async def commit(self):
+            captured["committed"] = True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    asyncio.run(main._persist_customer_paper_submission_audit_retry(
+        customer_id=716,
+        submission_detail={
+            "customer_id": 716,
+            "client_order_id": "active-lease-retry",
+            "status": "SUBMITTED",
+        },
+        error_type="CustomerPaperSubmissionAuditDeliveryInFlight",
+        increment_attempts=False,
+    ))
+
+    update_clause = captured["sql"].split("DO UPDATE SET", 1)[1]
+    assert "attempt_count" not in update_clause
+    assert "submission_detail" not in update_clause
+    assert "CASE" in update_clause
+    assert "CORRUPT" in captured["params"]
+    assert "PENDING" in captured["params"]
+    assert captured["committed"] is True
