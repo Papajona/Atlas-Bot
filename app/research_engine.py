@@ -48,9 +48,25 @@ def _trial_accounting_fields(
         "cumulative_trials": len(all_recorded),
         "cumulative_recorded_trials": len(all_recorded),
         "cumulative_fixed_signal_trials": len(fixed_signal),
-        "dsr_comparable_trial_count": len(fixed_signal),
+        # Labels are not Sharpe outcomes; this is populated only from a verified archive.
+        "dsr_comparable_trial_count": None,
         "cumulative_ai_trials": len(ai),
     }
+
+
+
+def _verified_dsr_comparable_trial_count(archive_verified: bool, archive_sharpes: object) -> int | None:
+    """Return the DSR population size only when signed comparable outcomes verify."""
+    if not archive_verified or not isinstance(archive_sharpes, (list, tuple)):
+        return None
+    if len(archive_sharpes) < 2 or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in archive_sharpes
+    ):
+        return None
+    return len(archive_sharpes)
 
 
 
@@ -796,11 +812,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     archive_verified = archive_validation.get("trial_archive_verified") is True
     archive_sharpes_raw = archive_validation.get("trial_sharpes_annual")
     archive_sharpes = list(archive_sharpes_raw) if isinstance(archive_sharpes_raw, (list, tuple)) else []
-    archive_sharpes_valid = (
-        archive_verified
-        and len(archive_sharpes) >= 2
-        and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in archive_sharpes)
+    dsr_comparable_trial_count = _verified_dsr_comparable_trial_count(
+        archive_verified, archive_sharpes
     )
+    archive_sharpes_valid = dsr_comparable_trial_count is not None
+    trial_accounting["dsr_comparable_trial_count"] = dsr_comparable_trial_count
     if not archive_sharpes_valid:
         dsr = {
             "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
