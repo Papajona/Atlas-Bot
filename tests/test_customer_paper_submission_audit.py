@@ -602,3 +602,38 @@ def test_damaged_encrypted_audit_payload_does_not_block_existing_order_replay(mo
         record.getMessage() == "customer paper audit payload could not be loaded for external delivery"
         for record in caplog.records
     )
+
+def test_submission_audit_distinguishes_active_external_delivery_lease(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=126,
+            event_hash="active-lease-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return main.EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(
+        main,
+        "emit_security_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a competing in-flight delivery must not send twice")
+        ),
+    )
+
+    with pytest.raises(main.CustomerPaperSubmissionAuditDeliveryInFlight):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-active-lease-order",
+        }))
