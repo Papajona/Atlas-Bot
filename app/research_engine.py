@@ -607,8 +607,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         this_labels,
         ai_trial_labels,
     )
-    # The DSR must use the fixed-signal labels only; AI remains separately counted.
-    n_trials = int(trial_accounting["cumulative_trials"])
+    # Use the fixed-signal archive labels for DSR verification; AI stays separate.
+    known_prior_fixed_signal_labels = set(trial_accounting["fixed_signal_trial_labels"]) - this_labels
     # Candidate statistics and signed evidence use an explicit protocol version.
     # Bump it when split geometry changes so old attestations cannot be silently reused.
     ens_cost = cost_breakeven_report(
