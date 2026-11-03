@@ -148,9 +148,11 @@ fun RiskDashboardScreen(
         if (showAuditDialog && metrics.lastUpdatedEpochMs > 0L) {
             val ageMs = safetyAuditNowEpochMs - metrics.lastUpdatedEpochMs
             if (ageMs >= -AI_SAFETY_TELEMETRY_MAX_FUTURE_SKEW_MS &&
-                ageMs < AI_SAFETY_TELEMETRY_MAX_AGE_MS
+                ageMs <= AI_SAFETY_TELEMETRY_MAX_AGE_MS
             ) {
-                delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs)
+                // The resolver accepts the exact freshness boundary, so wake just
+                // after it to ensure an open dialog transitions to unavailable.
+                delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs + 1L)
                 safetyAuditNowEpochMs = System.currentTimeMillis()
             }
         }
