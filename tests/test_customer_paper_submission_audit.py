@@ -98,14 +98,24 @@ def test_replayed_pending_order_repairs_missing_audit_without_marking_new(monkey
     assert attempts[0]["client_order_id"] == "cp-regression-order"
 
 
-def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
+def test_recovery_wrapper_order_intent_keeps_delivery_incomplete_pending(monkeypatch):
     calls = []
+    persisted = []
+    fallback = []
 
     async def audit_once(detail):
         calls.append(detail)
         return False
 
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
+
+    async def safe_audit(event, detail, actor_id=None):
+        fallback.append((event, detail, actor_id))
+
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
     recovered = {
         "status": "PROTECTIVE_EXIT_PENDING",
@@ -128,9 +138,12 @@ def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
         recovered, customer_id=501, trading_account_id=702, req=req,
     ))
 
-    assert stage == "customer_paper_order_pending"
+    assert stage == "customer_paper_order_audit_incomplete"
     assert calls[0]["order_role"] == "PROTECTIVE_EXIT"
     assert calls[0]["client_order_id"] == "cpx-recovered-exit"
+    assert persisted[0]["submission_detail"]["client_order_id"] == "cpx-recovered-exit"
+    assert persisted[0]["error_type"] == "DeliveryIncomplete"
+    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
 
 
 
@@ -298,7 +311,11 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     async def append_once(_db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(event_hash="a" * 64), True
+        return SimpleNamespace(
+            event_hash="a" * 64,
+            actor_id=kwargs["actor_id"],
+            detail=kwargs["detail"],
+        ), True
 
     async def claim_delivery(_event_hash):
         return "test-claim-token"
@@ -754,7 +771,8 @@ def test_submission_stage_quarantines_corrupt_audit_event_without_reopening_retr
         async def __aexit__(self, *_args):
             return False
         async def execute(self, statement):
-            statements.append(str(statement))
+            compiled = statement.compile()
+            statements.append((str(statement), dict(compiled.params)))
             return SimpleNamespace(rowcount=1)
         async def commit(self):
             return None
@@ -788,9 +806,9 @@ def test_submission_stage_quarantines_corrupt_audit_event_without_reopening_retr
 
     assert stage == "customer_paper_order_audit_incomplete"
     assert len(statements) == 1
-    assert "UPDATE customer_paper_submission_audit_retries" in statements[0]
-    assert "CORRUPT" in statements[0]
-    assert "PENDING" in statements[0]
+    assert "UPDATE customer_paper_submission_audit_retries" in statements[0][0]
+    assert "CORRUPT" in statements[0][1].values()
+    assert "PENDING" in statements[0][1].values()
     assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
     assert fallback[0][1]["reason"] == "CustomerPaperSubmissionAuditPayloadCorrupt"
 
