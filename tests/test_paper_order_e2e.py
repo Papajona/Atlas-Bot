@@ -5,6 +5,7 @@ import uuid
 
 os.environ.setdefault("ENVIRONMENT", "development")
 
+import pandas as pd
 import pytest
 from sqlalchemy import select
 
@@ -76,7 +77,9 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     async def run():
         await init_db()
         now = pd.Timestamp.now(tz="UTC")
-        bar_at = now.floor("5min") - pd.Timedelta(minutes=10)
+        current_floor = now.floor("5min")
+        submit_bar = current_floor - pd.Timedelta(minutes=10)
+        process_bar = current_floor - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
@@ -193,14 +196,14 @@ def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
             "volume_unit_verified":False,
         }
         fx_context = {
-            "bar_timestamp":bar_at.isoformat(), "data_provenance":fx_provenance,
+            "bar_timestamp":trigger_bar.isoformat(), "data_provenance":fx_provenance,
             "asset":"forex", "symbol":fx_symbol, "exchange":"oanda", "timeframe":"5m",
         }
         with pytest.raises(execution.RiskBlocked, match="limited to verified crypto spot"):
             await execution.execute_signal(
                 fx_symbol, "buy", 0.3, 1.1,
                 {"score":0.9, "_paper_execution_context":fx_context},
-                "oanda", "5m", bar_at.isoformat(),
+                "oanda", "5m", trigger_bar.isoformat(),
                 force_paper=True, stop_loss_price=1.09, take_profit_price=1.12, asset="forex",
             )
 
@@ -211,14 +214,14 @@ def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
             "volume_unit":"unknown", "volume_unit_verified":False,
         }
         derivative_context = {
-            "bar_timestamp":bar_at.isoformat(), "data_provenance":derivative_provenance,
+            "bar_timestamp":trigger_bar.isoformat(), "data_provenance":derivative_provenance,
             "asset":"crypto", "symbol":derivative_symbol, "exchange":"binance", "timeframe":"5m",
         }
         with pytest.raises(execution.RiskBlocked, match="verified CCXT crypto spot market"):
             await execution.execute_signal(
                 derivative_symbol, "buy", 0.3, 50000.0,
                 {"score":0.9, "_paper_execution_context":derivative_context},
-                "binance", "5m", bar_at.isoformat(),
+                "binance", "5m", trigger_bar.isoformat(),
                 force_paper=True, stop_loss_price=49000.0, take_profit_price=52000.0, asset="crypto",
             )
 
@@ -553,6 +556,10 @@ def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch):
 
     async def run():
         await init_db()
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        trigger_bar = current_floor - pd.Timedelta(minutes=10)
+        submitted_bar = trigger_bar - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
