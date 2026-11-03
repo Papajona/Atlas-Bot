@@ -28,12 +28,6 @@ def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator():
 
     async def run():
         await init_db()
-        # Create these timestamps after database initialization: CI setup can take
-        # long enough to make a precomputed submission candle stale before use.
-        now = pd.Timestamp.now(tz="UTC")
-        current_floor = now.floor("5min")
-        submit_bar = current_floor - pd.Timedelta(minutes=10)
-        process_bar = current_floor - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
@@ -76,7 +70,9 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     async def run():
         await init_db()
         now = pd.Timestamp.now(tz="UTC")
-        bar_at = now.floor("5min") - pd.Timedelta(minutes=10)
+        current_floor = now.floor("5min")
+        submit_bar = current_floor - pd.Timedelta(minutes=10)
+        process_bar = current_floor - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
@@ -180,8 +176,7 @@ def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
         await init_db()
         now = pd.Timestamp.now(tz="UTC")
         current_floor = now.floor("5min")
-        trigger_bar = current_floor - pd.Timedelta(minutes=10)
-        fill_bar = current_floor - pd.Timedelta(minutes=5)
+        bar_at = current_floor - pd.Timedelta(minutes=10)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
@@ -249,7 +244,7 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
         now = pd.Timestamp.now(tz="UTC")
         current_floor = now.floor("5min")
         trigger_bar = current_floor - pd.Timedelta(minutes=10)
-        submitted_bar = trigger_bar - pd.Timedelta(minutes=5)
+        fill_bar = current_floor - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
