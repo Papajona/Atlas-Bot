@@ -18,12 +18,12 @@ SPEC.loader.exec_module(migration)
 class AncillaryWorkflowConflictGuardTests(unittest.TestCase):
     def test_groq_research_adapter_allows_reviewed_stdlib_decimal_imports(self):
         source = """from __future__ import annotations
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 async def groq_research_review(research, intelligence):
     value = Decimal("1.25")
     try:
-        return {"value": str(value)}
+        return {"value": str(value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))}
     except InvalidOperation:
         return {"status": "unavailable"}
 """
@@ -235,10 +235,21 @@ fi
         self.assertIn("groq_trade_review_invalid", installed)
         self.assertNotIn('return {"safe": True', installed)
 
-    def test_native_ai_installer_refuses_unknown_branch_local_safety_module(self):
-        branch_local = """async def native_trade_safety_review(packet):
-    # Unknown branch-specific safety logic must not be discarded automatically.
-    return {"safe": True, "execution_authority": False}
+    def test_native_ai_installer_preserves_provider_free_branch_local_safety_module(self):
+        branch_local = """class NativeAIError(RuntimeError):
+    pass
+
+AIProviderError = NativeAIError
+
+def compose_strategy_spec(*, prompt, name, **kwargs):
+    return {"title": name, "execution_mode": "PAPER_SHADOW_ONLY"}
+
+def native_research_review(research, intelligence):
+    return {"status": "LOCAL", "execution_authority": False}
+
+async def native_trade_safety_review(packet):
+    # Branch-specific deterministic veto logic must not be overwritten by propagation.
+    return {"safe": packet.get("data_quality") == "OK", "execution_authority": False}
 """
         approved_legacy = """def evaluate_native_trade_packet(packet):
     return {"safe": True}
@@ -249,14 +260,14 @@ fi
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
-            (root / "app" / "native_ai.py").write_text(branch_local, encoding="utf-8")
+            target = root / "app" / "native_ai.py"
+            target.write_text(branch_local, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                with self.assertRaisesRegex(migration.MigrationError, "differs from both reviewed Native AI baselines"):
-                    migration._install_canonical_native_ai(
-                        canonical,
-                        approved_legacy_source=approved_legacy,
-                    )
-            installed = (root / "app" / "native_ai.py").read_text(encoding="utf-8")
+                migration._install_canonical_native_ai(
+                    canonical,
+                    approved_legacy_source=approved_legacy,
+                )
+            installed = target.read_text(encoding="utf-8")
         self.assertEqual(installed, branch_local)
 
     def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
