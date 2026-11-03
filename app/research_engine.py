@@ -40,15 +40,15 @@ def _trial_accounting_fields(
     } | {str(label) for label in current_ai_labels}
     all_recorded = fixed_signal | ai
     return {
-        # Keep trial_labels as the complete persistent archive interface.
+        # Keep trial_labels and cumulative_trials as the complete persistent archive interface.
         "trial_labels": sorted(all_recorded),
         "fixed_signal_trial_labels": sorted(fixed_signal),
         "ai_trial_labels": sorted(ai),
         # DSR adjusts only the fixed-signal population with a matching OOS sample.
-        "cumulative_trials": len(fixed_signal),
-        # These totals make the broader experiment count explicit without feeding
-        # non-comparable AI samples into the fixed-signal DSR calculation.
+        "cumulative_trials": len(all_recorded),
         "cumulative_recorded_trials": len(all_recorded),
+        "cumulative_fixed_signal_trials": len(fixed_signal),
+        "dsr_comparable_trial_count": len(fixed_signal),
         "cumulative_ai_trials": len(ai),
     }
 
