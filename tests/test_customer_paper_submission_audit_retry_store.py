@@ -468,7 +468,6 @@ def test_active_lease_upsert_does_not_increment_and_preserves_corrupt_quarantine
     assert captured["committed"] is True
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
-@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
 def test_corrupt_retry_snapshot_restores_only_from_matching_indexed_audit_event(monkeypatch, dialect):
     captured = {}
     original = {
