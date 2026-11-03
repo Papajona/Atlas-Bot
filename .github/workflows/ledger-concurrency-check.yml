@@ -5,12 +5,14 @@ on:
     paths:
       - 'app/customer_funds.py'
       - 'app/audit_chain.py'
+      - 'tests/test_custody_withdrawal_acceptance.py'
       - 'app/db.py'
       - 'app/withdrawal_security.py'
       - 'app/main.py'
       - 'app/execution.py'
       - 'tests/test_opening_balance_journaled.py'
       - 'tests/test_audit_chain_lock_order.py'
+      - '.github/workflows/propagate-native-ai-all-branches.yml'
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
@@ -34,6 +36,11 @@ on:
       - '.github/workflows/safe-merged-branch-pruning.yml'
       - '.github/workflows/ci.yml'
       - '.github/workflows/ledger-concurrency-check.yml'
+      # Staging's exact-commit release selector is part of the guarded paper deploy path.
+      - '.github/workflows/staging-paper-deploy.yml'
+      - '.github/workflows/production-deploy.yml'
+      - 'tests/test_production_security_gates.py'
+      - 'tests/test_staging_native_ai_attestation_selection.py'
       - 'scripts/migrate_legacy_native_ai.py'
       - 'tests/test_legacy_native_ai_migration.py'
   push:
@@ -195,6 +202,14 @@ jobs:
         run: |
           pytest -q tests/test_ledger_invariants_3_10_46.py -v
 
+      - name: Run custody withdrawal acceptance and exact journal checks (MANDATORY)
+        env:
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@127.0.0.1:5432/atlas_test
+        run: |
+          pytest -q -rs --junitxml=pg-custody.xml \
+            tests/test_custody_withdrawal_acceptance.py -v --tb=short
+
       - name: Run Postgres concurrency tests (MANDATORY)
         env:
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
@@ -278,7 +293,7 @@ jobs:
             -v --tb=short
 
       - name: Reject skipped mandatory PostgreSQL tests
-        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml pg-paper.xml pg-paper-shared.xml
+        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml pg-paper.xml pg-paper-shared.xml pg-custody.xml
 
       - name: Report success
         if: success()

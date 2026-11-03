@@ -69,11 +69,11 @@ anything on the API, while the worker pool is always-on by design.
 | `atlas-model-signing-public-key` | yes | yes | no |
 | `atlas-model-signing-private-key` | **no** | yes (to sign trained models) | no |
 | `atlas-supabase-anon-key`, `atlas-funding-webhook-secret` | yes | no | no |
-| `atlas-groq-api-key` (optional Groq research and trade-context reviewer; created only when `GROQ_API_KEY` is supplied) | optional | optional | no |
+| `atlas-groq-api-key` (required for production trade-time review; create it from `GROQ_API_KEY` before production deployment) | **yes** | yes (worker inherits the active API revision's pinned version) | no |
 
-Atlas Native AI remains the local strategy composer and deterministic safety authority. Groq can add research annotations and, when `GROQ_TRADE_REVIEW_ENABLED=true`, bounded market/risk evidence to the trade packet. Groq cannot compose the strategy, choose a side, change order parameters, or authorize execution; Native AI applies the final veto. `GROQ_RESEARCH_REVIEW_ENABLED` and `GROQ_TRADE_REVIEW_ENABLED` are independent controls, and the trade-time setting defaults to `false`. A missing key or unavailable required trade review fails closed; no live-trading or payout setting is enabled by this reviewer.
+Atlas Native AI remains the local strategy composer and deterministic safety authority. Production deployment explicitly enables `GROQ_TRADE_REVIEW_ENABLED=true`, so Groq contributes bounded market/risk evidence to the trade packet before Native AI applies the final veto. Groq cannot compose the strategy, choose a side, change order parameters, or authorize execution. `GROQ_RESEARCH_REVIEW_ENABLED` controls scheduled research separately. The production deploy aborts before rollout if the pinned Groq Secret Manager version is missing or trade-time review cannot be configured; the local/test application default remains disabled. No live-trading or payout setting is enabled by this reviewer.
 
-Groq version selection: Optional and must be an exact numeric Secret Manager version (`SECRET_GROQ_API_KEY_VERSION`); omit it when Groq is disabled, and do not use `latest` or a placeholder.
+Groq version selection: Production trade review requires an exact numeric Secret Manager version (`SECRET_GROQ_API_KEY_VERSION`). The production workflow enables trade review and refuses deployment when this version is absent. Do not use `latest` or a placeholder.
 
 ### 3.2 Service accounts
 `SERVICE_ACCOUNT` (API, e.g. `atlas-trading-api`), `WORKER_SERVICE_ACCOUNT` (e.g. `atlas-trading-worker`), `MIGRATION_SERVICE_ACCOUNT` (default `atlas-migrator`).
@@ -88,7 +88,7 @@ Each gets `secretAccessor` only on the secrets in the table above. Review the bu
 | `ADAPTIVE_BOT_CONTROLLER_ENABLED` | `true` | worker starts bot and executor controllers |
 | `RESEARCH_REQUIRE_COST_STRESS` / `RESEARCH_COST_STRESS_MULTIPLIER` | `true` / `2.0` | promotion needs a positive net edge at 2x costs |
 | `RESEARCH_MIN_DEFLATED_SHARPE` | `0.95` in production | production adaptive-model promotion fails closed below 0.95; development/staging may use a lower value for research |
-| `GROQ_RESEARCH_REVIEW_ENABLED`, `GROQ_TRADE_REVIEW_ENABLED` | `true`, `false` | independent research and trade-context review opt-ins; the worker inherits the effective trade setting from all API revisions receiving traffic |
+| `GROQ_RESEARCH_REVIEW_ENABLED`, `GROQ_TRADE_REVIEW_ENABLED` | `true`, `true` in production | scheduled research review and bounded trade-time review; production pipeline enables trade review and the worker inherits the value from all API revisions receiving traffic |
 | `EDGE_DECAY_HALT_ENABLED`, `EDGE_DECAY_WINDOW_TRADES`, `EDGE_DECAY_MIN_TRADES`, `EDGE_DECAY_Z_HALT` | `true`, 100, 60, 2.0 | blocks **new** entries when recent realized net returns are significantly negative; closes always pass |
 | `CUSTOMER_KEY_AUDIT_INTERVAL_SECONDS` | 900 (0 disables) | worker re-verifies customer exchange-key permissions |
 | `MAX_DRAWDOWN`, `DAILY_LOSS_LIMIT`, `MAX_LEVERAGE`, `RISK_PER_TRADE` | 0.15, 0.03, 3.0, 0.005 | keep customer trading unlevered; pilot with smaller caps |
@@ -105,7 +105,7 @@ Abort and investigate on the first failed check; do not skip forward.
 Required environment: `GCP_PROJECT_ID GCP_REGION AR_REPOSITORY MODEL_BUCKET MODEL_STAGING_BUCKET SERVICE_ACCOUNT WORKER_SERVICE_ACCOUNT DATABASE_URL
 USDT_TRON_ACCOUNT_XPUB TRONGRID_API_KEY APP_ENCRYPTION_KEY REDIS_URL SUPABASE_URL SUPABASE_ANON_KEY FUNDING_WEBHOOK_SECRET ADMIN_SUPABASE_USER_IDS
 BACKUP_RECOVERY_URL FORWARDED_ALLOW_IPS MODEL_SIGNING_PUBLIC_KEY MODEL_SIGNING_PRIVATE_KEY`; optional `MIGRATION_SERVICE_ACCOUNT`.
-It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, required secrets, and per-secret IAM bindings. The Groq secret is optional: supply `GROQ_API_KEY` to bootstrap it, or leave that variable unset to run Native AI without Groq.
+It enables the required APIs, creates the Artifact Registry repo, the three service accounts, the two buckets, required secrets, and per-secret IAM bindings. Production deployment always enables bounded Groq trade-time review: supply `GROQ_API_KEY` to bootstrap the `atlas-groq-api-key` secret and grant API/worker access. A keyless bootstrap may be used for non-production setup only; the production deploy is expected to fail closed without the pinned Groq secret version.
 **Check:** `gcloud secrets list`, `gcloud iam service-accounts list`; confirm `atlas-model-signing-private-key` is readable by the **worker only**.
 
 ### Step 2: Audit-log retention -- `deploy/gcp-security-audit-retention.sh`, then `deploy/verify-cloud-audit.sh`
@@ -137,14 +137,14 @@ bash deploy/cloud-run-migration-job.sh        # deploys the job as atlas-migrato
 ### Step 6: Deploy the API -- `deploy/cloud-run-deploy.sh`
 Required: all Step-1 variables plus `CLOUD_RUN_SERVICE` and explicit secret versions `SECRET_DATABASE_VERSION SECRET_KEY_VERSION SECRET_TRON_XPUB_VERSION
 SECRET_APP_ENCRYPTION_VERSION SECRET_REDIS_URL_VERSION SECRET_TRONGRID_VERSION SECRET_MODEL_SIGNING_PUBLIC_VERSION SECRET_SUPABASE_ANON_KEY_VERSION
-SECRET_FUNDING_WEBHOOK_VERSION`. Optional: set `SECRET_GROQ_API_KEY_VERSION` to the positive numeric version of `atlas-groq-api-key` to enable advisory research review; omit it to keep Groq disabled. The Native AI safety path does not require this key.
+SECRET_FUNDING_WEBHOOK_VERSION SECRET_GROQ_API_KEY_VERSION`. `SECRET_GROQ_API_KEY_VERSION` is required and must be the positive numeric version of `atlas-groq-api-key`; the production workflow enables bounded Groq trade-time review and the deploy refuses to proceed without this secret. The local/test Native AI application default remains disabled.
 It deploys with `--execution-environment gen2`, the read-only models volume, ingress `internal-and-cloud-load-balancing`, and `--allow-unauthenticated`
 (authentication is enforced by the app; the ingress setting restricts who can reach it).
 **Check:** `GET /healthz` (liveness) then `GET /readyz` (database, migrations current, Redis, recovery config, admin auth). `/docs` must be off
 (`DOCS_ENABLED=false`) and `/metrics` must require an admin (`METRICS_REQUIRE_ADMIN=true`).
 
 ### Step 7: Deploy the worker pool -- `deploy/cloud-run-worker-deploy.sh`
-The worker script reads every API revision currently receiving traffic and inherits its validated Groq model, token cap, enablement setting and optional pinned Secret Manager version. No-traffic tagged canaries are excluded. If multiple serving revisions have different Groq configurations, the worker rollout is refused. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; any supplied Groq overrides that differ from the serving API configuration are rejected.
+The worker script reads every API revision currently receiving traffic and inherits its validated Groq model, token cap, enablement setting and required pinned Secret Manager version. No-traffic tagged canaries are excluded. If multiple serving revisions have different Groq configurations, the worker rollout is refused. Set `API_SERVICE` to the same Cloud Run API service deployed in Step 6; any supplied Groq overrides that differ from the serving API configuration are rejected.
 ```
 
 export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUNT=atlas-trading-worker \
@@ -158,7 +158,7 @@ export WORKER_POOL=atlas-trading-worker IMAGE=<same image> WORKER_SERVICE_ACCOUN
   RESEARCH_MIN_DEFLATED_SHARPE="${RESEARCH_MIN_DEFLATED_SHARPE:-0.95}"
 bash deploy/cloud-run-worker-deploy.sh
 ```
-The worker reads and validates `GROQ_MODEL`, `GROQ_MAX_COMPLETION_TOKENS`, `GROQ_RESEARCH_REVIEW_ENABLED`, and `GROQ_TRADE_REVIEW_ENABLED` plus the optional pinned `GROQ_API_KEY` Secret Manager reference from the active API revision; it does not accept an independent worker optional Groq research review configuration. Any explicitly supplied research or trade-review override is rejected if it differs from the API. The three `RESEARCH_*` values remain mandatory for production worker startup. The legacy `` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
+The worker reads and validates `GROQ_MODEL`, `GROQ_MAX_COMPLETION_TOKENS`, `GROQ_RESEARCH_REVIEW_ENABLED`, and `GROQ_TRADE_REVIEW_ENABLED` plus the required pinned `GROQ_API_KEY` Secret Manager reference from the active API revision; it does not accept an independent worker Groq configuration. Any explicitly supplied research or trade-review override is rejected if it differs from the API. The three `RESEARCH_*` values remain mandatory for production worker startup. The legacy `GROQ_STRATEGY_MODEL` is not used. Use the actual fee source and immutable evidence identifier consumed by the research process; placeholders or CI fixtures are not operational evidence. The deployment validator rejects nonnumeric/nonfinite thresholds and values containing the active environment-variable delimiter before the deploy command runs. It verifies input shape only, not evidence authenticity.
 **Check:** `ServiceHeartbeat` rows appear for role `worker`; logs show the loops starting; the single-writer execution lease is held (only one worker may hold it).
 **Rollout caveat:** a worker-pool update can briefly run old and new instances together. Safety then rests on the distributed lease with fencing; keep live
 trading off until a rollout drill proves it.
@@ -234,7 +234,7 @@ and before each release (the verify script does).
 |---|---|---|
 | Migration job had no `--service-account` | ran as the default compute identity, which bootstrap never granted the DB secret (or ran over-privileged) | dedicated `atlas-migrator`, DB-secret-only, `--max-retries 0 --task-timeout 900s` |
 | Worker script never set `BACKUP_RECOVERY_URL` | production startup refused to boot: the worker pool crash-looped | variable now required and passed |
-| API deployment previously injected legacy hosted strategy-provider secrets | Legacy hosted-provider quotas and credentials could block strategy generation despite healthy core code | Legacy hosted strategy calls were removed; Native AI now runs locally, while an optional Groq research-only secret can be injected separately |
+| API deployment previously injected retired hosted strategy-provider secrets | Retired hosted-provider quotas and credentials could block strategy generation despite healthy core code | Hosted strategy calls were removed; Atlas Native AI now runs locally, while optional Groq research and trade-context review remains separately controlled |
 | Worker previously depended on a dual-hosted-provider veto | missing API keys forced every worker cycle to NO_TRADE | Native AI uses local evidence checks and fails closed on missing or inconsistent trade packets |
 | Hosted model availability and quota | provider status, API keys, rate limits and core-code correctness are separate concerns | Local Native AI health check is deterministic and offline; no external provider attestation is required |
 | `DEPLOYMENT_ACCEPTANCE.md` stated `max=1, concurrency=1` and listed migrations after deploy | wrong numbers and order | corrected |
@@ -299,4 +299,4 @@ bash deploy/verify-deployed-release.sh
 The verifier calls `/healthz` and fails unless both the Git SHA and Artifact Registry image digest match exactly. A green CI run alone does not prove that the live Cloud Run revision is serving the intended immutable artifact.
 
 
-The API's scheduled research review is controlled by `GROQ_RESEARCH_REVIEW_ENABLED`. Trade-time Groq review is a separate opt-in using `GROQ_TRADE_REVIEW_ENABLED` (default `false`); enabling it requires a configured Groq key and still leaves the final safety decision to Atlas Native AI.
+The API's scheduled research review is controlled by `GROQ_RESEARCH_REVIEW_ENABLED`. Production trade-time Groq review is explicitly enabled by the deployment workflow and requires a pinned Groq key. The worker inherits the serving API setting; a missing key blocks deployment. Groq remains advisory and Native AI retains the final safety decision.

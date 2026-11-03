@@ -11,6 +11,8 @@ import asyncio
 import hashlib
 import json
 import math
+import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any, Awaitable, Callable, Literal
@@ -35,15 +37,270 @@ from .customer_paper_lifecycle import (
     list_open_customer_paper_orders,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
+    verify_customer_paper_market_bar_provenance,
     submit_customer_paper_order,
 )
 from .trading_core import PROFILES
+from .distributed import allow_rate_limit
 
 
 _TIMEFRAME_SECONDS = {
     "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
     "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
 }
+_PAPER_MARKET_IMPACT_RETURN_LOOKBACK = 20
+
+
+def _paper_market_bar_key(*, venue: str, symbol: str, timeframe: str, bar_at: datetime) -> str:
+    """Reproduce the durable market-bar key without registering its shared budget."""
+    stamp = bar_at.astimezone(timezone.utc)
+    material = (
+        f"paper-market-bar-v1|{str(venue or '').strip().lower()}|spot|"
+        f"{str(symbol or '').strip().upper()}|{str(timeframe or '').strip().lower()}|{stamp.isoformat()}"
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _paper_preflight_completed_bar(
+    order: dict[str, Any],
+    bar: dict[str, Any],
+    df: Any,
+    *,
+    timeframe: str,
+) -> tuple[Decimal | None, float | None]:
+    """Validate all fill-price history before the durable shared budget is registered."""
+    values = bar["values"]
+    limit = Decimal(order["limit_price"]) if order.get("limit_price") is not None else None
+    side = str(order.get("side") or "").upper()
+    reference_price: Decimal | None = None
+    if str(order.get("order_type") or "").upper() == "MARKET":
+        reference_price = values["open"]
+    elif side == "BUY" and limit is not None and values["low"] <= limit:
+        reference_price = min(values["open"], limit)
+    elif side == "SELL" and limit is not None and values["high"] >= limit:
+        reference_price = max(values["open"], limit)
+
+    if reference_price is None:
+        return None, None
+
+    bar_position = int(df.index.get_loc(bar["timestamp"]))
+    volatility = _paper_market_impact_volatility(
+        df, bar_position=bar_position, timeframe=timeframe
+    )
+    return reference_price, volatility
+
+
+async def _market_bar_contexts_off_loop(df: Any, *, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+    """Build per-candle contexts away from the event loop for large anchored replays."""
+    return await asyncio.to_thread(
+        _market_bar_contexts,
+        df,
+        symbol=symbol,
+        timeframe=timeframe,
+    )
+
+
+def _paper_market_impact_volatility(df: Any, *, bar_position: int, timeframe: str) -> float:
+    """Require the complete contiguous return window used to price a paper fill."""
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+    if timeframe_seconds is None:
+        raise HTTPException(409, "Paper market-impact volatility timeframe is unsupported")
+    lookback = _PAPER_MARKET_IMPACT_RETURN_LOOKBACK
+    start_position = int(bar_position) - lookback
+    if start_position < 0:
+        raise HTTPException(
+            409,
+            "Insufficient contiguous completed-candle history for the full paper market-impact volatility window; reconcile the order before advancing",
+        )
+    history = df.iloc[start_position:int(bar_position) + 1]
+    if len(history) != lookback + 1 or "close" not in history.columns:
+        raise HTTPException(
+            409,
+            "Incomplete completed-candle history for paper market-impact volatility; reconcile the order before advancing",
+        )
+    timestamps = [_timestamp(value, "volatility history bar") for value in history.index]
+    expected_interval = float(timeframe_seconds)
+    if any(
+        (later - earlier).total_seconds() != expected_interval
+        for earlier, later in zip(timestamps, timestamps[1:])
+    ):
+        raise HTTPException(
+            409,
+            "Non-contiguous completed-candle history for paper market-impact volatility; reconcile the order before advancing",
+        )
+    returns = (
+        history["close"]
+        .astype(float)
+        .pct_change(fill_method=None)
+        .replace([float("inf"), float("-inf")], float("nan"))
+        .dropna()
+    )
+    if len(returns) != lookback:
+        raise HTTPException(
+            409,
+            "Incomplete return history for paper market-impact volatility; reconcile the order before advancing",
+        )
+    volatility = float(returns.std(ddof=0))
+    if not math.isfinite(volatility) or volatility < 0:
+        raise HTTPException(409, "Market volatility estimate is invalid")
+    return volatility
+
+
+# Share a very fresh, verified OHLCV snapshot across customer requests for the
+# same market. The per-key lock collapses concurrent cache misses without
+# serializing unrelated symbols/timeframes behind an exchange round trip.
+_PAPER_MARKET_SNAPSHOT_TTL_SECONDS = 3.0
+_PAPER_MARKET_SNAPSHOT_MAX_ENTRIES = 64
+_PAPER_MARKET_RATE_LIMIT_PER_MINUTE = 12
+_PAPER_MARKET_SNAPSHOTS: OrderedDict[
+    tuple[int, str, str, int, int], tuple[float, Any, Callable[..., Any]]
+] = OrderedDict()
+_PAPER_MARKET_SNAPSHOT_LOCKS: OrderedDict[
+    tuple[int, str, str, int, int], asyncio.Lock
+] = OrderedDict()
+_PAPER_MARKET_SNAPSHOT_CACHE_LOCK = asyncio.Lock()
+
+
+async def _fetch_verified_market_snapshot(
+    *,
+    customer_id: int,
+    symbol: str,
+    timeframe: str,
+    market_data: Callable[..., Any],
+    market_request_type: type,
+    earliest_required_at: datetime | None = None,
+) -> tuple[Any, dict[str, Any]]:
+    """Throttle and cache verified bars, extending replay history to the order's submission."""
+    allowed, _remaining = await allow_rate_limit(
+        f"customer-paper-market:{int(customer_id)}",
+        limit=_PAPER_MARKET_RATE_LIMIT_PER_MINUTE,
+        window_seconds=60,
+    )
+    if not allowed:
+        raise HTTPException(429, "Customer paper market-data request rate limit exceeded")
+
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
+    if not timeframe_seconds:
+        raise HTTPException(422, "Unsupported paper-order timeframe")
+    required_bars = max(
+        25,
+        max(1, int(settings.paper_order_ttl_bars))
+        + max(1, int(settings.paper_fill_latency_bars))
+        + 1,
+    )
+    # N candles span N-1 timeframe intervals. Counting N full intervals
+    # overstates the fetch window by one entire candle (notably for daily bars).
+    required_history_seconds = max(0, required_bars - 1) * timeframe_seconds
+    days = max(1, (required_history_seconds + 86_399) // 86_400)
+    if earliest_required_at is not None:
+        earliest = earliest_required_at
+        if earliest.tzinfo is None or earliest.utcoffset() is None:
+            raise HTTPException(409, "Persisted paper-order submission timestamp must be timezone-aware")
+        now_utc = datetime.now(timezone.utc)
+        earliest_utc = earliest.astimezone(timezone.utc)
+        fill_latency_bars = max(1, int(settings.paper_fill_latency_bars))
+        prefill_context_bars = max(
+            0, _PAPER_MARKET_IMPACT_RETURN_LOOKBACK - fill_latency_bars
+        )
+        # The earliest candle needed for the first eligible fill is 20 returns
+        # before submission + fill latency, not 20 returns before the end of TTL.
+        # Keep the submission candle in the request when latency exceeds the
+        # volatility lookback.
+        required_start = min(
+            earliest_utc,
+            earliest_utc - timedelta(seconds=prefill_context_bars * timeframe_seconds),
+        )
+        # Daily orders can remain pending for 24 bars while fill pricing still
+        # requires 19 completed returns before the first eligible candle. Support
+        # that full replay span rather than stranding valid orders after ~11 days.
+        maximum_replay_days = 60
+        supported_start = now_utc - timedelta(days=maximum_replay_days)
+        if required_start < supported_start:
+            raise HTTPException(
+                409,
+                "Paper-order replay requires pre-fill volatility history older than the supported 60-day candle window; reconcile the order before advancing",
+            )
+        anchored_seconds = max(0.0, (now_utc - required_start).total_seconds())
+        anchored_days = max(1, int(math.ceil(anchored_seconds / 86_400)))
+        days = min(maximum_replay_days, max(days, anchored_days))
+    else:
+        # Initial, unanchored submissions retain the endpoint's historical
+        # 30-day cap. TTL/latency settings can calculate 31 bars for daily
+        # candles; an N-bar window spans only N-1 complete intervals.
+        days = min(days, 30)
+    # Cache only within the same expected completed-candle generation. A
+    # three-second cache alone can otherwise serve yesterday's bar after the
+    # caller clock or market advances during a fast test/recovery cycle.
+    expected_closed_bar_generation = (
+        int(datetime.now(timezone.utc).timestamp()) // timeframe_seconds
+    )
+    # Scope cached frames to the adapter instance as well as the market identity.
+    # Retaining the callable in the value prevents its object ID being reused.
+    key = (
+        id(market_data),
+        str(symbol).strip().upper(),
+        str(timeframe),
+        expected_closed_bar_generation,
+        days,
+    )
+    request = market_request_type(
+        asset="crypto",
+        symbol=symbol,
+        exchange="binance",
+        timeframe=timeframe,
+        days=days,
+    )
+
+    async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
+        now = time.monotonic()
+        cached = _PAPER_MARKET_SNAPSHOTS.get(key)
+        if (
+            cached is not None
+            and cached[2] is market_data
+            and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS
+        ):
+            _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
+            frame = cached[1]
+            return frame, _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
+
+        key_lock = _PAPER_MARKET_SNAPSHOT_LOCKS.get(key)
+        if key_lock is None:
+            key_lock = asyncio.Lock()
+            _PAPER_MARKET_SNAPSHOT_LOCKS[key] = key_lock
+        _PAPER_MARKET_SNAPSHOT_LOCKS.move_to_end(key)
+        while len(_PAPER_MARKET_SNAPSHOT_LOCKS) > _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES * 2:
+            old_key, old_lock = next(iter(_PAPER_MARKET_SNAPSHOT_LOCKS.items()))
+            if old_lock.locked():
+                _PAPER_MARKET_SNAPSHOT_LOCKS.move_to_end(old_key)
+                if all(lock.locked() for lock in _PAPER_MARKET_SNAPSHOT_LOCKS.values()):
+                    break
+            else:
+                _PAPER_MARKET_SNAPSHOT_LOCKS.pop(old_key, None)
+
+    async with key_lock:
+        async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
+            now = time.monotonic()
+            cached = _PAPER_MARKET_SNAPSHOTS.get(key)
+            if (
+            cached is not None
+            and cached[2] is market_data
+            and now - cached[0] < _PAPER_MARKET_SNAPSHOT_TTL_SECONDS
+        ):
+                _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
+                frame = cached[1]
+                return frame, _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
+
+        frame = await asyncio.to_thread(market_data, request)
+        # Validate before caching. A malformed, stale, or wrong-venue response
+        # must never become a shared snapshot for later customers.
+        context = _market_bar_context(frame, symbol=symbol, timeframe=timeframe)
+        async with _PAPER_MARKET_SNAPSHOT_CACHE_LOCK:
+            _PAPER_MARKET_SNAPSHOTS[key] = (time.monotonic(), frame, market_data)
+            _PAPER_MARKET_SNAPSHOTS.move_to_end(key)
+            while len(_PAPER_MARKET_SNAPSHOTS) > _PAPER_MARKET_SNAPSHOT_MAX_ENTRIES:
+                _PAPER_MARKET_SNAPSHOTS.popitem(last=False)
+        return frame, context
+
 _VIRTUAL_STARTING_CASH = Decimal("10000")
 _DECIMAL_QUANTUM = Decimal("0.000000000000000001")
 
@@ -303,31 +560,21 @@ def build_customer_paper_router(
         else:
             await state_guard()
 
-    async def _fetch_bar(symbol: str, timeframe: str) -> tuple[Any, dict[str, Any]]:
-        # The execution model needs the most recent closed bar and enough history for
-        # its 20-return volatility estimate. Do not fetch a fixed 30-day window:
-        # that meant 43,200 candles / ~44 sequential CCXT pages for a 1-minute order.
-        timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
-        if not timeframe_seconds:
-            raise HTTPException(422, "Unsupported paper-order timeframe")
-        # Load enough closed candles to replay the configured order lifetime from
-        # the submission bar, while retaining a bounded request for very old orders.
-        required_bars = max(
-            25,
-            max(1, int(settings.paper_order_ttl_bars))
-            + max(1, int(settings.paper_fill_latency_bars))
-            + 1,
-        )
-        days = min(30, max(1, (required_bars * timeframe_seconds + 86_399) // 86_400))
-        req = market_request_type(
-            asset="crypto",
+    async def _fetch_bar(
+        customer_id: int,
+        symbol: str,
+        timeframe: str,
+        *,
+        earliest_required_at: datetime | None = None,
+    ) -> tuple[Any, dict[str, Any]]:
+        return await _fetch_verified_market_snapshot(
+            customer_id=customer_id,
             symbol=symbol,
-            exchange="binance",
             timeframe=timeframe,
-            days=days,
+            market_data=market_data,
+            market_request_type=market_request_type,
+            earliest_required_at=earliest_required_at,
         )
-        df = await asyncio.to_thread(market_data, req)
-        return df, _market_bar_context(df, symbol=symbol, timeframe=timeframe)
 
     async def _order_detail(customer_id: int, client_order_id: str) -> dict[str, Any]:
         order = await get_customer_paper_order(customer_id=customer_id, client_order_id=client_order_id)
@@ -425,7 +672,7 @@ def build_customer_paper_router(
             balances = await get_customer_paper_balances(customer_id=profile.id)
             if not any(row["account_code"] == "PAPER_CASH" for row in balances):
                 raise HTTPException(409, "Initialize the virtual paper account before submitting orders")
-            _df, bar = await _fetch_bar(req.symbol, req.timeframe)
+            _df, bar = await _fetch_bar(profile.id, req.symbol, req.timeframe)
             result = await submit_customer_paper_order(
                 customer_id=profile.id,
                 client_order_id=req.client_order_id,
@@ -491,8 +738,13 @@ def build_customer_paper_router(
             timeframe = str(metadata.get("timeframe") or "")
             if timeframe not in _TIMEFRAME_SECONDS or metadata.get("execution_model") != "completed_bar_volume_capped_heuristic_v1":
                 raise HTTPException(409, "Persisted paper order lacks a supported execution context")
-            df, latest_bar = await _fetch_bar(order["symbol"], timeframe)
             submitted_at = _timestamp(metadata.get("submission_bar_at"), "submission bar")
+            df, latest_bar = await _fetch_bar(
+                profile.id,
+                order["symbol"],
+                timeframe,
+                earliest_required_at=submitted_at,
+            )
             bar_seconds = _TIMEFRAME_SECONDS[timeframe]
             ttl_bars = max(1, int(settings.paper_order_ttl_bars))
             fill_latency_bars = max(1, int(settings.paper_fill_latency_bars))
@@ -508,8 +760,31 @@ def build_customer_paper_router(
                     "order": order,
                 }
 
-            bars = _market_bar_contexts(df, symbol=order["symbol"], timeframe=timeframe)
+            bars = await _market_bar_contexts_off_loop(
+                df, symbol=order["symbol"], timeframe=timeframe
+            )
             by_timestamp = {bar["timestamp"]: bar for bar in bars}
+
+            # Never replay an order against revised or substituted submission history.
+            # The immutable order intent records the exact completed candle hash seen
+            # when the customer submitted it. Missing history is a reconciliation
+            # condition, not permission to infer a new market context.
+            submission_bar = by_timestamp.get(submitted_at)
+            expected_submission_sha = str(metadata.get("submission_bar_sha256") or "").strip()
+            actual_submission_sha = (
+                str(submission_bar.get("bar_data_sha256") or "").strip()
+                if isinstance(submission_bar, dict) else ""
+            )
+            if (
+                not expected_submission_sha
+                or not actual_submission_sha
+                or actual_submission_sha != expected_submission_sha
+            ):
+                raise HTTPException(
+                    409,
+                    "Persisted submission candle no longer matches the immutable order context; reconcile the order before advancing",
+                )
+
             evaluation_end = min(latest_at, ttl_at)
 
             # Never select only the latest candle. Every eligible candle from the
@@ -556,23 +831,16 @@ def build_customer_paper_router(
 
             async def _process_completed_bar(bar, elapsed_bars, current_order):
                 order = current_order
-                budget = await register_customer_paper_market_bar(
+                bar_key = _paper_market_bar_key(
                     venue=order_venue,
                     symbol=order["symbol"],
                     timeframe=timeframe,
                     bar_at=bar["timestamp"],
-                    bar_data_sha256=bar["bar_data_sha256"],
-                    base_volume=_decimal_text(bar["values"]["volume"]),
-                    participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
                 )
-                prior_fill = await get_customer_paper_fill_for_bar(
-                    customer_id=profile.id,
-                    client_order_id=client_order_id,
-                    bar_key=budget["bar_key"],
-                )
-                if prior_fill is not None:
-                    # Re-read after the immutable fill lookup: another request can have
-                    # completed the order since the initial status read above.
+
+                async def _replay_existing_fill(prior_fill):
+                    # Existing fills are immutable. Return them before revalidating
+                    # the source candle or creating any new shared-bar budget.
                     replay_order = await _order_detail(profile.id, client_order_id)
                     if (
                         elapsed_bars >= max(1, int(settings.paper_order_ttl_bars))
@@ -582,11 +850,11 @@ def build_customer_paper_router(
                             await expire_customer_paper_order(
                                 customer_id=profile.id,
                                 client_order_id=client_order_id,
-                                idempotency_key=_paper_ttl_idempotency_key(profile.id, client_order_id, budget["bar_key"]),
+                                idempotency_key=_paper_ttl_idempotency_key(
+                                    profile.id, client_order_id, bar_key
+                                ),
                             )
                         except CustomerPaperOrderConflict:
-                            # A concurrent fill/expiry can win between the re-read and
-                            # expiry. Return the replay if the latest order is now terminal.
                             replay_order = await _order_detail(profile.id, client_order_id)
                             if replay_order["status"] in {"SUBMITTED", "PARTIALLY_FILLED"}:
                                 raise
@@ -596,20 +864,56 @@ def build_customer_paper_router(
                         "status": "REPLAYED",
                         "virtual_only": True,
                         "bar_at": bar["timestamp"].isoformat(),
-                        "bar_key": budget["bar_key"],
+                        "bar_key": bar_key,
                         "fill": prior_fill,
                         "order": replay_order,
                     }
+
+                prior_fill = await get_customer_paper_fill_for_bar(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    bar_key=bar_key,
+                )
+                if prior_fill is not None:
+                    # A fill idempotency key alone does not authenticate the candle.
+                    # Validate its immutable digest and volume before replaying it;
+                    # do not recalculate capacity from today's participation setting.
+                    await verify_customer_paper_market_bar_provenance(
+                        venue=order_venue,
+                        symbol=order["symbol"],
+                        timeframe=timeframe,
+                        bar_at=bar["timestamp"],
+                        bar_data_sha256=bar["bar_data_sha256"],
+                        base_volume=_decimal_text(bar["values"]["volume"]),
+                    )
+                    return await _replay_existing_fill(prior_fill)
+
+                # A candidate fill must pass the entire pre-fill volatility window
+                # before its immutable, shared bar budget can be committed. A failed
+                # history check may then be retried with corrected source candles.
+                reference_price, volatility = _paper_preflight_completed_bar(
+                    order, bar, df, timeframe=timeframe
+                )
+                budget = await register_customer_paper_market_bar(
+                    venue=order_venue,
+                    symbol=order["symbol"],
+                    timeframe=timeframe,
+                    bar_at=bar["timestamp"],
+                    bar_data_sha256=bar["bar_data_sha256"],
+                    base_volume=_decimal_text(bar["values"]["volume"]),
+                    participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
+                )
+                # Close the race with another request that may have filled after
+                # the pre-registration lookup but before the budget transaction.
+                prior_fill = await get_customer_paper_fill_for_bar(
+                    customer_id=profile.id,
+                    client_order_id=client_order_id,
+                    bar_key=budget["bar_key"],
+                )
+                if prior_fill is not None:
+                    return await _replay_existing_fill(prior_fill)
                 values = bar["values"]
-                limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
                 side = order["side"]
-                reference_price: Decimal | None = None
-                if order["order_type"] == "MARKET":
-                    reference_price = values["open"]
-                elif side == "BUY" and values["low"] <= limit:
-                    reference_price = min(values["open"], limit)
-                elif side == "SELL" and values["high"] >= limit:
-                    reference_price = max(values["open"], limit)
 
                 if reference_price is None:
                     attempt = "LIMIT_NOT_TRIGGERED"
@@ -678,14 +982,9 @@ def build_customer_paper_router(
                             }
                         fill_quantity = min(fill_quantity, held)
 
-                    # Historical candle impact inputs must not include closes from bars
-                    # that occurred after the candle currently being replayed.
-                    bar_position = int(df.index.get_loc(bar["timestamp"]))
-                    candle_history = df.iloc[:bar_position + 1]
-                    returns = candle_history["close"].astype(float).pct_change().replace([float("inf"), float("-inf")], float("nan")).dropna().tail(20)
-                    volatility = float(returns.std(ddof=0)) if len(returns) >= 2 else 0.0
-                    if not math.isfinite(volatility) or volatility < 0:
-                        raise HTTPException(409, "Market volatility estimate is invalid")
+                    # Volatility was validated before immutable budget registration.
+                    if volatility is None:
+                        raise HTTPException(409, "Paper fill volatility preflight is incomplete")
                     participation_for_impact = max(
                         0.0,
                         float(fill_quantity / max(values["volume"], Decimal("1e-18"))),

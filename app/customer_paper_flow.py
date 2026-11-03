@@ -22,6 +22,7 @@ from .customer_paper_ledger import (
     post_customer_paper_journal,
 )
 from .customer_paper_lifecycle import (
+    CustomerPaperCashShortfall,
     CustomerPaperOrderConflict,
     get_customer_paper_fill_for_bar,
     get_customer_paper_order,
@@ -699,7 +700,7 @@ async def _fill_open_order(
     except CustomerPaperFlowBlocked as exc:
         # The paper-cash advisory lock can reveal a concurrent spend after the
         # pre-read. Do not leave an unaffordable BUY permanently blocking recovery.
-        if side == "BUY" and "overdraw" in str(exc).lower():
+        if side == "BUY" and isinstance(exc.__cause__, CustomerPaperCashShortfall):
             await _paper_call(
                 expire_customer_paper_order(
                     customer_id=customer_id,
@@ -840,8 +841,13 @@ async def process_customer_paper_orders(
                     "expire manual pending BUY before protective exit",
                 )
                 return protective
+        manual_timeframe = str(meta.get("timeframe") or "unknown")
         raise CustomerPaperFlowBlocked(
-            "A manual paper order is open for this market; the autonomous flow will not take ownership or advance it"
+            "A manual paper order is open for this market "
+            f"({order.get('client_order_id')}, timeframe {manual_timeframe}). "
+            "Cancel or advance it through the manual paper-order API before running "
+            "the autonomous bot on this market; the autonomous flow will not take "
+            "ownership of or advance a manual order."
         )
 
     # A partially filled autonomous BUY can leave a protected position while the
@@ -1186,9 +1192,28 @@ async def execute_customer_paper_spot_signal(
         and str(p.get("symbol") or "").strip().upper() == str(req.symbol).strip().upper()
         and Decimal(str(p.get("quantity") or "0")) > 0
     ]
-    if normalized_side == "BUY" and positions:
+    manual_positions = [
+        p for p in positions
+        if str(p.get("execution_owner") or "manual_customer_api").strip().lower()
+        != "autonomous_customer_bot"
+    ]
+    if manual_positions:
+        # Manual holdings remain exclusively under the manual API flow. Do not let a
+        # strategy BUY stack on them or a strategy SELL reach the ledger owner guard.
+        return {
+            "mode": "CUSTOMER_PAPER",
+            "status": "NO_TRADE",
+            "decision": "NO_TRADE",
+            "reason": "manual_position_requires_manual_execution",
+        }
+    autonomous_positions = [
+        p for p in positions
+        if str(p.get("execution_owner") or "manual_customer_api").strip().lower()
+        == "autonomous_customer_bot"
+    ]
+    if normalized_side == "BUY" and autonomous_positions:
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "long_spot_position_already_open"}
-    if normalized_side == "SELL" and not positions:
+    if normalized_side == "SELL" and not autonomous_positions:
         return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "short_entries_are_not_supported"}
 
     fee_bps, slippage_bps, cost_status = _cost_inputs()
@@ -1207,7 +1232,7 @@ async def execute_customer_paper_spot_signal(
             if raw_quantity <= 0:
                 return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "insufficient_paper_cash"}
         else:
-            raw_quantity = min(raw_quantity, Decimal(str(positions[0]["quantity"])))
+            raw_quantity = min(raw_quantity, Decimal(str(autonomous_positions[0]["quantity"])))
             if raw_quantity <= 0:
                 return {"mode": "CUSTOMER_PAPER", "status": "NO_TRADE", "decision": "NO_TRADE", "reason": "no_long_position_to_close"}
         raw_quantity = raw_quantity.quantize(_BAR_QUANTUM, rounding=ROUND_DOWN)

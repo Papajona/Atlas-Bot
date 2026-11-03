@@ -9,6 +9,19 @@ import pytest
 from app import main
 
 
+def _successful_external_delivery(monkeypatch):
+    async def claim(_event_hash):
+        return "test-claim-token"
+
+    async def finish(_event_hash, *, claim_token, **_kwargs):
+        assert claim_token == "test-claim-token"
+        return True
+
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+
+
 def _pending_execution(*, newly_submitted: bool = True, order_role: str = "STRATEGY") -> dict:
     return {
         "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
@@ -26,410 +39,6 @@ def _pending_execution(*, newly_submitted: bool = True, order_role: str = "STRAT
             "newly_submitted": newly_submitted,
         },
     }
-
-
-def test_terminal_audit_failure_persists_retry_without_changing_trade_result(monkeypatch, caplog):
-    persisted = []
-    fallback = []
-
-    async def no_prior_retries(_customer_id):
-        return None
-
-    async def fail_audit(_detail):
-        raise RuntimeError("audit store unavailable")
-
-    async def persist_retry(**kwargs):
-        persisted.append(kwargs)
-
-    async def safe_audit(event, detail, actor_id=None):
-        fallback.append((event, detail, actor_id))
-
-    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_prior_retries)
-    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", fail_audit)
-    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
-    monkeypatch.setattr(main, "_safe_audit", safe_audit)
-
-    execution = _terminal_execution()
-    result = asyncio.run(main._customer_paper_submission_stage(
-        execution,
-        customer_id=501,
-        trading_account_id=702,
-        req=_request(),
-    ))
-
-    assert result is None
-    assert execution["decision"] == "TRADE"
-    assert len(persisted) == 1
-    assert persisted[0]["customer_id"] == 501
-    assert persisted[0]["error_type"] == "RuntimeError"
-    detail = persisted[0]["submission_detail"]
-    assert detail["client_order_id"] == "paper-terminal-order-501"
-    assert detail["execution_status"] == "APPENDED"
-    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
-    assert fallback[0][1]["submission_detail"] == detail
-    assert fallback[0][2] == "customer:501"
-    assert "paper-terminal-order-501" not in caplog.text
-    assert "customer_id=501" not in caplog.text
-
-
-def test_existing_primary_audit_retries_failed_external_delivery(monkeypatch):
-    appended = []
-    emitted = []
-    emit_results = iter([False, True])
-
-    class DummySession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-    async def append_once(_db, **kwargs):
-        appended.append(kwargs)
-        created = len(appended) == 1
-        return SimpleNamespace(event_hash="stable-event-hash"), created
-
-    def emit(**kwargs):
-        emitted.append(kwargs)
-        return next(emit_results)
-
-    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
-    monkeypatch.setattr(main, "append_audit_once", append_once)
-    monkeypatch.setattr(main, "emit_security_audit", emit)
-
-    detail = {
-        "customer_id": 501,
-        "client_order_id": "paper-external-retry-501",
-        "side": "BUY",
-    }
-
-    with pytest.raises(RuntimeError, match="external customer paper audit delivery failed"):
-        asyncio.run(main._audit_customer_paper_order_submitted_once(detail))
-
-    created = asyncio.run(main._audit_customer_paper_order_submitted_once(
-        detail, retry_external=True
-    ))
-
-    assert created is False
-    assert len(appended) == 2
-    assert all(item["idempotency_fields"] == ("customer_id", "client_order_id") for item in appended)
-    assert len(emitted) == 2
-    assert {item["event_hash"] for item in emitted} == {"stable-event-hash"}
-
-
-def test_retry_repair_marks_success_only_after_external_delivery(monkeypatch):
-    attempts = []
-    state_changes = []
-    payload = {
-        "customer_id": 501,
-        "client_order_id": "paper-retry-501",
-        "order_id": 99001,
-        "side": "SELL",
-    }
-
-    async def load(_customer_id):
-        return [{
-            "retry_id": 12,
-            "customer_id": 501,
-            "client_order_id": "paper-retry-501",
-            "submission_detail": payload,
-        }]
-
-    async def audit(detail, *, retry_external=False):
-        attempts.append((detail, retry_external))
-        return False
-
-    async def set_state(retry_id, **kwargs):
-        state_changes.append((retry_id, kwargs))
-
-    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
-    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit)
-    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
-
-    asyncio.run(main._repair_customer_paper_submission_audit_retries(501))
-
-    assert attempts == [(payload, True)]
-    assert state_changes == [(12, {"status": "REPAIRED", "error_type": ""})]
-
-
-def test_retry_repair_keeps_record_pending_after_external_delivery_failure(monkeypatch):
-    state_changes = []
-
-    async def load(_customer_id):
-        return [{
-            "retry_id": 13,
-            "customer_id": 501,
-            "client_order_id": "paper-retry-fail-501",
-            "submission_detail": {
-                "customer_id": 501,
-                "client_order_id": "paper-retry-fail-501",
-            },
-        }]
-
-    async def fail_audit(_detail, *, retry_external=False):
-        assert retry_external is True
-        raise RuntimeError("external sink unavailable")
-
-    async def set_state(retry_id, **kwargs):
-        state_changes.append((retry_id, kwargs))
-
-    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
-    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", fail_audit)
-    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
-
-    asyncio.run(main._repair_customer_paper_submission_audit_retries(501))
-
-    assert state_changes == [(13, {
-        "status": "PENDING",
-        "error_type": "RuntimeError",
-        "increment_attempts": True,
-    })]
-
-
-def test_retry_loader_quarantines_corrupt_record_and_keeps_valid_retry(monkeypatch, caplog):
-    rows = [
-        SimpleNamespace(id=1, client_order_id="good-order-501", raw_detail="good-ciphertext"),
-        SimpleNamespace(id=2, client_order_id="corrupt-order-501", raw_detail="bad-ciphertext"),
-    ]
-    statements = []
-    quarantined = []
-
-    class FakeResult:
-        rowcount = 1
-
-        def all(self):
-            return rows
-
-    class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-        async def execute(self, statement):
-            sql = str(statement)
-            statements.append(sql)
-            if sql.lstrip().upper().startswith("SELECT"):
-                return FakeResult()
-            return SimpleNamespace(rowcount=1)
-
-        async def commit(self):
-            return None
-
-    def decrypt(value):
-        if value == "bad-ciphertext":
-            raise RuntimeError("ciphertext authentication failed")
-        return json.dumps({
-            "customer_id": 501,
-            "client_order_id": "good-order-501",
-            "side": "BUY",
-        })
-
-    async def set_state(retry_id, **kwargs):
-        quarantined.append((retry_id, kwargs))
-
-    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
-    monkeypatch.setattr(main, "decrypt_text", decrypt)
-    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
-
-    pending = asyncio.run(main._load_customer_paper_submission_audit_retries(501))
-
-    assert pending == [{
-        "retry_id": 1,
-        "customer_id": 501,
-        "client_order_id": "good-order-501",
-        "submission_detail": {
-            "customer_id": 501,
-            "client_order_id": "good-order-501",
-            "side": "BUY",
-        },
-    }]
-    assert quarantined == [(2, {
-        "status": "CORRUPT",
-        "error_type": "RuntimeError",
-        "increment_attempts": True,
-    })]
-    sql = statements[0].lower()
-    assert "customer_paper_submission_audit_retries.customer_id" in sql
-    assert "customer_paper_submission_audit_retries.status" in sql
-    assert "limit" in sql
-    assert "processing" in sql
-    assert "updated_at" in sql
-    claim_sql = [statement.lower() for statement in statements[1:]]
-    assert len(claim_sql) == 2
-    assert all(statement.startswith("update customer_paper_submission_audit_retries") for statement in claim_sql)
-    assert all("status" in statement and "updated_at" in statement for statement in claim_sql)
-    assert "corrupt-order-501" not in caplog.text
-    assert "good-order-501" not in caplog.text
-
-
-def test_retry_failure_logs_use_non_reversible_order_reference(caplog):
-    try:
-        raise RuntimeError("sensitive SQL details must not be logged")
-    except RuntimeError as exc:
-        main._log_customer_paper_submission_audit_retry_failure(
-            event="customer_paper_submission_audit_retry_failed",
-            customer_id=501,
-            client_order_id="customer-visible-order-identity",
-            retry_id=42,
-            step="test",
-            exc=exc,
-        )
-
-    assert "retry_id=42" in caplog.text
-    assert "order_ref=" in caplog.text
-    assert "customer-visible-order-identity" not in caplog.text
-    assert "customer_id=501" not in caplog.text
-    assert "sensitive SQL details" not in caplog.text
-
-
-
-def test_retry_loader_skips_a_row_claimed_by_another_worker(monkeypatch):
-    rows = [
-        SimpleNamespace(id=21, client_order_id="raced-order-501", raw_detail="ciphertext"),
-    ]
-    calls = []
-
-    class FakeResult:
-        def all(self):
-            return rows
-
-    class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-        async def execute(self, statement):
-            sql = str(statement)
-            calls.append(sql)
-            if sql.lstrip().upper().startswith("SELECT"):
-                return FakeResult()
-            # A second worker won the compare-and-set claim first.
-            return SimpleNamespace(rowcount=0)
-
-    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
-    monkeypatch.setattr(
-        main,
-        "decrypt_text",
-        lambda _value: json.dumps({
-            "customer_id": 501,
-            "client_order_id": "raced-order-501",
-        }),
-    )
-
-    pending = asyncio.run(main._load_customer_paper_submission_audit_retries(501))
-
-    assert pending == []
-    assert len(calls) == 2
-    assert calls[1].lstrip().upper().startswith("UPDATE ")
-    assert "status" in calls[1].lower()
-
-
-def test_retry_loader_uses_expiring_processing_lease(monkeypatch):
-    rows = [
-        SimpleNamespace(id=22, client_order_id="expired-lease-order-501", raw_detail="ciphertext"),
-    ]
-    statements = []
-
-    class FakeResult:
-        rowcount = 1
-
-        def all(self):
-            return rows
-
-    class FakeSession:
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return False
-
-        async def execute(self, statement):
-            sql = str(statement)
-            statements.append(sql)
-            if sql.lstrip().upper().startswith("SELECT"):
-                return FakeResult()
-            return SimpleNamespace(rowcount=1)
-
-        async def commit(self):
-            return None
-
-    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
-    monkeypatch.setattr(
-        main,
-        "decrypt_text",
-        lambda _value: json.dumps({
-            "customer_id": 501,
-            "client_order_id": "expired-lease-order-501",
-            "side": "BUY",
-        }),
-    )
-
-    pending = asyncio.run(main._load_customer_paper_submission_audit_retries(501))
-
-    assert len(pending) == 1
-    assert pending[0]["retry_id"] == 22
-    selection = statements[0].lower()
-    assert "processing" in selection
-    assert "updated_at" in selection
-    assert "status" in selection
-    assert statements[1].lstrip().upper().startswith("UPDATE ")
-
-
-def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(monkeypatch, caplog):
-    fallback = []
-    persisted = []
-
-    async def audit_once(_detail):
-        raise RuntimeError("audit store unavailable")
-
-    async def persist_retry(**kwargs):
-        persisted.append(kwargs)
-
-    async def safe_audit(event, detail, **_kwargs):
-        fallback.append((event, detail))
-
-    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
-    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
-    monkeypatch.setattr(main, "_safe_audit", safe_audit)
-    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
-
-    stage = asyncio.run(main._customer_paper_submission_stage(
-        _pending_execution(),
-        customer_id=501,
-        trading_account_id=702,
-        req=req,
-    ))
-
-    assert stage == "customer_paper_order_audit_incomplete"
-    assert len(persisted) == 1
-    assert persisted[0]["customer_id"] == 501
-    assert persisted[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
-    failure_logs = [
-        record for record in caplog.records
-        if record.getMessage().startswith("customer_paper_submission_audit_failed ")
-    ]
-    assert len(failure_logs) == 1
-    assert "order_ref=" in failure_logs[0].getMessage()
-    assert "cp-regression-order" not in failure_logs[0].getMessage()
-    assert "audit store unavailable" not in failure_logs[0].getMessage()
-    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
-    assert fallback[0][1]["submission_detail"]["client_order_id"] == "cp-regression-order"
-
-
-@pytest.fixture(autouse=True)
-def _disable_retry_repair_for_submission_stage_unit_tests(monkeypatch, request):
-    # The two repair-unit tests must exercise the real replay loop below.
-    if request.node.name.startswith("test_retry_repair_"):
-        return
-
-    async def no_retries(_customer_id):
-        return None
-
-    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_retries)
 
 
 def test_new_pending_paper_order_has_distinct_stage_and_submission_audit(monkeypatch):
@@ -466,12 +75,13 @@ def test_new_pending_paper_order_has_distinct_stage_and_submission_audit(monkeyp
         "order_role": "STRATEGY",
     }]
 
+
 def test_replayed_pending_order_repairs_missing_audit_without_marking_new(monkeypatch):
     attempts = []
 
     async def audit_once(detail):
         attempts.append(detail)
-        return False  # The idempotent audit row already exists.
+        return True  # The existing outbox event is already externally delivered.
 
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
@@ -487,14 +97,25 @@ def test_replayed_pending_order_repairs_missing_audit_without_marking_new(monkey
     assert len(attempts) == 1
     assert attempts[0]["client_order_id"] == "cp-regression-order"
 
-def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
+
+def test_recovery_wrapper_order_intent_keeps_delivery_incomplete_pending(monkeypatch):
     calls = []
+    persisted = []
+    fallback = []
 
     async def audit_once(detail):
         calls.append(detail)
         return False
 
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
+
+    async def safe_audit(event, detail, actor_id=None):
+        fallback.append((event, detail, actor_id))
+
     monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
     recovered = {
         "status": "PROTECTIVE_EXIT_PENDING",
@@ -517,9 +138,71 @@ def test_recovery_wrapper_order_intent_is_audited_as_pending(monkeypatch):
         recovered, customer_id=501, trading_account_id=702, req=req,
     ))
 
-    assert stage == "customer_paper_order_pending"
+    assert stage == "customer_paper_order_audit_incomplete"
     assert calls[0]["order_role"] == "PROTECTIVE_EXIT"
     assert calls[0]["client_order_id"] == "cpx-recovered-exit"
+    assert persisted[0]["submission_detail"]["client_order_id"] == "cpx-recovered-exit"
+    assert persisted[0]["error_type"] == "RuntimeError"
+    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
+
+
+
+def test_audit_outage_does_not_turn_a_persisted_pending_order_into_http_error(monkeypatch, caplog):
+    fallback = []
+    persisted_retries = []
+
+    async def audit_once(_detail):
+        raise RuntimeError("audit store unavailable")
+
+    async def persist_retry(**kwargs):
+        persisted_retries.append(kwargs)
+
+    async def safe_audit(event, detail, **_kwargs):
+        fallback.append((event, detail))
+
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+    req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(),
+        customer_id=501,
+        trading_account_id=702,
+        req=req,
+    ))
+
+    assert stage == "customer_paper_order_audit_incomplete"
+    failure_logs = [
+        record for record in caplog.records
+        if record.getMessage().startswith("customer_paper_submission_audit_failed ")
+    ]
+    assert len(failure_logs) == 1
+    failure_message = failure_logs[0].getMessage()
+    assert "customer_id=501" in failure_message
+    assert "client_order_id=cp-regression-order" in failure_message
+    assert "error_type=RuntimeError" in failure_message
+    assert "traceback_frames=" in failure_message
+    assert "audit store unavailable" not in failure_message
+    assert failure_logs[0].exc_info is None
+    assert len(persisted_retries) == 1
+    assert persisted_retries[0]["customer_id"] == 501
+    assert persisted_retries[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
+    assert persisted_retries[0]["error_type"] == "RuntimeError"
+    assert fallback == [(
+        "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE",
+        {
+            "customer_id": 501,
+            "trading_account_id": 702,
+            "client_order_id": "cp-regression-order",
+            "symbol": "BTC/USDT",
+            "exchange": "binance",
+            "submission_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+            "execution_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+            "reason": "RuntimeError",
+        },
+    )]
+
 
 def test_protective_exit_role_survives_the_submission_audit_stage(monkeypatch):
     audits = []
@@ -540,6 +223,8 @@ def test_protective_exit_role_survives_the_submission_audit_stage(monkeypatch):
 
     assert stage == "customer_paper_order_submitted"
     assert audits[0]["order_role"] == "PROTECTIVE_EXIT"
+
+
 
 def test_terminal_fill_repairs_submission_audit_without_being_mislabeled_pending(monkeypatch):
     events = []
@@ -574,6 +259,7 @@ def test_terminal_fill_repairs_submission_audit_without_being_mislabeled_pending
     assert len(events) == 1
     assert events[0]["status"] == "WAITING_FOR_FILL_LATENCY"
     assert events[0]["execution_status"] == "APPENDED"
+
 
 def test_terminal_fill_audit_failure_does_not_replace_filled_result_with_no_trade(monkeypatch):
     fallback = []
@@ -612,6 +298,7 @@ def test_terminal_fill_audit_failure_does_not_replace_filled_result_with_no_trad
     assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
     assert fallback[0][1]["execution_status"] == "APPENDED"
 
+
 def test_customer_submission_audit_uses_customer_actor_even_with_system_context(monkeypatch):
     captured = {}
     class DummySession:
@@ -624,10 +311,22 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
 
     async def append_once(_db, **kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(event_hash="hash-1"), True
+        return SimpleNamespace(
+            event_hash="a" * 64,
+            actor_id=kwargs["actor_id"],
+            detail=kwargs["detail"],
+        ), True
+
+    async def claim_delivery(_event_hash):
+        return "test-claim-token"
+
+    async def finish_delivery(_event_hash, **_kwargs):
+        return True
 
     monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim_delivery)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish_delivery)
     monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: True)
 
     created = asyncio.run(main._audit_customer_paper_order_submitted_once({
@@ -638,6 +337,7 @@ def test_customer_submission_audit_uses_customer_actor_even_with_system_context(
     assert created is True
     assert captured["actor_id"] == "customer:501"
 
+
 def test_recovered_terminal_orders_keep_submission_intent_for_audit_repair():
     import inspect
     from app.customer_paper_flow import process_customer_paper_orders
@@ -646,6 +346,7 @@ def test_recovered_terminal_orders_keep_submission_intent_for_audit_repair():
     assert 'recovered["order_intent"] = {' in source
     assert 'if str(recovered.get("status") or "").upper() in {' not in source
     assert '"submission_status": str(order.get("status") or "SUBMITTED").upper()' in source
+
 
 def test_ownerless_legacy_expiry_repairs_submission_audit_without_reopening_order(monkeypatch):
     events = []
@@ -678,11 +379,15 @@ def test_ownerless_legacy_expiry_repairs_submission_audit_without_reopening_orde
     ))
 
     assert stage is None
-    assert len(events) == 1
-    assert events[0]["client_order_id"] == "legacy-ownerless-buy"
-    assert events[0]["order_id"] == "legacy-order-7"
-    assert events[0]["status"] == "SUBMITTED"
-    assert events[0]["execution_status"] == "EXPIRED"
+    legacy_events = [
+        detail for detail in events
+        if detail.get("client_order_id") == "legacy-ownerless-buy"
+    ]
+    assert len(legacy_events) == 1
+    assert legacy_events[0]["order_id"] == "legacy-order-7"
+    assert legacy_events[0]["status"] == "SUBMITTED"
+    assert legacy_events[0]["execution_status"] == "EXPIRED"
+
 
 def test_non_pending_execution_does_not_change_its_result_stage(monkeypatch):
     calls = []
@@ -704,6 +409,7 @@ def test_non_pending_execution_does_not_change_its_result_stage(monkeypatch):
     assert stage is None
     assert calls == []
 
+
 def test_both_customer_paper_trade_paths_audit_first_submit_and_recovery():
     from pathlib import Path
 
@@ -711,6 +417,7 @@ def test_both_customer_paper_trade_paths_audit_first_submit_and_recovery():
     assert source.count("pending_stage = await _customer_paper_submission_stage(") == 4
     assert source.count("recover_customer_paper_spot_flow(") >= 2
     assert '"stage": pending_stage' in source
+
 
 def test_submission_stage_handles_missing_intent_and_missing_status_without_crashing():
     req = SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h")
@@ -723,6 +430,7 @@ def test_submission_stage_handles_missing_intent_and_missing_status_without_cras
     ))
 
     assert stage is None
+
 
 def test_terminal_replay_audit_prefers_persisted_filled_status_over_replayed_wrapper(monkeypatch):
     events = []
@@ -759,3 +467,405 @@ def test_terminal_replay_audit_prefers_persisted_filled_status_over_replayed_wra
     assert events[0]["status"] == "SUBMITTED"
     assert events[0]["execution_status"] == "FILLED"
 
+
+def test_external_submission_audit_is_retried_when_database_event_already_exists(monkeypatch):
+    captured = {}
+    emitted = []
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            return SimpleNamespace(scalar_one=lambda: json.dumps(original_payload))
+
+    original_payload = {
+        "customer_id": 501,
+        "client_order_id": "cp-replayed-external-audit",
+        "status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+        "execution_status": "WAITING_FOR_NEXT_COMPLETED_BAR",
+    }
+    claim_results = iter(["claim-1", "claim-2", None])
+    create_results = iter([True, False, False])
+    emit_results = iter([False, True])
+    delivery_results = []
+
+    async def claim(_event_hash):
+        return next(claim_results)
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        delivery_results.append((delivered, error_type, claim_token))
+        return True
+
+    async def append_with_replay(_db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            id=123,
+            event_hash="stable-event-hash",
+            detail=json.dumps(original_payload),
+            actor_id="customer:501",
+        ), next(create_results)
+
+    def emit(**kwargs):
+        emitted.append(kwargs)
+        return next(emit_results)
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_with_replay)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+    monkeypatch.setattr(main, "emit_security_audit", emit)
+
+    with pytest.raises(RuntimeError, match="did not confirm delivery"):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-replayed-external-audit",
+        }))
+    created = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-replayed-external-audit",
+    }))
+    replayed = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-replayed-external-audit",
+    }))
+
+    assert created is True and replayed is True
+    assert captured["idempotency_fields"] == ("customer_id", "client_order_id")
+    assert len(emitted) == 2  # One failed attempt and one successful retry, not every replay.
+    assert emitted[0]["event_hash"] == emitted[1]["event_hash"] == "stable-event-hash"
+    assert emitted[0]["actor_id"] == emitted[1]["actor_id"] == "customer:501"
+    assert emitted[0]["detail"] == emitted[1]["detail"] == original_payload
+    assert delivery_results == [
+        (False, "DeliveryNotConfirmed", "claim-1"),
+        (True, None, "claim-2"),
+    ]
+
+
+def test_external_submission_audit_rejects_unconfirmed_second_copy(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            return SimpleNamespace(scalar_one=lambda: json.dumps({
+                "customer_id": 501,
+                "client_order_id": "cp-failed-external-audit",
+            }))
+
+    async def append_once(_db, **kwargs):
+        return SimpleNamespace(
+            id=124,
+            event_hash="stable-event-hash",
+            actor_id=kwargs["actor_id"],
+        ), False
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "emit_security_audit", lambda **_kwargs: False)
+    _successful_external_delivery(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="did not confirm delivery"):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-failed-external-audit",
+        }))
+
+
+
+def test_damaged_encrypted_audit_payload_does_not_block_existing_order_replay(monkeypatch, caplog):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise RuntimeError("encrypted audit detail authentication failed")
+
+    finished = []
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=125,
+            event_hash="damaged-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-damaged"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+    monkeypatch.setattr(
+        main, "emit_security_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("damaged payload must not reach sink")),
+    )
+
+    with pytest.raises(main.CustomerPaperSubmissionAuditPayloadCorrupt):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-damaged-encrypted-audit",
+        }))
+
+    assert finished == [("claim-damaged", False, "RuntimeError")]
+    assert any(
+        record.getMessage() == "customer paper audit payload could not be loaded for external delivery"
+        for record in caplog.records
+    )
+
+def test_submission_audit_distinguishes_active_external_delivery_lease(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=126,
+            event_hash="active-lease-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return main.EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(
+        main,
+        "emit_security_audit",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a competing in-flight delivery must not send twice")
+        ),
+    )
+
+    with pytest.raises(main.CustomerPaperSubmissionAuditDeliveryInFlight):
+        asyncio.run(main._audit_customer_paper_order_submitted_once({
+            "customer_id": 501,
+            "client_order_id": "cp-active-lease-order",
+        }))
+
+def test_active_delivery_lease_does_not_increment_submission_retry_attempt(monkeypatch):
+    persisted = []
+    fallback = []
+
+    async def no_prior_retries(_customer_id):
+        return None
+
+    async def audit_once(_detail):
+        raise main.CustomerPaperSubmissionAuditDeliveryInFlight(
+            "another worker still owns the outbox lease"
+        )
+
+    async def persist_retry(**kwargs):
+        persisted.append(kwargs)
+
+    async def safe_audit(event, detail, actor_id=None):
+        fallback.append((event, detail, actor_id))
+
+    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_prior_retries)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", persist_retry)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(newly_submitted=True),
+        customer_id=501,
+        trading_account_id=702,
+        req=SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h"),
+    ))
+
+    assert stage == "customer_paper_order_submitted"
+    assert len(persisted) == 1
+    assert persisted[0]["increment_attempts"] is False
+    assert persisted[0]["error_type"] == "CustomerPaperSubmissionAuditDeliveryInFlight"
+    assert persisted[0]["submission_detail"]["client_order_id"] == "cp-regression-order"
+    assert fallback == []
+
+
+def test_transient_audit_payload_read_failure_is_retryable_not_corrupt(monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise SQLAlchemyError("temporary audit database read failure")
+
+    finished = []
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=127,
+            event_hash="temporary-read-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-transient"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+    result = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-transient-audit-read",
+    }))
+
+    assert result is False
+    assert finished == [("claim-transient", False, "SQLAlchemyError")]
+
+
+def test_existing_delivered_outbox_row_reports_delivery_complete(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=128,
+            event_hash="delivered-event-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return None
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+
+    assert asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-already-delivered",
+    })) is True
+
+
+def test_submission_stage_quarantines_corrupt_audit_event_without_reopening_retry(monkeypatch):
+    statements = []
+    fallback = []
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            compiled = statement.compile()
+            statements.append((str(statement), dict(compiled.params)))
+            return SimpleNamespace(rowcount=1)
+        async def commit(self):
+            return None
+
+    async def no_prior_retries(_customer_id):
+        return None
+
+    async def corrupt_audit(_detail):
+        raise main.CustomerPaperSubmissionAuditPayloadCorrupt(
+            "immutable audit source is invalid"
+        )
+
+    async def safe_audit(event, detail, actor_id=None):
+        fallback.append((event, detail, actor_id))
+
+    async def reject_persist(**_kwargs):
+        raise AssertionError("permanent corruption must not create a new PENDING retry")
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_prior_retries)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", corrupt_audit)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", reject_persist)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(newly_submitted=True),
+        customer_id=501,
+        trading_account_id=702,
+        req=SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h"),
+    ))
+
+    assert stage == "customer_paper_order_audit_incomplete"
+    assert len(statements) == 1
+    assert "UPDATE customer_paper_submission_audit_retries" in statements[0][0]
+    assert "CORRUPT" in statements[0][1].values()
+    assert "PENDING" in statements[0][1].values()
+    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
+    assert fallback[0][1]["reason"] == "CustomerPaperSubmissionAuditPayloadCorrupt"
+
+
+def test_external_submission_audit_treats_connection_refusal_as_retryable(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise ConnectionRefusedError("database connection refused")
+
+    finished = []
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=129,
+            event_hash="connection-refused-audit-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-connection-refused"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+    result = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-connection-refused-audit",
+    }))
+
+    assert result is False
+    assert finished == [("claim-connection-refused", False, "ConnectionRefusedError")]
+
+
+def test_asyncpg_startup_connection_error_is_transient_for_audit_payload_reads():
+    # Model the driver's public exception name/module without depending on a live
+    # PostgreSQL startup race in the unit test.
+    CannotConnectNowError = type(
+        "CannotConnectNowError",
+        (Exception,),
+        {"__module__": "asyncpg.exceptions"},
+    )
+    error = CannotConnectNowError("database is starting")
+
+    assert main._is_transient_customer_audit_payload_read_error(error)
+    assert main._is_transient_customer_audit_payload_read_error(
+        TimeoutError("database connection timed out")
+    )
+    assert not main._is_transient_customer_audit_payload_read_error(
+        ValueError("stored audit payload has invalid identity")
+    )

@@ -55,10 +55,6 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"PAPER-{uuid.uuid4().hex[:10]}"
-    now = pd.Timestamp.now(tz="UTC")
-    current_floor = now.floor("5min")
-    submit_bar = current_floor - pd.Timedelta(minutes=10)
-    process_bar = current_floor - pd.Timedelta(minutes=5)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
@@ -77,6 +73,13 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
             state = await execution._get_state_locked(db)
             state.kill_switch = False
             await db.commit()
+
+        # Start the fixture clock after database initialization and state reset.
+        # CI startup or DB contention must not age provenance before execution.
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        submit_bar = current_floor - pd.Timedelta(minutes=10)
+        process_bar = current_floor - pd.Timedelta(minutes=5)
         df0 = pd.DataFrame(
             {"open":[99.0, 99.5, 100.0], "high":[100.0,100.0,101.0],
              "low":[98.0,99.0,99.5], "close":[99.0,99.5,100.0], "volume":[1.0,1.0,1.0]},
@@ -171,11 +174,12 @@ def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
 
     fx_symbol = f"FXPAPER-{uuid.uuid4().hex[:8]}"
     derivative_symbol = f"SWAPPAPER-{uuid.uuid4().hex[:8]}"
-    now = pd.Timestamp.now(tz="UTC")
-    bar_at = now.floor("5min") - pd.Timedelta(minutes=10)
 
     async def run():
         await init_db()
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        bar_at = current_floor - pd.Timedelta(minutes=10)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
@@ -232,10 +236,6 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
     from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"STOP-{uuid.uuid4().hex[:10]}"
-    now = pd.Timestamp.now(tz="UTC")
-    current_floor = now.floor("5min")
-    trigger_bar = current_floor - pd.Timedelta(minutes=10)
-    fill_bar = current_floor - pd.Timedelta(minutes=5)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
@@ -244,6 +244,10 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
 
     async def run():
         await init_db()
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        trigger_bar = current_floor - pd.Timedelta(minutes=10)
+        fill_bar = current_floor - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
@@ -358,10 +362,6 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
 
     suffix = uuid.uuid4().hex[:12]
     symbol = f"STRESS-{suffix}"
-    now = pd.Timestamp.now(tz="UTC")
-    current_floor = now.floor("5min")
-    submitted_bar = current_floor - pd.Timedelta(minutes=10)
-    processed_bar = current_floor - pd.Timedelta(minutes=5)
     order_count = 25
     order_quantity = 0.75
     volume = 100.0
@@ -377,6 +377,10 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
 
     async def run():
         await init_db()
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        submitted_bar = current_floor - pd.Timedelta(minutes=10)
+        processed_bar = current_floor - pd.Timedelta(minutes=5)
         trade_ids = []
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
@@ -539,10 +543,6 @@ def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch):
     from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"STOP-STRESS-{uuid.uuid4().hex[:10]}"
-    now = pd.Timestamp.now(tz="UTC")
-    current_floor = now.floor("5min")
-    trigger_bar = current_floor - pd.Timedelta(minutes=10)
-    submitted_bar = trigger_bar - pd.Timedelta(minutes=5)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
@@ -551,6 +551,10 @@ def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch):
 
     async def run():
         await init_db()
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        trigger_bar = current_floor - pd.Timedelta(minutes=10)
+        submitted_bar = trigger_bar - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False

@@ -40,6 +40,10 @@ class CustomerPaperOrderConflict(CustomerPaperLedgerBlocked):
     """An immutable customer paper order conflicts with an existing intent or state."""
 
 
+class CustomerPaperCashShortfall(CustomerPaperOrderConflict):
+    """A fill cannot be applied because concurrent paper cash consumption won the race."""
+
+
 def _customer_id(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("customer_id must be a positive integer")
@@ -742,6 +746,90 @@ async def register_customer_paper_market_bar(
         await engine.dispose()
 
 
+async def verify_customer_paper_market_bar_provenance(
+    *,
+    venue: str,
+    symbol: str,
+    timeframe: str,
+    bar_at: datetime | str,
+    bar_data_sha256: str,
+    base_volume: str | int | Decimal,
+) -> dict[str, str]:
+    """Verify an existing fill's candle against its immutable shared-bar record.
+
+    This is intentionally read-only and does not recompute capacity from the current
+    participation-rate setting. Historical fills remain replayable after that setting
+    changes, but a changed digest, timestamp, or base volume is rejected.
+    """
+    normalized_venue = str(venue or "").strip().lower()
+    if not _VENUE_RE.fullmatch(normalized_venue):
+        raise ValueError("venue must be a normalized provider identifier")
+    normalized_symbol = str(symbol or "").strip().upper()
+    if not _SYMBOL_RE.fullmatch(normalized_symbol):
+        raise ValueError("symbol is malformed")
+    normalized_timeframe = str(timeframe or "").strip().lower()
+    if normalized_timeframe not in {"1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d"}:
+        raise ValueError("unsupported market-bar timeframe")
+    try:
+        stamp = (
+            bar_at
+            if isinstance(bar_at, datetime)
+            else datetime.fromisoformat(str(bar_at).replace("Z", "+00:00"))
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("bar_at must be an ISO timestamp") from exc
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        raise ValueError("bar_at must be timezone-aware")
+    stamp = stamp.astimezone(timezone.utc)
+    digest = str(bar_data_sha256 or "").strip().lower()
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        raise ValueError("bar_data_sha256 must be a SHA-256 hex digest")
+    volume = _input_decimal(base_volume, "base_volume", non_negative=True)
+    bar_key = hashlib.sha256(
+        f"paper-market-bar-v1|{normalized_venue}|spot|{normalized_symbol}|{normalized_timeframe}|{stamp.isoformat()}".encode("utf-8")
+    ).hexdigest()
+
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            row = (await conn.execute(text(
+                """
+                SELECT venue, market_type, symbol, timeframe, bar_at,
+                       bar_data_sha256, base_volume, capacity
+                FROM customer_paper.market_bar_budgets
+                WHERE bar_key=:bar_key
+                """
+            ), {"bar_key": bar_key})).mappings().first()
+        if row is None:
+            raise CustomerPaperOrderConflict(
+                "existing paper fill has no matching immutable shared-bar provenance"
+            )
+        stored_at = row["bar_at"]
+        if isinstance(stored_at, str):
+            stored_at = datetime.fromisoformat(stored_at.replace("Z", "+00:00"))
+        if (
+            str(row["venue"]) != normalized_venue
+            or str(row["market_type"]) != "spot"
+            or str(row["symbol"]) != normalized_symbol
+            or str(row["timeframe"]) != normalized_timeframe
+            or stored_at.astimezone(timezone.utc) != stamp
+            or str(row["bar_data_sha256"]).strip().lower() != digest
+            or Decimal(row["base_volume"]) != volume
+        ):
+            raise CustomerPaperOrderConflict(
+                "replayed completed-bar provenance conflicts with the immutable shared paper budget"
+            )
+        return {
+            "status": "VERIFIED",
+            "bar_key": bar_key,
+            "bar_at": stamp.isoformat(),
+            "capacity": _fmt(Decimal(row["capacity"])),
+        }
+    finally:
+        await engine.dispose()
+
+
 async def get_customer_paper_fill_for_bar(
     *, customer_id: int, client_order_id: str, bar_key: str
 ) -> dict[str, Any] | None:
@@ -1018,7 +1106,7 @@ async def record_customer_paper_fill(
                         raise CustomerPaperLedgerBlocked(
                             "current correlation-group position mark is not finite and positive"
                         )
-                    # Risk may have risen since entry; never value an open holding below
+                    # A price drop must not free cap headroom below the booked entry cost.
                     # either its booked average entry or its latest verified market mark.
                     existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
 
@@ -1104,7 +1192,7 @@ async def record_customer_paper_fill(
                 """
             ), {"customer_id": customer_id, "currency": currency})).scalar_one())
             if cash_before + cash_delta < 0:
-                raise CustomerPaperOrderConflict("paper fill would overdraw the customer's paper cash")
+                raise CustomerPaperCashShortfall("paper fill would overdraw the customer's paper cash")
 
             fill_id = str(uuid.uuid4())
             filled_row = (await conn.execute(text(

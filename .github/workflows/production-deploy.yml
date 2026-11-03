@@ -48,60 +48,62 @@ jobs:
           require_success() {
             local workflow="$1"
             local label="$2"
-            local ok
-            ok="$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow "$workflow" \
-              --commit "$GITHUB_SHA" \
-              --json status,conclusion \
-              --jq '[.[] | select(.status=="completed" and .conclusion=="success")] | length')"
-            if [ "${ok:-0}" -lt 1 ]; then
-              echo "BLOCKED: $label has not passed on exact commit $GITHUB_SHA"
-              gh run list \
-                --repo "$GITHUB_REPOSITORY" \
-                --workflow "$workflow" \
-                --commit "$GITHUB_SHA" \
-                --limit 10
+            local run_id run_json run_sha run_branch run_status run_conclusion
+            # The newest run for this exact main SHA is authoritative. Do not
+            # retain an older success when a newer retry failed or is incomplete.
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --commit "$GITHUB_SHA" --limit 100 --json databaseId,headSha,headBranch --jq '[.[] | select(.headSha == "'"$GITHUB_SHA"'" and .headBranch == "main")] | sort_by(.databaseId) | last | .databaseId // empty')"
+            if [ -z "$run_id" ]; then
+              echo "BLOCKED: no $label run exists on main for exact commit $GITHUB_SHA"
               exit 1
             fi
-            echo "PASS: $label passed on exact commit $GITHUB_SHA"
+            run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,status,conclusion)"
+            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+            run_status="$(jq -r '.status // ""' <<< "$run_json")"
+            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+            if [ "$run_sha" != "$GITHUB_SHA" ] \
+              || [ "$run_branch" != "main" ] \
+              || [ "$run_status" != "completed" ] \
+              || [ "$run_conclusion" != "success" ]; then
+              echo "BLOCKED: latest $label run $run_id is not successful for exact main commit $GITHUB_SHA"
+              echo "Observed sha=$run_sha branch=$run_branch status=$run_status conclusion=$run_conclusion"
+              exit 1
+            fi
+            echo "PASS: latest $label run $run_id succeeded on exact main commit $GITHUB_SHA"
           }
 
           require_success "ci.yml" "Atlas CI"
+          require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
+
           require_native_ai_verification() {
-            local run_ids run_id run_json run_sha run_branch run_status run_conclusion native_conclusion
-            run_ids="$(gh run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow "production-verification.yml" \
-              --commit "$GITHUB_SHA" \
-              --limit 100 \
-              --json databaseId,headSha,headBranch,status,conclusion \
-              --jq '[.[] | select(.headSha == "'"$GITHUB_SHA"'" and .headBranch == "main" and .status == "completed" and .conclusion == "success")] | sort_by(.databaseId) | reverse | .[].databaseId')"
-            if [ -z "$run_ids" ]; then
-              echo "BLOCKED: no successful Atlas Native AI verification exists for exact main commit $GITHUB_SHA"
+            local run_id run_json run_sha run_branch run_event run_status run_conclusion native_conclusion
+            # Only a manual run can attest Native AI. Select the newest matching
+            # dispatch first, then inspect its result; never fall back to an older pass.
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "production-verification.yml" --event workflow_dispatch --commit "$GITHUB_SHA" --limit 100 --json databaseId,headSha,headBranch,event --jq '[.[] | select(.event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'" and .headBranch == "main")] | sort_by(.databaseId) | last | .databaseId // empty')"
+            if [ -z "$run_id" ]; then
+              echo "BLOCKED: no manual Atlas Native AI verification run exists for exact main commit $GITHUB_SHA"
               exit 1
             fi
-            for run_id in $run_ids; do
-              run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,status,conclusion,jobs)"
-              run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
-              run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
-              run_status="$(jq -r '.status // ""' <<< "$run_json")"
-              run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
-              native_conclusion="$(jq -r '[.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion][0] // ""' <<< "$run_json")"
-              if [ "$run_sha" = "$GITHUB_SHA" ] \
-                && [ "$run_branch" = "main" ] \
-                && [ "$run_status" = "completed" ] \
-                && [ "$run_conclusion" = "success" ] \
-                && [ "$native_conclusion" = "success" ]; then
-                echo "PASS: Atlas Native AI offline verification passed on exact main commit $GITHUB_SHA (run $run_id)"
-                return 0
-              fi
-              echo "Ignoring verification run $run_id: sha=$run_sha branch=$run_branch conclusion=$run_conclusion native_ai_step=$native_conclusion"
-            done
-            echo "BLOCKED: no successful Native AI offline check attests exact main commit $GITHUB_SHA"
-            exit 1
+            run_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"
+            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+            run_event="$(jq -r '.event // ""' <<< "$run_json")"
+            run_status="$(jq -r '.status // ""' <<< "$run_json")"
+            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+            native_conclusion="$(jq -r '[.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion][0] // ""' <<< "$run_json")"
+            if [ "$run_sha" != "$GITHUB_SHA" ] \
+              || [ "$run_branch" != "main" ] \
+              || [ "$run_event" != "workflow_dispatch" ] \
+              || [ "$run_status" != "completed" ] \
+              || [ "$run_conclusion" != "success" ] \
+              || [ "$native_conclusion" != "success" ]; then
+              echo "BLOCKED: latest manual Native AI verification run $run_id is not a successful exact-main attestation"
+              echo "Observed sha=$run_sha branch=$run_branch event=$run_event status=$run_status conclusion=$run_conclusion native_ai_step=$native_conclusion"
+              exit 1
+            fi
+            echo "PASS: latest manual Native AI offline verification run $run_id succeeded on exact main commit $GITHUB_SHA"
           }
-          require_success "ledger-concurrency-check.yml" "PostgreSQL ledger concurrency"
+
           require_native_ai_verification
           require_staging_identity_success() {
             local run_id run_status run_conclusion job_conclusion
@@ -134,7 +136,8 @@ jobs:
           }
 
           require_staging_identity_success
-          require_success "android-release.yml" "Protected signed Android release"
+          # The explicitly supplied Android release run is validated by ID, SHA,
+          # workflow identity, signing job, artifact and APK bytes below.
 
           # Require an explicitly chosen signed run; never select the first run by commit.
           android_run="$ANDROID_RELEASE_RUN_ID"
@@ -393,7 +396,7 @@ jobs:
           GROQ_MODEL: ${{ vars.GROQ_MODEL }}
           GROQ_MAX_COMPLETION_TOKENS: ${{ vars.GROQ_MAX_COMPLETION_TOKENS }}
           GROQ_RESEARCH_REVIEW_ENABLED: ${{ vars.GROQ_RESEARCH_REVIEW_ENABLED }}
-          GROQ_TRADE_REVIEW_ENABLED: ${{ vars.GROQ_TRADE_REVIEW_ENABLED }}
+          GROQ_TRADE_REVIEW_ENABLED: "true"
           FORWARDED_ALLOW_IPS: ${{ secrets.FORWARDED_ALLOW_IPS }}
           RESEARCH_FEE_SOURCE: ${{ vars.RESEARCH_FEE_SOURCE }}
           RESEARCH_FEE_EVIDENCE_ID: ${{ vars.RESEARCH_FEE_EVIDENCE_ID }}

@@ -230,6 +230,19 @@ def test_production_deploy_requires_verified_signed_android_artifact_for_exact_c
     assert "EXPECTED_CERT_SHA256: ${{ vars.ATLAS_RELEASE_CERT_SHA256 }}" not in deploy
     assert 'test "$package_name" = "com.atlas.trading"' in deploy
 
+def test_production_deploy_requires_manual_exact_commit_native_ai_verification():
+    deploy = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    start = deploy.index("require_native_ai_verification()")
+    end = deploy.index("require_staging_identity_success()", start)
+    gate = deploy[start:end]
+    assert "--event workflow_dispatch" in gate
+    assert '.event == "workflow_dispatch"' in gate
+    assert 'select(.name == "Atlas Native AI offline verification (no provider calls)")' in gate
+    assert '[ "$run_event" != "workflow_dispatch" ]' in gate
+    assert '[ "$run_status" != "completed" ]' in gate
+    assert '[ "$run_conclusion" != "success" ]' in gate
+    assert '[ "$native_conclusion" != "success" ]' in gate
+
 
 def test_deployment_independently_verifies_downloaded_apk_not_only_metadata():
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
@@ -453,6 +466,9 @@ def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
     assert "github.ref == 'refs/heads/main'" in deploy
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
+    assert '--event workflow_dispatch' in deploy
+    assert '.event == "workflow_dispatch"' in deploy
+    assert 'Atlas Native AI offline verification (no provider calls)' in deploy
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
     assert "gh workflow run staging-identity-preflight.yml" in deploy
@@ -587,3 +603,82 @@ abort("exact staging identity job gate missing") unless names.include?("Require 
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+
+def test_audit_delivery_outbox_grants_only_qualifying_backend_runtime_roles():
+    migration = (
+        ROOT / "alembic" / "versions" / "0056_audit_log_external_delivery.py"
+    ).read_text(encoding="utf-8")
+
+    assert "ENABLE ROW LEVEL SECURITY" in migration
+    assert "FROM PUBLIC" in migration
+    assert "ARRAY['anon', 'authenticated']" in migration
+    assert "WHERE r.rolcanlogin AND r.rolbypassrls" in migration
+    assert "AND NOT r.rolsuper" in migration
+    assert "AND NOT r.rolcreaterole" in migration
+    assert "AND NOT r.rolcreatedb" in migration
+    assert "AND NOT r.rolreplication" in migration
+    assert "AND NOT r.rolinherit" in migration
+    assert "AND r.rolname NOT IN (" in migration
+    assert "'service_role'" in migration
+    assert "'anon', 'authenticated'" in migration
+    assert "AND r.rolname = 'atlas_runtime'" not in migration
+    assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_log_external_delivery" in migration
+    assert "atlas_paper_reader" not in migration
+
+def test_staging_attestation_selects_latest_manual_exact_commit_before_checking_success():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    verification_gate = deploy.split(
+        'if [[ "$workflow" == "production-verification.yml" ]]; then', 1
+    )[1].split("\n              else", 1)[0]
+    selector = verification_gate.split("--jq ", 1)[1]
+
+    # Select the newest manual exact-main-commit run before inspecting its outcome.
+    # A newer failed or cancelled run must supersede an earlier successful run.
+    assert '.headBranch == "main"' in selector
+    assert '.event == "workflow_dispatch"' in selector
+    assert '.headSha == ' in selector
+    assert '.status == "completed"' not in selector
+    assert '.conclusion == "success"' not in selector
+    assert selector.index('.headSha == ') < selector.index("sort_by(.databaseId) | last")
+    assert "sort_by(.databaseId) | last //" in selector
+
+    # The selected run is evaluated afterward, and any completed non-success blocks staging.
+    assert 'if [[ "$run_status" == "completed" ]]; then' in deploy
+    assert 'if [[ "$run_conclusion" != "success" ]]; then' in deploy
+
+
+def test_production_deploy_uses_latest_exact_main_gate_run_before_checking_outcome():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    success_gate = workflow.split("          require_success() {", 1)[1].split(
+        '          require_success "ci.yml"', 1
+    )[0]
+    ci_selector = success_gate.split("--jq ", 1)[1].split("')", 1)[0]
+
+    # Select the newest exact-main-commit CI/PG run before evaluating its result.
+    assert "--json databaseId,headSha,headBranch" in success_gate
+    assert '.headSha == ' in ci_selector
+    assert '.headBranch == "main"' in ci_selector
+    assert '.status' not in ci_selector
+    assert '.conclusion' not in ci_selector
+    assert "sort_by(.databaseId) | last | .databaseId // empty" in ci_selector
+    assert '[ "$run_status" != "completed" ]' in success_gate
+    assert '[ "$run_conclusion" != "success" ]' in success_gate
+
+    native_gate = workflow.split("          require_native_ai_verification() {", 1)[1].split(
+        "          require_staging_identity_success() {", 1
+    )[0]
+    native_selector = native_gate.split("--jq ", 1)[1].split("')", 1)[0]
+    assert '--event workflow_dispatch' in native_gate
+    assert '.event == "workflow_dispatch"' in native_selector
+    assert '.headSha == ' in native_selector
+    assert '.headBranch == "main"' in native_selector
+    assert '.status' not in native_selector
+    assert '.conclusion' not in native_selector
+    assert "sort_by(.databaseId) | last | .databaseId // empty" in native_selector
+    assert "for run_id in run_ids" not in native_gate
+    assert '[ "$run_status" != "completed" ]' in native_gate
+    assert '[ "$run_conclusion" != "success" ]' in native_gate
+    assert '[ "$native_conclusion" != "success" ]' in native_gate

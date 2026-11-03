@@ -3,15 +3,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timezone
+import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from sqlalchemy import select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, OperationalError
 
-from .db import AuditChainState, AuditLog, SessionLocal
+from .db import AuditChainState, AuditLog, AuditLogExternalDelivery, SessionLocal
 from .distributed import allow_rate_limit
+
+
+# Distinguish a live competing lease from an already delivered event. None remains
+# the backwards-compatible signal for DELIVERED; claim tokens are random UUID hex.
+EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT = "__EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT__"
 
 
 # SQLite ignores SELECT ... FOR UPDATE. Serialize idempotent appends within this
@@ -35,7 +41,11 @@ def _sqlite_audit_lock(db) -> asyncio.Lock | None:
 async def _existing_idempotent_audit(db, *, event: str, idempotency_key: str):
     return (
         await db.execute(
-            select(AuditLog.id, AuditLog.event_hash)
+            select(
+                AuditLog.id,
+                AuditLog.event_hash,
+                AuditLog.actor_id,
+            )
             .where(
                 AuditLog.event == event,
                 AuditLog.idempotency_key == idempotency_key,
@@ -160,10 +170,15 @@ async def append_audit_once(
     # Fast indexed read before Redis rate accounting and the global chain-head lock:
     # ordinary recovery polls must not consume audit budget or make a network call
     # when the idempotent event already exists.
-    # Select only non-encrypted columns so damaged historical detail cannot block retry.
+    # Select only the indexed target event, not historical rows. Its stored payload is
+    # needed for the external copy so retries cannot pair a new payload with an old hash.
     existing = (
         await db.execute(
-            select(AuditLog.id, AuditLog.event_hash)
+            select(
+                AuditLog.id,
+                AuditLog.event_hash,
+                AuditLog.actor_id,
+            )
             .where(
                 AuditLog.event == event,
                 AuditLog.idempotency_key == idempotency_key,
@@ -173,7 +188,11 @@ async def append_audit_once(
     ).first()
     if existing is not None:
         await db.rollback()
-        return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+        return SimpleNamespace(
+            id=existing.id,
+            event_hash=existing.event_hash,
+            actor_id=existing.actor_id,
+        ), False
 
     # End the read-only precheck transaction before network I/O. This releases
     # the checked-out connection to the pool while Redis applies the per-actor limit.
@@ -191,7 +210,11 @@ async def append_audit_once(
         )
         if existing is not None:
             await db.rollback()
-            return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+            return SimpleNamespace(
+                id=existing.id,
+                event_hash=existing.event_hash,
+                actor_id=existing.actor_id,
+            ), False
         row = await _append_audit_locked(
             db,
             event=event,
@@ -214,7 +237,11 @@ async def append_audit_once(
                 )
                 if existing is not None:
                     await db.rollback()
-                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    return SimpleNamespace(
+                        id=existing.id,
+                        event_hash=existing.event_hash,
+                        actor_id=existing.actor_id,
+                    ), False
 
                 state = await _lock_chain_state(db)
                 existing = await _existing_idempotent_audit(
@@ -222,7 +249,11 @@ async def append_audit_once(
                 )
                 if existing is not None:
                     await db.rollback()
-                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    return SimpleNamespace(
+                        id=existing.id,
+                        event_hash=existing.event_hash,
+                        actor_id=existing.actor_id,
+                    ), False
 
                 row = await _append_audit_locked(
                     db,
@@ -247,7 +278,11 @@ async def append_audit_once(
                     existing = None
                 if existing is not None:
                     await db.rollback()
-                    return SimpleNamespace(id=existing.id, event_hash=existing.event_hash), False
+                    return SimpleNamespace(
+                        id=existing.id,
+                        event_hash=existing.event_hash,
+                        actor_id=existing.actor_id,
+                    ), False
                 if isinstance(exc, OperationalError):
                     error_text = str(exc).lower()
                     if not any(
@@ -285,3 +320,110 @@ async def record_audit(event: str, detail: dict, actor_id: str = "system") -> Au
     """Append an audit row using a dedicated session (safe to call from any module)."""
     async with SessionLocal() as db:
         return await append_audit(db, event=event, detail=detail, actor_id=actor_id)
+
+
+async def claim_external_audit_delivery(
+    event_hash: str, *, lease_seconds: int = 120
+) -> str | None:
+    """Claim one external audit delivery and return its unique fencing token."""
+    digest = str(event_hash or "").strip()
+    if len(digest) != 64:
+        raise ValueError("external audit delivery requires a SHA-256 event hash")
+
+    for attempt in range(5):
+        async with SessionLocal() as db:
+            sqlite_lock = _sqlite_audit_lock(db)
+            if sqlite_lock is not None:
+                await sqlite_lock.acquire()
+            try:
+                async with db.begin():
+                    statement = (
+                        select(AuditLogExternalDelivery)
+                        .where(AuditLogExternalDelivery.event_hash == digest)
+                        .with_for_update()
+                    )
+                    delivery = (await db.execute(statement)).scalar_one_or_none()
+                    now = datetime.now(timezone.utc)
+                    if delivery is None:
+                        delivery = AuditLogExternalDelivery(
+                            event_hash=digest,
+                            status="PENDING",
+                            attempt_count=0,
+                            created_at=now,
+                            updated_at=now,
+                        )
+                        db.add(delivery)
+                        await db.flush()
+                    if delivery.status == "DELIVERED":
+                        return None
+                    lease_until = delivery.lease_until
+                    if lease_until is not None and lease_until.tzinfo is None:
+                        lease_until = lease_until.replace(tzinfo=timezone.utc)
+                    if (
+                        delivery.status == "IN_FLIGHT"
+                        and lease_until is not None
+                        and lease_until > now
+                    ):
+                        return EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT
+                    token = uuid.uuid4().hex
+                    delivery.status = "IN_FLIGHT"
+                    delivery.claim_token = token
+                    delivery.attempt_count = int(delivery.attempt_count or 0) + 1
+                    delivery.lease_until = now + timedelta(seconds=max(30, int(lease_seconds)))
+                    delivery.updated_at = now
+                return token
+            except (IntegrityError, OperationalError) as exc:
+                await db.rollback()
+                if isinstance(exc, OperationalError):
+                    detail = str(exc).lower()
+                    if not any(marker in detail for marker in (
+                        "database is locked", "database table is locked", "database is busy"
+                    )):
+                        raise
+                if attempt == 4:
+                    raise
+            finally:
+                if sqlite_lock is not None and sqlite_lock.locked():
+                    sqlite_lock.release()
+    raise RuntimeError("external audit delivery claim could not be acquired")
+
+async def finish_external_audit_delivery(
+    event_hash: str,
+    *,
+    claim_token: str,
+    delivered: bool,
+    error_type: str | None = None,
+) -> bool:
+    """Finish only the active claim; late workers cannot overwrite a newer delivery."""
+    digest = str(event_hash or "").strip()
+    token = str(claim_token or "").strip()
+    if len(digest) != 64 or not token:
+        raise ValueError("external audit delivery completion requires its event hash and claim token")
+
+    async with SessionLocal() as db:
+        sqlite_lock = _sqlite_audit_lock(db)
+        if sqlite_lock is not None:
+            await sqlite_lock.acquire()
+        try:
+            async with db.begin():
+                statement = (
+                    select(AuditLogExternalDelivery)
+                    .where(AuditLogExternalDelivery.event_hash == digest)
+                    .with_for_update()
+                )
+                row = (await db.execute(statement)).scalar_one_or_none()
+                if row is None:
+                    return False
+                if row.status != "IN_FLIGHT" or row.claim_token != token:
+                    return False
+                now = datetime.now(timezone.utc)
+                row.status = "DELIVERED" if delivered else "PENDING"
+                row.claim_token = None
+                row.delivered_at = now if delivered else None
+                row.lease_until = None
+                row.last_error_type = None if delivered else (str(error_type or "DeliveryNotConfirmed")[:80])
+                row.updated_at = now
+            return True
+        finally:
+            if sqlite_lock is not None and sqlite_lock.locked():
+                sqlite_lock.release()

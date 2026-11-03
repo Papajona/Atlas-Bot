@@ -564,33 +564,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
-        if self.groq_trade_review_enabled:
-            timeout_settings = {
-                "GROQ_TRADE_REVIEW_TIMEOUT_SECONDS": self.groq_trade_review_timeout_seconds,
-                "GROQ_TIMEOUT_SECONDS": self.groq_timeout_seconds,
-                "AI_STRATEGY_PROVIDER_TIMEOUT_SECONDS": self.ai_strategy_provider_timeout_seconds,
-                "AI_TRADE_DECISION_TOTAL_TIMEOUT_SECONDS": self.ai_trade_decision_total_timeout_seconds,
-            }
-            for setting_name, raw_value in timeout_settings.items():
-                try:
-                    parsed_value = float(raw_value)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise ValueError(
-                        f"{setting_name} must be finite and positive when Groq trade review is enabled"
-                    ) from exc
-                if not math.isfinite(parsed_value) or parsed_value <= 0:
-                    raise ValueError(
-                        f"{setting_name} must be finite and positive when Groq trade review is enabled"
-                    )
-            if (
-                float(self.ai_trade_decision_total_timeout_seconds)
-                <= float(self.ai_strategy_provider_timeout_seconds)
-            ):
-                raise ValueError(
-                    "AI_TRADE_DECISION_TOTAL_TIMEOUT_SECONDS must exceed "
-                    "AI_STRATEGY_PROVIDER_TIMEOUT_SECONDS when Groq trade review is enabled "
-                    "so Native AI retains its full veto window"
-                )
         if self.live_enable_request_ttl_minutes < 1:
             raise ValueError("LIVE_ENABLE_REQUEST_TTL_MINUTES must be >= 1")
         if self.environment == "production" and not self.admin_totp_required:

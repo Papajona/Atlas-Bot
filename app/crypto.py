@@ -7,6 +7,10 @@ _PREFIX = "enc:"
 _LEGACY_PREFIX = "enc:v1:"
 
 
+class EncryptionKeyConfigurationError(RuntimeError):
+    """Encryption key material is missing or invalid; retry after configuration is repaired."""
+
+
 def _keyring() -> dict[str, str]:
     from .config import settings
     raw = str(settings.app_encryption_keys_json or "").strip()
@@ -17,7 +21,7 @@ def _keyring() -> dict[str, str]:
             if isinstance(parsed, dict):
                 keys = {str(k): str(v).strip() for k, v in parsed.items() if str(v).strip()}
         except Exception as exc:
-            raise RuntimeError("APP_ENCRYPTION_KEYS_JSON must be valid JSON object") from exc
+            raise EncryptionKeyConfigurationError("APP_ENCRYPTION_KEYS_JSON must be valid JSON object") from exc
     # Backward compatibility: legacy APP_ENCRYPTION_KEY is treated as v1 unless a
     # versioned entry already exists. This permits an in-place migration without
     # re-encrypting every row at deployment time.
@@ -31,11 +35,11 @@ def _fernet_for(key_id: str) -> Fernet:
     keys = _keyring()
     raw = keys.get(str(key_id))
     if not raw:
-        raise RuntimeError(f"Encryption key {key_id!r} is not configured")
+        raise EncryptionKeyConfigurationError(f"Encryption key {key_id!r} is not configured")
     try:
         return Fernet(raw.encode())
     except Exception as exc:
-        raise RuntimeError(f"Encryption key {key_id!r} is invalid") from exc
+        raise EncryptionKeyConfigurationError(f"Encryption key {key_id!r} is invalid") from exc
 
 
 def _active_key() -> tuple[str, Fernet]:

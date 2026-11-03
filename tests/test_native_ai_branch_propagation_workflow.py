@@ -1,6 +1,7 @@
 """Regression tests for the repository-wide native-AI propagation workflow."""
 
 import ast
+import subprocess
 from pathlib import Path
 
 
@@ -49,8 +50,8 @@ def test_propagation_uses_ancestral_pinned_source_and_semantic_workflow_validati
     migration = MIGRATION.read_text(encoding="utf-8")
 
     assert 'git merge-base --is-ancestor "$NATIVE_AI_CANONICAL_COMMIT" "$GITHUB_SHA"' in workflow
-    assert workflow.count("':!.github/workflows/production-deploy.yml'") == 2
-    assert workflow.count("':!.github/workflows/production-verification.yml'") == 2
+    assert workflow.count("':!.github/workflows/production-deploy.yml'") == 1
+    assert workflow.count("':!.github/workflows/production-verification.yml'") == 1
     assert "groq_research_review" in workflow
     assert "app/prompt_safety.py" in workflow
     # Workflow labels can mention retired providers without being active wiring. The
@@ -100,7 +101,7 @@ def test_legacy_branches_use_semantic_migration_not_bulk_cherry_pick() -> None:
     assert "tests/" not in runtime_path_list
     assert 'git show "$GITHUB_SHA:scripts/migrate_legacy_native_ai.py"' in workflow
     assert 'python "$RUNNER_TEMP/migrate_legacy_native_ai.py" --canonical-commit "$NATIVE_AI_CANONICAL_COMMIT" --cleanup-commit "$NATIVE_AI_CLEANUP_COMMIT" --extra-base-commit "$NATIVE_AI_EXTRA_BASE_COMMIT" --extra-commit "$NATIVE_AI_EXTRA_COMMIT"' in workflow
-    assert 'NATIVE_AI_CANONICAL_COMMIT="bafcc5bc3e5f025ce59c53555a622c9cb46a2f22"' in workflow
+    assert 'NATIVE_AI_CANONICAL_COMMIT="a2b745cff52a5b207d153bae5d1d7b98b916040b"' in workflow
     assert 'NATIVE_AI_CANONICAL_COMMIT="$GITHUB_SHA"' not in workflow
     assert 'NATIVE_AI_CLEANUP_COMMIT="f5e303dad1a93ce1a33940b3e2b16d118897ebf6"' in workflow
     assert 'NATIVE_AI_EXTRA_COMMIT="2317ccc4c3293e8bbd7043970876eceb509d2d1d"' in workflow
@@ -180,6 +181,7 @@ def test_provider_free_branch_skip_requires_static_native_error_alias_identity()
     assert "required_positional > 2" in workflow
     assert "required_keyword_only" in workflow
     assert "allowed_plain_imports" in workflow
+    assert '(0, "decimal"): {"Decimal", "InvalidOperation", "ROUND_HALF_UP"}' in workflow
     assert '(node.level, node.module or "") == (0, "__future__") and alias.asname is not None' in workflow
     assert "if [[ -z \"$before_refs\" ]] && verify_native_ai_impl; then" in workflow
     assert 'importlib.import_module("app.groq_ai")' not in workflow
@@ -222,3 +224,253 @@ def test_embedded_native_ai_verifier_script_is_valid_python() -> None:
         for line in embedded_lines
     )
     ast.parse(source, filename=f"{WORKFLOW.name}:verify_native_ai_impl")
+
+def test_provider_scan_includes_its_own_workflow_and_filters_only_scanner_literals() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    global_scan = next(
+        line for line in workflow.splitlines()
+        if 'if matches="$(git grep -nIEi' in line
+    )
+    assert "':!.github/workflows/propagate-native-ai-all-branches.yml'" not in global_scan
+    filter_block = workflow.split("filtered=\"$(printf", 1)[1].split(
+        "# Check metadata with the semantic helper", 1
+    )[0]
+    assert "scanner_prefix =" in filter_block
+    assert "current_pattern =" in filter_block
+    assert "previous_pattern =" in filter_block
+    assert "expected_suffix =" in filter_block
+    assert "current_self_excluded_suffix =" in filter_block
+    assert "previous_suffix =" in filter_block
+    assert "scan_pattern = substr(content, open_quote + 1, close_quote - open_quote - 1)" in filter_block
+    assert "if ((scan_pattern == current_pattern && suffix == expected_suffix)" in filter_block
+    assert "scan_pattern == previous_pattern && suffix == previous_suffix" in filter_block
+    assert "prune-contained-branches-once" in filter_block
+    assert r'git show "\$(main_sha|sha):scripts\/check_ai_models\.py"' in filter_block
+    assert r'>\/dev\/null[[:space:]]*\\$/' in filter_block
+    # Groq research code remains visible to the provider scan.
+    assert "legacy_groq_refs" in workflow
+    assert "legacy_groq_config_refs" in workflow
+
+def test_provider_scan_filters_only_exact_current_and_previous_scanner_definitions() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    filter_start = workflow.index("filtered=\"$(printf")
+    awk_start = workflow.index("awk '\n", filter_start) + len("awk '\n")
+    awk_end = workflow.index("\n            ')", awk_start)
+    awk_program = workflow[awk_start:awk_end]
+
+    scanner_prefix = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:104:"
+        "            if matches=\"$(git grep -nIEi '"
+    )
+    current_pattern = (
+        "gemini|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\.googleapis\\.com|"
+        "_gemini_json|settings\\.gemini_|settings\\.cerebras_api_key|settings\\.ai_gateway_|"
+        "AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|CEREBRAS_API_KEY|CEREBRAS_MODEL|"
+        "SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|openai-compatible|api\\.openai\\.com|"
+        "SECRET_GEMINI|api\\.cerebras\\.ai"
+    )
+    previous_pattern = (
+        "gemini|groq|cerebras|ai[[:space:]_-]*gateway|generativelanguage\\.googleapis\\.com|"
+        "_gemini_json|settings\\.gemini_|settings\\.groq_api_key|settings\\.cerebras_api_key|"
+        "settings\\.ai_gateway_|AI_GATEWAY_API_KEY|AI_GATEWAY_BASE_URL|AI_GATEWAY_MODEL|"
+        "CEREBRAS_API_KEY|CEREBRAS_MODEL|SECRET_OPENAI|atlas-openai|OPENAI_[[:alnum:]_]+|"
+        "openai-compatible|api\\.openai\\.com|SECRET_GEMINI|SECRET_GROQ|GROQ_API_KEY|"
+        "api\\.groq\\.com|api\\.cerebras\\.ai"
+    )
+    common_exclusions = (
+        " -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
+    )
+    legacy_exclusions = (
+        " -- . ':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
+        "':!.github/workflows/propagate-native-ai-all-branches.yml' "
+        "':!.github/workflows/prune-contained-branches-once.yml' "
+        "':!scripts/migrate_legacy_native_ai.py'"
+    )
+    production_exclusions = (
+        "':!.github/workflows/production-deploy.yml' "
+        "':!.github/workflows/production-verification.yml' "
+    )
+    migration_exclusion = "':!scripts/migrate_legacy_native_ai.py')\"; then"
+    self_exclusion = "':!.github/workflows/propagate-native-ai-all-branches.yml' "
+
+    scanner_definition = (
+        scanner_prefix + current_pattern + "'" + common_exclusions
+        + production_exclusions + migration_exclusion
+    )
+    current_self_excluded_scanner_definition = (
+        scanner_prefix + current_pattern + "'" + common_exclusions
+        + production_exclusions + self_exclusion + migration_exclusion
+    )
+    previous_scanner_definition = (
+        scanner_prefix + previous_pattern + "'" + common_exclusions
+        + self_exclusion + migration_exclusion
+    )
+    legacy_scanner_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:93:"
+        "            git grep -IlEi '" + previous_pattern + "'"
+        + legacy_exclusions + " || rc=$?"
+    )
+    legacy_verification_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:310:"
+        "            git grep -nIEi '" + previous_pattern + "'"
+        + legacy_exclusions + " >&2 || true"
+    )
+    modified_legacy_scanner = legacy_scanner_definition + "; curl https://api.openai.com/v1/models"
+    modified_legacy_verification = legacy_verification_definition + "; curl https://api.openai.com/v1/models"
+    modified_scanner_with_extra_command = current_self_excluded_scanner_definition.replace(
+        "')\"; then", "')\"; curl https://api.openai.com/v1/models; then"
+    )
+    modified_previous_scanner_with_extra_command = previous_scanner_definition.replace(
+        "')\"; then", "')\"; curl https://api.openai.com/v1/models; then"
+    )
+    arbitrary_grep_command = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:501:"
+        "          run: git grep -nIEi 'gemini'; curl -H "
+        "\"Authorization: Bearer $OPENAI_API_KEY\" https://api.openai.com/v1/models"
+    )
+    groq_strategy_match = "app/ai_providers.py:104:async def _groq_json(prompt):"
+    groq_config_match = "app/config.py:204:groq_strategy_model: str = 'legacy'"
+    historical_prune_marker = (
+        ".github/workflows/prune-contained-branches-once.yml:177:"
+        "                    && git show \"$main_sha:scripts/check_ai_models.py\" | grep -F 'def _check_groq' >/dev/null \\"
+    )
+    historical_branch_prune_marker = (
+        ".github/workflows/prune-contained-branches-once.yml:178:"
+        "                    && ! git show \"$sha:scripts/check_ai_models.py\" | grep -F 'def _check_groq' >/dev/null \\"
+    )
+    current_pattern_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:160:"
+        '                    current_pattern = "' + current_pattern.replace("\\", "\\\\") + '"'
+    )
+    previous_pattern_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:161:"
+        '                    previous_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
+    )
+    legacy_pattern_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:148:"
+        '                legacy_expected_pattern = "' + previous_pattern.replace("\\", "\\\\") + '"'
+    )
+    legacy_pattern_override = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:148:"
+        '                legacy_expected_pattern = "https://api.openai.com/v1/models"'
+    )
+    current_pattern_override = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:160:"
+        '                    current_pattern = "https://api.openai.com/v1/models"'
+    )
+    previous_pattern_override = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:161:"
+        '                    previous_pattern = "https://api.groq.com/openai/v1/chat/completions"'
+    )
+    current_pattern_with_command = current_pattern_definition + "; curl https://api.openai.com/v1/models"
+    previous_pattern_with_command = previous_pattern_definition + "; curl https://api.groq.com/openai/v1/chat/completions"
+    provider_bearing_prune_command = (
+        ".github/workflows/prune-contained-branches-once.yml:177:"
+        "                    && git show \"$main_sha:scripts/check_ai_models.py\" | grep -F 'def _check_groq' >/dev/null; curl https://api.openai.com/v1/models"
+    )
+    source = "\n".join([
+        scanner_definition,
+        current_self_excluded_scanner_definition,
+        previous_scanner_definition,
+        legacy_scanner_definition,
+        legacy_verification_definition,
+        modified_legacy_scanner,
+        modified_legacy_verification,
+        modified_scanner_with_extra_command,
+        modified_previous_scanner_with_extra_command,
+        arbitrary_grep_command,
+        groq_strategy_match,
+        groq_config_match,
+        historical_prune_marker,
+        historical_branch_prune_marker,
+        current_pattern_definition,
+        previous_pattern_definition,
+        legacy_pattern_definition,
+        legacy_pattern_override,
+        current_pattern_override,
+        previous_pattern_override,
+        current_pattern_with_command,
+        previous_pattern_with_command,
+        provider_bearing_prune_command,
+    ])
+    result = subprocess.run(
+        ["awk", awk_program],
+        input=source,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = result.stdout.splitlines()
+
+    assert scanner_definition not in output_lines
+    assert current_self_excluded_scanner_definition not in output_lines
+    assert previous_scanner_definition not in output_lines
+    assert legacy_scanner_definition not in output_lines
+    assert legacy_verification_definition not in output_lines
+    assert modified_legacy_scanner in output_lines
+    assert modified_legacy_verification in output_lines
+    assert modified_scanner_with_extra_command in output_lines
+    assert modified_previous_scanner_with_extra_command in output_lines
+    assert arbitrary_grep_command in output_lines
+    assert groq_strategy_match in output_lines
+    assert groq_config_match in output_lines
+    assert historical_prune_marker not in output_lines
+    assert historical_branch_prune_marker not in output_lines
+    assert current_pattern_definition not in output_lines
+    assert previous_pattern_definition not in output_lines
+    assert legacy_pattern_definition not in output_lines
+    assert legacy_pattern_override in output_lines
+    assert current_pattern_override in output_lines
+    assert previous_pattern_override in output_lines
+    assert current_pattern_with_command in output_lines
+    assert previous_pattern_with_command in output_lines
+    assert provider_bearing_prune_command in output_lines
+
+def test_post_migration_diagnostics_reuse_scan_results_without_second_grep() -> None:
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    after_refs_block = workflow.split('if [[ -n "$after_refs" ]]; then', 1)[1].split(
+        "if ! verify_native_ai_impl(); then", 1
+    )[0]
+    assert 'printf \'%s\\n\' "$after_refs" >&2' in after_refs_block
+    assert "git grep -nIEi" not in after_refs_block
+
+
+def test_provider_scan_filters_exact_legacy_self_excluded_diagnostic_grep():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    scanner_line = next(
+        line for line in workflow.splitlines()
+        if 'if matches="$(git grep -nIEi' in line
+    )
+    current_pattern = scanner_line.split("git grep -nIEi '", 1)[1].split("'", 1)[0]
+    filter_start = workflow.index("filtered=\"$(printf")
+    awk_start = workflow.index("awk '\n", filter_start) + len("awk '\n")
+    awk_end = workflow.index("\n            ')", awk_start)
+    awk_program = workflow[awk_start:awk_end]
+
+    scanner_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:105:"
+        + scanner_line
+    )
+    legacy_diagnostic = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:481:"
+        "            git grep -nIEi '" + current_pattern + "' -- . "
+        "':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
+        "':!.github/workflows/production-deploy.yml' "
+        "':!.github/workflows/production-verification.yml' "
+        "':!.github/workflows/propagate-native-ai-all-branches.yml' "
+        "':!scripts/migrate_legacy_native_ai.py' >&2 || true"
+    )
+    modified_diagnostic = legacy_diagnostic.replace(
+        " >&2 || true",
+        "; curl https://api.openai.com/v1/models >&2 || true",
+    )
+    result = subprocess.run(
+        ["awk", awk_program],
+        input="\n".join([scanner_definition, legacy_diagnostic, modified_diagnostic]),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = result.stdout.splitlines()
+    assert legacy_diagnostic not in output_lines
+    assert modified_diagnostic in output_lines

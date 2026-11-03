@@ -31,9 +31,9 @@ from .main import (
 
 
 class PaperMarketRequest(MarketRequest):
-    """Restricted short-window market request used only by the isolated paper runtime."""
+    """Bounded market request for isolated paper order submission and historical replay."""
 
-    days: int = Field(default=1, ge=1, le=30)
+    days: int = Field(default=1, ge=1, le=60)
 
 
 _EXPECTED_PRIMARY_ROLE = "atlas_paper_reader"
