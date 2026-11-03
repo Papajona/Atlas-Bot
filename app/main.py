@@ -457,35 +457,67 @@ async def _restore_customer_paper_submission_audit_retry_snapshot(
     *,
     customer_id: int,
     client_order_id: str,
-    original_submission_detail: dict,
-    authoritative_source: str,
 ) -> bool:
-    """Explicitly restore a quarantined row from its authoritative original snapshot.
+    """Restore a corrupt retry only from its indexed original audit-log event.
 
-    This is deliberately separate from ordinary retry persistence: callers must
-    first verify the original detail from the audit log or durable order ledger.
-    A later execution status is not an acceptable replacement for that snapshot.
+    The recovery payload is read and decrypted from AuditLog itself. No caller-
+    supplied dictionary or asserted source label can authorize a retry snapshot.
+    If the original append does not exist or cannot be decrypted, the row remains
+    quarantined for manual investigation rather than replaying unverified details.
     """
     customer_id = int(customer_id)
     client_order_id = str(client_order_id or "").strip()
-    source = str(authoritative_source or "").strip().upper()
-    if source not in {"AUDIT_LOG", "ORDER_LEDGER"}:
-        raise ValueError("corrupt retry restoration requires AUDIT_LOG or ORDER_LEDGER evidence")
-    if not client_order_id or not isinstance(original_submission_detail, dict):
-        raise ValueError("corrupt retry restoration requires the original customer/order detail")
-    if (
-        int(original_submission_detail.get("customer_id", -1)) != customer_id
-        or str(original_submission_detail.get("client_order_id") or "").strip() != client_order_id
-    ):
-        raise ValueError("restored submission detail does not match the quarantined retry identity")
+    if not client_order_id:
+        raise ValueError("corrupt retry restoration requires a customer/order identity")
 
-    payload = json.dumps(
-        original_submission_detail,
+    identity_payload = json.dumps(
+        {
+            "event": "CUSTOMER_PAPER_ORDER_SUBMITTED",
+            "identity": {
+                "customer_id": customer_id,
+                "client_order_id": client_order_id,
+            },
+        },
         sort_keys=True,
         separators=(",", ":"),
         default=str,
     )
+    idempotency_key = hashlib.sha256(identity_payload.encode("utf-8")).hexdigest()
+
     async with SessionLocal() as db:
+        stored_detail = (
+            await db.execute(
+                select(AuditLog.detail)
+                .where(
+                    AuditLog.event == "CUSTOMER_PAPER_ORDER_SUBMITTED",
+                    AuditLog.idempotency_key == idempotency_key,
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if stored_detail is None:
+            return False
+        if isinstance(stored_detail, str):
+            stored_detail = json.loads(stored_detail)
+        if not isinstance(stored_detail, dict):
+            raise ValueError("authoritative audit-log submission detail is not an object")
+
+        # append_audit_once may attach only these chain-level rate-limit markers;
+        # they are not part of the original customer submission snapshot.
+        original_detail = dict(stored_detail)
+        original_detail.pop("audit_chain_rate_limited", None)
+        original_detail.pop("audit_chain_rate_limit", None)
+        if (
+            int(original_detail.get("customer_id", -1)) != customer_id
+            or str(original_detail.get("client_order_id") or "").strip() != client_order_id
+        ):
+            raise ValueError("authoritative audit-log identity does not match the quarantined retry")
+        payload = json.dumps(
+            original_detail,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
         result = await db.execute(
             update(CustomerPaperSubmissionAuditRetry)
             .where(
@@ -496,7 +528,7 @@ async def _restore_customer_paper_submission_audit_retry_snapshot(
             .values(
                 submission_detail=payload,
                 status="PENDING",
-                last_error_type=f"RestoredFrom{source}",
+                last_error_type="RestoredFromAuditLog",
                 updated_at=datetime.now(timezone.utc),
             )
         )
