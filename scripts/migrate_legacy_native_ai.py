@@ -5946,7 +5946,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if not groq_only:
             groq_entry_present = any(
                 re.search(
-                    r"(?i)\\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\\b",
+                    r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
                     item,
                 )
                 for item in entries
