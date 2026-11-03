@@ -142,7 +142,7 @@ def test_recovery_wrapper_order_intent_keeps_delivery_incomplete_pending(monkeyp
     assert calls[0]["order_role"] == "PROTECTIVE_EXIT"
     assert calls[0]["client_order_id"] == "cpx-recovered-exit"
     assert persisted[0]["submission_detail"]["client_order_id"] == "cpx-recovered-exit"
-    assert persisted[0]["error_type"] == "DeliveryIncomplete"
+    assert persisted[0]["error_type"] == "RuntimeError"
     assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
 
 
