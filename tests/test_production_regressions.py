@@ -173,9 +173,31 @@ def test_customer_paper_group_marks_are_filtered_before_fetching():
 def test_customer_paper_recovery_does_not_misclassify_replays_or_take_manual_orders():
     flow = Path("app/customer_paper_flow.py").read_text(encoding="utf-8")
     assert '{"APPENDED", "REPLAYED"}' in flow
-    # The runtime message is deliberately split across adjacent literals for readability.
-    assert "the autonomous flow will not take " in flow
-    assert "ownership of or advance a manual order." in flow
+    tree = ast.parse(flow)
+
+    def static_message(node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            return "".join(static_message(part) for part in node.values)
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return static_message(node.left) + static_message(node.right)
+        return ""
+
+    raised_messages = [
+        static_message(node.exc.args[0])
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Raise)
+        and isinstance(node.exc, ast.Call)
+        and isinstance(node.exc.func, ast.Name)
+        and node.exc.func.id == "CustomerPaperFlowBlocked"
+        and node.exc.args
+    ]
+    assert any(
+        "A manual paper order is open for this market" in message
+        and "the autonomous flow will not take ownership of or advance a manual order." in message
+        for message in raised_messages
+    )
     assert "Protective-exit candle history is incomplete" in flow
     assert "WAITING_FOR_FILL_LATENCY" in flow
     assert "EXPIRED_TTL" in flow
