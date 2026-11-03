@@ -1659,9 +1659,9 @@ def test_fork_merge_cannot_authorize_deletion_of_same_named_local_branch():
 
 def test_same_tree_merge_child_of_main_ancestor_is_safe_to_retire(monkeypatch):
     outputs = iter([
-        "same-tree-sha\\nside-parent main-parent\\n",
-        "different-side-tree\\n",
-        "same-tree-sha\\n",
+        "same-tree-sha\nside-parent main-parent\n",
+        "different-side-tree\n",
+        "same-tree-sha\n",
     ])
 
     def fake_run(_args, *, check=True):
@@ -1674,19 +1674,25 @@ def test_same_tree_merge_child_of_main_ancestor_is_safe_to_retire(monkeypatch):
         lambda ancestor, descendant: ancestor == "main-parent" and descendant == "current-main",
     )
 
-    assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is True
+    safe, reason, paths = pruning._resolve_branch_integration(
+        "fix/no-op-reconciliation", "branch-sha", "current-main", set(), []
+    )
+
+    assert safe is True
+    assert "parent already in current main" in reason
+    assert paths == []
 
 
 def test_same_tree_merge_child_proof_rejects_different_tree_or_non_ancestor(monkeypatch):
     scenarios = [
         (
-            "different-tree\\nmain-parent\\n",
-            "same-tree-sha\\n",
+            "different-tree\nmain-parent\n",
+            "same-tree-sha\n",
             True,
         ),
         (
-            "same-tree-sha\\nother-parent\\n",
-            "same-tree-sha\\n",
+            "same-tree-sha\nother-parent\n",
+            "same-tree-sha\n",
             False,
         ),
     ]
