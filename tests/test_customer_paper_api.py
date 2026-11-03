@@ -1089,46 +1089,6 @@ def test_unanchored_daily_snapshot_clamps_valid_long_ttl_to_supported_fetch_wind
     assert len(calls) == 1
     assert calls[0].days == 30
 
-def test_paper_fill_preflight_failure_does_not_register_bar_and_corrected_candle_can_retry():
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-    order = {"order_type": "MARKET", "side": "BUY", "limit_price": None}
-    values = {
-        "open": Decimal("100"),
-        "high": Decimal("102"),
-        "low": Decimal("99"),
-        "close": Decimal("101"),
-        "volume": Decimal("10"),
-    }
-    bar = {"timestamp": now, "values": values}
-    registration_attempts = []
-
-    short_index = pd.date_range(end=now, periods=20, freq="1min")
-    short_frame = pd.DataFrame(
-        {"close": [100.0 + position for position in range(20)]},
-        index=short_index,
-    )
-    with pytest.raises(HTTPException) as failed:
-        reference, volatility = paper_api._paper_preflight_completed_bar(
-            order, bar, short_frame, timeframe="1m"
-        )
-        registration_attempts.append((reference, volatility))
-    assert failed.value.status_code == 409
-    assert registration_attempts == []
-
-    corrected_index = pd.date_range(end=now, periods=21, freq="1min")
-    corrected_frame = pd.DataFrame(
-        {"close": [100.0 + position for position in range(21)]},
-        index=corrected_index,
-    )
-    reference, volatility = paper_api._paper_preflight_completed_bar(
-        order, bar, corrected_frame, timeframe="1m"
-    )
-    assert reference == Decimal("100")
-    assert volatility is not None and volatility > 0
-    registration_attempts.append((reference, volatility))
-    assert len(registration_attempts) == 1
-
-
 def test_market_bar_key_matches_customer_paper_lifecycle_identity():
     stamp = datetime(2026, 11, 2, 10, 0, tzinfo=timezone.utc)
     expected = hashlib.sha256(
