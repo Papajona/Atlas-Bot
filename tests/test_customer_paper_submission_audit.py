@@ -850,3 +850,22 @@ def test_external_submission_audit_treats_connection_refusal_as_retryable(monkey
 
     assert result is False
     assert finished == [("claim-connection-refused", False, "ConnectionRefusedError")]
+
+
+def test_asyncpg_startup_connection_error_is_transient_for_audit_payload_reads():
+    # Model the driver's public exception name/module without depending on a live
+    # PostgreSQL startup race in the unit test.
+    CannotConnectNowError = type(
+        "CannotConnectNowError",
+        (Exception,),
+        {"__module__": "asyncpg.exceptions"},
+    )
+    error = CannotConnectNowError("database is starting")
+
+    assert main._is_transient_customer_audit_payload_read_error(error)
+    assert main._is_transient_customer_audit_payload_read_error(
+        TimeoutError("database connection timed out")
+    )
+    assert not main._is_transient_customer_audit_payload_read_error(
+        ValueError("stored audit payload has invalid identity")
+    )

@@ -37,6 +37,7 @@ from .customer_paper_lifecycle import (
     list_open_customer_paper_orders,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
+    verify_customer_paper_market_bar_provenance,
     submit_customer_paper_order,
 )
 from .trading_core import PROFILES
@@ -209,15 +210,19 @@ async def _fetch_verified_market_snapshot(
             earliest_utc,
             earliest_utc - timedelta(seconds=prefill_context_bars * timeframe_seconds),
         )
-        supported_start = now_utc - timedelta(days=30)
+        # Daily orders can remain pending for 24 bars while fill pricing still
+        # requires 19 completed returns before the first eligible candle. Support
+        # that full replay span rather than stranding valid orders after ~11 days.
+        maximum_replay_days = 60
+        supported_start = now_utc - timedelta(days=maximum_replay_days)
         if required_start < supported_start:
             raise HTTPException(
                 409,
-                "Paper-order replay requires pre-fill volatility history older than the supported 30-day candle window; reconcile the order before advancing",
+                "Paper-order replay requires pre-fill volatility history older than the supported 60-day candle window; reconcile the order before advancing",
             )
         anchored_seconds = max(0.0, (now_utc - required_start).total_seconds())
         anchored_days = max(1, int(math.ceil(anchored_seconds / 86_400)))
-        days = min(30, max(days, anchored_days))
+        days = min(maximum_replay_days, max(days, anchored_days))
     else:
         # Initial, unanchored submissions retain the endpoint's historical
         # 30-day cap. TTL/latency settings can calculate 31 bars for daily
@@ -870,6 +875,17 @@ def build_customer_paper_router(
                     bar_key=bar_key,
                 )
                 if prior_fill is not None:
+                    # A fill idempotency key alone does not authenticate the candle.
+                    # Validate its immutable digest and volume before replaying it;
+                    # do not recalculate capacity from today's participation setting.
+                    await verify_customer_paper_market_bar_provenance(
+                        venue=order_venue,
+                        symbol=order["symbol"],
+                        timeframe=timeframe,
+                        bar_at=bar["timestamp"],
+                        bar_data_sha256=bar["bar_data_sha256"],
+                        base_volume=_decimal_text(bar["values"]["volume"]),
+                    )
                     return await _replay_existing_fill(prior_fill)
 
                 # A candidate fill must pass the entire pre-fill volatility window
