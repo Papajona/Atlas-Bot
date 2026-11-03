@@ -25,6 +25,34 @@ def _safe(x: float, default: float = 0.0) -> float:
     return float(x) if np.isfinite(x) else default
 
 
+def _trial_accounting_fields(
+    known_prior_labels: set[str],
+    current_fixed_signal_labels: set[str],
+    current_ai_labels: set[str],
+) -> dict[str, object]:
+    """Report all recorded experiments separately from DSR-comparable fixed trials."""
+    prior = {str(label) for label in known_prior_labels}
+    fixed_signal = {
+        label for label in prior if not label.startswith("ai@")
+    } | {str(label) for label in current_fixed_signal_labels}
+    ai = {
+        label for label in prior if label.startswith("ai@")
+    } | {str(label) for label in current_ai_labels}
+    all_recorded = fixed_signal | ai
+    return {
+        # Keep trial_labels as the complete persistent archive interface.
+        "trial_labels": sorted(all_recorded),
+        "fixed_signal_trial_labels": sorted(fixed_signal),
+        "ai_trial_labels": sorted(ai),
+        # DSR adjusts only the fixed-signal population with a matching OOS sample.
+        "cumulative_trials": len(fixed_signal),
+        # These totals make the broader experiment count explicit without feeding
+        # non-comparable AI samples into the fixed-signal DSR calculation.
+        "cumulative_recorded_trials": len(all_recorded),
+        "cumulative_ai_trials": len(ai),
+    }
+
+
 
 def _apply_protective_halts(
     position: pd.Series,
@@ -573,17 +601,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # from labels/counts alone; the trusted research archive and its comparable trial
     # outcomes must be restored and verified first.
     known_prior_labels = set(prior_trial_labels or ())
-    # AI evaluation is an experiment and belongs in persistent accounting, but its
-    # different warm-up/label sample must never enter this fixed-signal DSR set.
-    known_prior_fixed_signal_labels = {label for label in known_prior_labels if not label.startswith("ai@")}
     ai_trial_labels = {f"ai@{ai_fp}"} if include_ai else set()
-    persistent_trial_labels = this_labels | ai_trial_labels
-    # n_trials must describe the SAME trial population the deflated Sharpe ratio
-    # corrects for. AI trials are recorded in persistent accounting, but their
-    # metrics come from a separate sample, so counting them here would inflate the
-    # multiplicity penalty above the dispersion DSR actually applies. Count the
-    # fixed-signal trials only, and keep the AI arm in its own accounting.
-    n_trials = len(known_prior_fixed_signal_labels | this_labels)
+    trial_accounting = _trial_accounting_fields(
+        known_prior_labels,
+        this_labels,
+        ai_trial_labels,
+    )
+    # The DSR must use the fixed-signal labels only; AI remains separately counted.
+    n_trials = int(trial_accounting["cumulative_trials"])
     # Candidate statistics and signed evidence use an explicit protocol version.
     # Bump it when split geometry changes so old attestations cannot be silently reused.
     ens_cost = cost_breakeven_report(
@@ -884,7 +909,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
                         "protocol_version": protocol_version,
-                        "trial_labels": sorted(known_prior_labels | persistent_trial_labels),
+                        **trial_accounting,
                         "trial_registry_complete": trial_registry_complete,
                         "financing_cost_model_complete": carry_evidence_complete,
                         "carry_rate_configured": carry is not None,
@@ -906,7 +931,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             else "INCOMPLETE_CURRENT_RUN_TRIAL_SET"
                         ),
                         "ai_trial_comparability_note": "AI fold windows use feature warm-up and label-horizon slicing; AI metrics are not mixed into the fixed-signal DSR unless the exact OOS sample is aligned.",
-                        "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
                         "fixed_signal_oos": oos,
                         "per_strategy_oos": per_strategy_oos,
