@@ -1593,6 +1593,13 @@ def test_merged_pr_records_require_exact_same_repository_head_identity():
                 # not eligible to prove deletion of a same-named local branch.
                 "head": {"repo": None},
             },
+            {
+                "number": 353,
+                "merged_at": "2026-11-02T12:03:00Z",
+                "merge_commit_sha": "deleted-fork-unknown-head-merge",
+                # GitHub may omit the complete head object after a fork is deleted.
+                "head": None,
+            },
         ],
         repository="Papajona/Atlas-Bot",
     )
@@ -1609,7 +1616,7 @@ def test_merged_pr_records_require_exact_same_repository_head_identity():
 def test_merged_pr_records_reject_malformed_closed_pr_metadata():
     malformed = [
         {
-            "number": 353,
+            "number": 355,
             "merged_at": "2026-11-02T12:00:00Z",
             "merge_commit_sha": "merge-sha",
             "head": {
@@ -1619,7 +1626,7 @@ def test_merged_pr_records_reject_malformed_closed_pr_metadata():
             },
         }
     ]
-    with pytest.raises(RuntimeError, match="malformed closed pull request"):
+    with pytest.raises(RuntimeError, match="malformed same-repository merged pull request"):
         pruning._merged_pull_request_records(
             malformed, repository="Papajona/Atlas-Bot"
         )
