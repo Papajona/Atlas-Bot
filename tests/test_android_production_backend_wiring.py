@@ -87,3 +87,16 @@ def test_signed_release_is_only_triggered_by_an_explicit_release_tag_or_manual_m
     assert "github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'" in release_job
     assert "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v')" in release_job
     assert "github.event_name == 'push' && github.ref == 'refs/heads/main'" not in release_job
+
+
+def test_debug_build_requires_an_explicit_valid_development_backend_origin():
+    assert "verifyDebugBackendConfiguration" in GRADLE
+    assert 'if (name == "preDebugBuild") dependsOn(verifyDebugBackendConfiguration)' in GRADLE
+    assert "ATLAS_DEV_BACKEND_URL is required for debug builds" in GRADLE
+    assert 'explicitDevBackendUri.scheme?.lowercase() in setOf("http", "https")' in GRADLE
+    assert "https://atlas-debug-backend.invalid" not in GRADLE
+    assert 'resValue("string", "atlas_backend_url", debugBackendUrl)' in GRADLE
+
+
+def test_android_debug_ci_uses_only_the_emulator_development_origin():
+    assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in RELEASE_WORKFLOW
