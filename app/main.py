@@ -394,8 +394,9 @@ async def _persist_customer_paper_submission_audit_retry(
     customer_id: int,
     submission_detail: dict,
     error_type: str,
+    increment_attempts: bool = True,
 ) -> None:
-    """Upsert one customer/order retry row; never scan encrypted audit history."""
+    """Upsert retry metadata while preserving the first snapshot and corrupt quarantine."""
     customer_id = int(customer_id)
     client_order_id = str(submission_detail.get("client_order_id") or "").strip()
     if not client_order_id:
@@ -421,15 +422,51 @@ async def _persist_customer_paper_submission_audit_retry(
                 CustomerPaperSubmissionAuditRetry.customer_id,
                 CustomerPaperSubmissionAuditRetry.client_order_id,
             ],
-            # The first submission snapshot is immutable for this customer/order.
-            # Later recovery failures may update retry metadata, never its audit payload.
+            # Keep corrupt rows quarantined; ordinary upserts cannot silently
+            # turn an unreadable immutable snapshot back into an automatic retry.
             set_={
-                "status": "PENDING",
-                "attempt_count": CustomerPaperSubmissionAuditRetry.attempt_count + 1,
-                "last_error_type": str(error_type or "UnknownError")[:80],
+                "status": case(
+                    (CustomerPaperSubmissionAuditRetry.status == "CORRUPT", "CORRUPT"),
+                    else_="PENDING",
+                ),
+                "last_error_type": case(
+                    (
+                        CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+                        CustomerPaperSubmissionAuditRetry.last_error_type,
+                    ),
+                    else_=str(error_type or "UnknownError")[:80],
+                ),
                 "updated_at": now,
             },
         )
+        if increment_attempts:
+            statement = statement.on_conflict_do_update(
+                index_elements=[
+                    CustomerPaperSubmissionAuditRetry.customer_id,
+                    CustomerPaperSubmissionAuditRetry.client_order_id,
+                ],
+                set_={
+                    "status": case(
+                        (CustomerPaperSubmissionAuditRetry.status == "CORRUPT", "CORRUPT"),
+                        else_="PENDING",
+                    ),
+                    "attempt_count": case(
+                        (
+                            CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+                            CustomerPaperSubmissionAuditRetry.attempt_count,
+                        ),
+                        else_=CustomerPaperSubmissionAuditRetry.attempt_count + 1,
+                    ),
+                    "last_error_type": case(
+                        (
+                            CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+                            CustomerPaperSubmissionAuditRetry.last_error_type,
+                        ),
+                        else_=str(error_type or "UnknownError")[:80],
+                    ),
+                    "updated_at": now,
+                },
+            )
         await db.execute(statement)
         await db.commit()
 
@@ -692,6 +729,40 @@ async def _customer_paper_submission_stage(
     # HTTP error or invite a duplicate retry when the audit store is unavailable.
     try:
         await _audit_customer_paper_order_submitted_once(detail)
+    except CustomerPaperSubmissionAuditDeliveryInFlight as exc:
+        # A competing lease is not a failed attempt. Create a retry row when absent,
+        # but leave an existing counter unchanged until this worker actually claims delivery.
+        try:
+            await _persist_customer_paper_submission_audit_retry(
+                customer_id=customer_id,
+                submission_detail=detail,
+                error_type=type(exc).__name__,
+                increment_attempts=False,
+            )
+        except Exception as persist_exc:
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_persist_failed",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=None,
+                step="persist_in_flight_defer_state",
+                exc=persist_exc,
+            )
+        _log_customer_paper_submission_audit_retry_failure(
+            event="customer_paper_submission_audit_delivery_deferred",
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            retry_id=None,
+            step="defer_active_external_delivery_lease",
+            exc=exc,
+        )
+        if status in pending_statuses:
+            return (
+                "customer_paper_order_submitted"
+                if intent.get("newly_submitted") is True
+                else "customer_paper_order_pending"
+            )
+        return None
     except Exception as exc:
         # Persist a customer/order-scoped retry state even for terminal fills. This
         # gives the next bot cycle a bounded indexed lookup instead of a history scan.
