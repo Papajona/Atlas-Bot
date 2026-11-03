@@ -37,6 +37,7 @@ from .customer_paper_lifecycle import (
     list_open_customer_paper_orders,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
+    verify_customer_paper_market_bar_provenance,
     submit_customer_paper_order,
 )
 from .trading_core import PROFILES
@@ -870,6 +871,17 @@ def build_customer_paper_router(
                     bar_key=bar_key,
                 )
                 if prior_fill is not None:
+                    # A fill idempotency key alone does not authenticate the candle.
+                    # Validate its immutable digest and volume before replaying it;
+                    # do not recalculate capacity from today's participation setting.
+                    await verify_customer_paper_market_bar_provenance(
+                        venue=order_venue,
+                        symbol=order["symbol"],
+                        timeframe=timeframe,
+                        bar_at=bar["timestamp"],
+                        bar_data_sha256=bar["bar_data_sha256"],
+                        base_volume=_decimal_text(bar["values"]["volume"]),
+                    )
                     return await _replay_existing_fill(prior_fill)
 
                 # A candidate fill must pass the entire pre-fill volatility window
