@@ -68,7 +68,7 @@ def test_production_workflow_requires_groq_trade_review_without_gemini():
     assert "GROQ_MODEL: ${{ vars.GROQ_MODEL }}" in workflow
     assert "GROQ_MAX_COMPLETION_TOKENS: ${{ vars.GROQ_MAX_COMPLETION_TOKENS }}" in workflow
     assert "GROQ_RESEARCH_REVIEW_ENABLED: ${{ vars.GROQ_RESEARCH_REVIEW_ENABLED }}" in workflow
-    assert "GROQ_TRADE_REVIEW_ENABLED: "true"" in workflow
+    assert 'GROQ_TRADE_REVIEW_ENABLED: "true"' in workflow
     assert "SECRET_GEMINI_API_KEY_VERSION" not in workflow
     assert "GEMINI_MODEL" not in workflow
     assert "GEMINI_STRATEGY_MODEL" not in workflow
