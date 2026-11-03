@@ -68,7 +68,7 @@ def test_android_biometric_dependency_is_stable_not_alpha():
 
 def test_explicit_debug_backend_url_is_normalized_then_validated_as_an_origin():
     assert 'val normalizedDevBackendUrl = configuredDevBackendUrl?.trimEnd(\'/\')' in GRADLE
-    assert 'check(!normalizedDevBackendUrl.isNullOrEmpty())' in GRADLE
+    assert 'check(!configuredDevBackendUrl.isNullOrEmpty() && !normalizedDevBackendUrl.isNullOrEmpty())' in GRADLE
     assert 'explicitDevBackendUri.scheme?.lowercase() in setOf("http", "https")' in GRADLE
     assert '!explicitDevBackendUri.host.isNullOrBlank()' in GRADLE
     assert 'explicitDevBackendUri.rawUserInfo == null' in GRADLE
