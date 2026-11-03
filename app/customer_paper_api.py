@@ -38,6 +38,7 @@ from .customer_paper_lifecycle import (
     record_customer_paper_fill,
     register_customer_paper_market_bar,
     submit_customer_paper_order,
+    verify_customer_paper_market_bar_provenance,
 )
 from .trading_core import PROFILES
 from .distributed import allow_rate_limit
@@ -874,18 +875,16 @@ def build_customer_paper_router(
                     bar_key=bar_key,
                 )
                 if prior_fill is not None:
-                    # An existing fill must not bypass immutable candle provenance.
-                    # Its original fill path already created this shared budget, so
-                    # idempotent registration verifies digest, volume/capacity,
-                    # timestamp and market identity before the fill can be replayed.
-                    await register_customer_paper_market_bar(
+                    # Validate persisted candle provenance without recalculating
+                    # capacity from today's participation setting. Historical fills
+                    # retain the capacity recorded when their bar budget was created.
+                    await verify_customer_paper_market_bar_provenance(
                         venue=order_venue,
                         symbol=order["symbol"],
                         timeframe=timeframe,
                         bar_at=bar["timestamp"],
                         bar_data_sha256=bar["bar_data_sha256"],
                         base_volume=_decimal_text(bar["values"]["volume"]),
-                        participation_rate=_decimal_text(Decimal(str(settings.paper_max_bar_volume_participation))),
                     )
                     return await _replay_existing_fill(prior_fill)
 
