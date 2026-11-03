@@ -210,9 +210,7 @@ def test_retry_state_transition_binds_pending_predicate_explicitly(monkeypatch, 
     assert "WHERE customer_paper_submission_audit_retries.id =" in sql
     assert "AND customer_paper_submission_audit_retries.status =" in sql
     normalized_sql = "".join(sql.split())
-    assert "attempt_count=CASEWHEN" in normalized_sql
-    assert "ELSEcustomer_paper_submission_audit_retries.attempt_count+" in normalized_sql
-    assert "CORRUPT" in str(captured["params"])
+    assert "attempt_count=(customer_paper_submission_audit_retries.attempt_count+" in normalized_sql
 
     status_predicates = [
         node for node in iterate(statement.whereclause)
@@ -340,7 +338,11 @@ def test_retry_upsert_is_unique_by_customer_and_order_and_reopens_pending_state(
     # Later recovery failures may reopen the retry and update diagnostics, but
     # must never replace the first immutable submission snapshot.
     update_clause = sql.split("DO UPDATE SET", 1)[1]
+    normalized_update = "".join(update_clause.split())
     assert "submission_detail" not in update_clause
+    assert "attempt_count=CASEWHEN" in normalized_update
+    assert "ELSEcustomer_paper_submission_audit_retries.attempt_count+" in normalized_update
+    assert "CORRUPT" in captured["params"]
     assert captured["committed"] is True
 
 
