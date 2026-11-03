@@ -1156,3 +1156,41 @@ def test_customer_paper_snapshot_rejects_daily_replay_without_required_pre_fill_
     assert rejected.value.status_code == 409
     assert "pre-fill volatility history older than the supported 30-day candle window" in rejected.value.detail
     assert calls == []
+
+
+def test_anchored_daily_snapshot_allows_replay_when_first_fill_lookback_fits_30_days(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    class MarketRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class MarketFetchReached(Exception):
+        pass
+
+    def market_data(request):
+        calls.append(request)
+        raise MarketFetchReached
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(MarketFetchReached):
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=MarketRequest,
+            earliest_required_at=now - timedelta(days=10),
+        ))
+
+    assert len(calls) == 1
+    assert 1 <= calls[0].days <= 30
