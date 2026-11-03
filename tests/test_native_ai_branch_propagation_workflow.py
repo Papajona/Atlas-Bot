@@ -394,3 +394,44 @@ def test_post_migration_diagnostics_reuse_scan_results_without_second_grep() -> 
     )[0]
     assert 'printf \'%s\\n\' "$after_refs" >&2' in after_refs_block
     assert "git grep -nIEi" not in after_refs_block
+
+
+def test_provider_scan_filters_exact_legacy_self_excluded_diagnostic_grep():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    scanner_line = next(
+        line for line in workflow.splitlines()
+        if 'if matches="$(git grep -nIEi' in line
+    )
+    current_pattern = scanner_line.split("git grep -nIEi '", 1)[1].split("'", 1)[0]
+    filter_start = workflow.index("filtered=\"$(printf")
+    awk_start = workflow.index("awk '\n", filter_start) + len("awk '\n")
+    awk_end = workflow.index("\n            ')", awk_start)
+    awk_program = workflow[awk_start:awk_end]
+
+    scanner_definition = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:105:"
+        + scanner_line
+    )
+    legacy_diagnostic = (
+        ".github/workflows/propagate-native-ai-all-branches.yml:481:"
+        "            git grep -nIEi '" + current_pattern + "' -- . "
+        "':!tests' ':!docs' ':!README.md' ':!CHANGELOG.md' "
+        "':!.github/workflows/production-deploy.yml' "
+        "':!.github/workflows/production-verification.yml' "
+        "':!.github/workflows/propagate-native-ai-all-branches.yml' "
+        "':!scripts/migrate_legacy_native_ai.py' >&2 || true"
+    )
+    modified_diagnostic = legacy_diagnostic.replace(
+        " >&2 || true",
+        "; curl https://api.openai.com/v1/models >&2 || true",
+    )
+    result = subprocess.run(
+        ["awk", awk_program],
+        input="\n".join([scanner_definition, legacy_diagnostic, modified_diagnostic]),
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    output_lines = result.stdout.splitlines()
+    assert legacy_diagnostic not in output_lines
+    assert modified_diagnostic in output_lines
