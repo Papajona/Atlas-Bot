@@ -1164,3 +1164,35 @@ def test_market_bar_context_conversion_runs_outside_event_loop(monkeypatch):
     assert worker_threads
     assert worker_threads[0] != loop_thread
 
+
+
+def test_customer_paper_snapshot_rejects_daily_replay_without_required_pre_fill_context(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    calls = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    def market_data(_request):
+        calls.append(True)
+        raise AssertionError("the provider cannot supply the complete required context")
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(HTTPException) as rejected:
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=lambda **kwargs: kwargs,
+            earliest_required_at=now - timedelta(days=12),
+        ))
+
+    assert rejected.value.status_code == 409
+    assert "pre-fill volatility history older than the supported 30-day candle window" in rejected.value.detail
+    assert calls == []
