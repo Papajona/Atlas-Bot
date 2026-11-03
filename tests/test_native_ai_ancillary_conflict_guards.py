@@ -175,7 +175,7 @@ gcloud run deploy atlas \
         )
         with self.assertRaisesRegex(
             migration.MigrationError,
-            "single-quoted shared-secret literal inside a retired-provider conditional",
+            "single-quoted AI_SECRET_ARGS value containing shell expansions",
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
