@@ -662,8 +662,8 @@ def test_production_deploy_uses_latest_exact_main_gate_run_before_checking_outco
     assert '.status' not in ci_selector
     assert '.conclusion' not in ci_selector
     assert "sort_by(.databaseId) | last | .databaseId // empty" in ci_selector
-    assert 'if [ "$run_status" != "completed" ]' in success_gate
-    assert 'if [ "$run_conclusion" != "success" ]' in success_gate
+    assert '[ "$run_status" != "completed" ]' in success_gate
+    assert '[ "$run_conclusion" != "success" ]' in success_gate
 
     native_gate = workflow.split("          require_native_ai_verification() {", 1)[1].split(
         "          require_staging_identity_success() {", 1
@@ -677,6 +677,6 @@ def test_production_deploy_uses_latest_exact_main_gate_run_before_checking_outco
     assert '.conclusion' not in native_selector
     assert "sort_by(.databaseId) | last | .databaseId // empty" in native_selector
     assert "for run_id in run_ids" not in native_gate
-    assert 'if [ "$run_status" != "completed" ]' in native_gate
-    assert 'if [ "$run_conclusion" != "success" ]' in native_gate
-    assert 'if [ "$native_conclusion" != "success" ]' in native_gate
+    assert '[ "$run_status" != "completed" ]' in native_gate
+    assert '[ "$run_conclusion" != "success" ]' in native_gate
+    assert '[ "$native_conclusion" != "success" ]' in native_gate
