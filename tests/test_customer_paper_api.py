@@ -542,8 +542,9 @@ def test_production_paper_market_request_accepts_only_the_computed_bounded_histo
         MarketRequest(days=1)
     with pytest.raises(ValidationError):
         CustomerPaperMarketRequest(days=0)
+    assert CustomerPaperMarketRequest(days=60).days == 60
     with pytest.raises(ValidationError):
-        CustomerPaperMarketRequest(days=31)
+        CustomerPaperMarketRequest(days=61)
 
 
 def test_production_customer_paper_router_uses_the_bounded_request_model():
@@ -953,11 +954,11 @@ def test_customer_paper_snapshot_fails_closed_when_anchored_replay_exceeds_suppo
             timeframe="1m",
             market_data=market_data,
             market_request_type=lambda **kwargs: kwargs,
-            earliest_required_at=now - timedelta(days=31),
+            earliest_required_at=now - timedelta(days=61),
         ))
 
     assert exc.value.status_code == 409
-    assert "supported 30-day candle window" in exc.value.detail
+    assert "supported 60-day candle window" in exc.value.detail
     assert calls == []
 
 
@@ -1255,3 +1256,42 @@ def test_existing_fill_api_replay_checks_market_provenance_before_returning_fill
     replay_check = source.index("await verify_customer_paper_market_bar_provenance(")
     existing_fill_return = source.index("return await _replay_existing_fill(prior_fill)", replay_check)
     assert replay_check < existing_fill_return
+
+
+def test_anchored_daily_replay_fetches_required_context_beyond_30_days(monkeypatch):
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    _freeze_paper_api_clock(monkeypatch, now)
+    paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+    paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    requests = []
+
+    async def allow(_key, *, limit, window_seconds):
+        return True, limit - 1
+
+    class MarketRequest:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class MarketFetchReached(Exception):
+        pass
+
+    def market_data(request):
+        requests.append(request)
+        raise MarketFetchReached
+
+    monkeypatch.setattr(paper_api, "allow_rate_limit", allow)
+    with pytest.raises(MarketFetchReached):
+        asyncio.run(paper_api._fetch_verified_market_snapshot(
+            customer_id=501,
+            symbol="BTC/USDT",
+            timeframe="1d",
+            market_data=market_data,
+            market_request_type=MarketRequest,
+            earliest_required_at=now - timedelta(days=12),
+        ))
+
+    assert len(requests) == 1
+    # 12 days of order age + 19 pre-submission returns = 31 days.
+    assert requests[0].days == 31
