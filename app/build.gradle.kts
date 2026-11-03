@@ -17,6 +17,10 @@ val normalizedDevBackendUrl = configuredDevBackendUrl?.trimEnd('/')
 // is validated by a task dependency of preDebugBuild, not during configuration,
 // so release-only builds do not need or inherit a development endpoint.
 val explicitDevBackendUri = configuredDevBackendUrl?.let { runCatching { URI(it) }.getOrNull() }
+val explicitDevBackendScheme = explicitDevBackendUri?.scheme?.lowercase()
+val explicitDevBackendHost = explicitDevBackendUri?.host?.lowercase()
+val debugBackendTransportAllowed = explicitDevBackendScheme == "https" ||
+    (explicitDevBackendScheme == "http" && explicitDevBackendHost == "10.0.2.2")
 val debugBackendUrl = normalizedDevBackendUrl.orEmpty()
 val verifyDebugBackendConfiguration = tasks.register("verifyDebugBackendConfiguration") {
     group = "verification"
@@ -32,6 +36,7 @@ val verifyDebugBackendConfiguration = tasks.register("verifyDebugBackendConfigur
         check(
             explicitDevBackendUri != null &&
                 explicitDevBackendUri.scheme?.lowercase() in setOf("http", "https") &&
+                debugBackendTransportAllowed &&
                 !explicitDevBackendUri.host.isNullOrBlank() &&
                 explicitDevBackendUri.rawUserInfo == null &&
                 explicitDevBackendUri.rawQuery == null &&
@@ -39,7 +44,7 @@ val verifyDebugBackendConfiguration = tasks.register("verifyDebugBackendConfigur
                 (explicitDevBackendUri.rawPath.isNullOrEmpty() || explicitDevBackendUri.rawPath == "/") &&
                 explicitDevBackendUri.port in -1..65535
         ) {
-            "ATLAS_DEV_BACKEND_URL must be a valid HTTP(S) origin with a host, and no credentials, path, query, or fragment."
+            "ATLAS_DEV_BACKEND_URL must be a valid origin with no credentials, path, query, or fragment; HTTP is allowed only for the Android emulator host 10.0.2.2, and other hosts must use HTTPS."
         }
     }
 }
