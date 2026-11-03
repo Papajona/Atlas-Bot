@@ -697,3 +697,41 @@ def test_retry_repair_runs_authoritative_recovery_before_loading_pending_rows(mo
     asyncio.run(main._repair_customer_paper_submission_audit_retries(905))
 
     assert restored_customers == [905]
+
+
+def test_quarantine_recovery_scans_corrupt_rows_and_uses_stored_identity(monkeypatch):
+    rows = [
+        SimpleNamespace(client_order_id="recoverable-row"),
+        SimpleNamespace(client_order_id="unverified-row"),
+    ]
+    restored = []
+
+    class Result:
+        def all(self):
+            return rows
+
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            sql = str(statement)
+            assert "status" in sql
+            assert "customer_id" in sql
+            assert "LIMIT" in sql.upper()
+            return Result()
+
+    async def restore(*, customer_id, client_order_id):
+        restored.append((customer_id, client_order_id))
+        return client_order_id == "recoverable-row"
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "_restore_customer_paper_submission_audit_retry_snapshot", restore)
+
+    asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(906))
+
+    assert restored == [
+        (906, "recoverable-row"),
+        (906, "unverified-row"),
+    ]
