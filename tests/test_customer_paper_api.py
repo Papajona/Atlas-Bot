@@ -649,9 +649,12 @@ def test_same_customer_order_retry_ignores_only_submission_bar_metadata():
     )
 
 
-@pytest.mark.parametrize("submission_hash_matches", [True, False])
-def test_manual_paper_advance_requires_original_submission_bar_and_replays_every_eligible_bar(
-    monkeypatch, submission_hash_matches
+@pytest.mark.parametrize(
+    ("submission_hash_matches", "history_complete"),
+    [(True, True), (False, True), (True, False)],
+)
+def test_manual_paper_advance_requires_original_submission_and_pre_fill_history(
+    monkeypatch, submission_hash_matches, history_complete
 ):
     now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     latest_bar_at = now - timedelta(minutes=1)
@@ -667,6 +670,12 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         for bar in submission_contexts
         if bar["timestamp"] == submission_bar_at
     )
+    if not history_complete:
+        # Keep the immutable submission candle but remove enough pre-fill bars
+        # that the endpoint's full 20-return volatility window cannot be formed.
+        frame = frame.iloc[-20:].copy()
+        frame.attrs["data_provenance"] = dict(frame.attrs["data_provenance"])
+        frame.attrs["data_provenance"]["row_count"] = len(frame)
 
     order = {
         "client_order_id": "multi-bar-manual-order",
@@ -781,7 +790,8 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         market_request_type=PaperMarketRequest,
         state_guard=state_guard,
     ))
-    response = TestClient(api_app).post(
+    client = TestClient(api_app)
+    response = client.post(
         "/api/customer/paper/orders/multi-bar-manual-order/advance",
         headers={"Authorization": "Bearer multi-bar-customer"},
     )
@@ -792,6 +802,22 @@ def test_manual_paper_advance_requires_original_submission_bar_and_replays_every
         assert registered_bars == []
         assert fill_rows == []
         return
+
+    if not history_complete:
+        assert response.status_code == 409, response.text
+        assert "full paper market-impact volatility window" in response.json()["detail"]
+        assert registered_bars == []
+        assert fill_rows == []
+        # Corrected history restores the missing 20-return context. The same order
+        # can then advance and the shared bar registration occurs only after preflight.
+        frame = _verified_bars(latest_bar_at, volume="100")
+        frame.attrs["data_provenance"]["fetched_at_utc"] = (now - timedelta(seconds=1)).isoformat()
+        paper_api._PAPER_MARKET_SNAPSHOTS.clear()
+        paper_api._PAPER_MARKET_SNAPSHOT_LOCKS.clear()
+        response = client.post(
+            "/api/customer/paper/orders/multi-bar-manual-order/advance",
+            headers={"Authorization": "Bearer multi-bar-customer"},
+        )
 
     assert response.status_code == 200, response.text
     payload = response.json()
