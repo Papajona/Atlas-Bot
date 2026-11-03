@@ -103,6 +103,7 @@ def test_retry_repair_continues_after_one_order_fails_and_logs_safe_traceback(mo
         replayed.append(detail["client_order_id"])
         if detail["client_order_id"] == "retry-first-fails":
             raise RuntimeError("do not expose this internal text")
+        return True
 
     async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
         states.append((retry_id, status, error_type, increment_attempts))
@@ -335,6 +336,14 @@ def test_retry_upsert_is_unique_by_customer_and_order_and_reopens_pending_state(
     assert "customer_id" in sql
     assert "client_order_id" in sql
     assert "PENDING" in captured["params"]
+    # Later recovery failures may reopen the retry and update diagnostics, but
+    # must never replace the first immutable submission snapshot.
+    update_clause = sql.split("DO UPDATE SET", 1)[1]
+    normalized_update = "".join(update_clause.split())
+    assert "submission_detail" not in update_clause
+    assert "attempt_count=CASEWHEN" in normalized_update
+    assert "ELSEcustomer_paper_submission_audit_retries.attempt_count+" in normalized_update
+    assert "CORRUPT" in captured["params"]
     assert captured["committed"] is True
 
 
@@ -371,3 +380,303 @@ def test_retry_store_migration_enables_row_level_security(monkeypatch):
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_paper_submission_audit_retries_id_seq TO %I" in statements
     assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in statements
     assert "'service_role'" in statements
+
+def test_retry_repair_defers_an_active_delivery_lease_without_spending_attempt(monkeypatch):
+    pending = [{
+        "retry_id": 31,
+        "customer_id": 715,
+        "client_order_id": "retry-held-by-competing-worker",
+        "submission_detail": {
+            "customer_id": 715,
+            "client_order_id": "retry-held-by-competing-worker",
+            "status": "SUBMITTED",
+        },
+    }]
+    audit_attempts = []
+    state_updates = []
+
+    async def load(_customer_id):
+        return pending
+
+    async def audit_once(detail):
+        audit_attempts.append(detail["client_order_id"])
+        if len(audit_attempts) == 1:
+            raise main.CustomerPaperSubmissionAuditDeliveryInFlight(
+                "another worker owns the delivery lease"
+            )
+        return True  # The outbox is already DELIVERED; this is a successful idempotent replay.
+
+    async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
+        state_updates.append((retry_id, status, error_type, increment_attempts))
+
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(715))
+    assert state_updates == [
+        (31, "PENDING", "CustomerPaperSubmissionAuditDeliveryInFlight", False)
+    ]
+
+    # A later repair cycle can retry once the competing lease has expired/failed.
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(715))
+    assert audit_attempts == [
+        "retry-held-by-competing-worker",
+        "retry-held-by-competing-worker",
+    ]
+    assert state_updates[-1] == (31, "REPAIRED", "", False)
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_active_lease_upsert_does_not_increment_and_preserves_corrupt_quarantine(monkeypatch, dialect):
+    captured = {}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=dialect)
+
+        async def execute(self, statement):
+            compiled = statement.compile(dialect=dialect)
+            captured["sql"] = str(compiled)
+            captured["params"] = compiled.params
+
+        async def commit(self):
+            captured["committed"] = True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    asyncio.run(main._persist_customer_paper_submission_audit_retry(
+        customer_id=716,
+        submission_detail={
+            "customer_id": 716,
+            "client_order_id": "active-lease-retry",
+            "status": "SUBMITTED",
+        },
+        error_type="CustomerPaperSubmissionAuditDeliveryInFlight",
+        increment_attempts=False,
+    ))
+
+    update_clause = captured["sql"].split("DO UPDATE SET", 1)[1]
+    assert "attempt_count" not in update_clause
+    assert "submission_detail" not in update_clause
+    assert "CASE" in update_clause
+    assert "CORRUPT" in str(captured["params"])
+    assert "PENDING" in str(captured["params"])
+    assert captured["committed"] is True
+
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_corrupt_retry_snapshot_restores_only_from_matching_indexed_audit_event(monkeypatch, dialect):
+    captured = {}
+    original = {
+        "customer_id": 717,
+        "client_order_id": "corrupt-original-order",
+        "status": "SUBMITTED",
+        "execution_status": "SUBMITTED",
+        "quantity": "0.25",
+    }
+    stored = dict(original, audit_chain_rate_limited=True)
+
+    class FakeResult:
+        def __init__(self, detail=None, rowcount=0):
+            self.detail = detail
+            self.rowcount = rowcount
+
+        def scalar_one_or_none(self):
+            return self.detail
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def execute(self, statement):
+            compiled = statement.compile(dialect=dialect)
+            sql = str(compiled)
+            captured.setdefault("statements", []).append(sql)
+            captured.setdefault("params", []).append(compiled.params)
+            if "FROM audit_log" in sql:
+                return FakeResult(json.dumps(stored))
+            return FakeResult(rowcount=1)
+
+        async def commit(self):
+            captured["committed"] = True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    restored = asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+        customer_id=717,
+        client_order_id="corrupt-original-order",
+    ))
+
+    assert restored is True
+    assert len(captured["statements"]) == 2
+    lookup_sql, update_sql = captured["statements"]
+    assert "FROM audit_log" in lookup_sql
+    assert "audit_log.event =" in lookup_sql
+    assert "audit_log.idempotency_key =" in lookup_sql
+    assert "customer_paper_submission_audit_retries.status =" in update_sql
+    assert "submission_detail" in update_sql.split("SET", 1)[1]
+    assert captured["committed"] is True
+    update_params = captured["params"][1]
+    assert "CORRUPT" in str(update_params)
+    assert "PENDING" in str(update_params)
+    assert "RestoredFromAuditLog" in str(update_params)
+    restored_payload = json.loads(update_params[next(
+        key for key, value in update_params.items()
+        if isinstance(value, str) and '"quantity":"0.25"' in value
+    )])
+    assert restored_payload == original
+
+
+def test_corrupt_retry_restoration_refuses_absent_or_mismatched_audit_identity(monkeypatch):
+    for stored in (None, {
+        "customer_id": 718,
+        "client_order_id": "corrupt-original-order",
+        "status": "SUBMITTED",
+        "quantity": "0.25",
+    }):
+        captured = {"updates": 0}
+
+        class FakeResult:
+            rowcount = 1
+
+            def scalar_one_or_none(self):
+                return json.dumps(stored) if stored is not None else None
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def execute(self, statement):
+                sql = str(statement)
+                if "FROM audit_log" in sql:
+                    return FakeResult()
+                captured["updates"] += 1
+                return FakeResult()
+
+            async def commit(self):
+                captured["committed"] = True
+
+        monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+        if stored is None:
+            assert asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+                customer_id=717,
+                client_order_id="corrupt-original-order",
+            )) is False
+            assert captured["updates"] == 0
+            assert "committed" not in captured
+        else:
+            with pytest.raises(ValueError, match="authoritative audit-log identity"):
+                asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+                    customer_id=717,
+                    client_order_id="corrupt-original-order",
+                ))
+            assert captured["updates"] == 0
+            assert "committed" not in captured
+
+
+def test_retry_loader_defers_missing_historical_key_without_quarantining(monkeypatch, caplog):
+    rows = [SimpleNamespace(
+        id=901,
+        client_order_id="needs-historical-key",
+        raw_detail="enc:v1:unavailable-key-ciphertext",
+    )]
+    state_updates = []
+
+    class Result:
+        def all(self):
+            return rows
+
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            return Result()
+
+    def decrypt(_value):
+        raise main.EncryptionKeyConfigurationError("historical key v1 unavailable")
+
+    async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
+        state_updates.append((retry_id, status, error_type, increment_attempts))
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "decrypt_text", decrypt)
+    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
+
+    assert asyncio.run(main._load_customer_paper_submission_audit_retries(901)) == []
+    assert state_updates == [
+        (901, "PENDING", "EncryptionKeyConfigurationError", False)
+    ]
+    assert "customer_paper_submission_audit_retry_key_unavailable" in caplog.text
+
+
+def test_retry_repair_does_not_mark_unconfirmed_external_delivery_repaired(monkeypatch):
+    pending = [{
+        "retry_id": 902,
+        "customer_id": 902,
+        "client_order_id": "unconfirmed-external-delivery",
+        "submission_detail": {
+            "customer_id": 902,
+            "client_order_id": "unconfirmed-external-delivery",
+        },
+    }]
+    states = []
+
+    async def load(_customer_id):
+        return pending
+
+    async def audit_once(_detail):
+        return False
+
+    async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
+        states.append((retry_id, status, error_type, increment_attempts))
+
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(902))
+
+    assert states == [(902, "PENDING", "DeliveryIncomplete", True)]
+
+
+def test_retry_repair_quarantines_permanently_corrupt_audit_payload(monkeypatch):
+    pending = [{
+        "retry_id": 903,
+        "customer_id": 903,
+        "client_order_id": "permanently-corrupt-audit",
+        "submission_detail": {
+            "customer_id": 903,
+            "client_order_id": "permanently-corrupt-audit",
+        },
+    }]
+    states = []
+
+    async def load(_customer_id):
+        return pending
+
+    async def audit_once(_detail):
+        raise main.CustomerPaperSubmissionAuditPayloadCorrupt("invalid authenticated audit payload")
+
+    async def set_state(retry_id, *, status, error_type="", increment_attempts=False):
+        states.append((retry_id, status, error_type, increment_attempts))
+
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", load)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", audit_once)
+    monkeypatch.setattr(main, "_set_customer_paper_submission_audit_retry_state", set_state)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(903))
+
+    assert states == [
+        (903, "CORRUPT", "CustomerPaperSubmissionAuditPayloadCorrupt", True)
+    ]

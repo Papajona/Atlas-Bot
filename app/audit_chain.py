@@ -15,6 +15,11 @@ from .db import AuditChainState, AuditLog, AuditLogExternalDelivery, SessionLoca
 from .distributed import allow_rate_limit
 
 
+# Distinguish a live competing lease from an already delivered event. None remains
+# the backwards-compatible signal for DELIVERED; claim tokens are random UUID hex.
+EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT = "__EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT__"
+
+
 # SQLite ignores SELECT ... FOR UPDATE. Serialize idempotent appends within this
 # process per database, then recover from cross-process lock/unique races by
 # rolling back and reading the winner's indexed idempotency row.
@@ -359,7 +364,7 @@ async def claim_external_audit_delivery(
                         and lease_until is not None
                         and lease_until > now
                     ):
-                        return None
+                        return EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT
                     token = uuid.uuid4().hex
                     delivery.status = "IN_FLIGHT"
                     delivery.claim_token = token
