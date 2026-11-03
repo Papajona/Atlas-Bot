@@ -20,6 +20,6 @@ def test_customer_paper_staging_requires_successful_exact_commit_native_ai_attes
     )[1].split("\n                fi", 1)[0]
     assert '.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion' in attestation_check
     assert '"$native_outcome" != "success"' in attestation_check
-    assert '"headSha // \\"\\""' in attestation_check
-    assert '"headBranch // \\"\\""' in attestation_check
-    assert '"event // \\"\\""' in attestation_check
+    assert 'headSha // ""' in attestation_check
+    assert 'headBranch // ""' in attestation_check
+    assert 'event // ""' in attestation_check
