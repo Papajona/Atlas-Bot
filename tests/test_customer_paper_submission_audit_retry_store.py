@@ -532,12 +532,12 @@ def test_corrupt_retry_snapshot_restores_only_from_matching_indexed_audit_event(
     assert restored_payload == original
 
 
-def test_corrupt_retry_restoration_refuses_absent_or_conflicting_audit_evidence(monkeypatch):
+def test_corrupt_retry_restoration_refuses_absent_or_mismatched_audit_identity(monkeypatch):
     for stored in (None, {
-        "customer_id": 717,
+        "customer_id": 718,
         "client_order_id": "corrupt-original-order",
-        "status": "FILLED",
-        "quantity": "999.0",
+        "status": "SUBMITTED",
+        "quantity": "0.25",
     }):
         captured = {"updates": 0}
 
