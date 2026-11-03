@@ -40,6 +40,7 @@ def test_research_trial_report_separates_dsr_comparable_and_all_recorded_trials(
     assert fields["cumulative_recorded_trials"] == 5
     assert fields["cumulative_fixed_signal_trials"] == 3
     assert fields["dsr_comparable_trial_count"] is None
+    assert fields["cumulative_ai_trials"] == 2
 
 
 def test_dsr_comparable_trial_count_uses_only_verified_archive_sharpes():
@@ -50,7 +51,6 @@ def test_dsr_comparable_trial_count_uses_only_verified_archive_sharpes():
     assert _verified_dsr_comparable_trial_count(False, [0.2, 0.4, -0.1, 0.3]) is None
     assert _verified_dsr_comparable_trial_count(True, [0.2]) is None
     assert _verified_dsr_comparable_trial_count(True, [0.2, float("nan")]) is None
-    assert fields["cumulative_ai_trials"] == 2
 
 
 def test_strategy_schema_and_bounds():
