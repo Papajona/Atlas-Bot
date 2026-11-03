@@ -67,6 +67,13 @@ class RiskDashboardAuditTest {
         assertFalse(disconnected.hasValidatedDeadline)
         assertEquals("unavailable", disconnected.deadlineLabel)
 
+        val exactlyAtFreshnessBoundary = resolveAiSafetyAuditStatus(
+            recentMetrics.copy(lastUpdatedEpochMs = now - AI_SAFETY_TELEMETRY_MAX_AGE_MS),
+            webSocketConnected = true,
+            nowEpochMs = now
+        )
+        assertTrue(exactlyAtFreshnessBoundary.hasValidatedDeadline)
+
         val expired = resolveAiSafetyAuditStatus(
             recentMetrics.copy(lastUpdatedEpochMs = now - AI_SAFETY_TELEMETRY_MAX_AGE_MS - 1L),
             webSocketConnected = true,
