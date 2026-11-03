@@ -453,6 +453,57 @@ async def _persist_customer_paper_submission_audit_retry(
         await db.commit()
 
 
+async def _restore_customer_paper_submission_audit_retry_snapshot(
+    *,
+    customer_id: int,
+    client_order_id: str,
+    original_submission_detail: dict,
+    authoritative_source: str,
+) -> bool:
+    """Explicitly restore a quarantined row from its authoritative original snapshot.
+
+    This is deliberately separate from ordinary retry persistence: callers must
+    first verify the original detail from the audit log or durable order ledger.
+    A later execution status is not an acceptable replacement for that snapshot.
+    """
+    customer_id = int(customer_id)
+    client_order_id = str(client_order_id or "").strip()
+    source = str(authoritative_source or "").strip().upper()
+    if source not in {"AUDIT_LOG", "ORDER_LEDGER"}:
+        raise ValueError("corrupt retry restoration requires AUDIT_LOG or ORDER_LEDGER evidence")
+    if not client_order_id or not isinstance(original_submission_detail, dict):
+        raise ValueError("corrupt retry restoration requires the original customer/order detail")
+    if (
+        int(original_submission_detail.get("customer_id", -1)) != customer_id
+        or str(original_submission_detail.get("client_order_id") or "").strip() != client_order_id
+    ):
+        raise ValueError("restored submission detail does not match the quarantined retry identity")
+
+    payload = json.dumps(
+        original_submission_detail,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    async with SessionLocal() as db:
+        result = await db.execute(
+            update(CustomerPaperSubmissionAuditRetry)
+            .where(
+                CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
+                CustomerPaperSubmissionAuditRetry.client_order_id == client_order_id,
+                CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+            )
+            .values(
+                submission_detail=payload,
+                status="PENDING",
+                last_error_type=f"RestoredFrom{source}",
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+    return int(getattr(result, "rowcount", 0) or 0) == 1
+
+
 async def _set_customer_paper_submission_audit_retry_state(
     retry_id: int,
     *,
