@@ -742,3 +742,93 @@ def test_existing_delivered_outbox_row_reports_delivery_complete(monkeypatch):
         "customer_id": 501,
         "client_order_id": "cp-already-delivered",
     })) is True
+
+
+def test_submission_stage_quarantines_corrupt_audit_event_without_reopening_retry(monkeypatch):
+    statements = []
+    fallback = []
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            statements.append(str(statement))
+            return SimpleNamespace(rowcount=1)
+        async def commit(self):
+            return None
+
+    async def no_prior_retries(_customer_id):
+        return None
+
+    async def corrupt_audit(_detail):
+        raise main.CustomerPaperSubmissionAuditPayloadCorrupt(
+            "immutable audit source is invalid"
+        )
+
+    async def safe_audit(event, detail, actor_id=None):
+        fallback.append((event, detail, actor_id))
+
+    async def reject_persist(**_kwargs):
+        raise AssertionError("permanent corruption must not create a new PENDING retry")
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "_repair_customer_paper_submission_audit_retries", no_prior_retries)
+    monkeypatch.setattr(main, "_audit_customer_paper_order_submitted_once", corrupt_audit)
+    monkeypatch.setattr(main, "_persist_customer_paper_submission_audit_retry", reject_persist)
+    monkeypatch.setattr(main, "_safe_audit", safe_audit)
+
+    stage = asyncio.run(main._customer_paper_submission_stage(
+        _pending_execution(newly_submitted=True),
+        customer_id=501,
+        trading_account_id=702,
+        req=SimpleNamespace(symbol="BTC/USDT", exchange="binance", timeframe="1h"),
+    ))
+
+    assert stage == "customer_paper_order_audit_incomplete"
+    assert len(statements) == 1
+    assert "UPDATE customer_paper_submission_audit_retries" in statements[0]
+    assert "CORRUPT" in statements[0]
+    assert "PENDING" in statements[0]
+    assert fallback[0][0] == "CUSTOMER_PAPER_ORDER_SUBMISSION_AUDIT_INCOMPLETE"
+    assert fallback[0][1]["reason"] == "CustomerPaperSubmissionAuditPayloadCorrupt"
+
+
+def test_external_submission_audit_treats_connection_refusal_as_retryable(monkeypatch):
+    class DummySession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, _statement):
+            raise ConnectionRefusedError("database connection refused")
+
+    finished = []
+
+    async def append_once(_db, **_kwargs):
+        return SimpleNamespace(
+            id=129,
+            event_hash="connection-refused-audit-hash",
+            actor_id="customer:501",
+        ), False
+
+    async def claim(_event_hash):
+        return "claim-connection-refused"
+
+    async def finish(_event_hash, *, claim_token, delivered, error_type=None):
+        finished.append((claim_token, delivered, error_type))
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(main, "append_audit_once", append_once)
+    monkeypatch.setattr(main, "claim_external_audit_delivery", claim)
+    monkeypatch.setattr(main, "finish_external_audit_delivery", finish)
+
+    result = asyncio.run(main._audit_customer_paper_order_submitted_once({
+        "customer_id": 501,
+        "client_order_id": "cp-connection-refused-audit",
+    }))
+
+    assert result is False
+    assert finished == [("claim-connection-refused", False, "ConnectionRefusedError")]
