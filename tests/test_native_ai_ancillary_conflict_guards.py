@@ -736,19 +736,20 @@ grant_secret_access atlas-gemini-api-key "$SERVICE_ACCOUNT" # retired provider a
 
 
     def test_groq_secret_fragment_is_hoisted_out_of_retired_gemini_conditional(self):
-        shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
+        shell = """AI_SECRET_ARGS="EXTRA_SECRET=atlas-extra-secret:2"
+if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
 fi
 gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SECRET_ARGS}"
 """
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
         self.assertNotIn("GEMINI", cleaned)
-        self.assertIn('AI_SECRET_ARGS="${GROQ_SECRET_ARG#,}"', cleaned)
+        self.assertIn('AI_SECRET_ARGS="${AI_SECRET_ARGS-}${AI_SECRET_ARGS:+,}${GROQ_SECRET_ARG#,}"', cleaned)
         self.assertIn("${AI_SECRET_ARGS}", cleaned)
         self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
         for fragment, expected in (
-            ("", "DATABASE_URL=atlas-database-url:3"),
-            (",GROQ_API_KEY=atlas-groq-api-key:17", "DATABASE_URL=atlas-database-url:3,GROQ_API_KEY=atlas-groq-api-key:17"),
+            ("", "DATABASE_URL=atlas-database-url:3,EXTRA_SECRET=atlas-extra-secret:2"),
+            (",GROQ_API_KEY=atlas-groq-api-key:17", "DATABASE_URL=atlas-database-url:3,EXTRA_SECRET=atlas-extra-secret:2,GROQ_API_KEY=atlas-groq-api-key:17"),
         ):
             env = os.environ.copy()
             env["GROQ_SECRET_ARG"] = fragment
@@ -791,6 +792,15 @@ fi
                 self.assertTrue(
                     migration._has_conflicting_provider_wiring("app/native_ai.py", source)
                 )
+
+
+    def test_noop_shared_ai_secret_args_self_assignment_is_removed_safely(self):
+        shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS="\${AI_SECRET_ARGS}"
+fi
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertEqual(cleaned, "")
 
 if __name__ == "__main__":
     unittest.main()

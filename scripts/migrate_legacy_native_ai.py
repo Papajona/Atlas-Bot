@@ -5968,7 +5968,14 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             r"$" + r"{\1#,}",
             value,
         )
-        return value_match.group(1) + value_match.group(2) + normalized + value_match.group(4)
+        # Preserve any existing shared list and add exactly one separator when needed.
+        return (
+            value_match.group(1)
+            + '"${AI_SECRET_ARGS-}${AI_SECRET_ARGS:+,}'
+            + normalized
+            + '"'
+            + value_match.group(4)[1:]
+        )
 
     def is_safe_empty_retired_ai_secret_args(statement: str) -> bool:
         """Permit a retired-provider list to disappear only when no shared secrets remain."""
