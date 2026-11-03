@@ -680,3 +680,170 @@ def test_retry_repair_quarantines_permanently_corrupt_audit_payload(monkeypatch)
     assert states == [
         (903, "CORRUPT", "CustomerPaperSubmissionAuditPayloadCorrupt", True)
     ]
+
+
+def test_retry_repair_runs_authoritative_recovery_before_loading_pending_rows(monkeypatch):
+    restored_customers = []
+
+    async def restore(customer_id):
+        restored_customers.append(customer_id)
+
+    async def no_pending(_customer_id):
+        return []
+
+    monkeypatch.setattr(main, "_restore_corrupt_customer_paper_submission_audit_retries", restore)
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", no_pending)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(905))
+
+    assert restored_customers == [905]
+
+
+def test_quarantine_recovery_scans_corrupt_rows_and_uses_stored_identity(monkeypatch):
+    rows = [
+        SimpleNamespace(client_order_id="recoverable-row"),
+        SimpleNamespace(client_order_id="unverified-row"),
+    ]
+    restored = []
+
+    class Result:
+        def all(self):
+            return rows
+
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            sql = str(statement)
+            assert "status" in sql
+            assert "customer_id" in sql
+            assert "LIMIT" in sql.upper()
+            return Result()
+
+    async def restore(*, customer_id, client_order_id):
+        restored.append((customer_id, client_order_id))
+        return client_order_id == "recoverable-row"
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "_restore_customer_paper_submission_audit_retry_snapshot", restore)
+
+    asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(906))
+
+    assert restored == [
+        (906, "recoverable-row"),
+        (906, "unverified-row"),
+    ]
+
+
+def test_unrecoverable_corrupt_retry_is_deferred_behind_next_bounded_restore_page(monkeypatch):
+    rows = [
+        SimpleNamespace(id=91, client_order_id="unrecoverable-first"),
+        SimpleNamespace(id=92, client_order_id="recoverable-second"),
+    ]
+    updates = []
+    calls = []
+
+    class Result:
+        def all(self):
+            return rows
+
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            sql = str(statement)
+            if "SELECT" in sql.upper():
+                return Result()
+            updates.append(statement)
+            return SimpleNamespace(rowcount=1)
+        async def commit(self):
+            return None
+
+    async def restore(*, customer_id, client_order_id):
+        calls.append((customer_id, client_order_id))
+        if client_order_id == "unrecoverable-first":
+            return False
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "_restore_customer_paper_submission_audit_retry_snapshot", restore)
+
+    asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(907))
+
+    assert calls == [(907, "unrecoverable-first"), (907, "recoverable-second")]
+    assert len(updates) == 1
+    sql = str(updates[0])
+    assert "customer_paper_submission_audit_retries.id" in sql
+    assert "customer_paper_submission_audit_retries.status" in sql
+    compiled = updates[0].compile()
+    assert compiled.params.get("last_error_type") == "AuthoritativeAuditEventNotFound"
+
+
+def test_more_than_100_unrecoverable_quarantines_do_not_starve_later_valid_restore(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    baseline = datetime.now(timezone.utc) - timedelta(days=10)
+    rows = [
+        SimpleNamespace(
+            id=index,
+            client_order_id=f"quarantined-{index}",
+            status="CORRUPT",
+            updated_at=baseline + timedelta(seconds=index),
+        )
+        for index in range(1, 102)
+    ]
+    restore_attempts = []
+    deferred = []
+
+    class Result:
+        def __init__(self, selected):
+            self.selected = selected
+        def all(self):
+            return self.selected
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            sql = str(statement).lstrip().upper()
+            assert sql.startswith("SELECT")
+            selected = sorted(
+                (row for row in rows if row.status == "CORRUPT"),
+                key=lambda row: (row.updated_at, row.id),
+            )[:100]
+            return Result(selected)
+
+    async def restore(*, customer_id, client_order_id):
+        assert customer_id == 908
+        restore_attempts.append(client_order_id)
+        return client_order_id == "quarantined-101"
+
+    async def defer(*, customer_id, retry_id, error_type):
+        assert customer_id == 908
+        row = next(item for item in rows if item.id == retry_id)
+        assert row.status == "CORRUPT"
+        row.updated_at = datetime.now(timezone.utc)
+        row.last_error_type = error_type
+        deferred.append(retry_id)
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(main, "_restore_customer_paper_submission_audit_retry_snapshot", restore)
+    monkeypatch.setattr(main, "_defer_corrupt_customer_paper_submission_audit_retry", defer)
+
+    asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(908))
+    assert len(restore_attempts) == 100
+    assert deferred == list(range(1, 101))
+    assert rows[-1].status == "CORRUPT"
+
+    # The next oldest-first page now reaches the one valid source event rather
+    # than re-reading the first 100 rows that had no authoritative source.
+    asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(908))
+    assert restore_attempts[-1] == "quarantined-101"
+    assert len(restore_attempts) == 101
+    assert deferred == list(range(1, 101))

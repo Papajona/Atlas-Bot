@@ -185,8 +185,9 @@ def test_staging_paper_request_accepts_short_history_without_relaxing_public_mod
         MarketRequest(days=1)
     assert paper_staging.PaperMarketRequest(days=1).days == 1
     assert paper_staging.PaperMarketRequest(days=30).days == 30
+    assert paper_staging.PaperMarketRequest(days=60).days == 60
     with pytest.raises(ValidationError):
-        paper_staging.PaperMarketRequest(days=31)
+        paper_staging.PaperMarketRequest(days=61)
 
 
 def test_readiness_bearer_token_is_purpose_bound_and_fails_closed():
