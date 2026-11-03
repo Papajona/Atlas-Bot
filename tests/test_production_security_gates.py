@@ -646,3 +646,37 @@ def test_staging_attestation_selects_latest_manual_exact_commit_before_checking_
     # The selected run is evaluated afterward, and any completed non-success blocks staging.
     assert 'if [[ "$run_status" == "completed" ]]; then' in deploy
     assert 'if [[ "$run_conclusion" != "success" ]]; then' in deploy
+
+
+def test_production_deploy_uses_latest_exact_main_gate_run_before_checking_outcome():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    success_gate = workflow.split("          require_success() {", 1)[1].split(
+        '          require_success "ci.yml"', 1
+    )[0]
+    ci_selector = success_gate.split("--jq ", 1)[1].split("')", 1)[0]
+
+    # Select the newest exact-main-commit CI/PG run before evaluating its result.
+    assert "--json databaseId,headSha,headBranch" in success_gate
+    assert '.headSha == ' in ci_selector
+    assert '.headBranch == "main"' in ci_selector
+    assert '.status' not in ci_selector
+    assert '.conclusion' not in ci_selector
+    assert "sort_by(.databaseId) | last | .databaseId // empty" in ci_selector
+    assert 'if [ "$run_status" != "completed" ]' in success_gate
+    assert 'if [ "$run_conclusion" != "success" ]' in success_gate
+
+    native_gate = workflow.split("          require_native_ai_verification() {", 1)[1].split(
+        "          require_staging_identity_success() {", 1
+    )[0]
+    native_selector = native_gate.split("--jq ", 1)[1].split("')", 1)[0]
+    assert '--event workflow_dispatch' in native_gate
+    assert '.event == "workflow_dispatch"' in native_selector
+    assert '.headSha == ' in native_selector
+    assert '.headBranch == "main"' in native_selector
+    assert '.status' not in native_selector
+    assert '.conclusion' not in native_selector
+    assert "sort_by(.databaseId) | last | .databaseId // empty" in native_selector
+    assert "for run_id in run_ids" not in native_gate
+    assert 'if [ "$run_status" != "completed" ]' in native_gate
+    assert 'if [ "$run_conclusion" != "success" ]' in native_gate
+    assert 'if [ "$native_conclusion" != "success" ]' in native_gate
