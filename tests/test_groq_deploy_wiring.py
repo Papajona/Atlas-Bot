@@ -21,7 +21,7 @@ def test_api_keeps_groq_secret_optional_and_gemini_removed():
     assert 'GROQ_MODEL="${GROQ_MODEL:-openai/gpt-oss-20b}"' in script
     assert 'GROQ_MAX_COMPLETION_TOKENS="${GROQ_MAX_COMPLETION_TOKENS:-2048}"' in script
     assert 'GROQ_RESEARCH_REVIEW_ENABLED="${GROQ_RESEARCH_REVIEW_ENABLED:-true}"' in script
-    assert 'GROQ_TRADE_REVIEW_ENABLED="${GROQ_TRADE_REVIEW_ENABLED:-false}"' in script
+    assert 'GROQ_TRADE_REVIEW_ENABLED="${GROQ_TRADE_REVIEW_ENABLED:-true}"' in script
     assert 'if [[ "$GROQ_TRADE_REVIEW_ENABLED" == "true" && -z "$SECRET_GROQ_API_KEY_VERSION" ]]' in script
     assert "enabling Groq trade review requires SECRET_GROQ_API_KEY_VERSION" in script
     assert 'python "${REPO_ROOT}/scripts/validate_groq_deploy_env.py"' in script
@@ -62,13 +62,13 @@ def test_worker_keeps_groq_secret_optional_and_inherits_only_serving_api_revisio
     assert "BROKER_SANDBOX=true" in script
     assert "PAPER_TRADING=true" in script
 
-def test_production_workflow_passes_optional_groq_secret_without_gemini():
+def test_production_workflow_requires_groq_trade_review_without_gemini():
     workflow = PRODUCTION_WORKFLOW.read_text(encoding="utf-8")
     assert "SECRET_GROQ_API_KEY_VERSION: ${{ secrets.SECRET_GROQ_API_KEY_VERSION }}" in workflow
     assert "GROQ_MODEL: ${{ vars.GROQ_MODEL }}" in workflow
     assert "GROQ_MAX_COMPLETION_TOKENS: ${{ vars.GROQ_MAX_COMPLETION_TOKENS }}" in workflow
     assert "GROQ_RESEARCH_REVIEW_ENABLED: ${{ vars.GROQ_RESEARCH_REVIEW_ENABLED }}" in workflow
-    assert "GROQ_TRADE_REVIEW_ENABLED: ${{ vars.GROQ_TRADE_REVIEW_ENABLED }}" in workflow
+    assert "GROQ_TRADE_REVIEW_ENABLED: "true"" in workflow
     assert "SECRET_GEMINI_API_KEY_VERSION" not in workflow
     assert "GEMINI_MODEL" not in workflow
     assert "GEMINI_STRATEGY_MODEL" not in workflow
