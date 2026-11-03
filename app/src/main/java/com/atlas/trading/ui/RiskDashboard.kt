@@ -399,7 +399,7 @@ fun RiskDashboardScreen(
                         "unavailable"
                     }
                     Text(
-                        text = "• AI Safety Decision Deadline: $aiSafetyDeadlineLabel (Native AI veto reserve protected)",
+                        text = "• AI Safety Decision Budget: $aiSafetyDeadlineLabel configured (Native AI veto reserve protected)",
                         color = textMuted,
                         fontSize = 13.sp
                     )
