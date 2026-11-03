@@ -680,3 +680,20 @@ def test_retry_repair_quarantines_permanently_corrupt_audit_payload(monkeypatch)
     assert states == [
         (903, "CORRUPT", "CustomerPaperSubmissionAuditPayloadCorrupt", True)
     ]
+
+
+def test_retry_repair_runs_authoritative_recovery_before_loading_pending_rows(monkeypatch):
+    restored_customers = []
+
+    async def restore(customer_id):
+        restored_customers.append(customer_id)
+
+    async def no_pending(_customer_id):
+        return []
+
+    monkeypatch.setattr(main, "_restore_corrupt_customer_paper_submission_audit_retries", restore)
+    monkeypatch.setattr(main, "_load_customer_paper_submission_audit_retries", no_pending)
+
+    asyncio.run(main._repair_customer_paper_submission_audit_retries(905))
+
+    assert restored_customers == [905]
