@@ -735,3 +735,49 @@ def test_quarantine_recovery_scans_corrupt_rows_and_uses_stored_identity(monkeyp
         (906, "recoverable-row"),
         (906, "unverified-row"),
     ]
+
+
+def test_unrecoverable_corrupt_retry_is_deferred_behind_next_bounded_restore_page(monkeypatch):
+    rows = [
+        SimpleNamespace(id=91, client_order_id="unrecoverable-first"),
+        SimpleNamespace(id=92, client_order_id="recoverable-second"),
+    ]
+    updates = []
+    calls = []
+
+    class Result:
+        def all(self):
+            return rows
+
+    class Session:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *_args):
+            return False
+        async def execute(self, statement):
+            sql = str(statement)
+            if "SELECT" in sql.upper():
+                return Result()
+            updates.append(statement)
+            return SimpleNamespace(rowcount=1)
+        async def commit(self):
+            return None
+
+    async def restore(*, customer_id, client_order_id):
+        calls.append((customer_id, client_order_id))
+        if client_order_id == "unrecoverable-first":
+            return False
+        return True
+
+    monkeypatch.setattr(main, "SessionLocal", lambda: Session())
+    monkeypatch.setattr(main, "_restore_customer_paper_submission_audit_retry_snapshot", restore)
+
+    asyncio.run(main._restore_corrupt_customer_paper_submission_audit_retries(907))
+
+    assert calls == [(907, "unrecoverable-first"), (907, "recoverable-second")]
+    assert len(updates) == 1
+    sql = str(updates[0])
+    assert "customer_paper_submission_audit_retries.id" in sql
+    assert "customer_paper_submission_audit_retries.status" in sql
+    compiled = updates[0].compile()
+    assert compiled.params.get("last_error_type") == "AuthoritativeAuditEventNotFound"
