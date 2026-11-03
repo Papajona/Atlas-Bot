@@ -5901,6 +5901,12 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if not match:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
         prefix, quote, value, suffix = match.groups()
+        # Single-quoted shell assignments do not expand Groq/AI secret references.
+        # Refuse them rather than preserving a deployment command with literal tokens.
+        if quote == "'" and "$" in value:
+            raise MigrationError(
+                f"{path} has a single-quoted AI_SECRET_ARGS value containing shell expansions; refusing literal secret deployment"
+            )
         cleaned = scrub_key_value_list(value.lstrip(","), preserve_groq_tokens=True)
         # Incremental lists must not introduce a leading/empty item when their first
         # optional Groq secret is the only surviving entry. Use the existing list
