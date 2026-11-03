@@ -28,7 +28,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
@@ -87,7 +87,7 @@ from .audit_chain import (
     finish_external_audit_delivery,
     EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT,
 )
-from .crypto import decrypt_text
+from .crypto import decrypt_text, EncryptionKeyConfigurationError
 from .startup_guards import assert_multidict_safe_backend, assert_database_migrations_current, assert_database_role_compatible_with_rls_lockdown
 
 
@@ -254,6 +254,10 @@ class CustomerPaperSubmissionAuditDeliveryInFlight(RuntimeError):
     """Another worker currently owns this audit outbox delivery lease."""
 
 
+class CustomerPaperSubmissionAuditPayloadCorrupt(RuntimeError):
+    """Persisted immutable audit payload is authenticated-invalid or identity-invalid."""
+
+
 async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
     """Persist one submission event per customer/order identity, including recovery repairs."""
     actor = f"customer:{int(detail['customer_id'])}"
@@ -275,7 +279,7 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
         )
     if claim_token is None:
         # None is reserved for an outbox row already acknowledged as DELIVERED.
-        return created
+        return True
 
     try:
         if created:
@@ -315,10 +319,14 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
         logging.getLogger(__name__).exception(
             "customer paper audit payload could not be loaded for external delivery"
         )
-        # The hash-chained database event remains durable. Do not turn an existing
-        # pending customer order into a failed replay because its external copy is
-        # temporarily undeliverable.
-        return created
+        # Database/key-configuration failures are transient and remain retryable.
+        # Malformed, unauthenticated or identity-mismatched immutable payloads are
+        # permanent corruption and must be quarantined rather than acknowledged.
+        if isinstance(exc, (SQLAlchemyError, EncryptionKeyConfigurationError)):
+            return False
+        raise CustomerPaperSubmissionAuditPayloadCorrupt(
+            "stored customer paper audit payload is permanently unreadable or invalid"
+        ) from exc
 
     safe_detail = {
         key: value for key, value in persisted_detail.items()
@@ -360,7 +368,7 @@ async def _audit_customer_paper_order_submitted_once(detail: dict) -> bool:
         )
     if not emitted:
         raise RuntimeError("external customer paper submission audit sink did not confirm delivery")
-    return created
+    return True
 
 def _log_customer_paper_submission_audit_retry_failure(
     *,
@@ -597,6 +605,35 @@ async def _load_customer_paper_submission_audit_retries(customer_id: int) -> lis
                 or str(parsed.get("client_order_id") or "").strip() != client_order_id
             ):
                 raise ValueError("retry detail identity does not match its indexed key")
+        except EncryptionKeyConfigurationError as exc:
+            # Missing historical key material is a configuration outage, not
+            # ciphertext corruption. Keep the row pending and move it behind
+            # other work in the bounded oldest-first selection.
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    int(row.id),
+                    status="PENDING",
+                    error_type=type(exc).__name__,
+                    increment_attempts=False,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_key_defer_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=int(row.id),
+                    step="defer_unavailable_retry_key",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_key_unavailable",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=int(row.id),
+                step="decrypt_retry_detail",
+                exc=exc,
+            )
+            continue
         except Exception as exc:
             # One damaged ciphertext is quarantined; it must not prevent other order retries.
             try:
@@ -656,7 +693,17 @@ async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> N
             # The audit helper returns normally only when the external delivery is
             # already DELIVERED or this worker confirmed delivery. An active lease
             # is raised separately so the retry stays eligible after lease expiry.
-            await _audit_customer_paper_order_submitted_once(record["submission_detail"])
+            delivered = await _audit_customer_paper_order_submitted_once(record["submission_detail"])
+            if delivered is not True:
+                # A lease was acquired but delivery could not be confirmed (for
+                # example, a temporary DB/key read error). Never mark it repaired.
+                await _set_customer_paper_submission_audit_retry_state(
+                    retry_id,
+                    status="PENDING",
+                    error_type="DeliveryIncomplete",
+                    increment_attempts=True,
+                )
+                continue
             await _set_customer_paper_submission_audit_retry_state(
                 retry_id,
                 status="REPAIRED",
@@ -681,6 +728,32 @@ async def _repair_customer_paper_submission_audit_retries(customer_id: int) -> N
                     step="defer_active_external_delivery_lease",
                     exc=state_exc,
                 )
+            continue
+        except CustomerPaperSubmissionAuditPayloadCorrupt as exc:
+            try:
+                await _set_customer_paper_submission_audit_retry_state(
+                    retry_id,
+                    status="CORRUPT",
+                    error_type=type(exc).__name__,
+                    increment_attempts=True,
+                )
+            except Exception as state_exc:
+                _log_customer_paper_submission_audit_retry_failure(
+                    event="customer_paper_submission_audit_retry_quarantine_failed",
+                    customer_id=customer_id,
+                    client_order_id=client_order_id,
+                    retry_id=retry_id,
+                    step="quarantine_corrupt_audit_payload",
+                    exc=state_exc,
+                )
+            _log_customer_paper_submission_audit_retry_failure(
+                event="customer_paper_submission_audit_retry_corrupt_audit_event",
+                customer_id=customer_id,
+                client_order_id=client_order_id,
+                retry_id=retry_id,
+                step="read_immutable_audit_payload",
+                exc=exc,
+            )
             continue
         except Exception as exc:
             try:
@@ -793,7 +866,9 @@ async def _customer_paper_submission_stage(
     # The ledger submission is durable. Never convert an accepted order into an
     # HTTP error or invite a duplicate retry when the audit store is unavailable.
     try:
-        await _audit_customer_paper_order_submitted_once(detail)
+        delivered = await _audit_customer_paper_order_submitted_once(detail)
+        if delivered is not True:
+            raise RuntimeError("external customer paper submission audit delivery was not confirmed")
     except CustomerPaperSubmissionAuditDeliveryInFlight as exc:
         # A competing lease is not a failed attempt. Create a retry row when absent,
         # but leave an existing counter unchanged until this worker actually claims delivery.
