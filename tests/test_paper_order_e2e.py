@@ -55,10 +55,6 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"PAPER-{uuid.uuid4().hex[:10]}"
-    now = pd.Timestamp.now(tz="UTC")
-    current_floor = now.floor("5min")
-    submit_bar = current_floor - pd.Timedelta(minutes=10)
-    process_bar = current_floor - pd.Timedelta(minutes=5)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
@@ -77,6 +73,14 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
             state = await execution._get_state_locked(db)
             state.kill_switch = False
             await db.commit()
+
+        # Start the fixture clock only after database initialization. CI startup can
+        # take long enough that provenance captured before init_db() is stale by the
+        # time the execution freshness gate evaluates it.
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        submit_bar = current_floor - pd.Timedelta(minutes=10)
+        process_bar = current_floor - pd.Timedelta(minutes=5)
         df0 = pd.DataFrame(
             {"open":[99.0, 99.5, 100.0], "high":[100.0,100.0,101.0],
              "low":[98.0,99.0,99.5], "close":[99.0,99.5,100.0], "volume":[1.0,1.0,1.0]},
