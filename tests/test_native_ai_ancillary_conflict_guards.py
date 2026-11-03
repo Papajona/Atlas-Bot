@@ -164,6 +164,20 @@ gcloud run deploy atlas \
         self.assertNotIn("SECRET_CEREBRAS_API_KEY_VERSION", cleaned)
         self.assertNotIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
 
+    def test_retired_provider_block_refuses_single_quoted_shared_secret_literal(self):
+        token = '${AI_SECRET_ARGS}'
+        shell = f'''AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3"
+if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS='{token}'
+fi
+gcloud run deploy atlas --set-secrets "${AI_SECRET_ARGS}"
+'''
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "single-quoted shared-secret literal inside a retired-provider conditional",
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
     def test_groq_secret_inside_retired_provider_shared_list_is_not_hoisted(self):
         shell = """if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS="${AI_SECRET_ARGS},CEREBRAS_API_KEY=atlas-cerebras-api-key:${SECRET_CEREBRAS_API_KEY_VERSION},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
