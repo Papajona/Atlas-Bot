@@ -207,12 +207,12 @@ fi
         # Existing Native AI authority code may inspect the bounded advisory envelope,
         # but it must not instantiate a hosted Groq client or call its endpoint.
         for hosted_wiring in (
-            "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)",
-            "import groq as hosted\\nclient = hosted.Groq(api_key=SECRET_GROQ_API_KEY)",
-            "from groq.asyncio import AsyncGroq\\nclient = AsyncGroq(api_key=GROQ_API_KEY)",
+            "from groq import Groq\nclient = Groq(api_key=GROQ_API_KEY)",
+            "import groq as hosted\nclient = hosted.Groq(api_key=SECRET_GROQ_API_KEY)",
+            "from groq.asyncio import AsyncGroq\nclient = AsyncGroq(api_key=GROQ_API_KEY)",
             "GROQ_STRATEGY_MODEL = 'legacy-model'",
             "settings.groq_strategy_model = 'legacy-model'",
-            "import httpx\\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
+            "import httpx\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
             "def review(): return _groq_json('prompt')",
         ):
             with self.subTest(hosted_wiring=hosted_wiring):
@@ -265,11 +265,11 @@ fi
         canonical = (
             Path(__file__).resolve().parents[1] / "app" / "native_ai.py"
         ).read_text(encoding="utf-8")
-        marker = '    reasons = [f"missing_{key}" for key in required if key not in packet or packet.get(key) is None]\\n'
+        marker = '    reasons = [f"missing_{key}" for key in required if key not in packet or packet.get(key) is None]\n'
         self.assertIn(marker, canonical)
         branch_local = canonical.replace(
             marker,
-            marker + '    if packet.get("branch_local_block") is True:\\n        reasons.append("branch_local_block")\\n',
+            marker + '    if packet.get("branch_local_block") is True:\n        reasons.append("branch_local_block")\n',
             1,
         )
         approved_legacy = """def evaluate_native_trade_packet(packet):
@@ -393,7 +393,7 @@ fi
             migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
 
     def test_shell_refusal_redacts_the_exact_unrecognized_provider_line(self):
-        shell = 'printf -v deployment_status "Gemini provider not configured"\\n'
+        shell = 'printf -v deployment_status "Gemini provider not configured"\n'
         with self.assertRaisesRegex(
             migration.MigrationError,
             "provider text in a non-provider shell statement; refusing lossy deletion",
@@ -629,14 +629,14 @@ SECRET_GROQ_API_KEY_VERSION=\"${SECRET_GROQ_API_KEY_VERSION:-}\"
         self.assertIn('SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"', cleaned)
 
     def test_compound_retired_provider_assignment_cannot_erase_deploy_command(self):
-        shell = "OPENAI_API_KEY=legacy; gcloud run deploy atlas-trading-api\\n"
+        shell = "OPENAI_API_KEY=legacy; gcloud run deploy atlas-trading-api\n"
         with self.assertRaisesRegex(
             migration.MigrationError, "compound retired-provider assignment|mixed shell command"
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
     def test_configured_groq_message_is_not_rewritten_as_missing_key_warning(self):
-        shell = 'echo "Optional Groq review configured; Gemini removed"\\n'
+        shell = 'echo "Optional Groq review configured; Gemini removed"\n'
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
         self.assertIn(
             'Groq remains optional research-only support; Atlas Native AI continues locally.',
