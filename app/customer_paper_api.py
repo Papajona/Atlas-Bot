@@ -37,6 +37,7 @@ from .customer_paper_lifecycle import (
     list_open_customer_paper_orders,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
+    verify_customer_paper_market_bar_provenance,
     submit_customer_paper_order,
 )
 from .trading_core import PROFILES
