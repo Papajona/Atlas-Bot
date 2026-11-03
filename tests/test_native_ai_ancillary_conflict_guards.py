@@ -229,6 +229,10 @@ fi
             "settings.groq_strategy_model = 'legacy-model'",
             "import httpx\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
             "def review(): return _groq_json('prompt')",
+            "from app.groq_ai import groq_trade_context_review",
+            "import app.groq_ai as hosted_groq\\nasync def review(packet): return await hosted_groq.groq_trade_context_review(packet)",
+            "async def review(packet): return await groq_trade_context_review(packet)",
+            "async def review(research, intelligence): return await groq_research_review(research, intelligence)",
         ):
             with self.subTest(hosted_wiring=hosted_wiring):
                 self.assertTrue(
