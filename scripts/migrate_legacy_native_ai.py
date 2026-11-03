@@ -5944,8 +5944,19 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             for item in entries
         )
         if not groq_only:
+            groq_entry_present = any(
+                re.search(
+                    r"(?i)\\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\\b",
+                    item,
+                )
+                for item in entries
+            )
+            if groq_entry_present:
+                raise MigrationError(
+                    f"{path} has a Groq secret assignment inside a retired-provider conditional; use the safe Groq hoist path"
+                )
             raise MigrationError(
-                f"{path} has non-Groq shared-secret entries inside a retired-provider conditional; refusing to hoist them"
+                f"{path} has surviving shared-secret entries inside a retired-provider conditional; refusing to make them unconditional"
             )
         return cleaned
 

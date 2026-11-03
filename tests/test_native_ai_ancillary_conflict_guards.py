@@ -148,7 +148,7 @@ fi
             with self.subTest(unsafe=unsafe), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
 
-    def test_retired_provider_block_drops_only_noop_shared_secret_reassignment(self):
+    def test_retired_provider_block_refuses_unverified_shared_secret_reassignment(self):
         shell = """AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
 if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS="${AI_SECRET_ARGS},CEREBRAS_API_KEY=atlas-cerebras-api-key:${SECRET_CEREBRAS_API_KEY_VERSION}"
@@ -156,13 +156,12 @@ fi
 gcloud run deploy atlas \
   --set-secrets "DATABASE_URL=atlas-database-url:3,SECRET_KEY=atlas-secret-key:4${AI_SECRET_ARGS}"
 """
-        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
-        self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
-        self.assertIn("SECRET_KEY=atlas-secret-key:4", cleaned)
-        self.assertNotIn("GEMINI_API_KEY", cleaned)
-        self.assertNotIn("CEREBRAS_API_KEY", cleaned)
-        self.assertNotIn("SECRET_CEREBRAS_API_KEY_VERSION", cleaned)
-        self.assertNotIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
+        # The inherited list could carry a surviving Groq or other secret. Do not
+        # silently discard or hoist an unverified shared-secret expansion.
+        with self.assertRaisesRegex(
+            migration.MigrationError, "surviving shared-secret entries"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
     def test_retired_provider_block_refuses_single_quoted_shared_secret_literal(self):
         token = "$" + "{AI_SECRET_ARGS}"
