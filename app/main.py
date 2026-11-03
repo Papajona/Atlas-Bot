@@ -416,57 +416,39 @@ async def _persist_customer_paper_submission_audit_retry(
     async with SessionLocal() as db:
         dialect_name = db.get_bind().dialect.name
         insert_fn = sqlite_insert if dialect_name == "sqlite" else pg_insert
-        statement = insert_fn(CustomerPaperSubmissionAuditRetry).values(**values)
-        statement = statement.on_conflict_do_update(
-            index_elements=[
-                CustomerPaperSubmissionAuditRetry.customer_id,
-                CustomerPaperSubmissionAuditRetry.client_order_id,
-            ],
-            # Keep corrupt rows quarantined; ordinary upserts cannot silently
-            # turn an unreadable immutable snapshot back into an automatic retry.
-            set_={
-                "status": case(
-                    (CustomerPaperSubmissionAuditRetry.status == "CORRUPT", "CORRUPT"),
-                    else_="PENDING",
+        conflict_values = {
+            "status": case(
+                (CustomerPaperSubmissionAuditRetry.status == "CORRUPT", "CORRUPT"),
+                else_="PENDING",
+            ),
+            "last_error_type": case(
+                (
+                    CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+                    CustomerPaperSubmissionAuditRetry.last_error_type,
                 ),
-                "last_error_type": case(
-                    (
-                        CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
-                        CustomerPaperSubmissionAuditRetry.last_error_type,
-                    ),
-                    else_=str(error_type or "UnknownError")[:80],
-                ),
-                "updated_at": now,
-            },
-        )
+                else_=str(error_type or "UnknownError")[:80],
+            ),
+            "updated_at": now,
+        }
         if increment_attempts:
-            statement = statement.on_conflict_do_update(
+            conflict_values["attempt_count"] = case(
+                (
+                    CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+                    CustomerPaperSubmissionAuditRetry.attempt_count,
+                ),
+                else_=CustomerPaperSubmissionAuditRetry.attempt_count + 1,
+            )
+        statement = (
+            insert_fn(CustomerPaperSubmissionAuditRetry)
+            .values(**values)
+            .on_conflict_do_update(
                 index_elements=[
                     CustomerPaperSubmissionAuditRetry.customer_id,
                     CustomerPaperSubmissionAuditRetry.client_order_id,
                 ],
-                set_={
-                    "status": case(
-                        (CustomerPaperSubmissionAuditRetry.status == "CORRUPT", "CORRUPT"),
-                        else_="PENDING",
-                    ),
-                    "attempt_count": case(
-                        (
-                            CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
-                            CustomerPaperSubmissionAuditRetry.attempt_count,
-                        ),
-                        else_=CustomerPaperSubmissionAuditRetry.attempt_count + 1,
-                    ),
-                    "last_error_type": case(
-                        (
-                            CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
-                            CustomerPaperSubmissionAuditRetry.last_error_type,
-                        ),
-                        else_=str(error_type or "UnknownError")[:80],
-                    ),
-                    "updated_at": now,
-                },
+                set_=conflict_values,
             )
+        )
         await db.execute(statement)
         await db.commit()
 
