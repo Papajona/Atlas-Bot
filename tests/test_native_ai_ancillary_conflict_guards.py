@@ -18,12 +18,12 @@ SPEC.loader.exec_module(migration)
 class AncillaryWorkflowConflictGuardTests(unittest.TestCase):
     def test_groq_research_adapter_allows_reviewed_stdlib_decimal_imports(self):
         source = """from __future__ import annotations
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 async def groq_research_review(research, intelligence):
     value = Decimal("1.25")
     try:
-        return {"value": str(value)}
+        return {"value": str(value.quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))}
     except InvalidOperation:
         return {"status": "unavailable"}
 """
@@ -148,6 +148,47 @@ fi
             with self.subTest(unsafe=unsafe), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
 
+    def test_retired_provider_block_drops_only_noop_shared_secret_reassignment(self):
+        shell = """AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
+if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS="${AI_SECRET_ARGS},CEREBRAS_API_KEY=atlas-cerebras-api-key:${SECRET_CEREBRAS_API_KEY_VERSION}"
+fi
+gcloud run deploy atlas \
+  --set-secrets "DATABASE_URL=atlas-database-url:3,SECRET_KEY=atlas-secret-key:4${AI_SECRET_ARGS}"
+"""
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
+        self.assertIn("SECRET_KEY=atlas-secret-key:4", cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("CEREBRAS_API_KEY", cleaned)
+        self.assertNotIn("SECRET_CEREBRAS_API_KEY_VERSION", cleaned)
+        self.assertNotIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
+
+    def test_retired_provider_block_refuses_single_quoted_shared_secret_literal(self):
+        token = "$" + "{AI_SECRET_ARGS}"
+        shell = (
+            'AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3"\n'
+            'if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then\n'
+            "  AI_SECRET_ARGS='" + token + "'\n"
+            "fi\n"
+            'gcloud run deploy atlas --set-secrets "${AI_SECRET_ARGS}"\n'
+        )
+        with self.assertRaisesRegex(
+            migration.MigrationError,
+            "single-quoted shared-secret literal inside a retired-provider conditional",
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_groq_secret_inside_retired_provider_shared_list_is_not_hoisted(self):
+        shell = """if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
+  AI_SECRET_ARGS="${AI_SECRET_ARGS},CEREBRAS_API_KEY=atlas-cerebras-api-key:${SECRET_CEREBRAS_API_KEY_VERSION},GROQ_API_KEY=atlas-groq-api-key:${SECRET_GROQ_API_KEY_VERSION}"
+fi
+"""
+        with self.assertRaisesRegex(
+            migration.MigrationError, "Groq secret assignment inside a retired-provider conditional"
+        ):
+            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
 
     def test_native_ai_guard_allows_supported_groq_trade_review_but_rejects_retired_wiring(self):
         supported_review = """def evaluate_native_trade_packet(packet):
@@ -181,12 +222,12 @@ fi
         # Existing Native AI authority code may inspect the bounded advisory envelope,
         # but it must not instantiate a hosted Groq client or call its endpoint.
         for hosted_wiring in (
-            "from groq import Groq\\nclient = Groq(api_key=GROQ_API_KEY)",
-            "import groq as hosted\\nclient = hosted.Groq(api_key=SECRET_GROQ_API_KEY)",
-            "from groq.asyncio import AsyncGroq\\nclient = AsyncGroq(api_key=GROQ_API_KEY)",
+            "from groq import Groq\nclient = Groq(api_key=GROQ_API_KEY)",
+            "import groq as hosted\nclient = hosted.Groq(api_key=SECRET_GROQ_API_KEY)",
+            "from groq.asyncio import AsyncGroq\nclient = AsyncGroq(api_key=GROQ_API_KEY)",
             "GROQ_STRATEGY_MODEL = 'legacy-model'",
             "settings.groq_strategy_model = 'legacy-model'",
-            "import httpx\\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
+            "import httpx\nhttpx.post('https://api.groq.com/openai/v1/chat/completions')",
             "def review(): return _groq_json('prompt')",
         ):
             with self.subTest(hosted_wiring=hosted_wiring):
@@ -235,10 +276,34 @@ fi
         self.assertIn("groq_trade_review_invalid", installed)
         self.assertNotIn('return {"safe": True', installed)
 
-    def test_native_ai_installer_refuses_unknown_branch_local_safety_module(self):
-        branch_local = """async def native_trade_safety_review(packet):
-    # Unknown branch-specific safety logic must not be discarded automatically.
-    return {"safe": True, "execution_authority": False}
+    def test_native_ai_installer_refuses_unreviewed_branch_local_safety_and_composer(self):
+        branch_local = """class NativeAIError(RuntimeError):
+    pass
+
+AIProviderError = NativeAIError
+
+def compose_strategy_spec(*, prompt, name, **kwargs):
+    # This draft omits the production schema and must not be propagated.
+    return {"title": name, "execution_mode": "PAPER_SHADOW_ONLY"}
+
+def native_research_review(research, intelligence):
+    return {"status": "LOCAL", "execution_authority": False}
+
+def evaluate_native_trade_packet(packet):
+    # This branch-local veto omits protective-price and advisory-evidence checks.
+    return {"safe": packet.get("data_quality") == "OK", "execution_authority": False}
+
+async def native_trade_safety_review(packet):
+    return evaluate_native_trade_packet(packet)
+
+def native_ai_health_check():
+    return {"status": "PASS", "network_calls": 0}
+
+async def dual_ai_research_review(research, intelligence):
+    return native_research_review(research, intelligence)
+
+async def dual_ai_trade_safety_review(packet):
+    return await native_trade_safety_review(packet)
 """
         approved_legacy = """def evaluate_native_trade_packet(packet):
     return {"safe": True}
@@ -249,14 +314,18 @@ fi
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "app").mkdir()
-            (root / "app" / "native_ai.py").write_text(branch_local, encoding="utf-8")
+            target = root / "app" / "native_ai.py"
+            target.write_text(branch_local, encoding="utf-8")
             with patch.object(migration, "ROOT", root):
-                with self.assertRaisesRegex(migration.MigrationError, "differs from both reviewed Native AI baselines"):
+                with self.assertRaisesRegex(
+                    migration.MigrationError,
+                    "differs from both reviewed Native AI baselines; preserving branch-specific safety logic",
+                ):
                     migration._install_canonical_native_ai(
                         canonical,
                         approved_legacy_source=approved_legacy,
                     )
-            installed = (root / "app" / "native_ai.py").read_text(encoding="utf-8")
+            installed = target.read_text(encoding="utf-8")
         self.assertEqual(installed, branch_local)
 
     def test_native_ai_installer_refuses_existing_hosted_groq_wiring(self):
@@ -313,7 +382,7 @@ fi
             migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
 
     def test_shell_refusal_redacts_the_exact_unrecognized_provider_line(self):
-        shell = 'printf -v deployment_status "Gemini provider not configured"\\n'
+        shell = 'printf -v deployment_status "Gemini provider not configured"\n'
         with self.assertRaisesRegex(
             migration.MigrationError,
             "provider text in a non-provider shell statement; refusing lossy deletion",
@@ -549,14 +618,14 @@ SECRET_GROQ_API_KEY_VERSION=\"${SECRET_GROQ_API_KEY_VERSION:-}\"
         self.assertIn('SECRET_GROQ_API_KEY_VERSION="${SECRET_GROQ_API_KEY_VERSION:-}"', cleaned)
 
     def test_compound_retired_provider_assignment_cannot_erase_deploy_command(self):
-        shell = "OPENAI_API_KEY=legacy; gcloud run deploy atlas-trading-api\\n"
+        shell = "OPENAI_API_KEY=legacy; gcloud run deploy atlas-trading-api\n"
         with self.assertRaisesRegex(
             migration.MigrationError, "compound retired-provider assignment|mixed shell command"
         ):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
     def test_configured_groq_message_is_not_rewritten_as_missing_key_warning(self):
-        shell = 'echo "Optional Groq review configured; Gemini removed"\\n'
+        shell = 'echo "Optional Groq review configured; Gemini removed"\n'
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
         self.assertIn(
             'Groq remains optional research-only support; Atlas Native AI continues locally.',

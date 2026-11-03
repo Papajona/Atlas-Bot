@@ -5911,7 +5911,7 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         return prefix + quote + cleaned + suffix
 
     def is_safe_empty_retired_ai_secret_args(statement: str) -> bool:
-        """Permit a guarded shared-secret list only when retired entries leave it empty."""
+        """Permit only an empty list or a no-op self-assignment after retired entries are removed."""
         if not re.match(r"^\s*(?:export\s+)?AI_SECRET_ARGS\s*=", statement, re.I):
             return False
         cleaned = scrub_ai_secret_args(statement)
@@ -5929,7 +5929,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         if value_match is None:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
-        if value_match.group(2).strip():
+        remaining = value_match.group(2).strip()
+        if remaining == "${AI_SECRET_ARGS}" and value_match.group(1) != '"':
+            raise MigrationError(
+                f"{path} has a single-quoted shared-secret literal inside a retired-provider conditional"
+            )
+        # A former Cerebras/Gemini append often becomes
+        # AI_SECRET_ARGS="\${AI_SECRET_ARGS}" after its provider item is removed.
+        # That assignment changes no value and can be dropped with its retired
+        # condition. Real shared or Groq entries are never moved outside the guard.
+        if remaining not in {"", "${AI_SECRET_ARGS}"}:
             raise MigrationError(
                 f"{path} has surviving shared-secret entries inside a retired-provider conditional; refusing to make them unconditional"
             )
@@ -7106,7 +7115,7 @@ def validate_groq_research_module(source: str, path: str = "app/groq_ai.py") -> 
     allowed_from_imports = {
         (0, "__future__"): {"annotations"},
         (0, "typing"): {"Any"},
-        (0, "decimal"): {"Decimal", "InvalidOperation"},
+        (0, "decimal"): {"Decimal", "InvalidOperation", "ROUND_HALF_UP"},
         (1, "config"): {"settings"},
         (1, "prompt_safety"): {
             "UNTRUSTED_PREAMBLE", "suspicious_instruction_markers", "wrap_untrusted",
@@ -7184,7 +7193,11 @@ def _install_canonical_native_ai(
             raise MigrationError(f"{label} {path} is not valid Python; preserving the branch") from exc
 
     # A previously upgraded branch already has the exact canonical source. The
-    # only other permitted replacement is the known prior Native AI baseline.
+    # only automatic replacement is the known prior Native AI baseline. When a
+    # branch carries a different provider-free module, validate and preserve it:
+    # branch-local safety logic must never be overwritten by propagation. The
+    # workflow's independent AST contract check below still rejects missing or
+    # invalid required exports before any ref can be updated.
     if existing and existing not in {canonical_source, approved_legacy_source}:
         if _has_conflicting_provider_wiring(path, existing):
             raise MigrationError(
@@ -7194,8 +7207,6 @@ def _install_canonical_native_ai(
             f"{path} differs from both reviewed Native AI baselines; preserving branch-specific safety logic"
         )
     if existing != canonical_source:
-        # This is a single-file replacement from a byte-for-byte reviewed baseline,
-        # not a broad branch overwrite. Any unrecognized local module is refused.
         write_text(path, canonical_source)
 
 
