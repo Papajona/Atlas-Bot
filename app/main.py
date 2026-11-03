@@ -561,6 +561,26 @@ async def _restore_customer_paper_submission_audit_retry_snapshot(
     return int(getattr(result, "rowcount", 0) or 0) == 1
 
 
+async def _defer_corrupt_customer_paper_submission_audit_retry(
+    *, customer_id: int, retry_id: int, error_type: str
+) -> None:
+    """Move an un-restorable quarantined row behind the next bounded recovery page."""
+    async with SessionLocal() as db:
+        await db.execute(
+            update(CustomerPaperSubmissionAuditRetry)
+            .where(
+                CustomerPaperSubmissionAuditRetry.id == int(retry_id),
+                CustomerPaperSubmissionAuditRetry.customer_id == int(customer_id),
+                CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
+            )
+            .values(
+                last_error_type=str(error_type or "RestoreFailed")[:80],
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.commit()
+
+
 async def _restore_corrupt_customer_paper_submission_audit_retries(customer_id: int) -> None:
     """Rehydrate quarantined retries only from their indexed immutable audit events.
 
@@ -631,20 +651,11 @@ async def _restore_corrupt_customer_paper_submission_audit_retries(customer_id: 
         # Move a row that has no verifiable source event behind the next bounded
         # scan page. Keep it CORRUPT and do not change its retry attempt count.
         try:
-            async with SessionLocal() as db:
-                await db.execute(
-                    update(CustomerPaperSubmissionAuditRetry)
-                    .where(
-                        CustomerPaperSubmissionAuditRetry.id == retry_id,
-                        CustomerPaperSubmissionAuditRetry.customer_id == customer_id,
-                        CustomerPaperSubmissionAuditRetry.status == "CORRUPT",
-                    )
-                    .values(
-                        last_error_type=restore_error[:80],
-                        updated_at=datetime.now(timezone.utc),
-                    )
-                )
-                await db.commit()
+            await _defer_corrupt_customer_paper_submission_audit_retry(
+                customer_id=customer_id,
+                retry_id=retry_id,
+                error_type=restore_error,
+            )
         except Exception as state_exc:
             _log_customer_paper_submission_audit_retry_failure(
                 event="customer_paper_submission_audit_retry_restore_defer_failed",
