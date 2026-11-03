@@ -77,7 +77,7 @@ jobs:
           if result.returncode != 0:
               raise SystemExit(f"BLOCKED: aapt could not decode the packaged APK resource table: {result.stderr.strip()}")
           actual = extract_runtime_backend_url_from_resource_dump(result.stdout)
-          expected = "https://atlas-debug-backend.invalid"
+          expected = "http://10.0.2.2:8000"
           if actual != expected:
               raise SystemExit(
                   f"BLOCKED: packaged runtime backend resource mismatch: expected {expected!r}, got {actual!r}"
