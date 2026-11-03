@@ -553,6 +553,10 @@ def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch):
 
     async def run():
         await init_db()
+        now = pd.Timestamp.now(tz="UTC")
+        current_floor = now.floor("5min")
+        trigger_bar = current_floor - pd.Timedelta(minutes=10)
+        submitted_bar = trigger_bar - pd.Timedelta(minutes=5)
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
