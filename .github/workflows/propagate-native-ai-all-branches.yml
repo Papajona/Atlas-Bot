@@ -182,13 +182,15 @@ jobs:
                 # provider pattern and an explicit self-exclusion. Filter only that exact
                 # diagnostic command; any changed pattern, path list, or appended command
                 # remains visible to the provider scan.
+                legacy_verify_content = content
+                sub(/^[[:space:]]+/, "", legacy_verify_content)
                 legacy_verify_prefix = "git grep -nIEi "
-                if (index(normalized_content, legacy_verify_prefix) == 1) {
-                  verify_open_quote = index(normalized_content, quote)
-                  verify_close_quote = index(substr(normalized_content, verify_open_quote + 1), quote) + verify_open_quote
+                if (index(legacy_verify_content, legacy_verify_prefix) == 1) {
+                  verify_open_quote = index(legacy_verify_content, quote)
+                  verify_close_quote = index(substr(legacy_verify_content, verify_open_quote + 1), quote) + verify_open_quote
                   if (verify_open_quote > 0 && verify_close_quote > verify_open_quote) {
-                    verify_pattern = substr(normalized_content, verify_open_quote + 1, verify_close_quote - verify_open_quote - 1)
-                    verify_suffix = substr(normalized_content, verify_close_quote + 1)
+                    verify_pattern = substr(legacy_verify_content, verify_open_quote + 1, verify_close_quote - verify_open_quote - 1)
+                    verify_suffix = substr(legacy_verify_content, verify_close_quote + 1)
                     legacy_current_verify_suffix = " -- . " quote ":!tests" quote " " \
                       quote ":!docs" quote " " quote ":!README.md" quote " " \
                       quote ":!CHANGELOG.md" quote " " \
