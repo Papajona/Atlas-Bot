@@ -468,11 +468,25 @@ def test_active_lease_upsert_does_not_increment_and_preserves_corrupt_quarantine
     assert captured["committed"] is True
 
 @pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
-def test_corrupt_retry_snapshot_restoration_requires_matching_authoritative_identity(monkeypatch, dialect):
+@pytest.mark.parametrize("dialect", [sqlite.dialect(), postgresql.dialect()])
+def test_corrupt_retry_snapshot_restores_only_from_matching_indexed_audit_event(monkeypatch, dialect):
     captured = {}
+    original = {
+        "customer_id": 717,
+        "client_order_id": "corrupt-original-order",
+        "status": "SUBMITTED",
+        "execution_status": "SUBMITTED",
+        "quantity": "0.25",
+    }
+    stored = dict(original, audit_chain_rate_limited=True)
 
     class FakeResult:
-        rowcount = 1
+        def __init__(self, detail=None, rowcount=0):
+            self.detail = detail
+            self.rowcount = rowcount
+
+        def scalar_one_or_none(self):
+            return self.detail
 
     class FakeSession:
         async def __aenter__(self):
@@ -483,57 +497,87 @@ def test_corrupt_retry_snapshot_restoration_requires_matching_authoritative_iden
 
         async def execute(self, statement):
             compiled = statement.compile(dialect=dialect)
-            captured["sql"] = str(compiled)
-            captured["params"] = compiled.params
-            return FakeResult()
+            sql = str(compiled)
+            captured.setdefault("statements", []).append(sql)
+            captured.setdefault("params", []).append(compiled.params)
+            if "FROM audit_log" in sql:
+                return FakeResult(json.dumps(stored))
+            return FakeResult(rowcount=1)
 
         async def commit(self):
             captured["committed"] = True
 
     monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
-    original = {
-        "customer_id": 717,
-        "client_order_id": "corrupt-original-order",
-        "status": "SUBMITTED",
-        "execution_status": "SUBMITTED",
-    }
-
     restored = asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
         customer_id=717,
         client_order_id="corrupt-original-order",
-        original_submission_detail=original,
-        authoritative_source="ORDER_LEDGER",
     ))
 
-    sql = captured["sql"]
     assert restored is True
-    assert "customer_paper_submission_audit_retries.status =" in sql
-    assert "submission_detail" in sql.split("SET", 1)[1]
+    assert len(captured["statements"]) == 2
+    lookup_sql, update_sql = captured["statements"]
+    assert "FROM audit_log" in lookup_sql
+    assert "audit_log.event =" in lookup_sql
+    assert "audit_log.idempotency_key =" in lookup_sql
+    assert "customer_paper_submission_audit_retries.status =" in update_sql
+    assert "submission_detail" in update_sql.split("SET", 1)[1]
     assert captured["committed"] is True
-    assert "CORRUPT" in str(captured["params"])
-    assert "PENDING" in str(captured["params"])
-    assert "RestoredFromORDER_LEDGER" in str(captured["params"])
+    update_params = captured["params"][1]
+    assert "CORRUPT" in str(update_params)
+    assert "PENDING" in str(update_params)
+    assert "RestoredFromAuditLog" in str(update_params)
+    restored_payload = json.loads(update_params[next(
+        key for key, value in update_params.items()
+        if isinstance(value, str) and '"quantity":"0.25"' in value
+    )])
+    assert restored_payload == original
 
 
-@pytest.mark.parametrize(
-    "customer_id,client_order_id,detail,source",
-    [
-        (717, "corrupt-original-order", {"customer_id": 717, "client_order_id": "different-order"}, "ORDER_LEDGER"),
-        (717, "corrupt-original-order", {"customer_id": 718, "client_order_id": "corrupt-original-order"}, "AUDIT_LOG"),
-        (717, "corrupt-original-order", {"customer_id": 717, "client_order_id": "corrupt-original-order"}, "LATEST_EXECUTION"),
-    ],
-)
-def test_corrupt_retry_snapshot_restoration_rejects_unverified_or_mismatched_detail(
-    monkeypatch, customer_id, client_order_id, detail, source
-):
-    def unexpected_session():
-        raise AssertionError("invalid restoration must not access the database")
+def test_corrupt_retry_restoration_refuses_absent_or_conflicting_audit_evidence(monkeypatch):
+    for stored in (None, {
+        "customer_id": 717,
+        "client_order_id": "corrupt-original-order",
+        "status": "FILLED",
+        "quantity": "999.0",
+    }):
+        captured = {"updates": 0}
 
-    monkeypatch.setattr(main, "SessionLocal", unexpected_session)
-    with pytest.raises(ValueError):
-        asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
-            customer_id=customer_id,
-            client_order_id=client_order_id,
-            original_submission_detail=detail,
-            authoritative_source=source,
-        ))
+        class FakeResult:
+            rowcount = 1
+
+            def scalar_one_or_none(self):
+                return json.dumps(stored) if stored is not None else None
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            async def execute(self, statement):
+                sql = str(statement)
+                if "FROM audit_log" in sql:
+                    return FakeResult()
+                captured["updates"] += 1
+                return FakeResult()
+
+            async def commit(self):
+                captured["committed"] = True
+
+        monkeypatch.setattr(main, "SessionLocal", lambda: FakeSession())
+        if stored is None:
+            assert asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+                customer_id=717,
+                client_order_id="corrupt-original-order",
+            )) is False
+            assert captured["updates"] == 0
+            assert "committed" not in captured
+        else:
+            with pytest.raises(ValueError, match="authoritative audit-log identity"):
+                asyncio.run(main._restore_customer_paper_submission_audit_retry_snapshot(
+                    customer_id=717,
+                    client_order_id="corrupt-original-order",
+                ))
+            assert captured["updates"] == 0
+            assert "committed" not in captured
