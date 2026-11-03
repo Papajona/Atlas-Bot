@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import subprocess
@@ -148,20 +149,20 @@ fi
             with self.subTest(unsafe=unsafe), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", unsafe)
 
-    def test_retired_provider_block_refuses_unverified_shared_secret_reassignment(self):
+    def test_retired_provider_block_drops_only_noop_shared_secret_reassignment(self):
         shell = """AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}"
 if [[ -n "$SECRET_CEREBRAS_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS="${AI_SECRET_ARGS},CEREBRAS_API_KEY=atlas-cerebras-api-key:${SECRET_CEREBRAS_API_KEY_VERSION}"
 fi
-gcloud run deploy atlas \
-  --set-secrets "DATABASE_URL=atlas-database-url:3,SECRET_KEY=atlas-secret-key:4${AI_SECRET_ARGS}"
+gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3,SECRET_KEY=atlas-secret-key:4${AI_SECRET_ARGS}"
 """
-        # The inherited list could carry a surviving Groq or other secret. Do not
-        # silently discard or hoist an unverified shared-secret expansion.
-        with self.assertRaisesRegex(
-            migration.MigrationError, "surviving shared-secret entries"
-        ):
-            migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+        self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
+        self.assertIn("SECRET_KEY=atlas-secret-key:4", cleaned)
+        self.assertNotIn("GEMINI_API_KEY", cleaned)
+        self.assertNotIn("CEREBRAS_API_KEY", cleaned)
+        self.assertNotIn("SECRET_CEREBRAS_API_KEY_VERSION", cleaned)
+        self.assertNotIn('AI_SECRET_ARGS="${AI_SECRET_ARGS}"', cleaned)
 
     def test_retired_provider_block_refuses_single_quoted_shared_secret_literal(self):
         token = "$" + "{AI_SECRET_ARGS}"
@@ -731,8 +732,7 @@ grant_secret_access atlas-gemini-api-key "$SERVICE_ACCOUNT" # retired provider a
             with self.subTest(shell=shell), self.assertRaises(migration.MigrationError):
                 migration.scrub_shell_deployment("deploy/gcp-bootstrap.sh", shell)
 
-if __name__ == "__main__":
-    unittest.main()
+
 
 
     def test_groq_secret_fragment_is_hoisted_out_of_retired_gemini_conditional(self):
@@ -743,16 +743,29 @@ gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SEC
 """
         cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
         self.assertNotIn("GEMINI", cleaned)
-        self.assertIn('AI_SECRET_ARGS="${GROQ_SECRET_ARG}"', cleaned)
+        self.assertIn('AI_SECRET_ARGS="${GROQ_SECRET_ARG#,}"', cleaned)
         self.assertIn("${AI_SECRET_ARGS}", cleaned)
         self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
-
+        for fragment, expected in (
+            ("", "DATABASE_URL=atlas-database-url:3"),
+            (",GROQ_API_KEY=atlas-groq-api-key:17", "DATABASE_URL=atlas-database-url:3,GROQ_API_KEY=atlas-groq-api-key:17"),
+        ):
+            env = os.environ.copy()
+            env["GROQ_SECRET_ARG"] = fragment
+            result = subprocess.run(
+                ["bash", "-c", 'gcloud() { printf "%s\\n" "$@"; }\n' + cleaned],
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.stdout.splitlines()[-1], expected)
     def test_groq_secret_hoist_refuses_non_groq_shared_secret_entries(self):
         shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3,GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
 fi
 """
-        with self.assertRaisesRegex(migration.MigrationError, "non-Groq shared-secret entries"):
+        with self.assertRaisesRegex(migration.MigrationError, "surviving shared-secret entries (non-Groq shared-secret entries)"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
     def test_native_ai_guard_allows_supported_groq_trade_review_but_rejects_hosted_calls(self):
@@ -779,3 +792,5 @@ fi
                     migration._has_conflicting_provider_wiring("app/native_ai.py", source)
                 )
 
+if __name__ == "__main__":
+    unittest.main()

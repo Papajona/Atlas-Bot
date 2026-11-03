@@ -5932,7 +5932,9 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         if value_match is None:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
         value = value_match.group(3).strip()
-        if not value:
+        if not value or value == "$" + "{AI_SECRET_ARGS}":
+            # This double-quoted self-assignment is a true no-op after retired
+            # entries are scrubbed; removing it cannot alter the shared list.
             return None
         entries = [item.strip() for item in split_shell_list(value.lstrip(","), ",") if item.strip()]
         groq_only = bool(entries) and all(
@@ -5956,9 +5958,17 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                     f"{path} has a Groq secret assignment inside a retired-provider conditional; use the safe Groq hoist path"
                 )
             raise MigrationError(
-                f"{path} has surviving shared-secret entries inside a retired-provider conditional; refusing to make them unconditional"
+                f"{path} has surviving shared-secret entries (non-Groq shared-secret entries) inside a retired-provider conditional; refusing to make them unconditional"
             )
-        return cleaned
+        # Legacy Groq fragments include their own leading comma. Store them
+        # without that separator because deployment-flag rewriting inserts a
+        # comma conditionally when AI_SECRET_ARGS is non-empty.
+        normalized = re.sub(
+            r"\$\{(GROQ_SECRET_(?:ARG|ARGS))\}",
+            r"$" + r"{\1#,}",
+            value,
+        )
+        return value_match.group(1) + value_match.group(2) + normalized + value_match.group(4)
 
     def is_safe_empty_retired_ai_secret_args(statement: str) -> bool:
         """Permit a retired-provider list to disappear only when no shared secrets remain."""
@@ -5972,6 +5982,11 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         if value_match is None:
             raise MigrationError(f"{path} has an unparseable shared AI_SECRET_ARGS assignment")
+        # A double-quoted expansion that assigns the variable to itself is
+        # harmless. scrub_ai_secret_args rejects single-quoted expansions,
+        # command substitutions and compound assignments before this point.
+        if value_match.group(1) == '"' and value_match.group(2).strip() == "$" + "{AI_SECRET_ARGS}":
+            return True
         if re.search(
             r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
             cleaned,
