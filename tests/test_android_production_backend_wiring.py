@@ -96,12 +96,18 @@ def test_android_audit_reports_only_validated_safety_telemetry_in_rendered_compo
         "@Composable\nprivate fun SystemStateRibbon", 1
     )[0]
     assert "AlertDialog(" in audit_dialog
-    assert "resolveAiSafetyAuditStatus(metrics)" in audit_dialog
+    assert "resolveAiSafetyAuditStatus(" in audit_dialog
     assert "AI Safety Decision Budget: ${aiSafetyAudit.deadlineLabel}" in audit_dialog
     assert "Native AI veto reserve: ${aiSafetyAudit.vetoReserveStatus}" in audit_dialog
     assert "configured (Native AI veto reserve protected)" not in audit_dialog
     assert "not independently attested" in RISK_DASHBOARD
     assert "metrics.telemetryAvailable &&" in RISK_DASHBOARD
     assert "metrics.aiSafetyTimeoutSeconds.isFinite()" in RISK_DASHBOARD
+    assert "metrics.lastUpdatedEpochMs > 0L" in RISK_DASHBOARD
+    assert "telemetryTimestampIsFresh" in RISK_DASHBOARD
+    assert "webSocketConnected &&" in RISK_DASHBOARD
+    assert "wsConnectionState is WebSocketConnectionState.Connected" in RISK_DASHBOARD
+    assert "LaunchedEffect(showAuditDialog, metrics.lastUpdatedEpochMs)" in RISK_DASHBOARD
+    assert "delay(AI_SAFETY_TELEMETRY_MAX_AGE_MS - ageMs)" in RISK_DASHBOARD
     assert "AI Safety Decision Deadline" not in audit_dialog
     assert "1.5s FAIL-CLOSED" not in audit_dialog
