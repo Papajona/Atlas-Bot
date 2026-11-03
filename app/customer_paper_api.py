@@ -201,7 +201,18 @@ async def _fetch_verified_market_snapshot(
         # provider window must contain both that history and the immutable submission
         # candle; checking only the submission age can accept orders whose required
         # 20-return context has already rolled out of the provider window.
-        required_start = earliest_utc - timedelta(seconds=required_history_seconds)
+        fill_latency_bars = max(1, int(settings.paper_fill_latency_bars))
+        prefill_context_bars = max(
+            0, _PAPER_MARKET_IMPACT_RETURN_LOOKBACK - fill_latency_bars
+        )
+        # The earliest candle needed for the first eligible fill is 20 returns
+        # before submission + fill latency, not 20 returns before the end of TTL.
+        # Keep the submission candle in the request when latency exceeds the
+        # volatility lookback.
+        required_start = min(
+            earliest_utc,
+            earliest_utc - timedelta(seconds=prefill_context_bars * timeframe_seconds),
+        )
         supported_start = now_utc - timedelta(days=30)
         if required_start < supported_start:
             raise HTTPException(
