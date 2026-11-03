@@ -195,7 +195,7 @@ jobs:
                       quote ":!.github/workflows/production-deploy.yml" quote " " \
                       quote ":!.github/workflows/production-verification.yml" quote " " \
                       quote ":!.github/workflows/propagate-native-ai-all-branches.yml" quote " " \
-                      quote ":!scripts/migrate_legacy_native_ai.py" quote ")\" >&2 || true"
+                      quote ":!scripts/migrate_legacy_native_ai.py" quote " >&2 || true"
                     if (verify_pattern == current_pattern && verify_suffix == legacy_current_verify_suffix) next
                   }
                 }
