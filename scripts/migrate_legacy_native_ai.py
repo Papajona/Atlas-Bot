@@ -7158,146 +7158,6 @@ def _has_conflicting_provider_wiring(path: str, contents: str) -> bool:
     return bool(PROVIDER_RE.search(contents))
 
 
-def _validate_branch_local_native_ai_safety_contract(path: str, contents: str) -> None:
-    """Preserve branch-local Native AI only when its static veto contract is complete."""
-    try:
-        tree = ast.parse(contents, filename=path)
-    except SyntaxError as exc:
-        raise MigrationError(f"{path} is not valid Python; preserving the branch") from exc
-
-    top_level_names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            top_level_names.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            top_level_names.update(
-                alias.asname or alias.name.rsplit(".", 1)[-1]
-                for alias in node.names
-                if alias.name != "*"
-            )
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    top_level_names.add(target.id)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
-            top_level_names.add(node.target.id)
-
-    required_exports = {
-        "NativeAIError", "AIProviderError", "compose_strategy_spec",
-        "native_research_review", "evaluate_native_trade_packet",
-        "native_trade_safety_review", "native_ai_health_check",
-        "dual_ai_research_review", "dual_ai_trade_safety_review",
-    }
-    missing_exports = sorted(required_exports.difference(top_level_names))
-    if missing_exports:
-        raise MigrationError(
-            f"{path} is missing required Native AI veto exports: {missing_exports}"
-        )
-
-    evaluators = [
-        node for node in tree.body
-        if isinstance(node, ast.FunctionDef) and node.name == "evaluate_native_trade_packet"
-    ]
-    reviewers = [
-        node for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "native_trade_safety_review"
-    ]
-    if len(evaluators) != 1 or len(reviewers) != 1:
-        raise MigrationError(
-            f"{path} must define one local Native AI packet veto and one async safety-review API"
-        )
-    evaluator = evaluators[0]
-
-    def named_gets(node: ast.AST, receiver: str) -> set[str]:
-        found: set[str] = set()
-        for child in ast.walk(node):
-            if (
-                isinstance(child, ast.Call)
-                and isinstance(child.func, ast.Attribute)
-                and child.func.attr == "get"
-                and isinstance(child.func.value, ast.Name)
-                and child.func.value.id == receiver
-                and child.args
-                and isinstance(child.args[0], ast.Constant)
-                and isinstance(child.args[0].value, str)
-            ):
-                found.add(child.args[0].value)
-        return found
-
-    required_packet_inputs = {
-        "symbol", "asset", "exchange", "timeframe", "market_timestamp",
-        "trade_plan", "deterministic_rules", "price_context", "data_quality",
-        "adaptive_model", "ml_signal", "groq_trade_review_required",
-        "groq_trade_review",
-    }
-    required_plan_inputs = {"side", "entry_price", "stop_loss_price", "take_profit_price"}
-    constants = {
-        node.value for node in ast.walk(evaluator)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
-    required_veto_reasons = {
-        "market_data_quality_not_safe", "invalid_protective_price",
-        "long_stop_entry_target_order_invalid", "short_target_entry_stop_order_invalid",
-        "ml_signal_is_not_directional", "groq_trade_review_unavailable",
-        "groq_setup_contradiction_veto", "groq_high_risk_veto", "groq_critical_risk_veto",
-        "all_native_safety_checks_passed",
-    }
-    missing_packet_inputs = sorted(required_packet_inputs.difference(named_gets(evaluator, "packet")))
-    missing_plan_inputs = sorted(required_plan_inputs.difference(named_gets(evaluator, "plan")))
-    missing_veto_reasons = sorted(required_veto_reasons.difference(constants))
-    if missing_packet_inputs or missing_plan_inputs or missing_veto_reasons:
-        raise MigrationError(
-            f"{path} does not satisfy the reviewed Native AI safety-veto contract "
-            f"(packet inputs={missing_packet_inputs}, plan inputs={missing_plan_inputs}, "
-            f"veto reasons={missing_veto_reasons})"
-        )
-
-    def return_dict_flags(node: ast.Return) -> tuple[bool, bool] | None:
-        value = node.value
-        if not isinstance(value, ast.Dict):
-            return None
-        fields = {
-            key.value: item
-            for key, item in zip(value.keys, value.values)
-            if isinstance(key, ast.Constant) and isinstance(key.value, str)
-        }
-        safe = fields.get("safe")
-        authority = fields.get("execution_authority")
-        if not isinstance(authority, ast.Constant) or authority.value is not False:
-            return None
-        if isinstance(safe, ast.Constant) and isinstance(safe.value, bool):
-            return safe.value, False
-        if (
-            isinstance(safe, ast.UnaryOp)
-            and isinstance(safe.op, ast.Not)
-            and isinstance(safe.operand, ast.Name)
-            and safe.operand.id == "reasons"
-        ):
-            return True, False
-        return None
-
-    return_flags = [
-        return_dict_flags(node)
-        for node in ast.walk(evaluator)
-        if isinstance(node, ast.Return)
-    ]
-    if (False, False) not in return_flags or (True, False) not in return_flags:
-        raise MigrationError(
-            f"{path} must return both explicit fail-closed and checked-safe results without execution authority"
-        )
-
-    reviewer_calls_evaluator = any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "evaluate_native_trade_packet"
-        for node in ast.walk(reviewers[0])
-    )
-    if not reviewer_calls_evaluator:
-        raise MigrationError(
-            f"{path} native_trade_safety_review must delegate to evaluate_native_trade_packet"
-        )
-
-
 def _install_canonical_native_ai(
     canonical_source: str,
     *,
@@ -7339,8 +7199,9 @@ def _install_canonical_native_ai(
             raise MigrationError(
                 f"{path} contains retired or hosted provider wiring; preserving the branch"
             )
-        _validate_branch_local_native_ai_safety_contract(path, existing)
-        return
+        raise MigrationError(
+            f"{path} differs from both reviewed Native AI baselines; preserving branch-specific safety logic"
+        )
     if existing != canonical_source:
         write_text(path, canonical_source)
 
