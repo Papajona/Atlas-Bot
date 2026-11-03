@@ -644,5 +644,5 @@ def test_staging_attestation_selects_latest_manual_exact_commit_before_checking_
     assert "sort_by(.databaseId) | last //" in selector
 
     # The selected run is evaluated afterward, and any completed non-success blocks staging.
-    assert 'if [[ "$run_status" == "completed" ]]; then' in verification_gate
-    assert 'if [[ "$run_conclusion" != "success" ]]; then' in verification_gate
+    assert 'if [[ "$run_status" == "completed" ]]; then' in deploy
+    assert 'if [[ "$run_conclusion" != "success" ]]; then' in deploy
