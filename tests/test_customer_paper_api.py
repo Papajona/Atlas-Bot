@@ -244,7 +244,6 @@ def test_manual_replay_validates_existing_fill_bar_provenance_before_replay(monk
     monkeypatch.setattr(paper_api, "expire_customer_paper_order", expire_order)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", forbidden_record_fill)
     monkeypatch.setattr(paper_api, "verify_customer_paper_market_bar_provenance", verify_bar_provenance)
-    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
     monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
 
