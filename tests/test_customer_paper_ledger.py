@@ -577,6 +577,38 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         assert positions[0]["quantity"] == "2.000000000000000000"
         assert positions[0]["cost_basis"] == "195.000000000000000000"
 
+        # An autonomous BUY must not merge its units into a manual/legacy
+        # position either. Otherwise the aggregate position could later be
+        # sold by one owner while consuming the other owner's cost basis.
+        await submit_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="autonomous-buy-against-manual-position-92001",
+            venue="binance",
+            market_type="spot",
+            symbol="BTC/USDT",
+            side="BUY",
+            quantity="0.1",
+            currency="USDT",
+            order_type="LIMIT",
+            limit_price="100",
+            metadata={"execution_owner": "autonomous_customer_bot"},
+        )
+        with pytest.raises(
+            CustomerPaperOrderConflict,
+            match="BUY fill owner does not match the owner of the open customer paper position",
+        ):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="autonomous-buy-against-manual-position-92001",
+                idempotency_key="autonomous-buy-against-manual-position-fill-92001",
+                bar_key="autonomous-buy-against-manual-position-bar-92001",
+                quantity="0.1",
+                price="100",
+                group_mark_prices={
+                    ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
+                },
+            )
+
         # A protective SELL created by an older autonomous cycle must not be
         # recoverable against a manual/ownerless legacy position. Insert the
         # stale durable intent directly to model an order that predates the
