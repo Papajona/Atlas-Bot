@@ -657,9 +657,9 @@ _EXACT_DUPLICATE_BRANCH_ALIASES = {
 
 
 def _explicit_duplicate_alias_retirement_proof(
-    branch_name: str, branch_sha: str
+    branch_name: str, branch_sha: str, main_sha: str
 ) -> tuple[bool, str, str | None]:
-    """Prove one exact duplicate alias only while its canonical ref is unchanged."""
+    """Retire an exact duplicate alias only after its canonical commit is in main."""
     expected = _EXACT_DUPLICATE_BRANCH_ALIASES.get(branch_name)
     if expected is None or branch_sha != expected["branch_sha"]:
         return False, "no exact duplicate-alias proof; preserve branch", None
@@ -669,6 +669,13 @@ def _explicit_duplicate_alias_retirement_proof(
     keeper = _run(["git", "rev-parse", "--verify", keeper_ref], check=False)
     if keeper.returncode or keeper.stdout.strip() != expected["keeper_sha"]:
         return False, "canonical duplicate branch is absent or has moved; preserve alias", None
+
+    # A final ls-remote check of the keeper is not atomic with deletion of the
+    # alias. Require the keeper commit itself to be an ancestor of the exact
+    # main snapshot instead. Once integrated, the alias has no unique content
+    # even if the keeper ref disappears concurrently.
+    if not _is_ancestor(expected["keeper_sha"], main_sha):
+        return False, "canonical duplicate commit is not integrated into main; preserve alias", None
 
     for commit_sha in (branch_sha, expected["keeper_sha"]):
         metadata = _run(
@@ -682,7 +689,7 @@ def _explicit_duplicate_alias_retirement_proof(
 
     return (
         True,
-        f"exact duplicate alias of {keeper_branch}; identical audited tree and parent",
+        f"exact duplicate alias of {keeper_branch}; canonical commit is integrated into main",
         keeper_branch,
     )
 
@@ -1037,7 +1044,7 @@ def main() -> int:
                 if item.get("headRefName") == branch_name
             ]
             duplicate_safe, duplicate_reason, duplicate_keeper = _explicit_duplicate_alias_retirement_proof(
-                branch_name, branch_sha
+                branch_name, branch_sha, main_sha
             )
             if duplicate_safe:
                 safe, reason, mismatch_paths = True, duplicate_reason, []
