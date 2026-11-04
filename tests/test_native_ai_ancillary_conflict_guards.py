@@ -736,7 +736,7 @@ grant_secret_access atlas-gemini-api-key "$SERVICE_ACCOUNT" # retired provider a
 
 
     def test_groq_secret_fragment_is_hoisted_out_of_retired_gemini_conditional(self):
-        shell_template = """AI_SECRET_ARGS="{prior}"
+        shell_template = """AI_SECRET_ARGS="__PRIOR__"
 if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
 fi
@@ -762,7 +762,7 @@ gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SEC
         )
         for prior, fragment, expected in cases:
             with self.subTest(prior=prior, fragment=fragment):
-                shell = shell_template.format(prior=prior)
+                shell = shell_template.replace("__PRIOR__", prior)
                 cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
                 self.assertNotIn("GEMINI", cleaned)
                 self.assertIn(
