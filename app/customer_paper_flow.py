@@ -1137,9 +1137,14 @@ async def _protective_exit(
         "quantity": format(quantity, "f"),
         "bar_timestamp": submission_bar_at,
         "submission_status": "SUBMITTED",
-        "execution_status": str(
-            execution.get("persisted_order_status") or execution.get("status") or ""
-        ).upper(),
+        "execution_status": (
+            "WAITING_FOR_NEXT_COMPLETED_BAR"
+            if str(execution.get("persisted_order_status") or "").upper()
+            in {"SUBMITTED", "PARTIALLY_FILLED"}
+            else str(
+                execution.get("persisted_order_status") or execution.get("status") or ""
+            ).upper()
+        ),
         "order_role": "PROTECTIVE_EXIT",
         "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
     }
