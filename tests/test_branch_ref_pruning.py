@@ -1336,7 +1336,7 @@ def test_duplicate_alias_retirement_preserves_until_canonical_commit_is_in_main(
         calls.append(args)
         if args[:3] == ["git", "rev-parse", "--verify"]:
             return subprocess.CompletedProcess(
-                args, 0, "eed301d88b163ea36ad6b473d69400c5eb49b584\\n", ""
+                args, 0, "eed301d88b163ea36ad6b473d69400c5eb49b584\n", ""
             )
         raise AssertionError(f"canonical ancestry must be checked before duplicate metadata: {args}")
 
