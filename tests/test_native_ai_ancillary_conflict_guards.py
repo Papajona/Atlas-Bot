@@ -773,7 +773,9 @@ gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SEC
                 env = os.environ.copy()
                 env["GROQ_SECRET_ARG"] = fragment
                 result = subprocess.run(
-                    ["bash", "-c", 'gcloud() { printf "%s\\n" "$@"; }\\n' + cleaned],
+                bash_prefix = 'gcloud() { printf "%s\\n" "$@"; }\n'
+                result = subprocess.run(
+                    ["bash", "-c", bash_prefix + cleaned],
                     env=env,
                     check=True,
                     capture_output=True,
@@ -785,7 +787,7 @@ gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SEC
   AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3,GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
 fi
 """
-        with self.assertRaisesRegex(migration.MigrationError, "surviving shared-secret entries (non-Groq shared-secret entries)"):
+        with self.assertRaisesRegex(migration.MigrationError, r"surviving shared-secret entries \(non-Groq shared-secret entries\)"):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
     def test_native_ai_guard_allows_supported_groq_trade_review_but_rejects_hosted_calls(self):
