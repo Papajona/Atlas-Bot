@@ -62,7 +62,7 @@ def _sample_annualized_sharpe(values: Any, annualization_factor: Any) -> float |
     variance = math.fsum((value - mean) ** 2 for value in parsed) / (len(parsed) - 1)
     if not math.isfinite(variance) or variance <= 0:
         return None
-    return mean / math.sqrt(variance) * math.sqrt(max(1, int(round(annualization)))
+    return mean / math.sqrt(variance) * math.sqrt(max(1, int(round(annualization))))
 
 
 def _report_context(report: Mapping[str, Any], request: Any) -> dict[str, str]:
