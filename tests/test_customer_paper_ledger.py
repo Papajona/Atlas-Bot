@@ -577,38 +577,6 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         assert positions[0]["quantity"] == "2.000000000000000000"
         assert positions[0]["cost_basis"] == "195.000000000000000000"
 
-        # An autonomous BUY must not merge its units into a manual/legacy
-        # position either. Otherwise the aggregate position could later be
-        # sold by one owner while consuming the other owner's cost basis.
-        await submit_customer_paper_order(
-            customer_id=customer_id,
-            client_order_id="autonomous-buy-against-manual-position-92001",
-            venue="binance",
-            market_type="spot",
-            symbol="BTC/USDT",
-            side="BUY",
-            quantity="0.1",
-            currency="USDT",
-            order_type="LIMIT",
-            limit_price="100",
-            metadata={"execution_owner": "autonomous_customer_bot"},
-        )
-        with pytest.raises(
-            CustomerPaperOrderConflict,
-            match="BUY fill owner does not match the owner of the open customer paper position",
-        ):
-            await record_customer_paper_fill(
-                customer_id=customer_id,
-                client_order_id="autonomous-buy-against-manual-position-92001",
-                idempotency_key="autonomous-buy-against-manual-position-fill-92001",
-                bar_key="autonomous-buy-against-manual-position-bar-92001",
-                quantity="0.1",
-                price="100",
-                group_mark_prices={
-                    ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
-                },
-            )
-
         # A protective SELL created by an older autonomous cycle must not be
         # recoverable against a manual/ownerless legacy position. Insert the
         # stale durable intent directly to model an order that predates the
@@ -651,8 +619,59 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
                     filled_quantity=Decimal("0"),
                     metadata={"legacy_stale_exit_fixture": True},
                 )
+                stale_buy_id = "92001000-0000-4000-8000-000000000005"
+                await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.orders
+                        (id, customer_id, client_order_id, venue, market_type, symbol,
+                         side, order_type, quantity, limit_price, currency,
+                         payload_sha256, metadata_json)
+                    VALUES
+                        (:id, :customer_id, 'stale-autonomous-buy-against-manual-92001',
+                         'binance', 'spot', 'BTC/USDT', 'BUY', 'LIMIT', 0.1,
+                         100, 'USDT', :payload_sha256, CAST(:metadata AS jsonb))
+                    """
+                ), {
+                    "id": stale_buy_id,
+                    "customer_id": customer_id,
+                    "payload_sha256": "b" * 64,
+                    "metadata": json.dumps({
+                        "paper_flow_version": 1,
+                        "execution_owner": "autonomous_customer_bot",
+                    }),
+                })
+                await paper_lifecycle._insert_order_event(
+                    conn,
+                    customer_id=customer_id,
+                    order_id=stale_buy_id,
+                    event_key="stale-autonomous-buy-submitted-92001",
+                    event_type="SUBMITTED",
+                    filled_quantity=Decimal("0"),
+                    metadata={"legacy_stale_buy_fixture": True},
+                )
         finally:
             await lifecycle_engine.dispose()
+
+        with pytest.raises(
+            CustomerPaperOrderConflict,
+            match="BUY fill owner does not match the owner of the open customer paper position",
+        ):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="stale-autonomous-buy-against-manual-92001",
+                idempotency_key="stale-autonomous-buy-against-manual-fill-92001",
+                bar_key="stale-autonomous-buy-against-manual-bar-92001",
+                quantity="0.1",
+                price="100",
+                group_mark_prices={
+                    ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
+                },
+            )
+        stale_buy = await get_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-buy-against-manual-92001",
+        )
+        assert stale_buy["status"] == "SUBMITTED"
 
         with pytest.raises(
             CustomerPaperOrderConflict,
