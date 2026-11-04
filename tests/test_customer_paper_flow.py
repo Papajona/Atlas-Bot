@@ -1618,17 +1618,24 @@ def test_customer_paper_strategy_reports_terminal_protective_exit_without_new_en
         "newly_submitted": True,
     }
     monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
-    monkeypatch.setattr(
-        flow, "ensure_customer_paper_account",
-        _async_value({"currency": "USDT", "paper_cash": "1000", "real_funds_used": False}),
-    )
-    monkeypatch.setattr(flow, "process_customer_paper_orders", _async_value(None))
-    monkeypatch.setattr(flow, "_protective_exit", _async_value({
-        "status": "TERMINAL",
-        "persisted_order_status": "EXPIRED",
-        "order_id": "88041",
-        "order_intent": intent,
-    }))
+
+    async def ensure_account(*_args, **_kwargs):
+        return {"currency": "USDT", "paper_cash": "1000", "real_funds_used": False}
+
+    async def no_pending_orders(*_args, **_kwargs):
+        return None
+
+    async def terminal_protective_exit(*_args, **_kwargs):
+        return {
+            "status": "TERMINAL",
+            "persisted_order_status": "EXPIRED",
+            "order_id": "88041",
+            "order_intent": intent,
+        }
+
+    monkeypatch.setattr(flow, "ensure_customer_paper_account", ensure_account)
+    monkeypatch.setattr(flow, "process_customer_paper_orders", no_pending_orders)
+    monkeypatch.setattr(flow, "_protective_exit", terminal_protective_exit)
 
     async def must_not_submit(**kwargs):
         raise AssertionError(f"terminal protective exit must stop a new strategy order: {kwargs}")
