@@ -690,6 +690,21 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             client_order_id="stale-autonomous-protective-exit-92001",
         )
         assert stale_exit["status"] == "SUBMITTED"
+
+        # Retire the deliberately stale intents after proving neither can fill.
+        # Their pending cross-flow reservations must not contaminate later cases.
+        cancelled_stale_buy = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-buy-against-manual-92001",
+            idempotency_key="retire-stale-autonomous-buy-92001",
+        )
+        assert cancelled_stale_buy["state"] == "CANCELLED"
+        cancelled_stale_exit = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-protective-exit-92001",
+            idempotency_key="retire-stale-autonomous-exit-92001",
+        )
+        assert cancelled_stale_exit["state"] == "CANCELLED"
         unchanged_positions = await get_customer_paper_positions(customer_id=customer_id)
         btc_position = next(row for row in unchanged_positions if row["symbol"] == "BTC/USDT")
         assert btc_position["quantity"] == "2.000000000000000000"
