@@ -559,6 +559,8 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     [
         ("FILLED", "FILLED", "REPLAYED"),
         ("EXPIRED", "EXPIRED", "TERMINAL"),
+        ("SUBMITTED", "WAITING_FOR_NEXT_COMPLETED_BAR", "WAITING_FOR_NEXT_COMPLETED_BAR"),
+        ("PARTIALLY_FILLED", "WAITING_FOR_NEXT_COMPLETED_BAR", "WAITING_FOR_NEXT_COMPLETED_BAR"),
     ],
 )
 def test_protective_exit_recovers_terminal_order_identity_when_concurrent_worker_removes_open_ref(
