@@ -736,31 +736,50 @@ grant_secret_access atlas-gemini-api-key "$SERVICE_ACCOUNT" # retired provider a
 
 
     def test_groq_secret_fragment_is_hoisted_out_of_retired_gemini_conditional(self):
-        shell = """AI_SECRET_ARGS="EXTRA_SECRET=atlas-extra-secret:2"
+        shell_template = """AI_SECRET_ARGS="{prior}"
 if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS=",GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
 fi
 gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SECRET_ARGS}"
 """
-        cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
-        self.assertNotIn("GEMINI", cleaned)
-        self.assertIn('AI_SECRET_ARGS="${AI_SECRET_ARGS-}${AI_SECRET_ARGS:+,}${GROQ_SECRET_ARG#,}"', cleaned)
-        self.assertIn("${AI_SECRET_ARGS}", cleaned)
-        self.assertIn("DATABASE_URL=atlas-database-url:3", cleaned)
-        for fragment, expected in (
-            ("", "DATABASE_URL=atlas-database-url:3,EXTRA_SECRET=atlas-extra-secret:2"),
-            (",GROQ_API_KEY=atlas-groq-api-key:17", "DATABASE_URL=atlas-database-url:3,EXTRA_SECRET=atlas-extra-secret:2,GROQ_API_KEY=atlas-groq-api-key:17"),
-        ):
-            env = os.environ.copy()
-            env["GROQ_SECRET_ARG"] = fragment
-            result = subprocess.run(
-                ["bash", "-c", 'gcloud() { printf "%s\\n" "$@"; }\n' + cleaned],
-                env=env,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(result.stdout.splitlines()[-1], expected)
+        cases = (
+            (
+                "EXTRA_SECRET=atlas-extra-secret:2",
+                "",
+                "DATABASE_URL=atlas-database-url:3,EXTRA_SECRET=atlas-extra-secret:2",
+            ),
+            (
+                "EXTRA_SECRET=atlas-extra-secret:2",
+                ",GROQ_API_KEY=atlas-groq-api-key:17",
+                "DATABASE_URL=atlas-database-url:3,EXTRA_SECRET=atlas-extra-secret:2,GROQ_API_KEY=atlas-groq-api-key:17",
+            ),
+            (
+                "",
+                ",GROQ_API_KEY=atlas-groq-api-key:17",
+                "DATABASE_URL=atlas-database-url:3,GROQ_API_KEY=atlas-groq-api-key:17",
+            ),
+            ("", "", "DATABASE_URL=atlas-database-url:3"),
+        )
+        for prior, fragment, expected in cases:
+            with self.subTest(prior=prior, fragment=fragment):
+                shell = shell_template.format(prior=prior)
+                cleaned = migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+                self.assertNotIn("GEMINI", cleaned)
+                self.assertIn(
+                    'AI_SECRET_ARGS="${AI_SECRET_ARGS-}${GROQ_SECRET_ARG:+${AI_SECRET_ARGS:+,}${GROQ_SECRET_ARG#,}}"',
+                    cleaned,
+                )
+                self.assertIn("${AI_SECRET_ARGS}", cleaned)
+                env = os.environ.copy()
+                env["GROQ_SECRET_ARG"] = fragment
+                result = subprocess.run(
+                    ["bash", "-c", 'gcloud() { printf "%s\\n" "$@"; }\\n' + cleaned],
+                    env=env,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(result.stdout.splitlines()[-1], expected)
     def test_groq_secret_hoist_refuses_non_groq_shared_secret_entries(self):
         shell = """if [[ -n "$SECRET_GEMINI_API_KEY_VERSION" ]]; then
   AI_SECRET_ARGS="DATABASE_URL=atlas-database-url:3,GEMINI_API_KEY=atlas-gemini-api-key:${SECRET_GEMINI_API_KEY_VERSION}${GROQ_SECRET_ARG}"
