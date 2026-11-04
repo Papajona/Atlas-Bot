@@ -1172,7 +1172,7 @@ async def record_customer_paper_fill(
                 """
             ), {"customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol})).first()
             quantity_before = Decimal(position[0]) if position is not None else Decimal("0")
-            if side == "SELL" and quantity_before > 0:
+            if quantity_before > 0:
                 position_metadata = position[4] if position is not None else {}
                 if isinstance(position_metadata, str):
                     try:
@@ -1191,8 +1191,9 @@ async def record_customer_paper_fill(
                     order_metadata.get("execution_owner") or "manual_customer_api"
                 ).strip()
                 if position_owner != order_owner:
+                    action = "SELL" if side == "SELL" else "BUY"
                     raise CustomerPaperOrderConflict(
-                        "SELL fill owner does not match the owner of the open customer paper position"
+                        f"{action} fill owner does not match the owner of the open customer paper position"
                     )
             average_before = Decimal(position[1]) if position is not None else Decimal("0")
             cost_before = Decimal(position[2]) if position is not None else Decimal("0")
