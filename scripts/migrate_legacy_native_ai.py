@@ -6077,12 +6077,12 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 if is_safe_retired_assignment(line):
                     continue
                 raise MigrationError(
-                    f"{path} has a compound retired-provider assignment; refusing to discard its trailing shell command: {stripped[:140]}"
+                    f"{path} has a compound retired-provider assignment; refusing to discard a shell statement with additional commands"
                 )
             if warning_only:
                 continue
             raise MigrationError(
-                f"{path} has a mixed provider-conditioned shell block; refusing to discard unrelated statement: {stripped[:100]}"
+                f"{path} has a mixed provider-conditioned shell block; refusing to discard an unrelated shell statement"
             )
 
         # Drop only a provider-specific if/else block, including its warning body.
@@ -6784,7 +6784,7 @@ def scrub_workflow_ancillary(path: str, text: str) -> str:
         # Unstructured provider-bearing lines are not safe to edit generically.
         if RETIRED_PROVIDER_RE.search(line) or ATLAS_PROVIDER_SECRET_RE.search(line):
             raise MigrationError(
-                f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution: {stripped[:100]}"
+                f"{path} has provider wiring outside a recognized YAML field; refusing unsafe text substitution"
             )
         kept.append(line)
         index += 1
