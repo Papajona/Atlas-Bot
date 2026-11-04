@@ -554,6 +554,87 @@ def test_paper_protective_exit_finds_a_breach_before_the_latest_candle(monkeypat
     }
 
 
+@pytest.mark.parametrize(
+    ("persisted_status", "expected_execution_status", "expected_result_status"),
+    [
+        ("FILLED", "FILLED", "REPLAYED"),
+        ("EXPIRED", "EXPIRED", "TERMINAL"),
+    ],
+)
+def test_protective_exit_recovers_terminal_order_identity_when_concurrent_worker_removes_open_ref(
+    monkeypatch, persisted_status, expected_execution_status, expected_result_status
+):
+    import app.customer_paper_flow as flow
+
+    now = pd.Timestamp.now(tz="UTC").floor("h")
+    prior, breach, latest = now - pd.Timedelta(hours=3), now - pd.Timedelta(hours=2), now - pd.Timedelta(hours=1)
+    frame = pd.DataFrame(
+        {"open": [100.0, 96.0, 100.0], "high": [101.0, 101.0, 101.0],
+         "low": [99.0, 94.0, 99.0], "close": [100.0, 96.0, 100.0],
+         "volume": [1000.0, 1000.0, 1000.0]},
+        index=pd.DatetimeIndex([prior, breach, latest]),
+    )
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"bar_timestamp": latest.isoformat(), "currency": "USDT", "data_sha256": "d" * 64}
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "1",
+        "timeframe": "1h", "last_event_bar_key": prior.isoformat(),
+        "stop_loss_price": "95", "take_profit_price": "110",
+        "execution_owner": "autonomous_customer_bot",
+    }]))
+    captured = {}
+
+    async def submit(**kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "APPENDED",
+            "client_order_id": kwargs["client_order_id"],
+            "order_id": 88041,
+        }
+
+    async def no_longer_open(**_kwargs):
+        return []
+
+    async def read_persisted(*, customer_id, client_order_id):
+        assert customer_id == 7
+        assert client_order_id == captured["client_order_id"]
+        return {
+            "order_id": "88041",
+            "client_order_id": client_order_id,
+            "venue": "binance",
+            "market_type": "spot",
+            "symbol": "BTC/USDT",
+            "side": "SELL",
+            "quantity": "1",
+            "status": persisted_status,
+            "metadata": captured["metadata"],
+        }
+
+    async def must_not_refill(*_args, **_kwargs):
+        raise AssertionError("a concurrently terminalized protective exit must not be filled twice")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", submit)
+    monkeypatch.setattr(flow, "list_open_customer_paper_orders", no_longer_open)
+    monkeypatch.setattr(flow, "get_customer_paper_order", read_persisted)
+    monkeypatch.setattr(flow, "_fill_open_order", must_not_refill)
+
+    result = asyncio.run(flow._protective_exit(7, req, frame, market))
+
+    assert result["status"] == expected_result_status
+    assert result["persisted_order_status"] == persisted_status
+    assert result["order_intent"] == {
+        "client_order_id": captured["client_order_id"],
+        "order_id": "88041",
+        "side": "SELL",
+        "quantity": "1",
+        "bar_timestamp": latest.isoformat(),
+        "submission_status": "SUBMITTED",
+        "execution_status": expected_execution_status,
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": True,
+    }
+
+
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
     import app.customer_paper_flow as flow
 
