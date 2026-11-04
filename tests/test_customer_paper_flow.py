@@ -1601,6 +1601,57 @@ def test_customer_paper_account_initialization_logs_only_safe_failure_metadata(m
     assert "RuntimeError" in caplog.text
 
 
+def test_customer_paper_strategy_reports_terminal_protective_exit_without_new_entry(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    req = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market = {"currency": "USDT"}
+    intent = {
+        "client_order_id": "protective-exit-already-expired",
+        "order_id": "88041",
+        "side": "SELL",
+        "quantity": "1",
+        "bar_timestamp": "2026-11-04T09:00:00+00:00",
+        "submission_status": "SUBMITTED",
+        "execution_status": "EXPIRED",
+        "order_role": "PROTECTIVE_EXIT",
+        "newly_submitted": True,
+    }
+    monkeypatch.setattr(flow, "validate_customer_paper_market", lambda *_args: market)
+    monkeypatch.setattr(
+        flow, "ensure_customer_paper_account",
+        _async_value({"currency": "USDT", "paper_cash": "1000", "real_funds_used": False}),
+    )
+    monkeypatch.setattr(flow, "process_customer_paper_orders", _async_value(None))
+    monkeypatch.setattr(flow, "_protective_exit", _async_value({
+        "status": "TERMINAL",
+        "persisted_order_status": "EXPIRED",
+        "order_id": "88041",
+        "order_intent": intent,
+    }))
+
+    async def must_not_submit(**kwargs):
+        raise AssertionError(f"terminal protective exit must stop a new strategy order: {kwargs}")
+
+    monkeypatch.setattr(flow, "submit_customer_paper_order", must_not_submit)
+    result = asyncio.run(flow.execute_customer_paper_spot_signal(
+        customer_id=7,
+        req=req,
+        df=pd.DataFrame(),
+        market_context={},
+        side="BUY",
+        quantity="0.25",
+        stop_loss_price="95",
+        take_profit_price="110",
+        strategy="terminal-protective-exit-regression",
+    ))
+
+    assert result["status"] == "PROTECTIVE_EXIT_TERMINAL"
+    assert result["decision"] == "NO_TRADE"
+    assert result["order_intent"] == intent
+    assert result["execution"]["persisted_order_status"] == "EXPIRED"
+
+
 def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkeypatch):
     import app.customer_paper_flow as flow
 
