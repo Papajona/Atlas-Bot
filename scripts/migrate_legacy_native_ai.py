@@ -5946,36 +5946,38 @@ def scrub_shell_deployment(path: str, text: str) -> str:
             for item in entries
         )
         if not groq_only:
-            groq_entry_present = any(
-                re.search(
-                    r"(?i)\b(?:GROQ_API_KEY|SECRET_GROQ[A-Z0-9_]*|GROQ_SECRET_(?:ARG|ARGS))\b",
-                    item,
-                )
-                for item in entries
+            groq_entry_pattern = re.compile(
+                r"(?i)(?:\\$\\{GROQ_SECRET_(?:ARG|ARGS)\\}|"
+                r"GROQ_API_KEY=(?:atlas-groq-api-key:)?\\$\\{SECRET_GROQ[A-Z0-9_]*\\})"
             )
-            if groq_entry_present:
+            non_groq_entries = [item for item in entries if not groq_entry_pattern.fullmatch(item)]
+            if non_groq_entries:
                 raise MigrationError(
-                    f"{path} has a Groq secret assignment inside a retired-provider conditional; use the safe Groq hoist path"
+                    f"{path} has surviving shared-secret entries (non-Groq shared-secret entries) "
+                    "inside a retired-provider conditional; refusing to make them unconditional"
                 )
             raise MigrationError(
-                f"{path} has surviving shared-secret entries (non-Groq shared-secret entries) inside a retired-provider conditional; refusing to make them unconditional"
+                f"{path} has an unsafe Groq secret assignment inside a retired-provider conditional; "
+                "refusing to hoist an unrecognized value"
             )
-        # Legacy Groq fragments include their own leading comma. Store them
-        # without that separator because deployment-flag rewriting inserts a
-        # comma conditionally when AI_SECRET_ARGS is non-empty.
+        # Preserve an existing shared list and append optional Groq fragments only
+        # when they are non-empty. Legacy fragments may carry their own leading
+        # comma, which is stripped so the combined list contains one separator.
         normalized = re.sub(
-            r"\$\{(GROQ_SECRET_(?:ARG|ARGS))\}",
-            r"$" + r"{\1#,}",
+            r"\\$\\{(GROQ_SECRET_(?:ARG|ARGS))\\}",
+            r"$" + r"{\\1#,}",
             value,
         )
-        # Preserve any existing shared list and add exactly one separator when needed.
-        return (
-            value_match.group(1)
-            + '"${AI_SECRET_ARGS-}${AI_SECRET_ARGS:+,}'
-            + normalized
-            + '"'
-            + value_match.group(4)[1:]
-        )
+        groq_variable_match = re.search(r"\\$\\{(GROQ_SECRET_(?:ARG|ARGS))\\}", value)
+        if groq_variable_match:
+            groq_variable = groq_variable_match.group(1)
+            optional_groq_suffix = (
+                "${" + groq_variable + ":+${AI_SECRET_ARGS:+,}${" + groq_variable + "#,}}"
+            )
+            combined_value = '"${AI_SECRET_ARGS-}' + optional_groq_suffix + '"'
+        else:
+            combined_value = '"${AI_SECRET_ARGS-}${AI_SECRET_ARGS:+,}' + normalized + '"'
+        return value_match.group(1) + combined_value + value_match.group(4)[1:]
 
     def is_safe_empty_retired_ai_secret_args(statement: str) -> bool:
         """Permit a retired-provider list to disappear only when no shared secrets remain."""
