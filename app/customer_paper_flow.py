@@ -1073,12 +1073,63 @@ async def _protective_exit(
         order for order in pending
         if order.get("client_order_id") == position_client_id
     ]
-    if len(match) != 1:
-        raise CustomerPaperFlowBlocked("Protective exit intent was not visible to recovery")
-    execution = await _fill_open_order(customer_id, match[0], market, df)
+    if len(match) > 1:
+        raise CustomerPaperFlowBlocked("Protective exit intent matched multiple open orders")
+    if len(match) == 1:
+        execution = await _fill_open_order(customer_id, match[0], market, df)
+    else:
+        # Another worker may terminalize the order after submit commits but before
+        # the open-order listing. Recover the immutable row by client identity so
+        # the terminal result still carries the order intent into the audit stage.
+        persisted = await _paper_call(
+            get_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id=position_client_id,
+            ),
+            "read protective exit after concurrent terminalization",
+        )
+        if not isinstance(persisted, dict):
+            raise CustomerPaperFlowBlocked(
+                "Protective exit disappeared from both the open-order list and durable order store"
+            )
+        persisted_metadata = persisted.get("metadata")
+        if not isinstance(persisted_metadata, Mapping):
+            persisted_metadata = {}
+        persisted_status = str(persisted.get("status") or "").strip().upper()
+        expected_order_id = str(submitted.get("order_id") or "").strip()
+        persisted_order_id = str(persisted.get("order_id") or "").strip()
+        if (
+            str(persisted.get("client_order_id") or "").strip() != position_client_id
+            or not persisted_order_id
+            or (expected_order_id and persisted_order_id != expected_order_id)
+            or str(persisted.get("venue") or "").strip().lower() != str(req.exchange).strip().lower()
+            or str(persisted.get("symbol") or "").strip().upper() != str(req.symbol).strip().upper()
+            or str(persisted.get("side") or "").strip().upper() != "SELL"
+            or str(persisted_metadata.get("execution_owner") or "") != "autonomous_customer_bot"
+            or str(persisted_metadata.get("order_role") or "") != "PROTECTIVE_EXIT"
+        ):
+            raise CustomerPaperFlowBlocked(
+                "Durable protective exit identity does not match the submitted order"
+            )
+        if persisted_status == "FILLED":
+            result_status = "REPLAYED"
+        elif persisted_status in {"SUBMITTED", "PARTIALLY_FILLED"}:
+            result_status = "WAITING_FOR_NEXT_COMPLETED_BAR"
+        elif persisted_status in {"EXPIRED", "CANCELLED", "REJECTED"}:
+            result_status = "TERMINAL"
+        else:
+            raise CustomerPaperFlowBlocked(
+                "Durable protective exit has an unsupported terminal or unknown state"
+            )
+        execution = {
+            "status": result_status,
+            "order_id": persisted_order_id,
+            "persisted_order_status": persisted_status,
+        }
+
     # Preserve intent identity for pending and terminal fills alike. If audit storage
-    # was unavailable at submission time, a same-cycle terminal fill still needs a
-    # durable key so the audit stage can repair the event idempotently.
+    # was unavailable at submission time, a same-cycle terminal result still needs
+    # a durable key so the audit stage can repair the event idempotently.
     execution["order_intent"] = {
         "client_order_id": position_client_id,
         "order_id": execution.get("order_id") or submitted.get("order_id"),
@@ -1086,7 +1137,9 @@ async def _protective_exit(
         "quantity": format(quantity, "f"),
         "bar_timestamp": submission_bar_at,
         "submission_status": "SUBMITTED",
-        "execution_status": str(execution.get("status") or "").upper(),
+        "execution_status": str(
+            execution.get("persisted_order_status") or execution.get("status") or ""
+        ).upper(),
         "order_role": "PROTECTIVE_EXIT",
         "newly_submitted": str(submitted.get("status") or "").upper() != "REPLAYED",
     }
@@ -1121,7 +1174,12 @@ async def recover_customer_paper_spot_flow(
         executed = protective.get("status") in {"APPENDED", "REPLAYED"}
         return {
             "mode": "CUSTOMER_PAPER",
-            "status": "PROTECTIVE_EXIT" if executed else "PROTECTIVE_EXIT_PENDING",
+            "status": (
+                "PROTECTIVE_EXIT" if executed
+                else "PROTECTIVE_EXIT_TERMINAL"
+                if protective.get("persisted_order_status") in {"EXPIRED", "CANCELLED", "REJECTED"}
+                else "PROTECTIVE_EXIT_PENDING"
+            ),
             "decision": "TRADE" if executed else "NO_TRADE",
             "execution": protective,
             "order_intent": protective.get("order_intent"),
