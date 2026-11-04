@@ -5947,8 +5947,8 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         )
         if not groq_only:
             groq_entry_pattern = re.compile(
-                r"(?i)(?:\\$\\{GROQ_SECRET_(?:ARG|ARGS)\\}|"
-                r"GROQ_API_KEY=(?:atlas-groq-api-key:)?\\$\\{SECRET_GROQ[A-Z0-9_]*\\})"
+                r"(?i)(?:\$\{GROQ_SECRET_(?:ARG|ARGS)\}|"
+                r"GROQ_API_KEY=(?:atlas-groq-api-key:)?\$\{SECRET_GROQ[A-Z0-9_]*\})"
             )
             non_groq_entries = [item for item in entries if not groq_entry_pattern.fullmatch(item)]
             if non_groq_entries:
@@ -5964,11 +5964,11 @@ def scrub_shell_deployment(path: str, text: str) -> str:
         # when they are non-empty. Legacy fragments may carry their own leading
         # comma, which is stripped so the combined list contains one separator.
         normalized = re.sub(
-            r"\\$\\{(GROQ_SECRET_(?:ARG|ARGS))\\}",
-            r"$" + r"{\\1#,}",
+            r"\$\{(GROQ_SECRET_(?:ARG|ARGS))\}",
+            r"$" + r"{\1#,}",
             value,
         )
-        groq_variable_match = re.search(r"\\$\\{(GROQ_SECRET_(?:ARG|ARGS))\\}", value)
+        groq_variable_match = re.search(r"\$\{(GROQ_SECRET_(?:ARG|ARGS))\}", value)
         if groq_variable_match:
             groq_variable = groq_variable_match.group(1)
             optional_groq_suffix = (
