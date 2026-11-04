@@ -67,3 +67,78 @@ def test_ai_trial_config_changes_archive_digest_and_idempotency_key():
     second = _row_payload(report, context, "ai@config", changed_metrics, "ai", "evaluation-b")
     assert first["config_sha256"] != second["config_sha256"]
     assert first["trial_key"] != second["trial_key"]
+
+
+
+def test_fixed_signal_trial_archive_sharpe_uses_exact_capped_dsr_sample():
+    context = {
+        "asset_class": "forex",
+        "venue": "oanda",
+        "market_type": "practice",
+        "symbol": "EUR_USD",
+        "timeframe": "1h",
+        "dataset_sha256": "a" * 64,
+        "protocol_version": "atlas-purged-walk-forward-v2",
+    }
+    report = {
+        "config": {"signal_threshold": 0.1},
+        "code_sha256": "c" * 64,
+        "validation": {
+            "oos_sample_sha256": "b" * 64,
+            "protocol_version": "atlas-purged-walk-forward-v2",
+            "fixed_signal_oos": {"annualization_factor": 252},
+        },
+    }
+    sample = [0.01, 0.02, -0.01, 0.025]
+    metrics = {
+        "status": "OK",
+        "sharpe": 99.0,
+        "annualization_factor": 252,
+        "oos_return_sample": sample,
+        "oos_total_return": 0.04,
+        "max_drawdown": -0.02,
+        "trades": 8,
+    }
+
+    row = _row_payload(report, context, "component:ensemble", metrics, "ensemble", "evaluation")
+    mean = sum(sample) / len(sample)
+    variance = sum((value - mean) ** 2 for value in sample) / (len(sample) - 1)
+    expected = mean / variance ** 0.5 * 252 ** 0.5
+
+    assert abs(row["annualized_sharpe"] - expected) < 1e-12
+    assert row["annualized_sharpe"] != 99.0
+    assert row["archive_status"] == "RECORDED_UNVERIFIED"
+
+
+def test_fixed_signal_trial_archive_without_capped_sample_is_unverified():
+    context = {
+        "asset_class": "forex",
+        "venue": "oanda",
+        "market_type": "practice",
+        "symbol": "EUR_USD",
+        "timeframe": "1h",
+        "dataset_sha256": "a" * 64,
+        "protocol_version": "atlas-purged-walk-forward-v2",
+    }
+    report = {
+        "config": {"signal_threshold": 0.1},
+        "code_sha256": "c" * 64,
+        "validation": {
+            "oos_sample_sha256": "b" * 64,
+            "protocol_version": "atlas-purged-walk-forward-v2",
+            "fixed_signal_oos": {"annualization_factor": 252},
+        },
+    }
+    metrics = {
+        "status": "OK",
+        "sharpe": 1.5,
+        "annualization_factor": 252,
+        "oos_total_return": 0.04,
+        "max_drawdown": -0.02,
+        "trades": 8,
+    }
+
+    row = _row_payload(report, context, "component:ensemble", metrics, "ensemble", "evaluation")
+
+    assert row["annualized_sharpe"] is None
+    assert row["archive_status"] == "UNVERIFIED_MISSING_METRICS"

@@ -34,8 +34,8 @@ def upgrade() -> None:
         unique=False,
     )
     # Keep this service-only outbox behind the public-schema RLS boundary.
-    # No API role or PUBLIC receives access. Only the explicit atlas_runtime
-    # backend identity, which can already append audit_log rows, gets outbox CRUD.
+    # Grant only to dedicated backend roles already trusted to append audit_log rows;
+    # the staging primary reader is explicitly excluded even if its grants drift.
     if op.get_bind().dialect.name == "postgresql":
         op.execute(
             "ALTER TABLE public.audit_log_external_delivery ENABLE ROW LEVEL SECURITY"
@@ -67,7 +67,8 @@ def upgrade() -> None:
                       )
                       AND r.rolname NOT IN (
                           'postgres', 'service_role', 'supabase_admin',
-                          'supabase_auth_admin', 'authenticator', 'anon', 'authenticated'
+                          'supabase_auth_admin', 'authenticator', 'anon', 'authenticated',
+                          'atlas_paper_reader'
                       )
                       AND has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')
                 LOOP

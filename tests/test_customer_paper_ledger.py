@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timedelta, timezone
 import os
 from decimal import Decimal
@@ -575,6 +576,148 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
         assert positions[0]["symbol"] == "BTC/USDT"
         assert positions[0]["quantity"] == "2.000000000000000000"
         assert positions[0]["cost_basis"] == "195.000000000000000000"
+
+        # A protective SELL created by an older autonomous cycle must not be
+        # recoverable against a manual/ownerless legacy position. Insert the
+        # stale durable intent directly to model an order that predates the
+        # current submission-time ownership guard.
+        stale_exit_id = "92001000-0000-4000-8000-000000000004"
+        lifecycle_engine = paper_lifecycle._paper_engine()
+        try:
+            async with lifecycle_engine.begin() as conn:
+                await conn.execute(
+                    text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                    {"customer_id": str(customer_id)},
+                )
+                await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.orders
+                        (id, customer_id, client_order_id, venue, market_type, symbol,
+                         side, order_type, quantity, limit_price, currency,
+                         payload_sha256, metadata_json)
+                    VALUES
+                        (:id, :customer_id, 'stale-autonomous-protective-exit-92001',
+                         'binance', 'spot', 'BTC/USDT', 'SELL', 'MARKET', 1,
+                         NULL, 'USDT', :payload_sha256, CAST(:metadata AS jsonb))
+                    """
+                ), {
+                    "id": stale_exit_id,
+                    "customer_id": customer_id,
+                    "payload_sha256": "a" * 64,
+                    "metadata": json.dumps({
+                        "paper_flow_version": 1,
+                        "execution_owner": "autonomous_customer_bot",
+                        "order_role": "PROTECTIVE_EXIT",
+                    }),
+                })
+                await paper_lifecycle._insert_order_event(
+                    conn,
+                    customer_id=customer_id,
+                    order_id=stale_exit_id,
+                    event_key="stale-autonomous-protective-exit-submitted-92001",
+                    event_type="SUBMITTED",
+                    filled_quantity=Decimal("0"),
+                    metadata={"legacy_stale_exit_fixture": True},
+                )
+        finally:
+            await lifecycle_engine.dispose()
+
+        with pytest.raises(
+            CustomerPaperOrderConflict,
+            match="SELL fill owner does not match the owner of the open customer paper position",
+        ):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="stale-autonomous-protective-exit-92001",
+                idempotency_key="stale-autonomous-protective-exit-fill-92001",
+                bar_key="stale-autonomous-protective-exit-bar-92001",
+                quantity="1",
+                price="100",
+            )
+        stale_exit = await get_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-protective-exit-92001",
+        )
+        assert stale_exit["status"] == "SUBMITTED"
+        cancelled_stale_exit = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-protective-exit-92001",
+            idempotency_key="retire-stale-autonomous-exit-92001",
+        )
+        assert cancelled_stale_exit["state"] == "CANCELLED"
+
+        # Test the stale BUY only after the protective SELL intent is terminal;
+        # the two cross-owner fixtures must not mask the fill-owner assertion
+        # with the independent pending-order coexistence guard.
+        lifecycle_engine = paper_lifecycle._paper_engine()
+        try:
+            async with lifecycle_engine.begin() as conn:
+                await conn.execute(
+                    text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                    {"customer_id": str(customer_id)},
+                )
+                stale_buy_id = "92001000-0000-4000-8000-000000000005"
+                await conn.execute(text(
+                    """
+                    INSERT INTO customer_paper.orders
+                        (id, customer_id, client_order_id, venue, market_type, symbol,
+                         side, order_type, quantity, limit_price, currency,
+                         payload_sha256, metadata_json)
+                    VALUES
+                        (:id, :customer_id, 'stale-autonomous-buy-against-manual-92001',
+                         'binance', 'spot', 'BTC/USDT', 'BUY', 'LIMIT', 0.1,
+                         100, 'USDT', :payload_sha256, CAST(:metadata AS jsonb))
+                    """
+                ), {
+                    "id": stale_buy_id,
+                    "customer_id": customer_id,
+                    "payload_sha256": "b" * 64,
+                    "metadata": json.dumps({
+                        "paper_flow_version": 1,
+                        "execution_owner": "autonomous_customer_bot",
+                    }),
+                })
+                await paper_lifecycle._insert_order_event(
+                    conn,
+                    customer_id=customer_id,
+                    order_id=stale_buy_id,
+                    event_key="stale-autonomous-buy-submitted-92001",
+                    event_type="SUBMITTED",
+                    filled_quantity=Decimal("0"),
+                    metadata={"legacy_stale_buy_fixture": True},
+                )
+        finally:
+            await lifecycle_engine.dispose()
+
+        with pytest.raises(
+            CustomerPaperOrderConflict,
+            match="BUY fill owner does not match the owner of the open customer paper position",
+        ):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="stale-autonomous-buy-against-manual-92001",
+                idempotency_key="stale-autonomous-buy-against-manual-fill-92001",
+                bar_key="stale-autonomous-buy-against-manual-bar-92001",
+                quantity="0.1",
+                price="100",
+                group_mark_prices={
+                    ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
+                },
+            )
+        stale_buy = await get_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-buy-against-manual-92001",
+        )
+        assert stale_buy["status"] == "SUBMITTED"
+        cancelled_stale_buy = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-buy-against-manual-92001",
+            idempotency_key="retire-stale-autonomous-buy-92001",
+        )
+        assert cancelled_stale_buy["state"] == "CANCELLED"
+        unchanged_positions = await get_customer_paper_positions(customer_id=customer_id)
+        btc_position = next(row for row in unchanged_positions if row["symbol"] == "BTC/USDT")
+        assert btc_position["quantity"] == "2.000000000000000000"
 
         reversed_fill = await reverse_customer_paper_fill(
             customer_id=customer_id, fill_id=second["fill_id"], idempotency_key="lifecycle-reverse-2"

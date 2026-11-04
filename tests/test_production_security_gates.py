@@ -626,7 +626,18 @@ def test_audit_delivery_outbox_grants_only_qualifying_backend_runtime_roles():
     assert "AND r.rolname = 'atlas_runtime'" not in migration
     assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.audit_log_external_delivery" in migration
-    assert "atlas_paper_reader" not in migration
+    assert "'atlas_paper_reader'" in migration
+
+
+def test_read_only_staging_reader_is_excluded_from_audit_outbox_and_retry_grants():
+    for relative_path in (
+        "alembic/versions/0056_audit_log_external_delivery.py",
+        "alembic/versions/0057_customer_paper_submission_audit_retries.py",
+    ):
+        migration = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "AND r.rolname NOT IN (" in migration
+        assert "'atlas_paper_reader'" in migration
+        assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
 
 def test_staging_attestation_selects_latest_manual_exact_commit_before_checking_success():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")

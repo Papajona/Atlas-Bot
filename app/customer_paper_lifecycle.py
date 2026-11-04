@@ -967,14 +967,14 @@ async def record_customer_paper_fill(
             venue = str(order["venue"])
             market_type = str(order["market_type"])
             symbol = str(order["symbol"])
+            stored_metadata = order["metadata_json"]
+            if isinstance(stored_metadata, str):
+                try:
+                    stored_metadata = json.loads(stored_metadata)
+                except ValueError:
+                    stored_metadata = {}
+            order_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
             if enforce_market_bar_budget:
-                stored_metadata = order["metadata_json"]
-                if isinstance(stored_metadata, str):
-                    try:
-                        stored_metadata = json.loads(stored_metadata)
-                    except ValueError:
-                        stored_metadata = {}
-                order_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
                 budget = (await conn.execute(text(
                     """
                     SELECT venue, market_type, symbol, timeframe, bar_at, capacity
@@ -1142,13 +1142,59 @@ async def record_customer_paper_fill(
             )
             position = (await conn.execute(text(
                 """
-                SELECT quantity_after, average_entry_after, cost_basis_after, realized_pnl_after
-                FROM customer_paper.position_events
-                WHERE customer_id=:customer_id AND venue=:venue AND market_type=:market_type AND symbol=:symbol
-                ORDER BY id DESC LIMIT 1
+                SELECT pe.quantity_after, pe.average_entry_after, pe.cost_basis_after,
+                       pe.realized_pnl_after, entry_order.metadata_json AS entry_metadata
+                FROM customer_paper.position_events AS pe
+                LEFT JOIN LATERAL (
+                    SELECT opening_order.metadata_json
+                    FROM customer_paper.position_events AS opening_event
+                    JOIN customer_paper.fills AS opening_fill
+                      ON opening_fill.id = opening_event.fill_id
+                     AND opening_fill.customer_id = opening_event.customer_id
+                    JOIN customer_paper.orders AS opening_order
+                      ON opening_order.id = opening_fill.order_id
+                     AND opening_order.customer_id = opening_fill.customer_id
+                    WHERE opening_event.customer_id = pe.customer_id
+                      AND opening_event.venue = pe.venue
+                      AND opening_event.market_type = pe.market_type
+                      AND opening_event.symbol = pe.symbol
+                      AND opening_event.id <= pe.id
+                      AND opening_event.quantity_before = 0
+                      AND opening_event.quantity_after > 0
+                      AND opening_order.side = 'BUY'
+                    ORDER BY opening_event.id DESC
+                    LIMIT 1
+                ) AS entry_order ON TRUE
+                WHERE pe.customer_id=:customer_id AND pe.venue=:venue
+                  AND pe.market_type=:market_type AND pe.symbol=:symbol
+                ORDER BY pe.id DESC
+                LIMIT 1
                 """
             ), {"customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol})).first()
             quantity_before = Decimal(position[0]) if position is not None else Decimal("0")
+            if quantity_before > 0:
+                position_metadata = position[4] if position is not None else {}
+                if isinstance(position_metadata, str):
+                    try:
+                        position_metadata = json.loads(position_metadata)
+                    except ValueError:
+                        position_metadata = {}
+                position_metadata = (
+                    dict(position_metadata)
+                    if isinstance(position_metadata, Mapping)
+                    else {}
+                )
+                position_owner = str(
+                    position_metadata.get("execution_owner") or "manual_customer_api"
+                ).strip()
+                order_owner = str(
+                    order_metadata.get("execution_owner") or "manual_customer_api"
+                ).strip()
+                if position_owner != order_owner:
+                    action = "SELL" if side == "SELL" else "BUY"
+                    raise CustomerPaperOrderConflict(
+                        f"{action} fill owner does not match the owner of the open customer paper position"
+                    )
             average_before = Decimal(position[1]) if position is not None else Decimal("0")
             cost_before = Decimal(position[2]) if position is not None else Decimal("0")
             realized_before = Decimal(position[3]) if position is not None else Decimal("0")

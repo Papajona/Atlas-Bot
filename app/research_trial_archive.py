@@ -45,6 +45,26 @@ def _int_metric(value: Any) -> int | None:
     return result if result >= 0 else None
 
 
+def _sample_annualized_sharpe(values: Any, annualization_factor: Any) -> float | None:
+    """Match the exact capped OOS sample used by the promotion DSR calculation."""
+    if not isinstance(values, (list, tuple)) or len(values) < 2:
+        return None
+    sample = [_finite(value) for value in values]
+    annualization = _finite(annualization_factor)
+    if (
+        any(value is None for value in sample)
+        or annualization is None
+        or annualization <= 0
+    ):
+        return None
+    parsed = [float(value) for value in sample]
+    mean = math.fsum(parsed) / len(parsed)
+    variance = math.fsum((value - mean) ** 2 for value in parsed) / (len(parsed) - 1)
+    if not math.isfinite(variance) or variance <= 0:
+        return None
+    return mean / math.sqrt(variance) * math.sqrt(annualization)
+
+
 def _report_context(report: Mapping[str, Any], request: Any) -> dict[str, str]:
     provenance = report.get("data_provenance")
     provenance = provenance if isinstance(provenance, Mapping) else {}
@@ -129,7 +149,19 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
     universe = universe if isinstance(universe, Mapping) else {}
     cost = validation.get("execution_cost_calibration")
     cost = cost if isinstance(cost, Mapping) else {}
-    sharpe = _finite(metrics.get("sharpe", metrics.get("oos_sharpe", metrics.get("annualized_sharpe"))))
+    if is_ai_trial:
+        # AI's feature-warmup/label-horizon sample is intentionally separate
+        # from the fixed-signal same-sample DSR distribution.
+        sharpe = _finite(metrics.get("sharpe", metrics.get("oos_sharpe", metrics.get("annualized_sharpe"))))
+    else:
+        # Promotion DSR uses only the exact serialized (latest <=5,000) OOS
+        # return sample. Never archive the full-series Sharpe beside that sample.
+        fixed_oos = validation.get("fixed_signal_oos")
+        fixed_oos = fixed_oos if isinstance(fixed_oos, Mapping) else {}
+        annualization = metrics.get("annualization_factor")
+        if annualization is None:
+            annualization = fixed_oos.get("annualization_factor")
+        sharpe = _sample_annualized_sharpe(metrics.get("oos_return_sample"), annualization)
     total_return = _finite(metrics.get("oos_total_return", metrics.get("total_return")))
     drawdown = _finite(metrics.get("max_drawdown", metrics.get("oos_max_drawdown")))
     trades = _int_metric(metrics.get("trades", metrics.get("oos_trades")))
