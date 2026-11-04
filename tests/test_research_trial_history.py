@@ -4,6 +4,7 @@ import hashlib
 import numpy as np
 
 import app.trading_core as trading_core
+import app.research_engine as research_engine
 
 
 def make_archive_variant(variant_id, sharpe, evidence_path, evidence_bytes):
@@ -116,6 +117,27 @@ def test_dsr_rejects_non_finite_trial_history():
         252,
     )
     assert report["status"] == "INVALID_TRIAL_HISTORY"
+
+
+def test_research_engine_dsr_count_uses_verified_archive_sharpes_not_label_count():
+    accounting = research_engine._trial_accounting_fields(
+        {"prior-fixed@a", "ai@prior-model"},
+        {"current-fixed@b", "current-variant@b"},
+        {"ai@current-model"},
+    )
+    known_fixed_signal_labels = set(accounting["fixed_signal_trial_labels"])
+    assert len(known_fixed_signal_labels) == 3
+    archive_sharpes = [0.12, 0.24, 0.31, 0.44]
+    count = research_engine._verified_dsr_comparable_trial_count(True, archive_sharpes)
+    accounting["dsr_comparable_trial_count"] = count
+    assert accounting["dsr_comparable_trial_count"] == 4
+    assert accounting["dsr_comparable_trial_count"] != len(known_fixed_signal_labels)
+
+
+def test_research_engine_dsr_count_is_unavailable_without_verified_finite_archive():
+    assert research_engine._verified_dsr_comparable_trial_count(False, [0.1, 0.2]) is None
+    assert research_engine._verified_dsr_comparable_trial_count(True, [0.1, float("nan")]) is None
+    assert research_engine._verified_dsr_comparable_trial_count(True, [0.1]) is None
 
 
 def test_reference_manifest_must_be_separate_from_candidate(tmp_path):
