@@ -1238,9 +1238,15 @@ async def execute_customer_paper_spot_signal(
         protective_executed = protective_fill_status in {"APPENDED", "REPLAYED"}
         return {
             "mode": "CUSTOMER_PAPER",
-            "status": "PROTECTIVE_EXIT" if protective_executed else "PROTECTIVE_EXIT_PENDING",
+            "status": (
+                "PROTECTIVE_EXIT" if protective_executed
+                else "PROTECTIVE_EXIT_TERMINAL"
+                if protective.get("persisted_order_status") in {"EXPIRED", "CANCELLED", "REJECTED"}
+                else "PROTECTIVE_EXIT_PENDING"
+            ),
             "decision": "TRADE" if protective_executed else "NO_TRADE",
             "execution": protective,
+            "order_intent": protective.get("order_intent"),
             "paper_account": {k: account[k] for k in ("currency", "paper_cash", "real_funds_used")},
         }
 
