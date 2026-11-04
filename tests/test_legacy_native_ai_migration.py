@@ -5458,7 +5458,7 @@ if [[ -n "$SECRET_GROQ_API_KEY_VERSION" ]]; then AI_SECRET_ARGS="${AI_SECRET_ARG
 
     def test_shell_scrub_redacts_provider_secret_from_compound_assignment_error(self):
         secret = "sk-proj-atlas-compound-assignment-secret-987654"
-        source = f"SECRET_GEMINI_API_KEY={secret}; gcloud run deploy atlas\\n"
+        source = f"SECRET_GEMINI_API_KEY={secret}; gcloud run deploy atlas" + "\n"
         with self.assertRaises(migration.MigrationError) as raised:
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", source)
         self.assertIn("compound retired-provider assignment", str(raised.exception))
