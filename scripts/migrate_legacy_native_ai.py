@@ -5950,6 +5950,16 @@ def scrub_shell_deployment(path: str, text: str) -> str:
                 r"(?i)(?:\$\{GROQ_SECRET_(?:ARG|ARGS)\}|"
                 r"GROQ_API_KEY=(?:atlas-groq-api-key:)?\$\{SECRET_GROQ[A-Z0-9_]*\})"
             )
+            unsafe_groq_assignment = any(
+                re.search(r"(?i)\bGROQ_API_KEY\s*=", item)
+                and not groq_entry_pattern.fullmatch(item)
+                for item in entries
+            )
+            if unsafe_groq_assignment:
+                raise MigrationError(
+                    f"{path} has an unsafe Groq secret assignment inside a retired-provider conditional; "
+                    "refusing to hoist an unrecognized value"
+                )
             non_groq_entries = [item for item in entries if not groq_entry_pattern.fullmatch(item)]
             if non_groq_entries:
                 raise MigrationError(
