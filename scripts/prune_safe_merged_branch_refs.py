@@ -689,7 +689,7 @@ def _explicit_duplicate_alias_retirement_proof(
 
     return (
         True,
-        f"exact duplicate alias of {keeper_branch}; canonical commit is integrated into main",
+        f"exact duplicate alias of {keeper_branch}; identical audited tree and parent; canonical commit is integrated into main",
         keeper_branch,
     )
 
