@@ -772,7 +772,6 @@ gcloud run deploy atlas --set-secrets "DATABASE_URL=atlas-database-url:3${AI_SEC
                 self.assertIn("${AI_SECRET_ARGS}", cleaned)
                 env = os.environ.copy()
                 env["GROQ_SECRET_ARG"] = fragment
-                result = subprocess.run(
                 bash_prefix = 'gcloud() { printf "%s\\n" "$@"; }\n'
                 result = subprocess.run(
                     ["bash", "-c", bash_prefix + cleaned],
