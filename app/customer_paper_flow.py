@@ -1103,8 +1103,11 @@ async def _protective_exit(
             or not persisted_order_id
             or (expected_order_id and persisted_order_id != expected_order_id)
             or str(persisted.get("venue") or "").strip().lower() != str(req.exchange).strip().lower()
+            or str(persisted.get("market_type") or "").strip().lower() != "spot"
             or str(persisted.get("symbol") or "").strip().upper() != str(req.symbol).strip().upper()
             or str(persisted.get("side") or "").strip().upper() != "SELL"
+            or str(persisted.get("quantity") or "").strip() != format(quantity, "f")
+            or str(persisted_metadata.get("timeframe") or "").strip() != str(req.timeframe)
             or str(persisted_metadata.get("execution_owner") or "") != "autonomous_customer_bot"
             or str(persisted_metadata.get("order_role") or "") != "PROTECTIVE_EXIT"
         ):
