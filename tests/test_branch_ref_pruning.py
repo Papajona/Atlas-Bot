@@ -444,7 +444,7 @@ def test_unknown_protection_branch_is_removed_only_when_remote_absence_is_verifi
 
 def test_unknown_protection_branch_still_remote_aborts_pruning(monkeypatch):
     def fake_run(args, *, check=True):
-        return subprocess.CompletedProcess(args, 0, "abc123\\trefs/heads/stale/branch\\n", "")
+        return subprocess.CompletedProcess(args, 0, "abc123\\trefs/heads/stale/branch\n", "")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
 
@@ -1137,8 +1137,8 @@ def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
     script = (
         "set -euo pipefail\n"
         "skip_pruning=false\n"
-        'changed_paths="$(printf "%s\\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
-        'for index in {1..12000}; do printf "app/generated/module_%05d.py\\n" "$index"; done)"\n'
+        'changed_paths="$(printf "%s\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
+        'for index in {1..12000}; do printf "app/generated/module_%05d.py\n" "$index"; done)"\n'
         + guarded_loop
         + '\nif [[ "$skip_pruning" == true ]]; then echo "skip=true" > "$GITHUB_OUTPUT"; '
         'else echo "skip=false" > "$GITHUB_OUTPUT"; fi\n'
@@ -1181,7 +1181,7 @@ def test_branch_without_common_merge_base_is_preserved_without_aborting_reconcil
     _git(tmp_path, "init", "-b", "main", repo)
     _git(repo, "config", "user.name", "Atlas unrelated-history regression")
     _git(repo, "config", "user.email", "atlas-unrelated@example.invalid")
-    (repo / "main.txt").write_text("main history\\n", encoding="utf-8")
+    (repo / "main.txt").write_text("main history\n", encoding="utf-8")
     _git(repo, "add", "main.txt")
     _git(repo, "commit", "-m", "main root")
     main_sha = _git(repo, "rev-parse", "HEAD")
@@ -1189,7 +1189,7 @@ def test_branch_without_common_merge_base_is_preserved_without_aborting_reconcil
     for path in repo.iterdir():
         if path.name != ".git" and path.is_file():
             path.unlink()
-    (repo / "branch.txt").write_text("unrelated branch history\\n", encoding="utf-8")
+    (repo / "branch.txt").write_text("unrelated branch history\n", encoding="utf-8")
     _git(repo, "add", "branch.txt")
     _git(repo, "commit", "-m", "unrelated root")
     branch_sha = _git(repo, "rev-parse", "HEAD")
@@ -1382,19 +1382,63 @@ def test_open_pull_request_head_enumeration_uses_all_rest_pages(monkeypatch):
     def fake_run(args, *, check=True):
         calls.append(args)
         return subprocess.CompletedProcess(
-            args, 0, "feature/page-one\nfeature/page-two\n", ""
+            args,
+            0,
+            json.dumps([
+                [
+                    {"number": 1, "head": {"ref": "feature/page-one"}},
+                    {"number": 2, "head": {"ref": "feature/page-two"}},
+                ],
+                [{"number": 3, "head": {"ref": "feature/page-three"}}],
+            ]),
+            "",
         )
 
     monkeypatch.setattr(pruning, "_run", fake_run)
     heads = pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
 
-    assert heads == {"feature/page-one", "feature/page-two"}
+    assert heads == {
+        "feature/page-one",
+        "feature/page-two",
+        "feature/page-three",
+    }
     assert calls == [[
-        "gh", "api", "--paginate",
+        "gh", "api", "--paginate", "--slurp",
         "repos/Papajona/Atlas-Bot/pulls?state=open&per_page=100",
-        "--jq", ".[].head.ref",
     ]]
 
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        json.dumps([{"number": 1, "head": {"ref": "feature/flat"}}]),
+        json.dumps([["not-a-pull-request"]]),
+        json.dumps([[{"number": 1, "head": {}}]]),
+        "",
+        "{not-json",
+    ],
+)
+def test_open_pull_request_head_enumeration_rejects_malformed_page_data(monkeypatch, payload):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, payload, ""),
+    )
+    with pytest.raises(RuntimeError, match="malformed|unexpected|valid head ref"):
+        pruning._list_open_pull_request_heads("Papajona/Atlas-Bot")
+
+
+def test_slurped_pull_request_parser_rejects_flat_and_malformed_shapes():
+    for payload in (
+        json.dumps({"number": 1}),
+        json.dumps([{"number": 1}]),
+        json.dumps([[None]]),
+        "not-json",
+    ):
+        with pytest.raises(RuntimeError, match="malformed|unexpected"):
+            pruning._parse_slurped_pull_request_pages(
+                payload, description="test pull requests"
+            )
 
 def test_open_pull_request_head_enumeration_fails_closed_on_api_error(monkeypatch):
     def failed_run(args, *, check=True):
@@ -1410,20 +1454,45 @@ def test_branch_open_pull_request_recheck_uses_paginated_exact_head_filter(monke
 
     def fake_run(args, *, check=True):
         calls.append(args)
-        return subprocess.CompletedProcess(args, 0, "321\n", "")
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            json.dumps([[
+                {"number": 321, "head": {"ref": "feature/with&fragment#and+plus"}}
+            ]]),
+            "",
+        )
 
     monkeypatch.setattr(pruning, "_run", fake_run)
     branch_name = "feature/with&fragment#and+plus"
     assert pruning._branch_has_open_pull_request("Papajona/Atlas-Bot", branch_name)
     assert calls == [[
-        "gh", "api", "--paginate", "--method", "GET",
+        "gh", "api", "--paginate", "--slurp", "--method", "GET",
         "repos/Papajona/Atlas-Bot/pulls",
         "-f", "state=open",
         "-f", "head=Papajona:feature/with&fragment#and+plus",
         "-f", "per_page=100",
-        "--jq", ".[].number",
     ]]
 
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        json.dumps([{"number": 321, "head": {"ref": "feature/flat"}}]),
+        json.dumps([[{"number": "321", "head": {"ref": "feature/one"}}]]),
+        json.dumps([[{"number": 321, "head": {}}]]),
+    ],
+)
+def test_branch_open_pull_request_recheck_rejects_malformed_results(monkeypatch, payload):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, payload, ""),
+    )
+    with pytest.raises(RuntimeError, match="unexpected|malformed"):
+        pruning._branch_has_open_pull_request(
+            "Papajona/Atlas-Bot", "feature/one"
+        )
 
 def test_branch_open_pull_request_recheck_fails_closed_on_api_error(monkeypatch):
     def failed_run(args, *, check=True):
@@ -1490,3 +1559,158 @@ def test_branch_pruning_main_refreshes_live_main_and_uses_paginated_pr_guards():
     assert "main_before_delete = _refresh_remote_main_sha(main_sha)" in source
     assert "_branch_has_open_pull_request(repository, branch_name)" in source
     assert '"--limit", "1000"' not in source
+
+
+
+def test_merged_pr_records_require_exact_same_repository_head_identity():
+    records = pruning._merged_pull_request_records(
+        [
+            {
+                "number": 350,
+                "merged_at": "2026-11-02T12:00:00Z",
+                "merge_commit_sha": "local-merge",
+                "head": {
+                    "ref": "feature/shared-name",
+                    "sha": "same-head-sha",
+                    "repo": {"full_name": "Papajona/Atlas-Bot"},
+                },
+            },
+            {
+                "number": 351,
+                "merged_at": "2026-11-02T12:01:00Z",
+                "merge_commit_sha": "fork-merge",
+                "head": {
+                    "ref": "feature/shared-name",
+                    "sha": "same-head-sha",
+                    "repo": {"full_name": "contributor/Atlas-Bot"},
+                },
+            },
+            {
+                "number": 352,
+                "merged_at": "2026-11-02T12:02:00Z",
+                "merge_commit_sha": "deleted-fork-merge",
+                # Deleted forks can omit both the head ref and SHA. They are
+                # not eligible to prove deletion of a same-named local branch.
+                "head": {"repo": None},
+            },
+            {
+                "number": 353,
+                "merged_at": "2026-11-02T12:03:00Z",
+                "merge_commit_sha": "deleted-fork-unknown-head-merge",
+                # GitHub may omit the complete head object after a fork is deleted.
+                "head": None,
+            },
+        ],
+        repository="Papajona/Atlas-Bot",
+    )
+
+    assert records == [{
+        "number": 350,
+        "headRepositoryFullName": "Papajona/Atlas-Bot",
+        "headRefName": "feature/shared-name",
+        "headRefOid": "same-head-sha",
+        "mergeCommit": {"oid": "local-merge"},
+    }]
+
+
+def test_merged_pr_records_reject_malformed_closed_pr_metadata():
+    malformed = [
+        {
+            "number": 355,
+            "merged_at": "2026-11-02T12:00:00Z",
+            "merge_commit_sha": "merge-sha",
+            "head": {
+                "ref": "feature/no-sha",
+                "sha": "",
+                "repo": {"full_name": "Papajona/Atlas-Bot"},
+            },
+        }
+    ]
+    with pytest.raises(RuntimeError, match="malformed same-repository merged pull request"):
+        pruning._merged_pull_request_records(
+            malformed, repository="Papajona/Atlas-Bot"
+        )
+
+
+def test_fork_merge_cannot_authorize_deletion_of_same_named_local_branch():
+    merged_prs = pruning._merged_pull_request_records(
+        [{
+            "number": 354,
+            "merged_at": "2026-11-02T12:00:00Z",
+            "merge_commit_sha": "fork-merge",
+            "head": {
+                "ref": "feature/shared-name",
+                "sha": "same-head-sha",
+                "repo": {"full_name": "contributor/Atlas-Bot"},
+            },
+        }],
+        repository="Papajona/Atlas-Bot",
+    )
+
+    assert should_delete_ref(
+        "feature/shared-name",
+        "same-head-sha",
+        "main-sha",
+        set(),
+        merged_prs,
+        _ancestor_pairs(("fork-merge", "main-sha")),
+    ) == (False, "no exact integration proof; preserve branch")
+
+
+def test_same_tree_merge_child_of_main_ancestor_is_safe_to_retire(monkeypatch):
+    outputs = iter([
+        "same-tree-sha\nside-parent main-parent\n",
+        # The ancestor parent has the same tree as the branch tip.
+        "same-tree-sha\n",
+    ])
+
+    def fake_run(_args, *, check=True):
+        return subprocess.CompletedProcess([], 0, next(outputs), "")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    monkeypatch.setattr(
+        pruning,
+        "_is_ancestor",
+        lambda ancestor, descendant: ancestor == "main-parent" and descendant == "current-main",
+    )
+
+    safe, reason, paths = pruning._resolve_branch_integration(
+        "fix/no-op-reconciliation", "branch-sha", "current-main", set(), []
+    )
+
+    assert safe is True
+    assert "parent already in current main" in reason
+    assert paths == []
+
+
+def test_same_tree_merge_child_proof_rejects_different_tree_or_non_ancestor(monkeypatch):
+    scenarios = [
+        (
+            "different-tree\nmain-parent\n",
+            "same-tree-sha\n",
+            True,
+        ),
+        (
+            "same-tree-sha\nother-parent\n",
+            "same-tree-sha\n",
+            False,
+        ),
+    ]
+    for branch_output, parent_output, is_ancestor in scenarios:
+        outputs = iter([branch_output, parent_output])
+
+        def fake_run(_args, *, check=True):
+            return subprocess.CompletedProcess([], 0, next(outputs), "")
+
+        monkeypatch.setattr(pruning, "_run", fake_run)
+        monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: is_ancestor)
+        assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is False
+
+
+def test_same_tree_merge_child_proof_fails_closed_on_unreadable_git_metadata(monkeypatch):
+    monkeypatch.setattr(
+        pruning,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, "", "object unavailable"),
+    )
+    assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is False

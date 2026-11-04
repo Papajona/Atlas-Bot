@@ -14,6 +14,45 @@ def sample_df(n=700):
     volume = rng.lognormal(10, 0.2, n)
     return pd.DataFrame({"open":open_, "high":high, "low":low, "close":close, "volume":volume}, index=idx)
 
+def test_research_trial_report_separates_dsr_comparable_and_all_recorded_trials():
+    from app.research_engine import _trial_accounting_fields
+
+    fields = _trial_accounting_fields(
+        known_prior_labels={"prior-trend@sha256:a", "ai@prior-model"},
+        current_fixed_signal_labels={"trend@sha256:b", "momentum@sha256:c"},
+        current_ai_labels={"ai@current-model"},
+    )
+
+    assert fields["trial_labels"] == [
+        "ai@current-model",
+        "ai@prior-model",
+        "momentum@sha256:c",
+        "prior-trend@sha256:a",
+        "trend@sha256:b",
+    ]
+    assert fields["fixed_signal_trial_labels"] == [
+        "momentum@sha256:c",
+        "prior-trend@sha256:a",
+        "trend@sha256:b",
+    ]
+    assert fields["ai_trial_labels"] == ["ai@current-model", "ai@prior-model"]
+    assert fields["cumulative_trials"] == 5
+    assert fields["cumulative_recorded_trials"] == 5
+    assert fields["cumulative_fixed_signal_trials"] == 3
+    assert fields["dsr_comparable_trial_count"] is None
+    assert fields["cumulative_ai_trials"] == 2
+
+
+def test_dsr_comparable_trial_count_uses_only_verified_archive_sharpes():
+    from app.research_engine import _verified_dsr_comparable_trial_count
+
+    # Four verified same-sample outcomes, despite only three known fixed-signal labels.
+    assert _verified_dsr_comparable_trial_count(True, [0.2, 0.4, -0.1, 0.3]) == 4
+    assert _verified_dsr_comparable_trial_count(False, [0.2, 0.4, -0.1, 0.3]) is None
+    assert _verified_dsr_comparable_trial_count(True, [0.2]) is None
+    assert _verified_dsr_comparable_trial_count(True, [0.2, float("nan")]) is None
+
+
 def test_strategy_schema_and_bounds():
     df = sample_df()
     s = strategy_signals(df)

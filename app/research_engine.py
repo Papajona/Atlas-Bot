@@ -25,6 +25,50 @@ def _safe(x: float, default: float = 0.0) -> float:
     return float(x) if np.isfinite(x) else default
 
 
+def _trial_accounting_fields(
+    known_prior_labels: set[str],
+    current_fixed_signal_labels: set[str],
+    current_ai_labels: set[str],
+) -> dict[str, object]:
+    """Report all recorded experiments separately from DSR-comparable fixed trials."""
+    prior = {str(label) for label in known_prior_labels}
+    fixed_signal = {
+        label for label in prior if not label.startswith("ai@")
+    } | {str(label) for label in current_fixed_signal_labels}
+    ai = {
+        label for label in prior if label.startswith("ai@")
+    } | {str(label) for label in current_ai_labels}
+    all_recorded = fixed_signal | ai
+    return {
+        # Keep trial_labels and cumulative_trials as the complete persistent archive interface.
+        "trial_labels": sorted(all_recorded),
+        "fixed_signal_trial_labels": sorted(fixed_signal),
+        "ai_trial_labels": sorted(ai),
+        # DSR adjusts only the fixed-signal population with a matching OOS sample.
+        "cumulative_trials": len(all_recorded),
+        "cumulative_recorded_trials": len(all_recorded),
+        "cumulative_fixed_signal_trials": len(fixed_signal),
+        # Labels are not Sharpe outcomes; this is populated only from a verified archive.
+        "dsr_comparable_trial_count": None,
+        "cumulative_ai_trials": len(ai),
+    }
+
+
+
+def _verified_dsr_comparable_trial_count(archive_verified: bool, archive_sharpes: object) -> int | None:
+    """Return the DSR population size only when signed comparable outcomes verify."""
+    if not archive_verified or not isinstance(archive_sharpes, (list, tuple)):
+        return None
+    if len(archive_sharpes) < 2 or any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in archive_sharpes
+    ):
+        return None
+    return len(archive_sharpes)
+
+
 
 def _apply_protective_halts(
     position: pd.Series,
@@ -573,17 +617,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # from labels/counts alone; the trusted research archive and its comparable trial
     # outcomes must be restored and verified first.
     known_prior_labels = set(prior_trial_labels or ())
-    # AI evaluation is an experiment and belongs in persistent accounting, but its
-    # different warm-up/label sample must never enter this fixed-signal DSR set.
-    known_prior_fixed_signal_labels = {label for label in known_prior_labels if not label.startswith("ai@")}
     ai_trial_labels = {f"ai@{ai_fp}"} if include_ai else set()
-    persistent_trial_labels = this_labels | ai_trial_labels
-    # n_trials must describe the SAME trial population the deflated Sharpe ratio
-    # corrects for. AI trials are recorded in persistent accounting, but their
-    # metrics come from a separate sample, so counting them here would inflate the
-    # multiplicity penalty above the dispersion DSR actually applies. Count the
-    # fixed-signal trials only, and keep the AI arm in its own accounting.
-    n_trials = len(known_prior_fixed_signal_labels | this_labels)
+    trial_accounting = _trial_accounting_fields(
+        known_prior_labels,
+        this_labels,
+        ai_trial_labels,
+    )
+    # Use the fixed-signal archive labels for DSR verification; AI stays separate.
+    known_prior_fixed_signal_labels = set(trial_accounting["fixed_signal_trial_labels"]) - this_labels
     # Candidate statistics and signed evidence use an explicit protocol version.
     # Bump it when split geometry changes so old attestations cannot be silently reused.
     ens_cost = cost_breakeven_report(
@@ -771,11 +812,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     archive_verified = archive_validation.get("trial_archive_verified") is True
     archive_sharpes_raw = archive_validation.get("trial_sharpes_annual")
     archive_sharpes = list(archive_sharpes_raw) if isinstance(archive_sharpes_raw, (list, tuple)) else []
-    archive_sharpes_valid = (
-        archive_verified
-        and len(archive_sharpes) >= 2
-        and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in archive_sharpes)
+    dsr_comparable_trial_count = _verified_dsr_comparable_trial_count(
+        archive_verified, archive_sharpes
     )
+    archive_sharpes_valid = dsr_comparable_trial_count is not None
+    trial_accounting["dsr_comparable_trial_count"] = dsr_comparable_trial_count
     if not archive_sharpes_valid:
         dsr = {
             "status": "MISSING_COMPARABLE_TRIAL_PERFORMANCE_HISTORY",
@@ -884,7 +925,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "multiple_testing_sharpe_proxy": adjusted,
                         "deflated_sharpe": dsr,
                         "protocol_version": protocol_version,
-                        "trial_labels": sorted(known_prior_labels | persistent_trial_labels),
+                        **trial_accounting,
                         "trial_registry_complete": trial_registry_complete,
                         "financing_cost_model_complete": carry_evidence_complete,
                         "carry_rate_configured": carry is not None,
@@ -906,7 +947,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                             else "INCOMPLETE_CURRENT_RUN_TRIAL_SET"
                         ),
                         "ai_trial_comparability_note": "AI fold windows use feature warm-up and label-horizon slicing; AI metrics are not mixed into the fixed-signal DSR unless the exact OOS sample is aligned.",
-                        "cumulative_trials": n_trials,
                         "cost_analysis": ens_cost,
                         "fixed_signal_oos": oos,
                         "per_strategy_oos": per_strategy_oos,
