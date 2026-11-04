@@ -619,6 +619,43 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
                     filled_quantity=Decimal("0"),
                     metadata={"legacy_stale_exit_fixture": True},
                 )
+        finally:
+            await lifecycle_engine.dispose()
+
+        with pytest.raises(
+            CustomerPaperOrderConflict,
+            match="SELL fill owner does not match the owner of the open customer paper position",
+        ):
+            await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id="stale-autonomous-protective-exit-92001",
+                idempotency_key="stale-autonomous-protective-exit-fill-92001",
+                bar_key="stale-autonomous-protective-exit-bar-92001",
+                quantity="1",
+                price="100",
+            )
+        stale_exit = await get_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-protective-exit-92001",
+        )
+        assert stale_exit["status"] == "SUBMITTED"
+        cancelled_stale_exit = await cancel_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id="stale-autonomous-protective-exit-92001",
+            idempotency_key="retire-stale-autonomous-exit-92001",
+        )
+        assert cancelled_stale_exit["state"] == "CANCELLED"
+
+        # Test the stale BUY only after the protective SELL intent is terminal;
+        # the two cross-owner fixtures must not mask the fill-owner assertion
+        # with the independent pending-order coexistence guard.
+        lifecycle_engine = paper_lifecycle._paper_engine()
+        try:
+            async with lifecycle_engine.begin() as conn:
+                await conn.execute(
+                    text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                    {"customer_id": str(customer_id)},
+                )
                 stale_buy_id = "92001000-0000-4000-8000-000000000005"
                 await conn.execute(text(
                     """
@@ -672,39 +709,12 @@ def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypat
             client_order_id="stale-autonomous-buy-against-manual-92001",
         )
         assert stale_buy["status"] == "SUBMITTED"
-
-        with pytest.raises(
-            CustomerPaperOrderConflict,
-            match="SELL fill owner does not match the owner of the open customer paper position",
-        ):
-            await record_customer_paper_fill(
-                customer_id=customer_id,
-                client_order_id="stale-autonomous-protective-exit-92001",
-                idempotency_key="stale-autonomous-protective-exit-fill-92001",
-                bar_key="stale-autonomous-protective-exit-bar-92001",
-                quantity="1",
-                price="100",
-            )
-        stale_exit = await get_customer_paper_order(
-            customer_id=customer_id,
-            client_order_id="stale-autonomous-protective-exit-92001",
-        )
-        assert stale_exit["status"] == "SUBMITTED"
-
-        # Retire the deliberately stale intents after proving neither can fill.
-        # Their pending cross-flow reservations must not contaminate later cases.
         cancelled_stale_buy = await cancel_customer_paper_order(
             customer_id=customer_id,
             client_order_id="stale-autonomous-buy-against-manual-92001",
             idempotency_key="retire-stale-autonomous-buy-92001",
         )
         assert cancelled_stale_buy["state"] == "CANCELLED"
-        cancelled_stale_exit = await cancel_customer_paper_order(
-            customer_id=customer_id,
-            client_order_id="stale-autonomous-protective-exit-92001",
-            idempotency_key="retire-stale-autonomous-exit-92001",
-        )
-        assert cancelled_stale_exit["state"] == "CANCELLED"
         unchanged_positions = await get_customer_paper_positions(customer_id=customer_id)
         btc_position = next(row for row in unchanged_positions if row["symbol"] == "BTC/USDT")
         assert btc_position["quantity"] == "2.000000000000000000"
