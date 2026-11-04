@@ -1297,9 +1297,14 @@ def test_exact_duplicate_alias_retirement_requires_exact_tree_parent_and_keeper(
         raise AssertionError(f"unexpected command: {args}")
 
     monkeypatch.setattr(pruning, "_run", fake_run)
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda ancestor, descendant: (
+        ancestor == "eed301d88b163ea36ad6b473d69400c5eb49b584"
+        and descendant == "verified-main-sha"
+    ))
     safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
         "fix/native-ai-propagation-error-alias-20261027",
         "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "verified-main-sha",
     )
     assert safe is True
     assert keeper == "fix/native-ai-propagation-verified-20261027"
@@ -1317,10 +1322,36 @@ def test_duplicate_alias_retirement_preserves_if_canonical_branch_moves(monkeypa
     safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
         "fix/native-ai-propagation-error-alias-20261027",
         "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "verified-main-sha",
     )
     assert safe is False
     assert "canonical duplicate branch is absent or has moved" in reason
     assert keeper is None
+
+
+def test_duplicate_alias_retirement_preserves_until_canonical_commit_is_in_main(monkeypatch):
+    calls = []
+
+    def fake_run(args, *, check=True):
+        calls.append(args)
+        if args[:3] == ["git", "rev-parse", "--verify"]:
+            return subprocess.CompletedProcess(
+                args, 0, "eed301d88b163ea36ad6b473d69400c5eb49b584\\n", ""
+            )
+        raise AssertionError(f"canonical ancestry must be checked before duplicate metadata: {args}")
+
+    monkeypatch.setattr(pruning, "_run", fake_run)
+    monkeypatch.setattr(pruning, "_is_ancestor", lambda _ancestor, _main: False)
+    safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
+        "fix/native-ai-propagation-error-alias-20261027",
+        "99e7d975d909fddc7098b06e31617fc3871e4cb4",
+        "main-without-canonical-commit",
+    )
+
+    assert safe is False
+    assert "not integrated into main" in reason
+    assert keeper is None
+    assert len(calls) == 1
 
 
 def test_duplicate_alias_retirement_preserves_if_alias_tip_moves(monkeypatch):
@@ -1334,6 +1365,7 @@ def test_duplicate_alias_retirement_preserves_if_alias_tip_moves(monkeypatch):
     safe, reason, keeper = pruning._explicit_duplicate_alias_retirement_proof(
         "fix/native-ai-propagation-error-alias-20261027",
         "different-sha",
+        "verified-main-sha",
     )
     assert safe is False
     assert "no exact duplicate-alias proof" in reason
