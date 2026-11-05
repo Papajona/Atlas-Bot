@@ -146,6 +146,14 @@ async function testAdminDashboard(browser, baseUrl) {
   assert.equal(await page.locator("#releaseId").inputValue(), "admin-user-1", "release operator should follow the authenticated identity");
   assert.equal(await page.locator("#adminId").getAttribute("readonly"), "");
   assert.equal(await page.locator("#releaseId").getAttribute("readonly"), "");
+  await waitUntil(async () => mfaStatusCalls === 1);
+  const statusCallsBeforeConcurrentResume = mfaStatusCalls;
+  await page.evaluate(() => Promise.all([resumeAdminSession(), resumeAdminSession()]));
+  assert.equal(
+    mfaStatusCalls,
+    statusCallsBeforeConcurrentResume + 1,
+    "overlapping startup/login session restoration must share one MFA-status request"
+  );
   assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_admin_refresh_token")), null, "legacy refresh token must be purged at dashboard startup");
   assert.equal(await page.evaluate(() => sessionStorage.getItem("ait_approver_token")), null, "legacy approver token must be purged at dashboard startup");
 
