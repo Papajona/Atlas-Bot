@@ -120,25 +120,10 @@ async function beginAdminMfaChallenge(status,expectedEpoch=adminSessionEpoch){
   $('adminMfaCode').focus();
 }
 let adminResumeInFlight=null;
-let adminResumeInFlight=null;
 async function resumeAdminSession(){
   const attemptEpoch=adminSessionEpoch;
   // Share the MFA status/challenge request when startup restoration and a login
   // action overlap for the same session epoch.
-  if(adminResumeInFlight&&adminResumeInFlight.epoch===attemptEpoch){
-    return adminResumeInFlight.promise;
-  }
-  const promise=resumeAdminSessionForEpoch(attemptEpoch);
-  adminResumeInFlight={epoch:attemptEpoch,promise};
-  try{
-    return await promise;
-  }finally{
-    if(adminResumeInFlight?.promise===promise)adminResumeInFlight=null;
-  }
-}
-async function resumeAdminSessionForEpoch(attemptEpoch){
-  // Startup restoration and an operator click can overlap while a saved session
-  // is being verified. Share exactly one verification/challenge flow per epoch.
   if(adminResumeInFlight&&adminResumeInFlight.epoch===attemptEpoch){
     return adminResumeInFlight.promise;
   }
