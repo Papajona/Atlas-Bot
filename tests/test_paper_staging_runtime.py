@@ -227,6 +227,40 @@ def test_readyz_rejects_unauthenticated_probe_before_database(monkeypatch):
     assert invalid.json()["reason"] == "READINESS_AUTHENTICATION_REQUIRED"
 
 
+def test_readyz_rate_limits_authenticated_probes_before_database(monkeypatch):
+    database_url = (
+        "postgresql+asyncpg://atlas_customer_paper:private-test-password@db.example/postgres"
+    )
+    monkeypatch.setattr(paper_staging.settings, "customer_paper_database_url", database_url)
+    token = paper_staging._readiness_bearer_token(database_url)
+    calls = []
+
+    def deny_rate_limit(bucket, *, limit, now=None):
+        calls.append((bucket, limit))
+        return False
+
+    async def forbidden_preflight():
+        raise AssertionError("rate-limited readiness must stop before DB preflight")
+
+    monkeypatch.setattr(paper_staging, "_allow_paper_api_request", deny_rate_limit)
+    monkeypatch.setattr(
+        paper_staging, "_cached_paper_runtime_preflight", forbidden_preflight
+    )
+
+    response = TestClient(paper_staging.app).get(
+        "/readyz", headers={"Authorization": f"Bearer {token}"}
+    )
+
+    assert response.status_code == 429
+    assert response.headers["Retry-After"] == "60"
+    assert response.json()["reason"] == "READINESS_RATE_LIMIT_EXCEEDED"
+    assert len(calls) == 1
+    assert calls[0][0].startswith("paper:readyz:")
+    assert calls[0][1] == paper_staging._PAPER_READINESS_RATE_LIMIT_PER_MINUTE
+
+
+
+
 def test_customer_api_limiter_caps_per_ip_and_per_auth_identity(monkeypatch):
     limiter = paper_staging._paper_api_request_times
     limiter.clear()
