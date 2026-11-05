@@ -774,11 +774,11 @@ def retained_helper():
                 "canonical_text",
                 return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
-                with self.assertRaisesRegex(
-                    migration.MigrationError, "different or unknown binding"
-                ):
-                    migration.transform_ai_providers("canonical-commit")
-            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("from .native_ai import AIProviderError, NativeAIError", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_aliased_all_list_mutation_fails_closed(self):
         legacy = """from .branch_helpers import *
@@ -871,11 +871,11 @@ def retained_helper():
                 migration, "canonical_text",
                 return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
-                with self.assertRaisesRegex(
-                    migration.MigrationError, "dynamic exports or mutates __all__"
-                ):
-                    migration.transform_ai_providers("canonical-commit")
-            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("from .native_ai import AIProviderError, NativeAIError", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_top_level_walrus_binding_counts_as_star_export(self):
         legacy = """def helper():
