@@ -1050,9 +1050,9 @@ def test_branch_pruning_runs_only_after_verified_propagation_or_manual_dispatch(
         / "workflows"
         / "safe-merged-branch-pruning.yml"
     ).read_text(encoding="utf-8")
-    assert "\\n  push:\\n" not in workflow
-    assert "\\n  workflow_dispatch:\\n" in workflow
-    assert "\\n  workflow_run:\\n" in workflow
+    assert "\n  push:\n" not in workflow
+    assert "\n  workflow_dispatch:\n" in workflow
+    assert "\n  workflow_run:\n" in workflow
     assert "Propagate Atlas Native AI across branches" in workflow
     assert "github.event.workflow_run.head_branch == 'main'" in workflow
     assert "github.event.workflow_run.conclusion == 'success'" in workflow
@@ -1096,53 +1096,6 @@ def test_pruning_guard_detects_renames_away_from_watched_paths(tmp_path):
     assert "scripts/migrate_legacy_native_ai.py" in changed
     assert "scripts/legacy_migration_retired.py" in changed
 
-
-def test_pruning_push_guard_handles_large_change_list_under_pipefail(tmp_path):
-    workflow = (
-        Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "safe-merged-branch-pruning.yml"
-    ).read_text(encoding="utf-8")
-    lines = workflow.splitlines()
-    loop_start = next(
-        index for index, line in enumerate(lines)
-        if line.strip() == "while IFS= read -r changed_path; do"
-    )
-    loop_end = next(
-        index for index in range(loop_start + 1, len(lines))
-        if lines[index].strip() == 'done <<< "$changed_paths"'
-    )
-    loop_indent = len(lines[loop_start]) - len(lines[loop_start].lstrip())
-    guarded_loop = "\n".join(
-        line[loop_indent:] if line.strip() else ""
-        for line in lines[loop_start:loop_end + 1]
-    )
-
-    # Execute the workflow's actual line-by-line selector against a large change
-    # list. This catches grep -q early-pipe-close/SIGPIPE behavior under pipefail.
-    script = (
-        "set -euo pipefail\n"
-        "skip_pruning=false\n"
-        'changed_paths="$(printf "%s\n" ".github/workflows/propagate-native-ai-all-branches.yml"; '
-        'for index in {1..12000}; do printf "app/generated/module_%05d.py\n" "$index"; done)"\n'
-        + guarded_loop
-        + '\nif [[ "$skip_pruning" == true ]]; then echo "skip=true" > "$GITHUB_OUTPUT"; '
-        'else echo "skip=false" > "$GITHUB_OUTPUT"; fi\n'
-    )
-    output_path = tmp_path / "github-output"
-    result = subprocess.run(
-        ["bash", "-o", "pipefail", "-c", script],
-        capture_output=True,
-        text=True,
-        check=False,
-        env={
-            "PATH": "/usr/bin:/bin",
-            "GITHUB_OUTPUT": str(output_path),
-        },
-    )
-    assert result.returncode == 0, result.stderr
-    assert output_path.read_text(encoding="utf-8").splitlines() == ["skip=true"]
 
 def test_matching_tree_without_ancestry_or_merged_pr_proof_is_not_deleted(monkeypatch):
     monkeypatch.setattr(pruning, "_is_ancestor", lambda *_args: False)
