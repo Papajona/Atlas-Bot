@@ -5938,6 +5938,16 @@ fi
         with self.assertRaises(migration.MigrationError):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
 
+    def test_migration_assignment_analysis_detects_starred_bindings(self):
+        assignment = ast.parse("*json, remainder = [1, 2]").body[0]
+        self.assertEqual(migration._defined_names(assignment), {"json", "remainder"})
+
+        loop = ast.parse("for *json, remainder in [(1, 2)]:\n    pass").body[0]
+        self.assertEqual(
+            migration._assigned_names(loop.target), {"json", "remainder"}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 
