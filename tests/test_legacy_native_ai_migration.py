@@ -775,7 +775,7 @@ def retained_helper():
                 return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
                 with self.assertRaisesRegex(
-                    migration.MigrationError, "dynamic exports or mutates __all__"
+                    migration.MigrationError, "different or unknown binding"
                 ):
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
@@ -857,6 +857,7 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
+                "__all__ = ['branch_helper']\n"
                 "def helper():\n"
                 "    (__all__ := ['NativeAIError'])\n"
                 "class NativeAIError(RuntimeError):\n"
