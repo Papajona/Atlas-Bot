@@ -2174,10 +2174,17 @@ def transform_ai_providers(commit: str) -> None:
             for candidate in ast.walk(module_node):
                 if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # Function bodies run only if called later, not while importing
-                    # the module. Do not treat their eval/exec usage as import-time
-                    # dynamic export mutation.
+                    # the module. Do not treat their local walrus/export variables as
+                    # module-level __all__ changes. Explicit global __all__ is different:
+                    # it can mutate the module namespace and therefore remains unsafe.
                     for body_statement in candidate.body:
                         deferred_body_nodes.update(id(item) for item in ast.walk(body_statement))
+                    if any(
+                        isinstance(item, ast.Global) and "__all__" in item.names
+                        for body_statement in candidate.body
+                        for item in ast.walk(body_statement)
+                    ):
+                        dynamic_all = True
                 elif isinstance(candidate, ast.Lambda):
                     # Lambda bodies are deferred; default expressions remain checked.
                     deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
@@ -2251,6 +2258,7 @@ def transform_ai_providers(commit: str) -> None:
                     isinstance(nested, ast.Name)
                     and nested.id == "__all__"
                     and isinstance(nested.ctx, ast.Load)
+                    and id(nested) not in deferred_body_nodes
                 ):
                     dynamic_all = True
 
@@ -2284,6 +2292,12 @@ def transform_ai_providers(commit: str) -> None:
                     ):
                         dynamic_all = True
                 elif isinstance(nested, ast.NamedExpr):
+                    # A function-local walrus target belongs to the function's
+                    # local namespace, not the imported module's star exports.
+                    # Function bodies are deferred; only definition-time expressions
+                    # and module/class-suite expressions can change import-time exports.
+                    if id(nested) in deferred_body_nodes:
+                        continue
                     if (
                         id(nested) in class_scope_nodes
                         and id(nested) not in class_global_named_expr_ids
