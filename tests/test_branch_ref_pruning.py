@@ -1043,22 +1043,22 @@ def test_native_ai_retirement_keeps_branches_with_open_prs(monkeypatch):
     assert paths == []
 
 
-def test_branch_pruning_runs_after_propagation_without_racing_its_push():
+def test_branch_pruning_runs_only_after_verified_propagation_or_manual_dispatch():
     workflow = (
         Path(__file__).resolve().parents[1]
         / ".github"
         / "workflows"
         / "safe-merged-branch-pruning.yml"
     ).read_text(encoding="utf-8")
-    assert "\n  push:\n" in workflow
-    assert "\n  workflow_run:\n" in workflow
+    assert "\\n  push:\\n" not in workflow
+    assert "\\n  workflow_dispatch:\\n" in workflow
+    assert "\\n  workflow_run:\\n" in workflow
     assert "Propagate Atlas Native AI across branches" in workflow
     assert "github.event.workflow_run.head_branch == 'main'" in workflow
     assert "github.event.workflow_run.conclusion == 'success'" in workflow
+    assert "github.event_name == 'workflow_dispatch'" in workflow
     assert "actions: read" in workflow
     assert "if: always()" in workflow
-    assert 'if [[ "$EVENT_NAME" == "push" ]]; then' in workflow
-    assert workflow.count("git diff --no-renames --name-only") == 2
     assert "gh api --paginate" in workflow
     assert "for propagation_status in queued in_progress waiting requested pending action_required stale;" in workflow
     assert "status=$propagation_status&per_page=100" in workflow
@@ -1068,22 +1068,9 @@ def test_branch_pruning_runs_after_propagation_without_racing_its_push():
     assert "Cannot prove the successful propagation covers this main commit; preserving every branch." in workflow
     assert "gh run list" not in workflow
     assert "Verify Native AI propagation is successful before pruning" in workflow
-    assert "github.event_name == 'push'" in workflow
     assert "scripts/migrate_legacy_native_ai.py" in workflow
     assert ".github/workflows/propagate-native-ai-all-branches.yml" in workflow
-    assert "while IFS= read -r changed_path;" in workflow
-    assert 'case "$changed_path" in' in workflow
     assert "skip_pruning=false" in workflow
-    assert "grep -Fxq" not in workflow, (
-        "grep -q can close the pipe early under pipefail and fail open"
-    )
-    assert 'echo "skip=true" >> "$GITHUB_OUTPUT"' in workflow
-    assert "if: steps.pruning_guard.outputs.skip != 'true'" in workflow
-    # Keep the established marker guards so one-time cleanup commits cannot recurse.
-    assert "[atlas-branch-prune-once-20261020]" in workflow
-    assert "[atlas-branch-prune-content-once-20261020]" in workflow
-    assert "[atlas-branch-prune-reviewed-once-20261020]" in workflow
-    assert "[atlas-branch-prune-verified-duplicates-once-20261020]" in workflow
 
 
 def test_pruning_guard_detects_renames_away_from_watched_paths(tmp_path):
