@@ -443,6 +443,43 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_star_import_ignores_function_local_all_walrus(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "def configure_local_exports():\n"
+                "    return (__all__ := ['json'])\n"
+                "def branch_helper():\n"
+                "    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = (
+                '"""Canonical facade."""\n'
+                "from __future__ import annotations\n"
+                "from .native_ai import AIProviderError\n"
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("def retained_helper():", result)
+            self.assertIn("return branch_helper()", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_absolute_app_star_import_is_resolved_under_app_package(self):
         legacy = """from app.branch_helpers import *
 
