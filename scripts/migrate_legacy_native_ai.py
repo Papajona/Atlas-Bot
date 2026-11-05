@@ -1313,6 +1313,11 @@ def _defined_names(node: ast.AST) -> set[str]:
 def _assigned_names(target: ast.AST) -> set[str]:
     if isinstance(target, ast.Name):
         return {target.id}
+    if isinstance(target, ast.Starred):
+        # Starred unpacking is a real binding just like a tuple/list target.
+        # Omitting it can make migration dependency checks believe a canonical
+        # import survives when a loop or assignment rebinds that name.
+        return _assigned_names(target.value)
     if isinstance(target, (ast.Tuple, ast.List)):
         return {name for item in target.elts for name in _assigned_names(item)}
     return set()
