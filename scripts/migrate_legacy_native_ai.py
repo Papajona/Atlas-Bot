@@ -1994,6 +1994,25 @@ def transform_ai_providers(commit: str) -> None:
         def directly_assigns_all(target: ast.AST) -> bool:
             return isinstance(target, ast.Name) and target.id == "__all__"
 
+        def statically_assigned_value(
+            target: ast.AST, value: ast.AST, name: str
+        ) -> ast.AST | None:
+            """Resolve one name from literal tuple/list destructuring without execution."""
+            if isinstance(target, ast.Starred):
+                return statically_assigned_value(target.value, value, name)
+            if isinstance(target, ast.Name):
+                return value if target.id == name else None
+            if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, type(target)):
+                if len(target.elts) != len(value.elts):
+                    return None
+                matches = [
+                    statically_assigned_value(left, right, name)
+                    for left, right in zip(target.elts, value.elts)
+                ]
+                found = [match for match in matches if match is not None]
+                return found[0] if len(found) == 1 else None
+            return None
+
         def mutates_all_target(target: ast.AST) -> bool:
             return root_name(target) == "__all__" and not directly_assigns_all(target)
 
@@ -2133,9 +2152,19 @@ def transform_ai_providers(commit: str) -> None:
                         if not immutable_tuple:
                             dynamic_all = True
                 elif targets_bind_all:
-                    # Destructuring/attribute targets that include __all__ are not a
-                    # simple literal export declaration we can safely reason about.
-                    dynamic_all = True
+                    # A destructuring assignment is statically safe only when the
+                    # exact __all__ value can be paired with a literal tuple/list
+                    # expression. This accepts e.g. __all__, unused = (["helper"], None)
+                    # without inferring unrelated public definitions as exports.
+                    assigned_values = [
+                        statically_assigned_value(target, module_node.value, "__all__")
+                        for target in module_node.targets
+                    ]
+                    assigned_values = [value for value in assigned_values if value is not None]
+                    if len(assigned_values) == 1:
+                        all_values.append(assigned_values[0])
+                    else:
+                        dynamic_all = True
                 if any(mutates_all_target(target) for target in module_node.targets):
                     dynamic_all = True
             elif isinstance(module_node, ast.AnnAssign):
