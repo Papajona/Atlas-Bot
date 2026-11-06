@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_branch_pruning_workflows_share_concurrency_and_skip_duplicate_marker_run():
+def test_branch_pruning_workflows_share_concurrency_and_require_verified_propagation():
     regular = (ROOT / ".github/workflows/safe-merged-branch-pruning.yml").read_text()
     one_time = (ROOT / ".github/workflows/prune-contained-branches-once.yml").read_text()
 
@@ -14,10 +14,16 @@ def test_branch_pruning_workflows_share_concurrency_and_skip_duplicate_marker_ru
     assert "group: atlas-native-ai-branch-propagation-and-pruning" in one_time
     assert "cancel-in-progress: false" in regular
     assert "cancel-in-progress: false" in one_time
-    assert "atlas-branch-prune-once-20261020" in regular
-    assert "atlas-branch-prune-content-once-20261020" in regular
-    assert "atlas-branch-prune-reviewed-once-20261020" in regular
-    assert "atlas-branch-prune-verified-duplicates-once-20261020" in regular
+    assert "\n  workflow_dispatch:\n" in regular
+    assert "\n  workflow_run:\n" in regular
+    assert "- Propagate Atlas Native AI across branches" in regular
+    assert "github.event.workflow_run.head_branch == 'main'" in regular
+    assert "github.event.workflow_run.conclusion == 'success'" in regular
+    assert "for propagation_status in queued in_progress waiting requested pending action_required stale;" in regular
+    assert "atlas-branch-prune-once-20261020" not in regular
+    assert "atlas-branch-prune-content-once-20261020" not in regular
+    assert "atlas-branch-prune-reviewed-once-20261020" not in regular
+    assert "atlas-branch-prune-verified-duplicates-once-20261020" not in regular
     assert "ALREADY ABSENT (concurrent cleanup removed ref)" in one_time
 
 
