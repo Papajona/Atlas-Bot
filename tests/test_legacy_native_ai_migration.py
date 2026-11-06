@@ -443,6 +443,78 @@ def retained_helper():
                     migration.transform_ai_providers("canonical-commit")
             self.assertEqual(target.read_text(encoding="utf-8"), legacy)
 
+    def test_star_import_ignores_function_local_all_walrus(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "def configure_local_exports():\n"
+                "    return (__all__ := ['json'])\n"
+                "def branch_helper():\n"
+                "    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = (
+                '"""Canonical facade."""\n'
+                "from __future__ import annotations\n"
+                "from .native_ai import AIProviderError\n"
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("def retained_helper():", result)
+            self.assertIn("return branch_helper()", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
+    def test_star_import_accepts_literal_destructured_all_export_list(self):
+        legacy = """from .branch_helpers import *
+
+class AIProviderError(RuntimeError):
+    pass
+
+def retained_helper():
+    return branch_helper()
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "app" / "ai_providers.py"
+            helper_module = root / "app" / "branch_helpers.py"
+            target.parent.mkdir()
+            helper_module.write_text(
+                "__all__, unused = ([\"branch_helper\"], None)\n"
+                "NativeAIError = object()\n"
+                "def branch_helper():\n    return True\n",
+                encoding="utf-8",
+            )
+            target.write_text(legacy, encoding="utf-8")
+            canonical = (
+                '"""Canonical facade."""\n'
+                "from __future__ import annotations\n"
+                "from .native_ai import AIProviderError, NativeAIError\n"
+            )
+            with patch.object(migration, "ROOT", root), patch.object(
+                migration, "canonical_text", return_value=canonical
+            ):
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("return branch_helper()", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
+
     def test_absolute_app_star_import_is_resolved_under_app_package(self):
         legacy = """from app.branch_helpers import *
 
@@ -702,11 +774,11 @@ def retained_helper():
                 "canonical_text",
                 return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
-                with self.assertRaisesRegex(
-                    migration.MigrationError, "dynamic exports or mutates __all__"
-                ):
-                    migration.transform_ai_providers("canonical-commit")
-            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("from .native_ai import AIProviderError, NativeAIError", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_aliased_all_list_mutation_fails_closed(self):
         legacy = """from .branch_helpers import *
@@ -785,6 +857,7 @@ def retained_helper():
             helper_module = root / "app" / "branch_helpers.py"
             target.parent.mkdir()
             helper_module.write_text(
+                "__all__ = ['branch_helper']\n"
                 "def helper():\n"
                 "    (__all__ := ['NativeAIError'])\n"
                 "class NativeAIError(RuntimeError):\n"
@@ -798,11 +871,11 @@ def retained_helper():
                 migration, "canonical_text",
                 return_value="from .native_ai import AIProviderError, NativeAIError\n",
             ):
-                with self.assertRaisesRegex(
-                    migration.MigrationError, "dynamic exports or mutates __all__"
-                ):
-                    migration.transform_ai_providers("canonical-commit")
-            self.assertEqual(target.read_text(encoding="utf-8"), legacy)
+                migration.transform_ai_providers("canonical-commit")
+            result = target.read_text(encoding="utf-8")
+            self.assertIn("from .branch_helpers import *", result)
+            self.assertIn("from .native_ai import AIProviderError, NativeAIError", result)
+            self.assertNotRegex(result, migration.PROVIDER_RE)
 
     def test_top_level_walrus_binding_counts_as_star_export(self):
         legacy = """def helper():
@@ -5937,6 +6010,16 @@ fi
         )
         with self.assertRaises(migration.MigrationError):
             migration.scrub_shell_deployment("deploy/cloud-run-deploy.sh", shell)
+
+    def test_migration_assignment_analysis_detects_starred_bindings(self):
+        assignment = ast.parse("*json, remainder = [1, 2]").body[0]
+        self.assertEqual(migration._defined_names(assignment), {"json", "remainder"})
+
+        loop = ast.parse("for *json, remainder in [(1, 2)]:\n    pass").body[0]
+        self.assertEqual(
+            migration._assigned_names(loop.target), {"json", "remainder"}
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -119,8 +119,23 @@ async function beginAdminMfaChallenge(status,expectedEpoch=adminSessionEpoch){
   $('authState').textContent='Enter the six-digit Google Authenticator code. Protected data remains locked until the server confirms AAL2.';
   $('adminMfaCode').focus();
 }
+let adminResumeInFlight=null;
 async function resumeAdminSession(){
   const attemptEpoch=adminSessionEpoch;
+  // Share the MFA status/challenge request when startup restoration and a login
+  // action overlap for the same session epoch.
+  if(adminResumeInFlight&&adminResumeInFlight.epoch===attemptEpoch){
+    return adminResumeInFlight.promise;
+  }
+  const promise=resumeAdminSessionForEpoch(attemptEpoch);
+  adminResumeInFlight={epoch:attemptEpoch,promise};
+  try{
+    return await promise;
+  }finally{
+    if(adminResumeInFlight?.promise===promise)adminResumeInFlight=null;
+  }
+}
+async function resumeAdminSessionForEpoch(attemptEpoch){
   if(!token()){
     lockAdminDashboard('Sign in with an authorized administrator account and complete required Google Authenticator MFA.');
     return;

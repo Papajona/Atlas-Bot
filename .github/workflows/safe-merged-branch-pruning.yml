@@ -1,9 +1,6 @@
 name: Safe merged branch pruning
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
   workflow_run:
     workflows:
@@ -28,13 +25,6 @@ jobs:
           github.event_name == 'workflow_run' &&
           github.event.workflow_run.head_branch == 'main' &&
           github.event.workflow_run.conclusion == 'success'
-        ) ||
-        (
-          github.event_name == 'push' &&
-          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-once-20261020]') &&
-          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-content-once-20261020]') &&
-          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-reviewed-once-20261020]') &&
-          !startsWith(github.event.head_commit.message, '[atlas-branch-prune-verified-duplicates-once-20261020]')
         )
       )
     concurrency:
@@ -56,31 +46,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.sha }}
         shell: bash
         run: |
           skip_pruning=false
 
-          # A main push that changes either watched file starts propagation and must wait.
-          if [[ "$EVENT_NAME" == "push" ]]; then
-            if ! changed_paths="$(git diff --no-renames --name-only "$BEFORE_SHA" "$AFTER_SHA")"; then
-              skip_pruning=true
-              echo "Unable to verify the push diff; preserving every branch."
-            else
-              while IFS= read -r changed_path; do
-                case "$changed_path" in
-                  scripts/migrate_legacy_native_ai.py|.github/workflows/propagate-native-ai-all-branches.yml)
-                    skip_pruning=true
-                    break
-                    ;;
-                esac
-              done <<< "$changed_paths"
-            fi
-          fi
-
           # Query every non-completed status with API pagination; never infer that a
-          # busy history window is idle. This guard runs for push, manual, and completion events.
+          # busy history window is idle. This guard runs for manual and successful propagation-completion events.
           if [[ "$skip_pruning" != true ]]; then
             for propagation_status in queued in_progress waiting requested pending action_required stale; do
               if ! active_ids="$(gh api --paginate "/repos/$GITHUB_REPOSITORY/actions/workflows/propagate-native-ai-all-branches.yml/runs?branch=main&status=$propagation_status&per_page=100" --jq '.workflow_runs[].id')"; then

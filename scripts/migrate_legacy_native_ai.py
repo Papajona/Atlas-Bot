@@ -1313,6 +1313,11 @@ def _defined_names(node: ast.AST) -> set[str]:
 def _assigned_names(target: ast.AST) -> set[str]:
     if isinstance(target, ast.Name):
         return {target.id}
+    if isinstance(target, ast.Starred):
+        # Starred unpacking is a real binding just like a tuple/list target.
+        # Omitting it can make migration dependency checks believe a canonical
+        # import survives when a loop or assignment rebinds that name.
+        return _assigned_names(target.value)
     if isinstance(target, (ast.Tuple, ast.List)):
         return {name for item in target.elts for name in _assigned_names(item)}
     return set()
@@ -1989,6 +1994,25 @@ def transform_ai_providers(commit: str) -> None:
         def directly_assigns_all(target: ast.AST) -> bool:
             return isinstance(target, ast.Name) and target.id == "__all__"
 
+        def statically_assigned_value(
+            target: ast.AST, value: ast.AST, name: str
+        ) -> ast.AST | None:
+            """Resolve one name from literal tuple/list destructuring without execution."""
+            if isinstance(target, ast.Starred):
+                return statically_assigned_value(target.value, value, name)
+            if isinstance(target, ast.Name):
+                return value if target.id == name else None
+            if isinstance(target, (ast.Tuple, ast.List)) and isinstance(value, type(target)):
+                if len(target.elts) != len(value.elts):
+                    return None
+                matches = [
+                    statically_assigned_value(left, right, name)
+                    for left, right in zip(target.elts, value.elts)
+                ]
+                found = [match for match in matches if match is not None]
+                return found[0] if len(found) == 1 else None
+            return None
+
         def mutates_all_target(target: ast.AST) -> bool:
             return root_name(target) == "__all__" and not directly_assigns_all(target)
 
@@ -2128,9 +2152,19 @@ def transform_ai_providers(commit: str) -> None:
                         if not immutable_tuple:
                             dynamic_all = True
                 elif targets_bind_all:
-                    # Destructuring/attribute targets that include __all__ are not a
-                    # simple literal export declaration we can safely reason about.
-                    dynamic_all = True
+                    # A destructuring assignment is statically safe only when the
+                    # exact __all__ value can be paired with a literal tuple/list
+                    # expression. This accepts e.g. __all__, unused = (["helper"], None)
+                    # without inferring unrelated public definitions as exports.
+                    assigned_values = [
+                        statically_assigned_value(target, module_node.value, "__all__")
+                        for target in module_node.targets
+                    ]
+                    assigned_values = [value for value in assigned_values if value is not None]
+                    if len(assigned_values) == 1:
+                        all_values.append(assigned_values[0])
+                    else:
+                        dynamic_all = True
                 if any(mutates_all_target(target) for target in module_node.targets):
                     dynamic_all = True
             elif isinstance(module_node, ast.AnnAssign):
@@ -2169,10 +2203,17 @@ def transform_ai_providers(commit: str) -> None:
             for candidate in ast.walk(module_node):
                 if isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     # Function bodies run only if called later, not while importing
-                    # the module. Do not treat their eval/exec usage as import-time
-                    # dynamic export mutation.
+                    # the module. Do not treat their local walrus/export variables as
+                    # module-level __all__ changes. Explicit global __all__ is different:
+                    # it can mutate the module namespace and therefore remains unsafe.
                     for body_statement in candidate.body:
                         deferred_body_nodes.update(id(item) for item in ast.walk(body_statement))
+                    if any(
+                        isinstance(item, ast.Global) and "__all__" in item.names
+                        for body_statement in candidate.body
+                        for item in ast.walk(body_statement)
+                    ):
+                        dynamic_all = True
                 elif isinstance(candidate, ast.Lambda):
                     # Lambda bodies are deferred; default expressions remain checked.
                     deferred_body_nodes.update(id(item) for item in ast.walk(candidate.body))
@@ -2246,6 +2287,7 @@ def transform_ai_providers(commit: str) -> None:
                     isinstance(nested, ast.Name)
                     and nested.id == "__all__"
                     and isinstance(nested.ctx, ast.Load)
+                    and id(nested) not in deferred_body_nodes
                 ):
                     dynamic_all = True
 
@@ -2279,6 +2321,12 @@ def transform_ai_providers(commit: str) -> None:
                     ):
                         dynamic_all = True
                 elif isinstance(nested, ast.NamedExpr):
+                    # A function-local walrus target belongs to the function's
+                    # local namespace, not the imported module's star exports.
+                    # Function bodies are deferred; only definition-time expressions
+                    # and module/class-suite expressions can change import-time exports.
+                    if id(nested) in deferred_body_nodes:
+                        continue
                     if (
                         id(nested) in class_scope_nodes
                         and id(nested) not in class_global_named_expr_ids

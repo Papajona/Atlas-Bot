@@ -42,6 +42,7 @@ _PAPER_API_RATE_WINDOW_SECONDS = 60.0
 _PAPER_API_RATE_LIMIT_PER_MINUTE = 60
 _PAPER_API_IP_RATE_LIMIT_PER_MINUTE = 600
 _PAPER_ORDER_RATE_LIMIT_PER_MINUTE = 12
+_PAPER_READINESS_RATE_LIMIT_PER_MINUTE = 30
 _PAPER_API_RATE_MAX_BUCKETS = 8192
 _paper_preflight_cache_result: dict[str, Any] | None = None
 _paper_preflight_cache_at = 0.0
@@ -394,6 +395,20 @@ async def readyz(request: Request):
             {"status": "BLOCKED", "reason": "READINESS_AUTHENTICATION_REQUIRED"},
             status_code=401,
         )
+
+    # Only authenticated readiness probes consume this bucket. This prevents an
+    # unauthenticated caller from exhausting the operator's readiness quota, while
+    # bounding valid callers before each probe opens the shared Supabase session.
+    readiness_bucket = f"paper:readyz:{_trusted_client_ip(request)}"
+    if not _allow_paper_api_request(
+        readiness_bucket, limit=_PAPER_READINESS_RATE_LIMIT_PER_MINUTE
+    ):
+        return JSONResponse(
+            {"status": "BLOCKED", "reason": "READINESS_RATE_LIMIT_EXCEEDED"},
+            status_code=429,
+            headers={"Retry-After": "60"},
+        )
+
     result = await _cached_paper_runtime_preflight()
     if result.get("status") != "PASS":
         return JSONResponse(result, status_code=503)

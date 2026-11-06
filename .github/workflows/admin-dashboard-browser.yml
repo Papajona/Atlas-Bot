@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   chromium-browser-tests:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: Checkout pull request
@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: "22"
       - name: Install Playwright
-        run: npm install --no-save --no-package-lock playwright
+        run: npm install --no-save --no-package-lock playwright@1.56.1
       - name: Install Chromium and system dependencies
         run: npx playwright install --with-deps chromium
       - name: Run dashboard and customer browser regressions plus UI stress
