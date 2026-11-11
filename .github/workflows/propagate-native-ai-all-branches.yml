@@ -1,13 +1,10 @@
 name: Propagate Atlas Native AI across branches
 
 on:
+  # Propagate and safely prune after every main merge, not only Native AI file edits.
+  # The propagation script still pins and validates the exact reviewed paths and SHAs.
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/propagate-native-ai-all-branches.yml"
-      - "scripts/migrate_legacy_native_ai.py"
-      - "app/groq_ai.py"
-      - "app/prompt_safety.py"
   workflow_dispatch:
 
 permissions:
