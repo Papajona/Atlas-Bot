@@ -133,11 +133,10 @@ def _remove_only_proven_duplicate_unique_index(bind) -> None:
         DO $atlas_customer_paper_duplicate_index$
         DECLARE
             duplicate_oid oid;
-            duplicate_table oid;
             replacement_oid oid;
         BEGIN
-            SELECT idx.oid, ix.indrelid
-              INTO duplicate_oid, duplicate_table
+            SELECT idx.oid
+              INTO duplicate_oid
             FROM pg_class idx
             JOIN pg_namespace ns ON ns.oid = idx.relnamespace
             JOIN pg_index ix ON ix.indexrelid = idx.oid
@@ -170,8 +169,10 @@ def _remove_only_proven_duplicate_unique_index(bind) -> None:
              AND candidate.indclass = duplicate.indclass
              AND candidate.indcollation = duplicate.indcollation
              AND candidate.indoption = duplicate.indoption
-             AND candidate.indexprs IS NOT DISTINCT FROM duplicate.indexprs
-             AND candidate.indpred IS NOT DISTINCT FROM duplicate.indpred
+             AND candidate.indexprs IS NULL
+             AND duplicate.indexprs IS NULL
+             AND candidate.indpred IS NULL
+             AND duplicate.indpred IS NULL
             WHERE duplicate.indexrelid = duplicate_oid
               AND candidate.indexrelid <> duplicate_oid
               AND EXISTS (
