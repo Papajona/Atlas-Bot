@@ -219,19 +219,20 @@ def _create_and_verify_fk_index(bind, schema: str, table: str,
                ix.indisready,
                ix.indpred IS NULL AS has_no_predicate,
                ix.indexprs IS NULL AS has_no_expressions,
-               array_agg(att.attname ORDER BY key.ordinality) AS column_names
+               ARRAY(
+                   SELECT att.attname
+                   FROM unnest(ix.indkey) WITH ORDINALITY
+                       AS key(attnum, ordinality)
+                   JOIN pg_attribute att
+                     ON att.attrelid = parent.oid AND att.attnum = key.attnum
+                   ORDER BY key.ordinality
+               ) AS column_names
         FROM pg_class idx
         JOIN pg_namespace ns ON ns.oid = idx.relnamespace
         JOIN pg_index ix ON ix.indexrelid = idx.oid
         JOIN pg_class parent ON parent.oid = ix.indrelid
-        CROSS JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY
-            AS key(attnum, ordinality)
-        JOIN pg_attribute att
-          ON att.attrelid = parent.oid AND att.attnum = key.attnum
         WHERE ns.nspname = :schema_name
           AND idx.relname = :index_name
-        GROUP BY parent.relname, ix.indisunique, ix.indisvalid,
-                 ix.indisready, ix.indpred, ix.indexprs
     """), {
         "schema_name": schema,
         "index_name": index_name,
