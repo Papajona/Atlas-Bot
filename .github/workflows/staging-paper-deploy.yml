@@ -5,6 +5,13 @@ on:
     branches:
       - main
   workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Production Core Verification (Atlas Native AI offline)
+    types:
+      - completed
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -24,6 +31,13 @@ jobs:
         (
           github.event_name == 'push' &&
           contains(github.event.head_commit.message, '[atlas-paper-staging-deploy-once-20261023]')
+        ) ||
+        (
+          github.event_name == 'workflow_run' &&
+          github.event.workflow_run.head_branch == 'main' &&
+          github.event.workflow_run.event == 'workflow_dispatch' &&
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.head_sha == github.sha
         )
       )
     runs-on: ubuntu-latest

@@ -34,14 +34,15 @@ def test_propagation_requires_a_separate_credential_for_workflow_file_updates() 
     assert upload.index(reset_header) < upload.index(workflow_header)
 
 
-def test_propagation_reruns_when_migration_engine_changes() -> None:
+def test_propagation_runs_after_every_main_push_and_manual_dispatch() -> None:
     workflow = WORKFLOW.read_text(encoding="utf-8")
     push_trigger = workflow.split("  push:", 1)[1].split("  workflow_dispatch:", 1)[0]
 
-    assert '".github/workflows/propagate-native-ai-all-branches.yml"' in push_trigger
-    assert '"scripts/migrate_legacy_native_ai.py"' in push_trigger
-    assert '"app/prompt_safety.py"' in push_trigger
-    assert '"app/groq_ai.py"' in push_trigger
+    # The propagation script itself validates exact SHAs and migration paths.
+    # Its event trigger must not silently skip unrelated main merges.
+    assert "branches: [main]" in push_trigger
+    assert "paths:" not in push_trigger
+    assert "  workflow_dispatch:" in workflow
 
 
 
