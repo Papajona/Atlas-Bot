@@ -69,8 +69,8 @@ _FOREIGN_KEY_INDEXES = (
      ("trading_account_id", "customer_id")),
     ("public", "trade_executors", "ix_trade_executor_account_customer_fk",
      ("trading_account_id", "customer_id")),
-    ("public", "trading_accounts", "ix_trade_account_customer_fk",
-     ("customer_id",)),
+    ("public", "trades", "ix_trade_account_customer_fk",
+     ("trading_account_id", "customer_id")),
     ("public", "withdrawals", "ix_withdrawal_wallet_customer_fk",
      ("wallet_id", "customer_id")),
 )
