@@ -6804,7 +6804,7 @@ async def list_alerts(authorization: str | None = Header(default=None)):
 
 @app.post("/api/customer/strategy-lab/candidates")
 async def create_strategy_candidate(req: StrategyLabRequest, authorization: str | None = Header(default=None)):
-    _assert_established_noncrypto(MarketRequest(asset=req.asset, symbol=req.symbol, exchange=req.exchange, timeframe=req.timeframe, days=req.days))
+    _assert_established_noncrypto(MarketRequest(asset=req.asset, symbol=req.symbol, exchange=req.exchange, timeframe=req.timeframe or "1h", days=req.days))
     if req.asset in {"forex", "commodity"}:
         req.symbol = _normalize_oanda_instrument(req.symbol); req.exchange = "oanda"
     async with SessionLocal() as db:
@@ -6822,15 +6822,23 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
             raise _safe_http_error(503, exc, "Strategy generation is temporarily unavailable") from exc
         await _consume_ai_credit(db, profile.id, "strategy_builder_generation")
         spec = generated["strategy"]
+        candidate_timeframe = req.timeframe or next(
+            (
+                value for value in spec.get("timeframes", [])
+                if isinstance(value, str)
+                and value in {"5m", "15m", "30m", "1h", "4h", "1d"}
+            ),
+            "1h",
+        )
         spec["requested_market"] = {
             "asset": req.asset,
             "symbol": req.symbol,
             "exchange": req.exchange,
-            "timeframe": req.timeframe,
+            "timeframe": candidate_timeframe,
         }
         spec["live_authority"] = False
         spec["ai_provider"] = generated["ai"]
-        row=StrategyCandidate(customer_id=profile.id,name=req.name,asset=req.asset,symbol=req.symbol,exchange=req.exchange,timeframe=req.timeframe,spec_json=json.dumps(spec,separators=(",",":")))
+        row=StrategyCandidate(customer_id=profile.id,name=req.name,asset=req.asset,symbol=req.symbol,exchange=req.exchange,timeframe=candidate_timeframe,spec_json=json.dumps(spec,separators=(",",":")))
         db.add(row); await db.commit(); await db.refresh(row)
         return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST"}
 
