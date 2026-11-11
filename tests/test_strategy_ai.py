@@ -242,7 +242,7 @@ def test_strategy_lab_ui_defaults_to_prompt_timeframe_and_sends_null():
 def test_strategy_candidate_persists_resolved_prompt_timeframe():
     source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     start = source.index('@app.post("/api/customer/strategy-lab/candidates")')
-    end = source.index("\\n\\ndef _candidate_backtest_config", start)
+    end = source.index("\n\ndef _candidate_backtest_config", start)
     route = source[start:end]
     assert 'candidate_timeframe = req.timeframe or next(' in route
     assert '"timeframe": candidate_timeframe' in route
