@@ -182,3 +182,68 @@ def test_active_app_and_deployment_surface_has_no_gemini_provider_references():
         assert "gemini" not in path.read_text(encoding="utf-8").casefold(), (
             f"Retired Gemini provider reference remains in active source: {path.relative_to(ROOT)}"
         )
+
+
+def test_strategy_lab_uses_prompt_timeframe_when_no_override_is_selected():
+    from app.schemas import StrategyLabRequest
+    from app.strategy_ai import generate_strategy_draft
+
+    request = StrategyLabRequest(
+        name="Prompt timeframe",
+        prompt="Create a BTC breakout strategy on 4h with risk 0.5%, target 2R, and completed candles.",
+        asset="crypto",
+        symbol="BTC/USDT",
+        exchange="binance",
+    )
+    assert request.timeframe is None
+
+    result = asyncio.run(generate_strategy_draft(
+        prompt=request.prompt,
+        name=request.name,
+        asset=request.asset,
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+    ))
+    spec = result["strategy"]
+    assert spec["timeframes"] == ["4h"]
+    assert all(
+        condition["timeframe"] == "4h"
+        for key in ("entry_conditions", "exit_conditions")
+        for condition in spec[key]
+    )
+
+
+def test_strategy_lab_explicit_timeframe_still_overrides_prompt():
+    from app.strategy_ai import generate_strategy_draft
+
+    result = asyncio.run(generate_strategy_draft(
+        prompt="Create a BTC breakout strategy on 4h with risk 0.5%, target 2R, and completed candles.",
+        name="Explicit timeframe",
+        asset="crypto",
+        symbol="BTC/USDT",
+        timeframe="1h",
+    ))
+    spec = result["strategy"]
+    assert spec["timeframes"] == ["1h"]
+    assert all(
+        condition["timeframe"] == "1h"
+        for key in ("entry_conditions", "exit_conditions")
+        for condition in spec[key]
+    )
+
+
+def test_strategy_lab_ui_defaults_to_prompt_timeframe_and_sends_null():
+    customer_html = (ROOT / "app" / "templates" / "customer.html").read_text(encoding="utf-8")
+    dashboard_js = (ROOT / "app" / "static" / "customer-dashboard.js").read_text(encoding="utf-8")
+    assert '<option value="" selected>Use prompt</option>' in customer_html
+    assert "timeframe:document.getElementById('labTf').value||null" in dashboard_js
+
+
+def test_strategy_candidate_persists_resolved_prompt_timeframe():
+    source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    start = source.index('@app.post("/api/customer/strategy-lab/candidates")')
+    end = source.index("\\n\\ndef _candidate_backtest_config", start)
+    route = source[start:end]
+    assert 'candidate_timeframe = req.timeframe or next(' in route
+    assert '"timeframe": candidate_timeframe' in route
+    assert 'timeframe=candidate_timeframe' in route
