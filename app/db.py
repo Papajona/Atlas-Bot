@@ -188,6 +188,7 @@ class Trade(Base):
         UniqueConstraint("id", "customer_id", name="uq_trade_id_customer"),
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_trade_account_customer"),
         Index("ix_trade_status_symbol", "status", "symbol"),
+        Index("ix_trade_account_customer_fk", "trading_account_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id"), nullable=True, index=True)
@@ -290,6 +291,7 @@ class OrderCommand(Base):
         UniqueConstraint("client_order_id", name="uq_order_command_client_order"),
         ForeignKeyConstraint(["trade_id", "customer_id"], ["trades.id", "trades.customer_id"], name="fk_order_command_trade_customer"),
         Index("ix_order_command_status_updated", "status", "updated_at"),
+        Index("ix_order_command_trade_customer_fk", "trade_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(ForeignKey("trades.id"), nullable=False)
@@ -327,7 +329,9 @@ class Position(Base):
     __table_args__ = (UniqueConstraint("customer_id", "exchange", "symbol", name="uq_position_customer_exchange_symbol"),
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_position_account_customer"),
         ForeignKeyConstraint(["entry_trade_id", "customer_id"], ["trades.id", "trades.customer_id"], name="fk_position_trade_customer"),
-        Index("ix_position_customer_status", "customer_id", "quantity"),)
+        Index("ix_position_customer_status", "customer_id", "quantity"),
+        Index("ix_position_account_customer_fk", "trading_account_id", "customer_id"),
+        Index("ix_position_entry_trade_customer_fk", "entry_trade_id", "customer_id"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trading_account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -514,6 +518,7 @@ class Withdrawal(Base):
         UniqueConstraint("request_id", name="uq_withdrawal_request_id"),
         ForeignKeyConstraint(["wallet_id", "customer_id"], ["wallets.id", "wallets.customer_id"], name="fk_withdrawal_wallet_customer"),
         Index("ix_withdrawal_status_created", "status", "created_at"),
+        Index("ix_withdrawal_wallet_customer_fk", "wallet_id", "customer_id"),
         Index("uq_withdrawal_provider_id_nonempty", "provider", "provider_id", unique=True,
               postgresql_where=sa.text("provider_id <> ''"),
               sqlite_where=sa.text("provider_id <> ''")),
@@ -788,6 +793,7 @@ class SmartTrade(Base):
     __table_args__ = (
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_smart_trade_account_customer"),
         Index("ix_smart_trade_customer_status", "customer_id", "status"),
+        Index("ix_smart_trade_account_customer_fk", "trading_account_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -814,6 +820,7 @@ class DcaBot(Base):
     __table_args__ = (
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_dca_bot_account_customer"),
         Index("ix_dca_bot_customer_status", "customer_id", "status"),
+        Index("ix_dca_bot_account_customer_fk", "trading_account_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -841,6 +848,7 @@ class GridBot(Base):
     __table_args__ = (
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_grid_bot_account_customer"),
         Index("ix_grid_bot_customer_status", "customer_id", "status"),
+        Index("ix_grid_bot_account_customer_fk", "trading_account_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -868,6 +876,7 @@ class AdaptiveTradingBot(Base):
         Index("ix_adaptive_bot_customer_status", "customer_id", "status"),
         UniqueConstraint("customer_id", "name", name="uq_adaptive_bot_customer_name"),
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_adaptive_bot_account_customer"),
+        Index("ix_adaptive_bot_account_customer_fk", "trading_account_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1052,6 +1061,7 @@ class TradeExecutor(Base):
     __table_args__ = (
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_executor_account_customer"),
         Index("ix_trade_executor_customer_status", "customer_id", "status"),
+        Index("ix_trade_executor_account_customer_fk", "trading_account_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -1315,6 +1325,7 @@ class FundingTransaction(Base):
         UniqueConstraint("provider", "provider_reference", name="uq_funding_provider_reference"),
         ForeignKeyConstraint(["wallet_id", "customer_id"], ["wallets.id", "wallets.customer_id"], name="fk_funding_wallet_customer"),
         Index("ix_funding_customer_status", "customer_id", "status"),
+        Index("ix_funding_transaction_wallet_customer_fk", "wallet_id", "customer_id"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int] = mapped_column(Integer, nullable=False)
