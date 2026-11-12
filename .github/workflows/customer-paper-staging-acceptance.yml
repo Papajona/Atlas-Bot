@@ -86,6 +86,7 @@ jobs:
           [[ "$EXPECTED_RUNTIME_DB_ROLE" == "atlas_paper_reader" ]]
           [[ "$EXPECTED_PAPER_DB_ROLE" == "atlas_customer_paper" ]]
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
+          echo "SUPABASE_URL=https://${STAGING_SUPABASE_PROJECT_REF}.supabase.co" >> "$GITHUB_ENV"
           [[ "$PRIMARY_DATABASE_SECRET" != "$PAPER_DATABASE_SECRET" ]]
           [[ "$PREFLIGHT_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]]
 

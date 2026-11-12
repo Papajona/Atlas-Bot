@@ -66,3 +66,24 @@ def test_failure_reason_redacts_credentials_and_synthetic_tenant_ids():
     assert "8123456789012345678" not in reason
     assert "[database-uri-redacted]" in reason
     assert "password=[redacted]" in reason
+
+
+
+def test_staging_paper_drill_derives_supabase_url_from_validated_project_ref():
+    from pathlib import Path
+
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "customer-paper-staging-acceptance.yml"
+    ).read_text(encoding="utf-8")
+    validate_at = workflow.index(
+        '[[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]'
+    )
+    derive_at = workflow.index(
+        'echo "SUPABASE_URL=https://${STAGING_SUPABASE_PROJECT_REF}.supabase.co" >> "$GITHUB_ENV"'
+    )
+    run_at = workflow.index("python scripts/customer_paper_acceptance_drill.py")
+    assert validate_at < derive_at < run_at
+    assert "PROCESS_ROLE: paper" in workflow
