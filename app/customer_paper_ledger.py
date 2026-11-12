@@ -637,7 +637,9 @@ async def preflight_isolated_customer_paper_ledger(
                           AND n.nspname <> 'information_schema'
                           AND (
                               NOT :same_database
-                              OR p.oid IS DISTINCT FROM to_regprocedure('customer_paper.verify_market_bar_capacity_guards()')
+                              OR n.nspname <> 'customer_paper'
+                              OR p.proname <> 'verify_market_bar_capacity_guards'
+                              OR p.pronargs <> 0
                               OR p.prorettype <> 'boolean'::regtype
                           )
                           AND has_schema_privilege(r.oid, n.oid, 'USAGE')
