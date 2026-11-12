@@ -247,3 +247,54 @@ def test_strategy_candidate_persists_resolved_prompt_timeframe():
     assert 'candidate_timeframe = req.timeframe or next(' in route
     assert '"timeframe": candidate_timeframe' in route
     assert 'timeframe=candidate_timeframe' in route
+
+
+def test_legacy_strategy_builder_uses_prompt_timeframe_by_default():
+    from app.schemas import StrategyBuilderRequest
+    from app.strategy_ai import generate_strategy_draft
+
+    request = StrategyBuilderRequest(
+        prompt="Create a BTC breakout strategy on 4h with risk 0.5%, target 2R, and completed candles.",
+        asset="crypto",
+        symbol="BTC/USDT:USDT",
+        exchange="binance",
+    )
+    assert request.timeframe is None
+
+    result = asyncio.run(generate_strategy_draft(
+        prompt=request.prompt,
+        name=request.name,
+        asset=request.asset,
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+    ))
+    assert result["strategy"]["timeframes"] == ["4h"]
+
+
+def test_legacy_strategy_builder_explicit_timeframe_remains_an_override():
+    from app.schemas import StrategyBuilderRequest
+    from app.strategy_ai import generate_strategy_draft
+
+    request = StrategyBuilderRequest(
+        prompt="Create a BTC breakout strategy on 4h with risk 0.5%, target 2R, and completed candles.",
+        asset="crypto",
+        symbol="BTC/USDT:USDT",
+        exchange="binance",
+        timeframe="1h",
+    )
+    result = asyncio.run(generate_strategy_draft(
+        prompt=request.prompt,
+        name=request.name,
+        asset=request.asset,
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+    ))
+    assert result["strategy"]["timeframes"] == ["1h"]
+
+
+def test_legacy_strategy_builder_route_passes_optional_timeframe_through():
+    source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    start = source.index('@app.post("/api/customer/strategy-builder")')
+    end = source.index('@app.post("/api/customer/strategy-builder/{draft_id}/promote")', start)
+    route = source[start:end]
+    assert "timeframe=req.timeframe" in route
