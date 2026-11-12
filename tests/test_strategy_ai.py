@@ -73,7 +73,6 @@ def test_native_strategy_parser_preserves_multitimeframe_rules_and_avoids_substr
         prompt="15m breakout with 1h confirmation for forex trend together",
         name="Multi-timeframe forex",
         asset="forex",
-        timeframe="1h",
     )
     assert spec["symbols"] == ["EUR_USD"]
     assert spec["strategy_family"] == "BREAKOUT"
@@ -247,3 +246,89 @@ def test_strategy_candidate_persists_resolved_prompt_timeframe():
     assert 'candidate_timeframe = req.timeframe or next(' in route
     assert '"timeframe": candidate_timeframe' in route
     assert 'timeframe=candidate_timeframe' in route
+
+
+def test_legacy_strategy_builder_uses_prompt_timeframe_by_default():
+    from app.schemas import StrategyBuilderRequest
+    from app.strategy_ai import generate_strategy_draft
+
+    request = StrategyBuilderRequest(
+        prompt="Create a BTC breakout strategy on 4h with risk 0.5%, target 2R, and completed candles.",
+        asset="crypto",
+        symbol="BTC/USDT:USDT",
+        exchange="binance",
+    )
+    assert request.timeframe is None
+
+    result = asyncio.run(generate_strategy_draft(
+        prompt=request.prompt,
+        name=request.name,
+        asset=request.asset,
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+    ))
+    assert result["strategy"]["timeframes"] == ["4h"]
+
+
+def test_legacy_strategy_builder_explicit_timeframe_remains_an_override():
+    from app.schemas import StrategyBuilderRequest
+    from app.strategy_ai import generate_strategy_draft
+
+    request = StrategyBuilderRequest(
+        prompt="Create a BTC breakout strategy on 4h with risk 0.5%, target 2R, and completed candles.",
+        asset="crypto",
+        symbol="BTC/USDT:USDT",
+        exchange="binance",
+        timeframe="1h",
+    )
+    result = asyncio.run(generate_strategy_draft(
+        prompt=request.prompt,
+        name=request.name,
+        asset=request.asset,
+        symbol=request.symbol,
+        timeframe=request.timeframe,
+    ))
+    assert result["strategy"]["timeframes"] == ["1h"]
+
+
+def test_legacy_strategy_builder_route_passes_optional_timeframe_through():
+    source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
+    start = source.index('@app.post("/api/customer/strategy-builder")')
+    end = source.index('@app.post("/api/customer/strategy-builder/{draft_id}/promote")', start)
+    route = source[start:end]
+    assert "timeframe=req.timeframe" in route
+
+
+def test_explicit_timeframe_overrides_all_prompt_timeframes():
+    from app.native_ai import compose_strategy_spec
+
+    spec = compose_strategy_spec(
+        prompt=(
+            "Create a BTC breakout using 4h range highs and 15m confirmation; "
+            "use 1h for the volatility filter."
+        ),
+        name="Explicit timeframe override",
+        asset="crypto",
+        symbol="BTC/USDT",
+        timeframe="1h",
+    )
+    assert spec["timeframes"] == ["1h"]
+    assert all(
+        condition["timeframe"] == "1h"
+        for key in ("entry_conditions", "exit_conditions")
+        for condition in spec[key]
+    )
+
+
+def test_prompt_can_still_define_multiple_timeframes_without_an_override():
+    from app.native_ai import compose_strategy_spec
+
+    spec = compose_strategy_spec(
+        prompt="Create a BTC breakout on 15m with 1h trend confirmation.",
+        name="Prompt multi-timeframe",
+        asset="crypto",
+        symbol="BTC/USDT",
+    )
+    assert set(spec["timeframes"]) == {"15m", "1h"}
+    conditions = spec["entry_conditions"] + spec["exit_conditions"]
+    assert {condition["timeframe"] for condition in conditions} <= {"15m", "1h"}

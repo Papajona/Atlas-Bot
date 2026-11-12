@@ -294,6 +294,8 @@ jobs:
           import subprocess
           import sys
           from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          from scripts.alembic_revision_contract import expected_alembic_heads
           from urllib.parse import unquote, urlparse
 
           secret_path = Path(sys.argv[1])
@@ -327,7 +329,10 @@ jobs:
                    WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid),
                  (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid),
                  (NOT has_schema_privilege('anon','public','USAGE')
-                  AND NOT has_schema_privilege('authenticated','public','USAGE'))
+                  AND NOT has_schema_privilege('authenticated','public','USAGE')),
+                 has_table_privilege(r.rolname, 'public.audit_log', 'INSERT'),
+                 has_table_privilege(r.rolname, 'public.trades', 'INSERT'),
+                 has_table_privilege(r.rolname, 'public.customer_ledger_accounts', 'UPDATE')
           FROM pg_roles r WHERE r.rolname=current_user
           """
           result = subprocess.run(
@@ -338,11 +343,12 @@ jobs:
               print("BLOCKED: read-only production database role check failed; database output withheld")
               sys.exit(1)
           fields = result.stdout.strip().split("|")
-          if len(fields) != 14:
+          if len(fields) != 17:
               raise SystemExit("BLOCKED: unexpected production database role query result")
           (database, role, login_role, revision, table_count, unprotected_count,
            is_superuser, can_create_roles, can_create_databases, can_replicate, bypass_rls,
-           owned_count, membership_count, api_schema_blocked) = fields
+           owned_count, membership_count, api_schema_blocked, audit_insert, trades_insert,
+           ledger_update) = fields
           reserved = {"postgres", "service_role", "supabase_admin", "supabase_auth_admin",
                       "authenticator", "anon", "authenticated"}
           print(
@@ -367,7 +373,26 @@ jobs:
               raise SystemExit("BLOCKED: anon/authenticated still have public schema USAGE")
           if not revision:
               raise SystemExit("BLOCKED: production database Alembic revision is missing")
-          print("PASS: production DB URL resolves to a dedicated non-owner/non-admin runtime role with RLS lockdown intact.")
+          expected_heads = expected_alembic_heads(Path("alembic/versions"))
+          current_heads = {item.strip() for item in revision.split(",") if item.strip()}
+          if current_heads != expected_heads:
+              raise SystemExit(
+                  "BLOCKED: production database Alembic revision is stale or divergent: "
+                  f"current={sorted(current_heads)} expected={sorted(expected_heads)}. "
+                  "Run the approved Cloud Run migration job after verifying a current backup; "
+                  "the API must not be deployed against an older schema."
+              )
+          if audit_insert.lower() != "true" or trades_insert.lower() != "true" or ledger_update.lower() != "true":
+              raise SystemExit(
+                  "BLOCKED: production database role lacks core runtime write privileges "
+                  "(audit_log INSERT, trades INSERT, customer_ledger_accounts UPDATE); "
+                  "a read-only paper/staging identity cannot be used as the production API role."
+              )
+          print(
+              "PASS: production DB URL resolves to a dedicated writable non-owner/non-admin runtime role "
+              "with RLS lockdown intact and exact Alembic head "
+              f"{','.join(sorted(expected_heads))}."
+          )
           PY
 
       - name: Deploy immutable API release

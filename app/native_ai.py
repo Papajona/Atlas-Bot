@@ -142,14 +142,20 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
             (r"\bWTI\b|\bCRUDE\s*OIL\b", "WTI"),
         ) if re.search(pattern, upper)), None)
         selected_symbol = match[1] if match else {"crypto": "BTC/USDT", "forex": "EUR_USD", "commodity": "XAU_USD"}[asset_kind]
-    requested_timeframes = list(dict.fromkeys(
+    explicit_timeframe = timeframe if timeframe in _ALLOWED_TIMEFRAMES else None
+    prompt_timeframes = list(dict.fromkeys(
         match.group(1) for match in re.finditer(
             r"(?<![a-z0-9])(5m|15m|30m|1h|4h|1d)(?![a-z0-9])", text.lower()
         )
     ))
-    tf = timeframe if timeframe in _ALLOWED_TIMEFRAMES else (requested_timeframes[0] if requested_timeframes else "1h")
-    if tf not in requested_timeframes:
-        requested_timeframes.append(tf)
+    # A selected UI/API timeframe is authoritative. Only infer multiple condition-level
+    # timeframes from the prompt when the caller leaves the timeframe unset.
+    requested_timeframes = (
+        [explicit_timeframe]
+        if explicit_timeframe
+        else prompt_timeframes or ["1h"]
+    )
+    tf = requested_timeframes[0]
     family = _classify_family(text)
     lower = text.lower()
     asks_both = any(x in lower for x in ("both directions", "long and short", "long/short", "both sides"))
@@ -179,6 +185,12 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         "This draft is not backtest evidence; cost-aware out-of-sample and walk-forward validation remain mandatory before paper promotion."]
     if direction_ambiguous:
         warnings.append("No trading direction was explicit in the prompt; LONG is only a draft default and must be confirmed before use.")
+    if explicit_timeframe and len(prompt_timeframes) > 1 and any(
+        prompt_timeframe != explicit_timeframe for prompt_timeframe in prompt_timeframes
+    ):
+        warnings.append(
+            f"Selected timeframe {explicit_timeframe} overrides the draft's multi-timeframe setup inferred from the prompt."
+        )
     risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*(%|percent|bps|bp)?", lower)
     if risk_match:
         amount = float(risk_match.group(1))
@@ -193,8 +205,12 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     rr_match = re.search(r"(?:take.?profit|reward.?risk|risk.?reward|target)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*r\b", lower)
     target_rr = min(10.0, max(0.1, float(rr_match.group(1)))) if rr_match else 2.0
     entries, exits = _template_rules(family)
-    entry_conditions = [dict(x, timeframe=_condition_timeframe(text, x["type"], tf)) for x in entries]
-    exit_conditions = [dict(x, timeframe=_condition_timeframe(text, x["type"], tf)) for x in exits]
+    if explicit_timeframe:
+        entry_conditions = [dict(x, timeframe=tf) for x in entries]
+        exit_conditions = [dict(x, timeframe=tf) for x in exits]
+    else:
+        entry_conditions = [dict(x, timeframe=_condition_timeframe(text, x["type"], tf)) for x in entries]
+        exit_conditions = [dict(x, timeframe=_condition_timeframe(text, x["type"], tf)) for x in exits]
     sessions = [n for n, term in (("ASIA", "asia"), ("LONDON", "london"), ("NEW_YORK", "new york"), ("SYDNEY", "sydney")) if term in lower]
     return {
         "version": "atlas-strategy-v1", "title": title,

@@ -13,7 +13,7 @@
 - Stage/production model loading requires a manifest signature independently of `MODEL_INTEGRITY_REQUIRED_FOR_LIVE`.
 - Withdrawal execution defaults off. Destination checks fail closed when whitelisting is disabled or the allow-list is empty, including in staging.
 - The quantity-reference AST fallback now includes `_QTY_QUANTUM`. New regression tests cover missing-class log loss, timeout labels, non-finite execution inputs, strict JSON output, model-signature fail-closed behavior, withdrawal allow-list behavior, UTF-8 comparisons and transient provider verification retries.
-- AI defaults/examples/deployment scripts were moved from the identifiers raised by the audit to `gemini-3.6-flash` and `gpt-oss-120b`. `scripts/check_ai_models.py` retries transient HTTP 429/5xx/network errors a bounded number of times and does not convert a persistent provider failure into success.
+- Historical hosted-model defaults and remote-inference checks were subsequently retired. Atlas Native AI now performs strategy and safety decisions in-process; its verification does not call hosted model APIs or consume provider quota.
 - Android manifest configuration explicitly disables cleartext, configures system-trust TLS, keeps Android backups disabled, and supplies legacy/Android 12+ exclusions for app data. The Android debug build/security checks have passed in CI.
 - The local Compose setup now mounts `/app/model-staging` as its own named volume while retaining the read-only root filesystem.
 - The PostgreSQL service image in Atlas CI, Production Verification Gate and Ledger Concurrency workflow was changed from the ECR public mirror to Docker Hub after GitHub Actions logs showed the ECR pull failed before tests with `toomanyrequests: Data limit exceeded`.
@@ -22,12 +22,12 @@
 - A real GitHub Actions full pytest run after the core repairs completed with **856 passed, 16 skipped, zero failures**. The three failures from the earlier run (zero-quantity risk handling and two stale source-text assertions for HMAC calls) were fixed and the subsequent run passed.
 - The mandatory PostgreSQL ledger/concurrency workflow completed successfully on the repair branch.
 - Android security/debug compilation completed successfully. The signed Android release job was skipped on pull-request context; this is not a signed release APK verification.
-- The live AI provider gate still fails when Gemini responds with HTTP 503 even after the bounded retry path. Groq `openai/gpt-oss-20b` model listing and Chat Completions inference succeeded in the observed logs. `CEREBRAS_API_KEY` was not supplied to that workflow, so Cerebras inference has not been verified. **Do not waive the Gemini failure or treat the overall production gate as green.**
+- The historical hosted-provider gate failed when a configured external service returned a quota/availability error. That gate has since been replaced by offline Atlas Native AI verification; current production verification does not call hosted model APIs. **Do not treat historical provider logs as evidence of the current runtime configuration.**
 
 ## Not verified / must remain blocked
 - The latest commit's complete set of workflow statuses must be checked before merge; the newest workflow set has been observed running.
-- A successful live Gemini inference for the configured model remains a release blocker; repeat after provider capacity recovers or select a different model only after verifying it against provider catalog and real inference with authorized credentials.
-- Cerebras live inference is unverified because no key was present in CI.
+- Hosted-model inference is not a release requirement for Atlas Native AI. Verify the current exact-commit offline Native AI checks and deployment configuration instead.
+- Historical third-party provider inference is not part of the current Atlas Native AI release gate.
 - A signed Android release APK, certificate fingerprint, package ID and SHA-256 checksum have not been verified in this PR; the release job is intentionally unavailable on the pull-request branch.
 - Production secrets/identity, live exchange order execution, TRON mainnet funding/sweeping, customer money/payouts, a real backup restore from the staging backup system, and live provider reconciliation were not executed by this patch.
 - Docker base image digest pinning and package hash-locking were not changed because an authoritative digest/hash set was not available in this environment; do not invent hashes or digests. The exact package versions in `requirements.txt` remain pinned by version but are not all hash-locked.

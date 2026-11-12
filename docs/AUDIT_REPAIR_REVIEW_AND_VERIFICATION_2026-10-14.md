@@ -20,7 +20,7 @@ A patch is not called verified merely because it was committed or compiled. Veri
 | Correlation exposure ignores positions without mark price | Can undercount exposure if a valid entry-price fallback exists | Fall back to average entry price in correlation risk calculation | Targeted scenario reported blocked; broader portfolio-risk regression still required. |
 | `test_qty_ref_idempotency.py` fallback loader omits `_QTY_QUANTUM` | Test harness defect, not a production ledger defect | Include the required constant in fallback loader | The user-supplied audit reported 6 tests passing. |
 | Cerebras default `llama3.1-8b` is deprecated | Needs provider catalogue evidence; do not infer all model IDs or endpoint availability from names | Changed defaults to a supported candidate only where checked in repository | Do not claim a live Cerebras inference pass unless the current CI provider log shows it. |
-| Gemini inference default | Model existence, quota, and successful inference are separate checks | `gemini-3.5-flash-lite` failed inference in the exact-head Production Verification Gate run on 2026-10-23; the same run's diagnostic historically generated text with `gemini-3.5-flash`. The current remediation branch has been changed to a single `gemini-3.8-flash` setting across config, CI, Cloud Run defaults, and runbook; exact-head model inference is still pending and must pass before release | Production Verification Gate passed on the tested paper-trading commit with no quota waiver. Explicit environment overrides still require live verification. |
+| Retired hosted-model inference integration | Remote model availability and quota made release verification dependent on external services | Removed hosted-model configuration and remote inference from the active application and deployment workflows; Atlas Native AI is the in-process strategy and safety authority | Current exact-head verification uses offline Native AI checks and makes no hosted model calls. |
 | Groq model/API behavior | Models-list HTTP 403 does not prove chat inference is broken; endpoint and operation must match intended use | Gate uses the repository checker; no claim based solely on models-list | Exact current checker logs decide pass/fail. |
 | Model artifact integrity could be optional for staging/production | Hash adjacency alone is not a trusted signature boundary if the hash can be replaced with the model | Staging/production model verification now fails closed when independent artifact signature verification is not available, regardless of the old optional flag; regression coverage added | **Code/test verification pending exact-head CI.** Ensure production artifacts have a valid signature/manifest and test both valid and tampered artifacts. |
 | Withdrawal configuration permissive in staging | A staging flag must not become a path to real provider payouts | Withdrawals now default disabled and destination allow-list checks fail closed when disabled or empty | **Code/test verification pending exact-head CI.** A real staging/provider payout drill remains prohibited until explicitly authorized; verify no staging configuration can reach a real payout provider. |
@@ -39,8 +39,8 @@ A patch is not called verified merely because it was committed or compiled. Veri
 - Correlation exposure fallback to average entry price.
 - Quantity-idempotency fallback test-loader correction.
 - Python container base-image digest pin plus CI digest verification/container build.
-- Gemini configuration and deployment templates now use one `gemini-3.8-flash` setting; historical `gemini-3.5-flash` probe evidence does not establish that `gemini-3.8-flash` works, so exact-head live provider verification remains required.
-- Production verification no longer waives Gemini HTTP 429/quota failure; all configured AI providers must pass live inference.
+- The historical hosted-model configuration and inference gate have been retired. Current application, deployment templates and verification use in-process Atlas Native AI; hosted-model credentials and model identifiers are not required.
+- Production verification now exercises offline Atlas Native AI and does not invoke remote model providers or rely on provider quotas.
 - Regression assertions updated to check fail-closed provider-gate behavior rather than requiring the old Cerebras-specific log string.
 - This audit record added so findings, changes, and unclosed work remain reviewable.
 
@@ -52,7 +52,7 @@ For workflow runs on a repair head before the last test assertion update:
 - Production-safe regression suite: 857 passed, 16 skipped, 1 failed on that same stale assertion; must rerun.
 - PostgreSQL ledger/concurrency workflow: **passed** on the observed repair head.
 - Android debug build: **passed**; Android release job was skipped, so no signed APK is proven.
-- Provider verification passed on a prior run after the model/default change, but the final workflow must pass on the exact final commit with no waiver.
+- Historical provider verification runs are not current release evidence; only exact-head offline Native AI and mandatory CI results count for the current runtime.
 - Docker digest/container steps were added after earlier runs; do not claim those checks passed until a run on the exact final commit completes.
 
 ## Release and production gaps — still blocking
@@ -70,7 +70,7 @@ For workflow runs on a repair head before the last test assertion update:
 
 - Inspected user-provided audit claims and separated reproducible code defects from unverified external provider/version claims.
 - Reviewed GitHub Actions job summaries and logs rather than treating workflow badges or active steps as completion.
-- Identified the quota-waiver behavior and removed the exception so provider verification fails closed.
+- Replaced the legacy remote-provider verification path with offline Native AI verification, eliminating provider quota calls from CI.
 - Observed and recorded the exact failing stale assertion from CI, updated the assertion, and required a new exact-head run.
 - Added digest pin verification/container build coverage and this report.
 - No production deploy, live trade, payout, mainnet transfer, or production database migration was performed as part of this work.
