@@ -12,8 +12,8 @@ def _frame(first: datetime, last: datetime) -> pd.DataFrame:
 
 def test_oanda_history_accepts_full_window_with_weekend_start_margin():
     finished = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
-    started = finished - timedelta(days=365)
-    frame = _frame(started + timedelta(days=2), finished - timedelta(hours=1))
+    started = finished
+    frame = _frame(started - timedelta(days=363), finished - timedelta(hours=1))
 
     timestamps = _validated_history_timestamps(
         frame, started=started, finished=finished, days=365
@@ -24,7 +24,7 @@ def test_oanda_history_accepts_full_window_with_weekend_start_margin():
 
 def test_oanda_history_rejects_short_response_even_when_all_candles_are_in_window():
     finished = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
-    started = finished - timedelta(days=365)
+    started = finished
     frame = _frame(finished - timedelta(days=30), finished - timedelta(hours=1))
 
     with pytest.raises(SystemExit, match="does not reach the requested start"):
@@ -35,8 +35,8 @@ def test_oanda_history_rejects_short_response_even_when_all_candles_are_in_windo
 
 def test_oanda_history_rejects_stale_latest_candle():
     finished = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
-    started = finished - timedelta(days=365)
-    frame = _frame(started + timedelta(days=1), finished - timedelta(days=4))
+    started = finished
+    frame = _frame(started - timedelta(days=364), finished - timedelta(days=4))
 
     with pytest.raises(SystemExit, match="latest completed OANDA practice candle is stale"):
         _validated_history_timestamps(
@@ -46,9 +46,9 @@ def test_oanda_history_rejects_stale_latest_candle():
 
 def test_oanda_history_rejects_naive_and_unordered_timestamps():
     finished = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
-    started = finished - timedelta(days=365)
-    naive = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex([started + timedelta(days=1)]))
-    unordered = _frame(finished - timedelta(hours=2), started + timedelta(days=1))
+    started = finished
+    naive = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex([started - timedelta(days=364)]))
+    unordered = _frame(finished - timedelta(hours=2), started - timedelta(days=364))
 
     with pytest.raises(SystemExit, match="not timezone-aware"):
         _validated_history_timestamps(
