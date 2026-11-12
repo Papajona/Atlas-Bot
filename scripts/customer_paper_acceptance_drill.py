@@ -114,7 +114,10 @@ async def _register_bar(
     symbol: str,
     bar_at: datetime,
     run_key: str,
+    base_volume: str = "1",
+    participation_rate: str = "0.01",
 ) -> dict[str, str]:
+    _set_operation(f"{label}:register-market-bar")
     digest = hashlib.sha256(f"{run_key}|{label}|bar".encode("utf-8")).hexdigest()
     result = await register_customer_paper_market_bar(
         venue=venue,
@@ -122,12 +125,92 @@ async def _register_bar(
         timeframe="1m",
         bar_at=bar_at,
         bar_data_sha256=digest,
-        base_volume="1",
-        participation_rate="0.01",
+        base_volume=base_volume,
+        participation_rate=participation_rate,
     )
     _require(result.get("status") in {"APPENDED", "REPLAYED"}, f"{label}: market-bar budget registration failed")
-    _require(Decimal(result["capacity"]) >= Decimal("0.001"), f"{label}: market-bar capacity too small")
+    _require(Decimal(result["capacity"]) > 0, f"{label}: market-bar capacity must be positive")
     return result
+
+
+async def _read_market_bar_allocation(customer_id: int, bar_key: str) -> tuple[Decimal, Decimal]:
+    _set_operation("verify-aggregate-market-bar-allocation")
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(customer_id)},
+            )
+            row = (await conn.execute(text("""
+                SELECT b.capacity,
+                       COALESCE(SUM(a.allocated_quantity), 0) AS allocated_quantity
+                FROM customer_paper.market_bar_budgets AS b
+                LEFT JOIN customer_paper.market_bar_allocations AS a
+                  ON a.bar_key = b.bar_key
+                WHERE b.bar_key = :bar_key
+                GROUP BY b.bar_key, b.capacity
+            """), {"bar_key": bar_key})).mappings().first()
+        _require(row is not None, "registered market-bar budget could not be read back")
+        return Decimal(row["capacity"]), Decimal(row["allocated_quantity"])
+    finally:
+        await engine.dispose()
+
+
+async def _verify_tenant_rls(
+    *,
+    primary_customer_id: int,
+    other_customer_id: int,
+    primary_order_id: str,
+    other_order_id: str,
+) -> dict[str, int]:
+    _set_operation("verify-cross-tenant-row-level-security")
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(other_customer_id)},
+            )
+            # This is deliberately an RLS-sensitive read: the session context belongs
+            # to tenant B, while the predicate asks for tenant A's known persisted row.
+            # A broken/missing tenant policy makes this count non-zero.
+            primary_order_count = int((await conn.execute(text("""
+                SELECT count(*) FROM customer_paper.orders
+                WHERE customer_id = :primary_customer_id
+                  AND client_order_id = :primary_order_id
+            """), {
+                "primary_customer_id": primary_customer_id,
+                "primary_order_id": primary_order_id,
+            })).scalar_one())
+            other_order_count = int((await conn.execute(text("""
+                SELECT count(*) FROM customer_paper.orders
+                WHERE customer_id = :other_customer_id
+                  AND client_order_id = :other_order_id
+            """), {
+                "other_customer_id": other_customer_id,
+                "other_order_id": other_order_id,
+            })).scalar_one())
+            primary_account_count = int((await conn.execute(text("""
+                SELECT count(*) FROM customer_paper.accounts
+                WHERE customer_id = :primary_customer_id
+            """), {"primary_customer_id": primary_customer_id})).scalar_one())
+            other_account_count = int((await conn.execute(text("""
+                SELECT count(*) FROM customer_paper.accounts
+                WHERE customer_id = :other_customer_id
+            """), {"other_customer_id": other_customer_id})).scalar_one())
+        _require(primary_order_count == 0, "tenant B RLS context exposed tenant A's known order")
+        _require(primary_account_count == 0, "tenant B RLS context exposed tenant A's account rows")
+        _require(other_order_count == 1, "tenant B could not read its own known order through RLS")
+        _require(other_account_count > 0, "tenant B could not read its own account rows through RLS")
+        return {
+            "foreign_order_rows_visible": primary_order_count,
+            "foreign_account_rows_visible": primary_account_count,
+            "own_order_rows_visible": other_order_count,
+            "own_account_rows_visible": other_account_count,
+        }
+    finally:
+        await engine.dispose()
 
 
 async def _read_journal_invariants(customer_id: int) -> int:
