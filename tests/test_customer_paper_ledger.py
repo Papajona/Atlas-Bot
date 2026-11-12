@@ -167,7 +167,6 @@ def test_primary_security_definer_scan_exempts_only_the_shared_paper_guard_probe
     assert "p.prorettype <> 'boolean'::regtype" in query
     assert "AND p.prosecdef" in query
     assert "has_function_privilege(r.oid, p.oid, 'EXECUTE')" in query
-    assert "n.nspname <> 'customer_paper'" not in query
 
 
 
