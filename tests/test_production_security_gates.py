@@ -704,3 +704,8 @@ def test_production_deploy_blocks_database_behind_repository_alembic_head():
     assert "current_heads != expected_heads" in audit
     assert "stale or divergent" in audit
     assert "after verifying a current backup" in audit
+    assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in audit
+    assert "has_table_privilege(r.rolname, 'public.trades', 'INSERT')" in audit
+    assert "has_table_privilege(r.rolname, 'public.customer_ledger_accounts', 'UPDATE')" in audit
+    assert "audit_insert.lower() != \"true\"" in audit
+    assert "a read-only paper/staging identity cannot be used as the production API role" in audit
