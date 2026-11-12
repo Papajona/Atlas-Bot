@@ -73,6 +73,10 @@ jobs:
           : "${STAGING_SUPABASE_PROJECT_REF:?Missing staging Supabase project ref}"
           : "${PRIMARY_DATABASE_SECRET:?Missing primary reader database secret name}"
           : "${PAPER_DATABASE_SECRET:?Missing customer-paper database secret name}"
+          : "${EXPECTED_RUNTIME_DB_ROLE:?Missing primary runtime database role}"
+          : "${EXPECTED_PAPER_DB_ROLE:?Missing customer-paper database role}"
+          [[ "$EXPECTED_RUNTIME_DB_ROLE" == "atlas_paper_reader" ]]
+          [[ "$EXPECTED_PAPER_DB_ROLE" == "atlas_customer_paper" ]]
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
           [[ "$PRIMARY_DATABASE_SECRET" != "$PAPER_DATABASE_SECRET" ]]
           [[ "$PREFLIGHT_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]]
@@ -104,6 +108,52 @@ jobs:
             echo "CUSTOMER_PAPER_DATABASE_URL=$paper"
           } >> "$GITHUB_ENV"
           chmod 600 "$RUNNER_TEMP/atlas-primary-db-url" "$RUNNER_TEMP/atlas-paper-db-url"
+
+      - name: Verify database URLs target the configured Supabase project and identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          from urllib.parse import unquote, urlparse
+
+          root = Path(os.environ["RUNNER_TEMP"])
+          primary = urlparse((root / "atlas-primary-db-url").read_text(encoding="utf-8").strip())
+          paper = urlparse((root / "atlas-paper-db-url").read_text(encoding="utf-8").strip())
+          expected = os.environ["STAGING_SUPABASE_PROJECT_REF"]
+          pooler_pattern = re.compile(r"^aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com$")
+
+          def validate(label, parsed, expected_role):
+              if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg"} or not parsed.hostname:
+                  raise SystemExit(f"BLOCKED: {label} database secret is not a PostgreSQL URI")
+              host = parsed.hostname.lower()
+              is_pooler = bool(pooler_pattern.fullmatch(host))
+              if host not in {f"db.{expected}.supabase.co", f"{expected}.supabase.co"} and not is_pooler:
+                  raise SystemExit(f"BLOCKED: {label} database host does not match configured Supabase project")
+              if parsed.port not in (None, 5432) or parsed.path.lstrip("/") != "postgres":
+                  raise SystemExit(f"BLOCKED: {label} database URI must target PostgreSQL database postgres on port 5432")
+              if not parsed.username or not parsed.password:
+                  raise SystemExit(f"BLOCKED: {label} database URI lacks a dedicated login")
+              actual_user = unquote(parsed.username)
+              expected_user = f"{expected_role}.{expected}" if is_pooler else expected_role
+              if actual_user != expected_user:
+                  raise SystemExit(f"BLOCKED: {label} database URI does not use its configured least-privilege role")
+              return host, unquote(parsed.password)
+
+          primary_host, primary_password = validate(
+              "primary", primary, os.environ["EXPECTED_RUNTIME_DB_ROLE"]
+          )
+          paper_host, paper_password = validate(
+              "paper", paper, os.environ["EXPECTED_PAPER_DB_ROLE"]
+          )
+          if primary_host != paper_host or (primary.port or 5432) != (paper.port or 5432) or primary.path != paper.path:
+              raise SystemExit("BLOCKED: primary and paper credentials must target the same configured Supabase database")
+          if primary.username == paper.username or primary_password == paper_password:
+              raise SystemExit("BLOCKED: primary and paper database roles and credentials must be distinct")
+          print("PASS: primary and paper URLs match the configured Supabase project, database, and distinct least-privilege roles; values withheld")
+          PY
 
       - name: Install hash-locked Atlas dependencies
         shell: bash
