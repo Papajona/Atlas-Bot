@@ -158,7 +158,7 @@ def test_acceptance_workflow_checks_project_and_least_privilege_roles_before_dri
     assert validate_ref < derive_url < validate_urls < execute_drill
     assert '[[ "$EXPECTED_RUNTIME_DB_ROLE" == "atlas_paper_reader" ]]' in workflow
     assert '[[ "$EXPECTED_PAPER_DB_ROLE" == "atlas_customer_paper" ]]' in workflow
-    assert "expected_user = f"{'{'}expected_role{'}'}.{ '{' }expected{'}' }" not in workflow  # keep role binding in validator
+    assert 'expected_user = f"{expected_role}.{expected}"' in workflow
     assert "primary and paper database roles and credentials must be distinct" in workflow
     assert "PROCESS_ROLE: paper" in workflow
 
