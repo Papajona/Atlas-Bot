@@ -47,7 +47,7 @@ def test_oanda_history_rejects_stale_latest_candle():
 def test_oanda_history_rejects_naive_and_unordered_timestamps():
     finished = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
     started = finished
-    naive = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex([started - timedelta(days=364)]))
+    naive = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex([(started - timedelta(days=364)).replace(tzinfo=None)]))
     unordered = _frame(finished - timedelta(hours=2), started - timedelta(days=364))
 
     with pytest.raises(SystemExit, match="not timezone-aware"):
