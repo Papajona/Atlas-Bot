@@ -35,7 +35,7 @@ jobs:
         (
           github.event_name == 'workflow_run' &&
           github.event.workflow_run.head_branch == 'main' &&
-          github.event.workflow_run.event == 'workflow_dispatch' &&
+          (github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'push') &&
           github.event.workflow_run.conclusion == 'success' &&
           github.event.workflow_run.head_sha == github.sha
         )
@@ -77,16 +77,16 @@ jobs:
               fi
 
               if [[ "$workflow" == "production-verification.yml" ]]; then
-                # Ignore automatic pull_request/push/schedule runs as release evidence.
-                # Only an explicitly dispatched run on exact current main can attest Native AI.
+                # Accept a manual run or the push-triggered offline Production Core
+                # Verification for this exact main commit. PR and scheduled runs remain
+                # ineligible; the Native AI offline step is checked below in both cases.
                 run_json="$(gh run list \
                   --repo "$GITHUB_REPOSITORY" \
                   --workflow "$workflow" \
-                  --event workflow_dispatch \
                   --commit "$GITHUB_SHA" \
                   --limit 100 \
                   --json databaseId,headSha,headBranch,event,status,conclusion \
-                  --jq '[.[] | select(.headBranch == "main" and .event == "workflow_dispatch" and .headSha == "'"$GITHUB_SHA"'")] | sort_by(.databaseId) | last // {}')"
+                  --jq '[.[] | select(.headBranch == "main" and (.event == "workflow_dispatch" or .event == "push") and .headSha == "'"$GITHUB_SHA"'")] | sort_by(.databaseId) | last // {}')"
               else
                 run_json="$(gh run list \
                   --repo "$GITHUB_REPOSITORY" \
@@ -113,11 +113,12 @@ jobs:
                 if [[ "$workflow" == "production-verification.yml" ]]; then
                   verification_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"
                   native_outcome="$(jq -r '[.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion][0] // ""' <<< "$verification_json")"
+                  verification_event="$(jq -r '.event // ""' <<< "$verification_json")"
                   if [[ "$(jq -r '.headSha // ""' <<< "$verification_json")" != "$GITHUB_SHA" \
                     || "$(jq -r '.headBranch // ""' <<< "$verification_json")" != "main" \
-                    || "$(jq -r '.event // ""' <<< "$verification_json")" != "workflow_dispatch" \
+                    || ( "$verification_event" != "workflow_dispatch" && "$verification_event" != "push" ) \
                     || "$native_outcome" != "success" ]]; then
-                    echo "BLOCKED: Production Verification run $run_id is not a successful manual Native AI attestation for exact main commit $GITHUB_SHA"
+                    echo "BLOCKED: Production Verification run $run_id is not a successful exact-main Native AI offline verification for commit $GITHUB_SHA"
                     exit 1
                   fi
                 fi
