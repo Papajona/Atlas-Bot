@@ -2,6 +2,9 @@
 name: Customer Paper Staging Acceptance Drill
 
 on:
+  push:
+    branches:
+      - main
   workflow_run:
     workflows:
       - Deploy Paper-Only Atlas Staging
@@ -23,6 +26,7 @@ jobs:
   customer-paper-acceptance:
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.head_branch == 'main' &&
