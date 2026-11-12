@@ -2,6 +2,26 @@
 
 **Purpose:** distinguish merged code, automated tests, and real environment evidence. No line may be marked PASS solely because a CI simulation completed.
 
+
+
+## Current paper-staging evidence — 2026-11-12
+
+**Exact verified main SHA:** `445e9d1fa44ca1b7c88feb4f82da85ab315645d9`
+
+| Check | Result | Evidence |
+|---|---|---|
+| Atlas CI | PASS | [run 43257475829](https://github.com/Papajona/Atlas-Bot/actions/runs/43257475829) |
+| Production Core Verification (offline Native AI) | PASS | [run 43257475756](https://github.com/Papajona/Atlas-Bot/actions/runs/43257475756) |
+| Mandatory PostgreSQL ledger concurrency | PASS | [run 43257475702](https://github.com/Papajona/Atlas-Bot/actions/runs/43257475702) |
+| Paper-only Cloud Run staging deployment | PASS | [run 43258473229](https://github.com/Papajona/Atlas-Bot/actions/runs/43258473229) |
+| Staging identity and authenticated `/readyz` preflight | PASS | [run 43259066958](https://github.com/Papajona/Atlas-Bot/actions/runs/43259066958) |
+
+The dedicated staging database identity gate is now **PASS for paper-only staging**. The exact-main preflight verified the deployed Cloud Run runtime identity and paper-only settings, distinct primary and paper database roles/credentials within the configured same-project Supabase target, the primary `atlas_paper_reader` as read-only / non-owner / non-admin / NOINHERIT / BYPASSRLS, and the authenticated isolated-ledger `/readyz` preflight. This same-project design is intentional and documented in `RUNBOOK.md`; a second Supabase project or paid branch is not required for this staging gate.
+
+The Production Core workflow is pinned to `ubuntu-24.04` in `.github/workflows/production-verification.yml`; the exact-main Production Core run above passed. This removes the Ubuntu runner-migration warning from the production-safety job.
+
+These passes clear the **paper-staging identity/readiness blocker** only. They do not clear the separate original-market-data/DSR, full backup-restore, provider-to-ledger reconciliation, signed production Android artifact, monitoring-notification delivery, complete hash-locked dependency, or full production operational sign-off gates below. Live trading, live payouts, and mainnet funding remain disabled.
+
 ## Release identity
 
 | Field | Value |
