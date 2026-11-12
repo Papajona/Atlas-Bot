@@ -294,6 +294,8 @@ jobs:
           import subprocess
           import sys
           from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          from scripts.alembic_revision_contract import expected_alembic_heads
           from urllib.parse import unquote, urlparse
 
           secret_path = Path(sys.argv[1])
@@ -367,7 +369,20 @@ jobs:
               raise SystemExit("BLOCKED: anon/authenticated still have public schema USAGE")
           if not revision:
               raise SystemExit("BLOCKED: production database Alembic revision is missing")
-          print("PASS: production DB URL resolves to a dedicated non-owner/non-admin runtime role with RLS lockdown intact.")
+          expected_heads = expected_alembic_heads(Path("alembic/versions"))
+          current_heads = {item.strip() for item in revision.split(",") if item.strip()}
+          if current_heads != expected_heads:
+              raise SystemExit(
+                  "BLOCKED: production database Alembic revision is stale or divergent: "
+                  f"current={sorted(current_heads)} expected={sorted(expected_heads)}. "
+                  "Run the approved Cloud Run migration job after verifying a current backup; "
+                  "the API must not be deployed against an older schema."
+              )
+          print(
+              "PASS: production DB URL resolves to a dedicated non-owner/non-admin runtime role "
+              "with RLS lockdown intact and exact Alembic head "
+              f"{','.join(sorted(expected_heads))}."
+          )
           PY
 
       - name: Deploy immutable API release
