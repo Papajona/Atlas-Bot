@@ -50,3 +50,19 @@ def test_acceptance_recovery_crosses_a_fresh_event_loop(monkeypatch):
     assert report["phase_one"]["partial_fill"] is True
     assert report["phase_two"]["post_restart_fill"] == "APPENDED"
     assert report["real_customer_authentication_tested"] is False
+
+
+
+def test_failure_reason_redacts_credentials_and_synthetic_tenant_ids():
+    exc = RuntimeError(
+        "database failure password=topsecret postgresql://atlas:pw@db.example/postgres "
+        "customer_id=8123456789012345678"
+    )
+    reason = drill._safe_failure_reason(exc)
+
+    assert "topsecret" not in reason
+    assert "atlas:pw" not in reason
+    assert "db.example" not in reason
+    assert "8123456789012345678" not in reason
+    assert "[database-uri-redacted]" in reason
+    assert "password=[redacted]" in reason
