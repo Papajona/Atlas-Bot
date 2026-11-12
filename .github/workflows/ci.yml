@@ -102,7 +102,7 @@ jobs:
             echo "Runtime and verification Dockerfiles must use the same reviewed Python base-image digest" >&2
             exit 1
           }
-          docker pull "docker.io/library/python@\${runtime_digest}"
+          docker pull "docker.io/library/python@${runtime_digest}"
           echo "Verified shared runtime/verification Python base-image digest: $runtime_digest"
       - name: Build application container image
         run: docker build --tag atlas-bot-ci:repair .
