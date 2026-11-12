@@ -87,3 +87,33 @@ def test_staging_paper_drill_derives_supabase_url_from_validated_project_ref():
     run_at = workflow.index("python scripts/customer_paper_acceptance_drill.py")
     assert validate_at < derive_at < run_at
     assert "PROCESS_ROLE: paper" in workflow
+
+
+
+def test_acceptance_drill_exercises_rls_between_two_seeded_tenants():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "customer_paper_acceptance_drill.py"
+    ).read_text(encoding="utf-8")
+    seed_second = source.index("ensure_customer_paper_account(other_customer_id, \"USDT\")")
+    rls_start = source.index("async def _verify_tenant_rls_visibility(")
+    rls_end = source.index("\n\nasync def _phase_one(", rls_start)
+    rls_helper = source[rls_start:rls_end]
+    phase_two_start = source.index("async def _phase_two(")
+    phase_two_end = source.index("\n\ndef _run(", phase_two_start)
+    phase_two = source[phase_two_start:phase_two_end]
+
+    assert "set_config('app.customer_id'" in rls_helper
+    assert "FROM customer_paper.accounts" in rls_helper
+    assert "FROM customer_paper.orders" in rls_helper
+    assert "FROM customer_paper.journals" in rls_helper
+    assert "hidden_customer_id" in rls_helper
+    assert "result[\"hidden_accounts\"] == 0" in rls_helper
+    assert "result[\"hidden_orders\"] == 0" in rls_helper
+    assert "result[\"hidden_journals\"] == 0" in rls_helper
+    assert "visible_customer_id=other_customer_id" in phase_two
+    assert "hidden_customer_id=customer_id" in phase_two
+    assert seed_second < rls_start
