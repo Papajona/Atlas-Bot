@@ -86,19 +86,28 @@ jobs:
             --run-attempt "$GITHUB_RUN_ATTEMPT" \
             --commit "$GITHUB_SHA" \
             --output "$RUNNER_TEMP/customer-paper-acceptance.json"
-      - name: Verify pinned Python base-image digest
+      - name: Verify pinned Python base-image digests
         shell: bash
         run: |
           set -euo pipefail
-          digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile)"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "Dockerfile Python base image is not pinned to a SHA-256 digest" >&2
+          runtime_digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile)"
+          verify_digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile.verify)"
+          for digest in "$runtime_digest" "$verify_digest"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "Runtime and verification Dockerfiles must pin Python 3.13 slim by SHA-256 digest" >&2
+              exit 1
+            }
+          done
+          [[ "$runtime_digest" == "$verify_digest" ]] || {
+            echo "Runtime and verification Dockerfiles must use the same reviewed Python base-image digest" >&2
             exit 1
           }
-          docker pull "docker.io/library/python@${digest}"
-          echo "Verified pinned Python base-image digest: $digest"
+          docker pull "docker.io/library/python@\${runtime_digest}"
+          echo "Verified shared runtime/verification Python base-image digest: $runtime_digest"
       - name: Build application container image
         run: docker build --tag atlas-bot-ci:repair .
+      - name: Build verification container image
+        run: docker build --file Dockerfile.verify --tag atlas-bot-verify-ci:repair .
       - name: Smoke-test paper-only container startup and liveness
         shell: bash
         run: |
