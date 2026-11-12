@@ -98,13 +98,17 @@ def _tenant_policy_expression_is_exact(expression: Any) -> bool:
     policy per table and checks its command, name and role.
     """
     normalized = _normalize_sql_expression(expression)
-    # PostgreSQL's pg_policies deparser quotes the generated target-list alias and
-    # may add redundant parentheses around current_setting/NULLIF expressions.
-    # Normalize only that known alias spelling; the predicate grammar below remains
-    # exact and does not accept extra predicates or a different GUC.
+    # PostgreSQL's pg_policies deparser can render the current_setting value
+    # through a one-column scalar SELECT, with its target-list alias named
+    # current_setting. Accept only that exact rendering; the predicate grammar below
+    # remains strict and does not accept extra predicates or a different GUC.
     normalized = normalized.replace('as"nullif"', "asnullif")
     setting_call = r"current_setting\('app\.customer_id'(?:::text)?,true\)"
-    setting_expression = rf"(?:{setting_call}|\({setting_call}\))"
+    setting_expression = (
+        rf"(?:{setting_call}|\({setting_call}\)|"
+        rf"\(select{setting_call}ascurrent_setting\)|"
+        rf'\(select{setting_call}as"current_setting"\))'
+    )
     nullif_expression = (
         rf"nullif\({setting_expression},''(?:::text)?\)"
     )
