@@ -298,3 +298,38 @@ def test_legacy_strategy_builder_route_passes_optional_timeframe_through():
     end = source.index('@app.post("/api/customer/strategy-builder/{draft_id}/promote")', start)
     route = source[start:end]
     assert "timeframe=req.timeframe" in route
+
+
+def test_explicit_timeframe_overrides_all_prompt_timeframes():
+    from app.native_ai import compose_strategy_spec
+
+    spec = compose_strategy_spec(
+        prompt=(
+            "Create a BTC breakout using 4h range highs and 15m confirmation; "
+            "use 1h for the volatility filter."
+        ),
+        name="Explicit timeframe override",
+        asset="crypto",
+        symbol="BTC/USDT",
+        timeframe="1h",
+    )
+    assert spec["timeframes"] == ["1h"]
+    assert all(
+        condition["timeframe"] == "1h"
+        for key in ("entry_conditions", "exit_conditions")
+        for condition in spec[key]
+    )
+
+
+def test_prompt_can_still_define_multiple_timeframes_without_an_override():
+    from app.native_ai import compose_strategy_spec
+
+    spec = compose_strategy_spec(
+        prompt="Create a BTC breakout on 15m with 1h trend confirmation.",
+        name="Prompt multi-timeframe",
+        asset="crypto",
+        symbol="BTC/USDT",
+    )
+    assert set(spec["timeframes"]) == {"15m", "1h"}
+    conditions = spec["entry_conditions"] + spec["exit_conditions"]
+    assert {condition["timeframe"] for condition in conditions} <= {"15m", "1h"}
