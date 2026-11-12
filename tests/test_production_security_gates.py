@@ -466,8 +466,10 @@ def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
     assert "github.ref == 'refs/heads/main'" in deploy
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
-    assert '--event workflow_dispatch' in deploy
+    assert '--event workflow_dispatch' in deploy  # used for the uniquely correlated preflight dispatch
     assert '.event == "workflow_dispatch"' in deploy
+    assert '.event == "push"' in deploy
+    assert "github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'push'" in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
@@ -639,17 +641,19 @@ def test_read_only_staging_reader_is_excluded_from_audit_outbox_and_retry_grants
         assert "'atlas_paper_reader'" in migration
         assert "has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')" in migration
 
-def test_staging_attestation_selects_latest_manual_exact_commit_before_checking_success():
+def test_staging_attestation_selects_latest_manual_or_push_exact_commit_before_checking_success():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     verification_gate = deploy.split(
         'if [[ "$workflow" == "production-verification.yml" ]]; then', 1
     )[1].split("\n              else", 1)[0]
     selector = verification_gate.split("--jq ", 1)[1]
 
-    # Select the newest manual exact-main-commit run before inspecting its outcome.
-    # A newer failed or cancelled run must supersede an earlier successful run.
+    # Select the newest manual or push-triggered exact-main-commit run before
+    # inspecting its outcome. PR and scheduled runs are not eligible; a newer
+    # failed or cancelled eligible run supersedes an earlier successful run.
     assert '.headBranch == "main"' in selector
     assert '.event == "workflow_dispatch"' in selector
+    assert '.event == "push"' in selector
     assert '.headSha == ' in selector
     assert '.status == "completed"' not in selector
     assert '.conclusion == "success"' not in selector
