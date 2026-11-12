@@ -7,7 +7,7 @@ from scripts.verify_oanda_practice_history import _validated_history_timestamps
 
 
 def _frame(first: datetime, last: datetime) -> pd.DataFrame:
-    return pd.DataFrame(index=pd.DatetimeIndex([first, last]))
+    return pd.DataFrame({"close": [1.0, 1.1]}, index=pd.DatetimeIndex([first, last]))
 
 
 def test_oanda_history_accepts_full_window_with_weekend_start_margin():
@@ -47,7 +47,7 @@ def test_oanda_history_rejects_stale_latest_candle():
 def test_oanda_history_rejects_naive_and_unordered_timestamps():
     finished = datetime(2026, 11, 12, 12, tzinfo=timezone.utc)
     started = finished - timedelta(days=365)
-    naive = pd.DataFrame(index=pd.DatetimeIndex([started + timedelta(days=1)]))
+    naive = pd.DataFrame({"close": [1.0]}, index=pd.DatetimeIndex([started + timedelta(days=1)]))
     unordered = _frame(finished - timedelta(hours=2), started + timedelta(days=1))
 
     with pytest.raises(SystemExit, match="not timezone-aware"):
