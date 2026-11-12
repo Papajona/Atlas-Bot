@@ -8,8 +8,6 @@ __pycache__
 *.docx
 *.pdf
 tests/
-!tests/
-!tests/**
 backups/
 *.log
 .env
