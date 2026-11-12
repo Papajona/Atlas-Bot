@@ -185,6 +185,12 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         "This draft is not backtest evidence; cost-aware out-of-sample and walk-forward validation remain mandatory before paper promotion."]
     if direction_ambiguous:
         warnings.append("No trading direction was explicit in the prompt; LONG is only a draft default and must be confirmed before use.")
+    if explicit_timeframe and len(prompt_timeframes) > 1 and any(
+        prompt_timeframe != explicit_timeframe for prompt_timeframe in prompt_timeframes
+    ):
+        warnings.append(
+            f"Selected timeframe {explicit_timeframe} overrides the draft's multi-timeframe setup inferred from the prompt."
+        )
     risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*(%|percent|bps|bp)?", lower)
     if risk_match:
         amount = float(risk_match.group(1))
