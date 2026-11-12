@@ -214,6 +214,7 @@ async def _verify_tenant_rls(
 
 
 async def _read_journal_invariants(customer_id: int) -> int:
+    _set_operation("verify-balanced-customer-paper-journals")
     engine = _paper_engine()
     try:
         async with engine.begin() as conn:
@@ -249,14 +250,18 @@ async def _phase_one(
     bar_one_at: datetime,
     symbol: str,
 ) -> dict[str, Any]:
+    _set_operation("phase-one:initial-isolation-preflight")
     preflight = await preflight_isolated_customer_paper_ledger(require_enabled=True)
     _require(preflight.get("status") == "PASS", "customer-paper isolation preflight did not pass")
 
+    _set_operation("phase-one:seed-synthetic-customer")
     seeded = await ensure_customer_paper_account(customer_id, "USDT")
     _require(seeded.get("status") == "PASS" and seeded.get("real_funds_used") is False, "virtual account seed failed")
+    _set_operation("phase-one:verify-idempotent-customer-seed")
     reseeded = await ensure_customer_paper_account(customer_id, "USDT")
     _require(reseeded.get("paper_cash") == seeded.get("paper_cash"), "virtual account initialization was not idempotent")
 
+    _set_operation("phase-one:submit-primary-order")
     submission_digest = hashlib.sha256(f"{run_key}|submission|primary".encode("utf-8")).hexdigest()
     order = await submit_customer_paper_order(
         customer_id=customer_id,
@@ -278,7 +283,10 @@ async def _phase_one(
         symbol=symbol,
         bar_at=bar_one_at,
         run_key=run_key,
+        base_volume="0.001",
+        participation_rate="1",
     )
+    _set_operation("phase-one:append-first-partial-fill")
     fill_args = {
         "customer_id": customer_id,
         "client_order_id": order_id,
@@ -291,12 +299,14 @@ async def _phase_one(
     }
     first_fill = await record_customer_paper_fill(**fill_args)
     _require(first_fill.get("status") == "APPENDED", "first partial fill was not appended")
+    _set_operation("phase-one:verify-same-payload-fill-replay")
     replay = await record_customer_paper_fill(**fill_args)
     _require(
         replay.get("status") == "REPLAYED" and replay.get("fill_id") == first_fill.get("fill_id"),
         "identical fill retry did not return the immutable prior fill",
     )
 
+    _set_operation("phase-one:verify-conflicting-idempotency-key-rejected")
     try:
         await record_customer_paper_fill(**{**fill_args, "price": "100.01"})
     except CustomerPaperIdempotencyConflict:
@@ -304,6 +314,7 @@ async def _phase_one(
     else:
         raise RuntimeError("same fill idempotency key accepted a different price")
 
+    _set_operation("phase-one:verify-same-order-duplicate-bar-rejected")
     try:
         await record_customer_paper_fill(
             **{**fill_args, "idempotency_key": f"{run_key}:primary:duplicate-bar"}
@@ -313,6 +324,56 @@ async def _phase_one(
     else:
         raise RuntimeError("one order accepted two fills against the same completed bar")
 
+    # Exhaust the registered bar with a second independent order. The first order
+    # has consumed the full 0.001 capacity; a different order on that same bar
+    # must receive NO_LIQUIDITY rather than passing only the duplicate-order guard.
+    capacity_order_id = f"{run_key}-capacity-probe"
+    _set_operation("phase-one:submit-second-order-for-shared-bar-capacity")
+    capacity_submission_digest = hashlib.sha256(
+        f"{run_key}|submission|capacity-probe".encode("utf-8")
+    ).hexdigest()
+    capacity_order = await submit_customer_paper_order(
+        customer_id=customer_id,
+        client_order_id=capacity_order_id,
+        venue="binance",
+        market_type="spot",
+        symbol=symbol,
+        side="BUY",
+        quantity="0.001",
+        currency="USDT",
+        order_type="MARKET",
+        metadata=_market_metadata(submission_at, capacity_submission_digest),
+    )
+    _require(capacity_order.get("status") == "APPENDED", "second capacity-probe order was not appended")
+    _set_operation("phase-one:reject-second-order-after-aggregate-bar-capacity-exhaustion")
+    capacity_fill = await record_customer_paper_fill(
+        customer_id=customer_id,
+        client_order_id=capacity_order_id,
+        idempotency_key=f"{run_key}:capacity-probe:fill",
+        bar_key=bar["bar_key"],
+        quantity="0.001",
+        price="100",
+        fee_amount="0",
+        enforce_market_bar_budget=True,
+    )
+    _require(
+        capacity_fill.get("status") == "NO_LIQUIDITY",
+        "a second order consumed a market bar after aggregate capacity was exhausted",
+    )
+    bar_capacity, bar_allocated = await _read_market_bar_allocation(customer_id, bar["bar_key"])
+    _require(
+        bar_capacity == Decimal("0.001") and bar_allocated == bar_capacity,
+        "persisted market-bar allocations do not exactly respect the shared 0.001 capacity",
+    )
+    _set_operation("phase-one:cancel-unfilled-capacity-probe-order")
+    capacity_cancel = await cancel_customer_paper_order(
+        customer_id=customer_id,
+        client_order_id=capacity_order_id,
+        idempotency_key=f"{run_key}:capacity-probe:cancel",
+    )
+    _require(capacity_cancel.get("status") == "APPENDED", "unfilled capacity-probe order did not cancel")
+
+    _set_operation("phase-one:read-persisted-partial-order-state")
     persisted = await get_customer_paper_order(customer_id=customer_id, client_order_id=order_id)
     _require(
         persisted is not None
@@ -320,13 +381,19 @@ async def _phase_one(
         and Decimal(persisted.get("filled_quantity", "0")) == Decimal("0.001"),
         "partial order state was not persisted correctly",
     )
+    _set_operation("phase-one:verify-partial-order-recovery-list")
     open_orders = await list_open_customer_paper_orders(customer_id=customer_id)
     _require(any(row.get("client_order_id") == order_id for row in open_orders), "partial order was not recoverable from persisted state")
+    _set_operation("phase-one:verify-persisted-paper-balances")
     balances = await get_customer_paper_balances(customer_id=customer_id)
     _require(_balance_map(balances).get("PAPER_CASH", Decimal("0")) > 0, "paper cash balance was not persisted")
     return {
         "partial_fill": True,
         "same_payload_retry": replay.get("status"),
+        "aggregate_bar_capacity_exhaustion": capacity_fill.get("status"),
+        "bar_capacity": _fmt_decimal(bar_capacity),
+        "bar_allocated_quantity": _fmt_decimal(bar_allocated),
+        "capacity_probe_cancelled": capacity_cancel.get("status"),
         "conflicting_retry_blocked": conflicting_retry_blocked,
         "duplicate_bar_blocked": duplicate_bar_blocked,
         "restart_checkpoint_order_status": persisted["status"],
