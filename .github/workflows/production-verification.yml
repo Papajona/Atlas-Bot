@@ -11,7 +11,7 @@ permissions:
   contents: read
 jobs:
   production-safety:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: docker.io/library/postgres:15-alpine

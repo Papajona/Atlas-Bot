@@ -424,8 +424,10 @@ def test_customer_paper_preflight_excludes_dedicated_schema_only_when_database_i
     query = source.split("primary_security_definer_rows", 1)[1].split(
         "for row in primary_security_definer_rows", 1
     )[0]
-    assert "p.oid IS DISTINCT FROM to_regprocedure('customer_paper.verify_market_bar_capacity_guards()')" in query
-    assert "n.nspname <> 'customer_paper'" not in query
+    assert "n.nspname <> 'customer_paper'" in query
+    assert "p.proname <> 'verify_market_bar_capacity_guards'" in query
+    assert "p.pronargs <> 0" in query
+    assert "p.oid IS DISTINCT FROM to_regprocedure" not in query
 
 
 def test_mandatory_postgres_workflow_covers_config_and_real_shared_primary_relations():
