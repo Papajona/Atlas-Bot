@@ -17,6 +17,44 @@ from app.config import settings
 from app.data import fetch_forex_oanda
 
 
+
+def _validated_history_timestamps(
+    frame: pd.DataFrame,
+    *,
+    started: datetime,
+    finished: datetime,
+    days: int,
+) -> pd.DatetimeIndex:
+    """Fail unless OANDA returned recent candles spanning the requested history."""
+    if frame.empty:
+        raise SystemExit("FAIL: OANDA practice endpoint returned no in-window completed candles.")
+    timestamps = pd.DatetimeIndex(frame.index)
+    if timestamps.tz is None:
+        raise SystemExit("FAIL: returned candle timestamps are not timezone-aware.")
+    timestamps = timestamps.tz_convert("UTC")
+    if timestamps.hasnans or not timestamps.is_monotonic_increasing or timestamps.has_duplicates:
+        raise SystemExit("FAIL: candle timestamps are missing, unordered or duplicated.")
+
+    requested_start = started - timedelta(days=days)
+    first_candle = timestamps.min().to_pydatetime()
+    last_candle = timestamps.max().to_pydatetime()
+    if first_candle < requested_start:
+        raise SystemExit("FAIL: returned candle precedes the requested history window.")
+    # OANDA FX is closed on weekends and some holidays. Permit a short market-closure
+    # margin, but never let a short API response masquerade as a full requested history.
+    if first_candle > requested_start + timedelta(days=3):
+        covered_days = (last_candle - first_candle).total_seconds() / 86400.0
+        raise SystemExit(
+            "FAIL: OANDA practice history does not reach the requested start; "
+            f"first candle is {(first_candle - requested_start).total_seconds() / 86400.0:.1f} "
+            f"days late (observed span {covered_days:.1f} days, requested {days})."
+        )
+    if last_candle >= finished:
+        raise SystemExit("FAIL: returned candle is at or after the fetch completion time.")
+    if finished - last_candle > timedelta(days=3):
+        raise SystemExit("FAIL: latest completed OANDA practice candle is stale by more than 3 days.")
+    return timestamps
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--days", type=int, default=365)
@@ -35,18 +73,9 @@ def main() -> int:
     started = datetime.now(timezone.utc)
     frame = fetch_forex_oanda(args.symbol, timeframe=args.timeframe, days=args.days)
     finished = datetime.now(timezone.utc)
-    if frame.empty:
-        raise SystemExit("FAIL: OANDA practice endpoint returned no in-window completed candles.")
-    timestamps = pd.DatetimeIndex(frame.index)
-    if timestamps.tz is None:
-        raise SystemExit("FAIL: returned candle timestamps are not timezone-aware.")
-    timestamps = timestamps.tz_convert("UTC")
-    if not timestamps.is_monotonic_increasing or timestamps.has_duplicates:
-        raise SystemExit("FAIL: candle timestamps are unordered or duplicated.")
-    if timestamps.min().to_pydatetime() < started - timedelta(days=args.days):
-        raise SystemExit("FAIL: returned candle precedes the requested history window.")
-    if timestamps.max().to_pydatetime() >= finished:
-        raise SystemExit("FAIL: returned candle is at or after the fetch completion time.")
+    timestamps = _validated_history_timestamps(
+        frame, started=started, finished=finished, days=args.days
+    )
 
     print(json.dumps({
         "status": "PASS",
