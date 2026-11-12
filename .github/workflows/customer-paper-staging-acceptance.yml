@@ -39,11 +39,12 @@ jobs:
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF || secrets.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
       PRIMARY_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET || secrets.ATLAS_STAGING_DATABASE_SECRET }}
       PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET || secrets.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
+      EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE || secrets.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+      EXPECTED_PAPER_DB_ROLE: ${{ vars.ATLAS_STAGING_PAPER_DB_ROLE || secrets.ATLAS_STAGING_PAPER_DB_ROLE }}
       TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
     steps:
-      - name: Require exact current main commit
+      - name: Validate successful main deployment or manual main dispatch
         shell: bash
-        env:
         run: |
           set -euo pipefail
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
@@ -53,14 +54,20 @@ jobs:
             test "$GITHUB_REF" = "refs/heads/main"
           fi
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          current_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
-          test "$TARGET_SHA" = "$current_main"
-          echo "PASS: acceptance drill is restricted to the successful deployment's exact current main commit $TARGET_SHA"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 1
+
+      - name: Require exact current main commit after checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          current_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$TARGET_SHA" = "$current_main"
+          echo "PASS: acceptance drill is restricted to the successful deployment's exact current main commit $TARGET_SHA"
 
       - name: Validate protected staging identity inputs
         shell: bash
