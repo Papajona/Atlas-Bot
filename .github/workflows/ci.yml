@@ -60,6 +60,32 @@ jobs:
           echo "ATLAS_PAPER_TEST_DATABASE_URL=postgresql+asyncpg://atlas_paper_app:paper_test_password@localhost:5432/atlas_paper_test" >> "$GITHUB_ENV"
           echo "ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test" >> "$GITHUB_ENV"
           echo "ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_paper_test" >> "$GITHUB_ENV"
+
+      - name: Run end-to-end customer-paper lifecycle acceptance drill
+        env:
+          ENVIRONMENT: development
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          CUSTOMER_PAPER_DATABASE_URL: postgresql+asyncpg://atlas_paper_app:paper_test_password@localhost:5432/atlas_paper_test
+          CUSTOMER_PAPER_LEDGER_ENABLED: "true"
+          CUSTOMER_PAPER_SHARED_DATABASE_ENABLED: "false"
+          CUSTOMER_PAPER_INITIAL_BALANCE: "10000"
+          CUSTOMER_PAPER_INITIAL_CURRENCY: USDT
+          CUSTOMER_TOTP_REQUIRED: "true"
+          PAPER_TRADING: "true"
+          LIVE_TRADING_ENABLED: "false"
+          CUSTOMER_LIVE_TRADING_ENABLED: "false"
+          PAYOUT_LIVE_ENABLED: "false"
+          BROKER_SANDBOX: "true"
+          DERIV_LIVE_ENABLED: "false"
+          USDT_TRON_ENABLED: "false"
+          USDT_TRON_SWEEP_ENABLED: "false"
+        run: |
+          set -euo pipefail
+          python scripts/customer_paper_acceptance_drill.py \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --commit "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/customer-paper-acceptance.json"
       - name: Verify pinned Python base-image digest
         shell: bash
         run: |

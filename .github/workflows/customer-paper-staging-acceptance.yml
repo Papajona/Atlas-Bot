@@ -1,0 +1,148 @@
+
+name: Customer Paper Staging Acceptance Drill
+
+on:
+  workflow_run:
+    workflows:
+      - Deploy Paper-Only Atlas Staging
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: atlas-customer-paper-staging-acceptance
+  cancel-in-progress: false
+
+jobs:
+  customer-paper-acceptance:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: staging
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION || secrets.GCP_REGION }}
+      WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+      PREFLIGHT_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT || secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+      STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF || secrets.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
+      PRIMARY_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET || secrets.ATLAS_STAGING_DATABASE_SECRET }}
+      PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET || secrets.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
+      TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Require exact current main commit
+        shell: bash
+        env:
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
+            test "${{ github.event.workflow_run.head_branch }}" = "main"
+            test "${{ github.event.workflow_run.conclusion }}" = "success"
+          else
+            test "$GITHUB_REF" = "refs/heads/main"
+          fi
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          current_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
+          test "$TARGET_SHA" = "$current_main"
+          echo "PASS: acceptance drill is restricted to the successful deployment's exact current main commit $TARGET_SHA"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          fetch-depth: 1
+
+      - name: Validate protected staging identity inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${GCP_PROJECT_ID:?Missing staging GCP project}"
+          : "${GCP_REGION:?Missing staging GCP region}"
+          : "${WIF_PROVIDER:?Missing staging workload identity provider}"
+          : "${PREFLIGHT_SERVICE_ACCOUNT:?Missing staging preflight service account}"
+          : "${STAGING_SUPABASE_PROJECT_REF:?Missing staging Supabase project ref}"
+          : "${PRIMARY_DATABASE_SECRET:?Missing primary reader database secret name}"
+          : "${PAPER_DATABASE_SECRET:?Missing customer-paper database secret name}"
+          [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
+          [[ "$PRIMARY_DATABASE_SECRET" != "$PAPER_DATABASE_SECRET" ]]
+          [[ "$PREFLIGHT_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]]
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT || secrets.GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+
+      - name: Retrieve separate staging database credentials without logging them
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          gcloud secrets versions access latest --secret="$PRIMARY_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-primary-db-url"
+          gcloud secrets versions access latest --secret="$PAPER_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-paper-db-url"
+          test -s "$RUNNER_TEMP/atlas-primary-db-url"
+          test -s "$RUNNER_TEMP/atlas-paper-db-url"
+          primary="$(cat "$RUNNER_TEMP/atlas-primary-db-url")"
+          paper="$(cat "$RUNNER_TEMP/atlas-paper-db-url")"
+          echo "::add-mask::$primary"
+          echo "::add-mask::$paper"
+          {
+            echo "DATABASE_URL=$primary"
+            echo "CUSTOMER_PAPER_DATABASE_URL=$paper"
+          } >> "$GITHUB_ENV"
+          chmod 600 "$RUNNER_TEMP/atlas-primary-db-url" "$RUNNER_TEMP/atlas-paper-db-url"
+
+      - name: Install hash-locked Atlas dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade "pip==25.3"
+          MULTIDICT_NO_EXTENSIONS=1 python -m pip install --no-binary=multidict --require-hashes -r requirements-dev.lock
+          python -m pip check
+
+      - name: Exercise paper ledger with a synthetic tenant only
+        env:
+          ENVIRONMENT: staging
+          CUSTOMER_PAPER_LEDGER_ENABLED: "true"
+          CUSTOMER_PAPER_SHARED_DATABASE_ENABLED: "true"
+          CUSTOMER_PAPER_INITIAL_BALANCE: "10000"
+          CUSTOMER_PAPER_INITIAL_CURRENCY: USDT
+          CUSTOMER_TOTP_REQUIRED: "true"
+          PAPER_TRADING: "true"
+          LIVE_TRADING_ENABLED: "false"
+          CUSTOMER_LIVE_TRADING_ENABLED: "false"
+          PAYOUT_LIVE_ENABLED: "false"
+          BROKER_SANDBOX: "true"
+          DERIV_LIVE_ENABLED: "false"
+          USDT_TRON_ENABLED: "false"
+          USDT_TRON_SWEEP_ENABLED: "false"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/customer_paper_acceptance_drill.py \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --commit "$TARGET_SHA" \
+            --output "$RUNNER_TEMP/customer-paper-acceptance.json"
+
+      - name: Preserve redacted staging acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: atlas-customer-paper-acceptance-${{ github.run_id }}
+          path: ${{ runner.temp }}/customer-paper-acceptance.json
+          if-no-files-found: warn
+          retention-days: 90
