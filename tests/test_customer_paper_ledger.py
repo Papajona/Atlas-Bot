@@ -157,13 +157,16 @@ def test_primary_security_definer_scan_exempts_only_the_shared_paper_guard_probe
     query = source.split("primary_security_definer_rows", 1)[1].split(
         "for row in primary_security_definer_rows", 1
     )[0]
-    # Exempt only the exact read-only boolean guard probe. Other executable
-    # SECURITY DEFINER routines in customer_paper remain visible to preflight.
-    assert "p.oid IS DISTINCT FROM to_regprocedure('customer_paper.verify_market_bar_capacity_guards()')" in query
+    # Exempt only the exact no-argument boolean guard probe in a shared DB.
+    # Catalog comparisons avoid resolving a customer_paper-qualified name, because
+    # atlas_paper_reader intentionally has no USAGE on that schema.
+    assert "n.nspname <> 'customer_paper'" in query
+    assert "p.proname <> 'verify_market_bar_capacity_guards'" in query
+    assert "p.pronargs <> 0" in query
     assert "p.prorettype <> 'boolean'::regtype" in query
+    assert "to_regprocedure(" not in query
     assert "AND p.prosecdef" in query
     assert "has_function_privilege(r.oid, p.oid, 'EXECUTE')" in query
-    assert "n.nspname <> 'customer_paper'" not in query
 
 
 
