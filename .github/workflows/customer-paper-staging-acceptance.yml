@@ -2,9 +2,6 @@
 name: Customer Paper Staging Acceptance Drill
 
 on:
-  push:
-    branches:
-      - main
   workflow_run:
     workflows:
       - Deploy Paper-Only Atlas Staging
@@ -26,7 +23,6 @@ jobs:
   customer-paper-acceptance:
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
       (
         github.event_name == 'workflow_run' &&
         github.event.workflow_run.head_branch == 'main' &&
@@ -54,8 +50,11 @@ jobs:
           if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
             test "${{ github.event.workflow_run.head_branch }}" = "main"
             test "${{ github.event.workflow_run.conclusion }}" = "success"
+            test "$TARGET_SHA" = "${{ github.event.workflow_run.head_sha }}"
           else
+            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
             test "$GITHUB_REF" = "refs/heads/main"
+            test "$TARGET_SHA" = "$GITHUB_SHA"
           fi
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
 
@@ -64,14 +63,12 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 1
 
-      - name: Require exact current main commit after checkout
+      - name: Require checkout to match the exact deployed or manually dispatched commit
         shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          current_main="$(git ls-remote --exit-code origin refs/heads/main | awk '{print $1}')"
-          test "$TARGET_SHA" = "$current_main"
-          echo "PASS: acceptance drill is restricted to the successful deployment's exact current main commit $TARGET_SHA"
+          echo "PASS: acceptance drill is pinned to the completed deployment or reviewed manual-dispatch commit $TARGET_SHA; later main commits do not invalidate this deployment's evidence"
 
       - name: Validate protected staging identity inputs
         shell: bash
