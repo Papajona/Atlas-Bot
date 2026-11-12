@@ -11,7 +11,9 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import sys
+import traceback
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -37,9 +39,46 @@ from app.customer_paper_lifecycle import (
     list_open_customer_paper_orders,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
+    cancel_customer_paper_order,
     reverse_customer_paper_fill,
     submit_customer_paper_order,
 )
+
+
+_CURRENT_OPERATION = "initializing"
+
+
+def _set_operation(operation: str) -> None:
+    global _CURRENT_OPERATION
+    _CURRENT_OPERATION = str(operation)[:120]
+
+
+def _sanitized_failure(exc: Exception) -> tuple[str, list[str]]:
+    message = str(exc)
+    for candidate in (
+        getattr(settings, "database_url", None),
+        getattr(settings, "customer_paper_database_url", None),
+    ):
+        if candidate:
+            message = message.replace(str(candidate), "[REDACTED_DATABASE_URL]")
+    message = re.sub(
+        r"(?i)((?:postgres(?:ql)?(?:\+\w+)?|mysql)://)[^\s'\"@]+@",
+        r"\1[REDACTED]@",
+        message,
+    )
+    message = re.sub(
+        r"(?i)\b(password|token|secret|api[_-]?key|authorization)\b\s*[:=]\s*[^,\s;]+",
+        r"\1=[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [REDACTED]", message)
+    message = re.sub(r"\beyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b", "[REDACTED_JWT]", message)
+    message = message.strip()[:600] or "No exception message was supplied."
+    frames = [
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in traceback.extract_tb(exc.__traceback__)[-20:]
+    ]
+    return message, frames
 
 
 def _require(condition: bool, message: str) -> None:
