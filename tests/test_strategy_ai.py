@@ -73,7 +73,6 @@ def test_native_strategy_parser_preserves_multitimeframe_rules_and_avoids_substr
         prompt="15m breakout with 1h confirmation for forex trend together",
         name="Multi-timeframe forex",
         asset="forex",
-        timeframe="1h",
     )
     assert spec["symbols"] == ["EUR_USD"]
     assert spec["strategy_family"] == "BREAKOUT"
