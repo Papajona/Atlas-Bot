@@ -116,7 +116,9 @@ def test_acceptance_drill_exercises_rls_between_two_seeded_tenants():
     assert "result[\"hidden_journals\"] == 0" in rls_helper
     assert "visible_customer_id=other_customer_id" in phase_two
     assert "hidden_customer_id=customer_id" in phase_two
-    assert seed_second < rls_start
+    # The helper is defined before phase_one; tenant two must be seeded during
+    # phase_one before phase_two calls the helper with B visible / A hidden.
+    assert rls_start < seed_second < phase_two_start
 
 
 def test_acceptance_workflow_is_pinned_to_the_triggering_deployment_sha():
