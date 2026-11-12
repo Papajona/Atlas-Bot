@@ -142,7 +142,9 @@ class StrategyBuilderRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
     symbol: str = Field(default="BTC/USDT:USDT", min_length=2, max_length=80)
     exchange: str = Field(default="binance", min_length=2, max_length=50)
-    timeframe: str = Field(default="1h", pattern="^(5m|15m|30m|1h|4h|1d)$")
+    # Keep prompt inference as the default for the compatibility endpoint too.
+    # An explicit value remains a caller-selected override.
+    timeframe: str | None = Field(default=None, pattern="^(5m|15m|30m|1h|4h|1d)$")
 
 
 class GridBotRequest(BaseModel):
