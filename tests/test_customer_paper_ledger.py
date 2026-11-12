@@ -1269,6 +1269,23 @@ def test_customer_paper_policy_validator_accepts_exact_statement_constant_subque
     )
     assert _tenant_policy_expression_is_exact(deparsed_parenthesized_setting) is True
 
+    # Actual Supabase/PostgreSQL pg_policies rendering observed in staging:
+    # NULLIF wraps a scalar SELECT whose target-list alias is current_setting.
+    live_supabase_deparse = (
+        "(customer_id = (NULLIF(( SELECT current_setting('app.customer_id'::text, true) "
+        "AS current_setting), ''::text))::bigint)"
+    )
+    assert _tenant_policy_expression_is_exact(live_supabase_deparse) is True
+    assert _tenant_policy_expression_is_exact(
+        live_supabase_deparse.replace("AS current_setting", 'AS "current_setting"')
+    ) is True
+    assert _tenant_policy_expression_is_exact(
+        live_supabase_deparse.replace("app.customer_id", "app.other_id")
+    ) is False
+    assert _tenant_policy_expression_is_exact(
+        live_supabase_deparse.replace("AS current_setting", "AS current_settingx")
+    ) is False
+
     widened = (
         "(customer_id = (SELECT NULLIF(current_setting('app.customer_id'::text, true), "
         "''::text)::bigint) OR true)"
