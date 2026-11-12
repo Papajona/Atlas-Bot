@@ -693,3 +693,14 @@ def test_production_deploy_uses_latest_exact_main_gate_run_before_checking_outco
     assert '[ "$run_status" != "completed" ]' in native_gate
     assert '[ "$run_conclusion" != "success" ]' in native_gate
     assert '[ "$native_conclusion" != "success" ]' in native_gate
+
+
+def test_production_deploy_blocks_database_behind_repository_alembic_head():
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    start = workflow.index("- name: Verify production database runtime role before deployment")
+    end = workflow.index("- name: Deploy immutable API release", start)
+    audit = workflow[start:end]
+    assert "expected_alembic_heads(Path(\"alembic/versions\"))" in audit
+    assert "current_heads != expected_heads" in audit
+    assert "stale or divergent" in audit
+    assert "after verifying a current backup" in audit
