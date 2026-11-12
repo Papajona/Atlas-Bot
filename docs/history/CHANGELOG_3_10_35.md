@@ -27,10 +27,10 @@
 
 ## Strategy Intelligence upgrade
 - Replaced the deterministic keyword strategy parser with a real LLM-backed Strategy Intelligence pipeline.
-- Gemini is the primary strategy-generation provider; Groq is an optional fallback.
+- The original strategy-generation flow used hosted AI services. That architecture has since been retired and replaced by in-process Atlas Native AI.
 - Added strict Pydantic schema validation, supported-timeframe/asset validation, and platform risk caps.
 - AI output is permanently marked `PAPER_SHADOW_ONLY` and has no execution authority.
-- Provider/model metadata and fallback errors are returned for auditability.
+- Strategy provenance and validation outcomes are recorded for auditability.
 - Added regression tests covering provider requirements, schema validation, risk capping, and removal of the keyword parser.
 
 ## Strategy fact-check correction
