@@ -352,6 +352,7 @@ def simulate_execution_aware_strategy(
         exit_turnover = abs(actual) if exited and actual != 0.0 else 0.0
         turnover[i] = entry_turnover + exit_turnover
         exit_cost_index = i + 1 if gap_exit_fill and i + 1 < n else i
+        entry_cost_drag_override: float | None = None
         if transaction_cost_provider is None:
             entry_cost_bps = float(per_bar_transaction_bps[i])
             exit_cost_bps = float(per_bar_transaction_bps[exit_cost_index])
@@ -359,10 +360,40 @@ def simulate_execution_aware_strategy(
             entry_cost_bps = 0.0
             exit_cost_bps = 0.0
             if entry_turnover > 0.0:
-                entry_side = "buy" if actual - previous_position > 0.0 else "sell"
-                entry_cost_bps = float(transaction_cost_provider(
-                    i, entry_turnover, float(opens[i]), entry_side, "ENTRY"
-                ))
+                reversal = (
+                    previous_position != 0.0
+                    and actual != 0.0
+                    and math.copysign(1.0, previous_position) != math.copysign(1.0, actual)
+                )
+                if reversal:
+                    # A reversal is two executable orders, not one net position delta:
+                    # close the old side and open the new side with separate
+                    # participation calculations and deterministic latency draws.
+                    close_quantity = abs(float(previous_position))
+                    open_quantity = abs(float(actual))
+                    close_side = "sell" if previous_position > 0.0 else "buy"
+                    open_side = "buy" if actual > 0.0 else "sell"
+                    close_cost_bps = float(transaction_cost_provider(
+                        i, close_quantity, float(opens[i]), close_side, "ENTRY_CLOSE"
+                    ))
+                    open_cost_bps = float(transaction_cost_provider(
+                        i, open_quantity, float(opens[i]), open_side, "ENTRY_OPEN"
+                    ))
+                    if any(
+                        not math.isfinite(rate) or rate < 0.0
+                        for rate in (close_cost_bps, open_cost_bps)
+                    ):
+                        raise ValueError("event-level transaction cost provider returned an invalid reversal rate")
+                    entry_cost_drag_override = (
+                        close_quantity * close_cost_bps
+                        + open_quantity * open_cost_bps
+                    ) / 10_000.0
+                    entry_cost_bps = entry_cost_drag_override * 10_000.0 / entry_turnover
+                else:
+                    entry_side = "buy" if actual - previous_position > 0.0 else "sell"
+                    entry_cost_bps = float(transaction_cost_provider(
+                        i, entry_turnover, float(opens[i]), entry_side, "ENTRY"
+                    ))
             if exit_turnover > 0.0:
                 if exit_fill_price is None:
                     raise RuntimeError("execution exit was flagged without a verified fill price")
@@ -378,7 +409,11 @@ def simulate_execution_aware_strategy(
                 or exit_cost_bps < 0.0
             ):
                 raise ValueError("event-level transaction cost provider returned an invalid rate")
-        entry_cost_drag = entry_turnover * entry_cost_bps / 10_000.0
+        entry_cost_drag = (
+            entry_cost_drag_override
+            if entry_cost_drag_override is not None
+            else entry_turnover * entry_cost_bps / 10_000.0
+        )
         exit_cost_drag = exit_turnover * exit_cost_bps / 10_000.0
         transaction_cost_drag[i] = entry_cost_drag + exit_cost_drag
         if turnover[i] > 0.0:
