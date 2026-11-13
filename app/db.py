@@ -14,7 +14,9 @@ def _utc_date():
 
 engine_kwargs = {"future": True, "pool_pre_ping": True}
 if settings.database_url.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
+    # BEGIN IMMEDIATE serializes the trial-ledger head before reads on SQLite;
+    # the bounded busy timeout permits concurrent local appenders to queue safely.
+    engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
 else:
     engine_kwargs.update({
         "pool_size": 10, "max_overflow": 20, "pool_recycle": 1800,
@@ -1288,6 +1290,7 @@ class ResearchTrialArchive(Base):
     ledger_previous_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ledger_entry_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     ledger_hmac_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ledger_hmac_key_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     ledger_status: Mapped[str] = mapped_column(String(40), nullable=False, default="LEGACY_UNCHAINED")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
 
