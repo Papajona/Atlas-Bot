@@ -49,9 +49,12 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
     return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
-@pytest.mark.parametrize(("fail_lock_commit", "fail_unlock"), [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize(
+    ("fail_lock_commit", "fail_unlock", "fail_lock_wait"),
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+)
 def test_customer_paper_fill_fetches_marks_before_write_and_legacy_locks_after_order_bar(
-    monkeypatch, fail_lock_commit, fail_unlock,
+    monkeypatch, fail_lock_commit, fail_unlock, fail_lock_wait,
 ):
     from app.correlation_risk import RISK_GROUPS
 
@@ -113,6 +116,9 @@ def test_customer_paper_fill_fetches_marks_before_write_and_legacy_locks_after_o
 
             if "pg_advisory_lock(" in query:
                 lock_key = params["lock_key"]
+                if fail_lock_wait:
+                    events.append(("session_lock_wait_failed", lock_key, self._in_transaction))
+                    raise RuntimeError("simulated risk-budget lock wait timeout")
                 self.session_locks.add(lock_key)
                 events.append(("session_lock", lock_key, self._in_transaction))
                 if fail_lock_commit:
@@ -230,9 +236,11 @@ def test_customer_paper_fill_fetches_marks_before_write_and_legacy_locks_after_o
     monkeypatch.setattr(paper_lifecycle, "_set_tenant", set_tenant)
     monkeypatch.setattr(paper_lifecycle, "_paper_engine", lambda: engine)
 
-    expected_exception = RuntimeError if fail_lock_commit else StopBeforeFill
+    expected_exception = RuntimeError if (fail_lock_commit or fail_lock_wait) else StopBeforeFill
     expected_message = (
-        "simulated commit failure"
+        "simulated risk-budget lock wait timeout"
+        if fail_lock_wait
+        else "simulated commit failure"
         if fail_lock_commit
         else "legacy locks follow order and bar locks"
     )
@@ -267,7 +275,7 @@ def test_customer_paper_fill_fetches_marks_before_write_and_legacy_locks_after_o
     ]
     unlock_events = [item for item in events if isinstance(item, tuple) and item[0] == "unlock"]
 
-    if fail_lock_commit:
+    if fail_lock_commit or fail_lock_wait:
         assert not mark_events
         assert not write_event_indexes
         assert not legacy_lock_indexes
@@ -286,13 +294,17 @@ def test_customer_paper_fill_fetches_marks_before_write_and_legacy_locks_after_o
         ]
         assert events.index(mark_events[0]) < write_event_indexes[0]
 
-    assert len(unlock_events) == 1
-    if fail_unlock:
-        assert unlock_events[0][2] is False
+    if fail_lock_wait:
+        assert unlock_events == []
         assert conn.invalidated is True
     else:
-        assert unlock_events[0][2] is True
-        assert conn.invalidated is False
+        assert len(unlock_events) == 1
+        if fail_unlock:
+            assert unlock_events[0][2] is False
+            assert conn.invalidated is True
+        else:
+            assert unlock_events[0][2] is True
+            assert conn.invalidated is False
     assert conn.session_locks == set()
     assert engine.disposed is True
 
