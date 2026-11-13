@@ -1,6 +1,5 @@
 .git
 .gitignore
-.github
 .pytest_cache
 __pycache__
 *.py[cod]
@@ -21,7 +20,6 @@ RELEASE_AUDIT_*.md
 REVIEW*.md
 ROOT_BUG_AUDIT_*.md
 
-docs/
 
 # Android module shares the app/ directory name with the Python package
 app/src/
