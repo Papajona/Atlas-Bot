@@ -160,7 +160,7 @@ def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference(
 
 @pytest.mark.postgres
 @pytest.mark.skipif(
-    not os.getenv("DATABASE_URL"),
+    not (os.getenv("ATLAS_POSTGRES_URL") or os.getenv("DATABASE_URL")),
     reason="requires the migrated disposable PostgreSQL database provisioned by CI",
 )
 def test_research_integrity_query_executes_against_postgres():
@@ -169,9 +169,12 @@ def test_research_integrity_query_executes_against_postgres():
     import asyncpg
     from scripts.verify_staging_restore import RESEARCH_INTEGRITY_QUERY
 
-    dsn = os.environ["DATABASE_URL"].replace(
-        "postgresql+asyncpg://", "postgresql://", 1
-    )
+    # Prefer the explicitly PostgreSQL-only DSN: conftest may supply a default
+    # SQLite DATABASE_URL when the caller did not export a database URL.
+    postgres_url = os.environ.get("ATLAS_POSTGRES_URL") or os.environ["DATABASE_URL"]
+    dsn = postgres_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    if not dsn.startswith(("postgresql://", "postgres://")):
+        raise AssertionError("PostgreSQL integration test requires a PostgreSQL DSN")
 
     async def execute_query():
         connection = await asyncpg.connect(dsn)
