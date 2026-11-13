@@ -1366,16 +1366,37 @@ def cost_breakeven_report(
         )
     except (TypeError, ValueError, OverflowError):
         return {"status": "INVALID_COST_INPUT", "observations": 0, "stress_ok": False}
-    n = min(len(g), len(t), len(fixed), len(variable))
+    lengths = (len(g), len(t), len(fixed), len(variable))
+    if len(set(lengths)) != 1:
+        return {
+            "status": "INVALID_COST_ALIGNMENT",
+            "observations": int(min(lengths)),
+            "input_lengths": {
+                "gross_returns": lengths[0],
+                "turnover": lengths[1],
+                "fixed_cost_drag": lengths[2],
+                "variable_cost_bps_per_bar": lengths[3],
+            },
+            "stress_ok": False,
+        }
+    n = lengths[0]
     if n < 30:
         return {"status": "INSUFFICIENT_DATA", "observations": int(n), "stress_ok": False}
-    g, t, fixed, variable = g[:n], t[:n], fixed[:n], variable[:n]
     try:
         taker = float(taker_bps)
         slippage = float(slippage_bps)
         multiplier = float(stress_multiplier)
+        annualization = float(bars_per_year)
     except (TypeError, ValueError, OverflowError):
         return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
+    if (
+        isinstance(bars_per_year, bool)
+        or not math.isfinite(annualization)
+        or not annualization.is_integer()
+        or annualization < 1
+    ):
+        return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
+    per_year = int(annualization)
     if (
         not np.all(np.isfinite(g))
         or not np.all(np.isfinite(t))
@@ -1403,7 +1424,6 @@ def cost_breakeven_report(
     net = float((g - fixed - variable_drag).mean())
     stressed = float((g - fixed - variable_drag * multiplier).mean())
     breakeven_bps = ((mean_gross - mean_fixed) / mean_turn * 10_000.0) if mean_turn > 0 else float("inf")
-    per_year = max(1, int(bars_per_year))
     return {
         "status": "OK",
         "observations": int(n),
