@@ -387,6 +387,25 @@ def evaluate_decision_outcome_labels(
                 result[decision] = _metrics(values, min_group_samples=min_group_samples)
             return result
 
+        if not train_kept:
+            # A group entirely after the shared boundary, or one whose every
+            # pre-boundary outcome overlaps it, has no independent training
+            # baseline. It must not qualify for one-time holdout release.
+            out_of_sample.append({
+                **base,
+                "status": "INSUFFICIENT_TRAINING_BASELINE",
+                "holdout_fraction": float(holdout_fraction),
+                "holdout_start": holdout_start.isoformat(),
+                "n_train_before_purge": len(train_candidates),
+                "n_train_after_purge": 0,
+                "n_purged_train_labels": purged,
+                "n_holdout": len(holdout_entries),
+                "train_by_decision": {},
+                "holdout_by_decision": {},
+                "interpretation": "excluded; no post-purge pre-cutoff training baseline",
+            })
+            continue
+
         out_of_sample.append({
             **base,
             "status": "CHRONOLOGICAL_HOLDOUT",
@@ -402,7 +421,7 @@ def evaluate_decision_outcome_labels(
         })
 
     return {
-        "report_version": "rejected-signal-evaluation-v3",
+        "report_version": "rejected-signal-evaluation-v4",
         "research_only": True,
         "automatic_promotion": False,
         "methodology": {
@@ -545,6 +564,7 @@ async def evaluate_decision_outcome_labels_once(
         row for row in report.get("out_of_sample", [])
         if isinstance(row, dict)
         and row.get("status") == "CHRONOLOGICAL_HOLDOUT"
+        and int(row.get("n_train_after_purge", 0) or 0) > 0
         and int(row.get("n_holdout", 0) or 0) > 0
     ]
     adequately_sampled = []
