@@ -44,6 +44,10 @@ class CustomerPaperCashShortfall(CustomerPaperOrderConflict):
     """A fill cannot be applied because concurrent paper cash consumption won the race."""
 
 
+class CustomerPaperMarkVerificationError(CustomerPaperOrderConflict):
+    """A fresh correlation-group quote could not be obtained or validated."""
+
+
 def _customer_id(value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError("customer_id must be a positive integer")
@@ -915,14 +919,16 @@ async def record_customer_paper_fill(
             raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
         try:
             group_mark_prices = await group_mark_prices_loader()
+        except CustomerPaperMarkVerificationError:
+            raise
         except CustomerPaperLedgerBlocked:
             raise
         except Exception as exc:
-            raise CustomerPaperLedgerBlocked(
+            raise CustomerPaperMarkVerificationError(
                 "current correlation-group marks could not be verified"
             ) from exc
         if not isinstance(group_mark_prices, Mapping):
-            raise CustomerPaperLedgerBlocked(
+            raise CustomerPaperMarkVerificationError(
                 "current correlation-group mark loader returned invalid data"
             )
     engine = _paper_engine()
