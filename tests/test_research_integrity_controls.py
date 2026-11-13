@@ -561,6 +561,26 @@ def test_complete_label_history_uses_one_repeatable_read_snapshot(monkeypatch):
     assert statements[1].startswith("SELECT")
 
 
+def test_sqlite_shared_memory_uri_skips_wal_and_connects():
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.db import _configure_sqlite_wal
+
+    async def run():
+        url = "sqlite+aiosqlite:///file::memory:?cache=shared&uri=true"
+        engine = create_async_engine(url)
+        try:
+            assert _configure_sqlite_wal(engine, url) is False
+            async with engine.connect() as connection:
+                mode = await connection.scalar(text("PRAGMA journal_mode"))
+                assert str(mode).casefold() == "memory"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
 def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_rows(tmp_path, monkeypatch):
     import asyncio
     import json
@@ -596,7 +616,7 @@ def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_row
                 sql = str(statement).lstrip().upper()
                 if (
                     sql.startswith("SELECT")
-                    and "_HOLDOUT_SNAPSHOT_AUDIT_LOG" in sql
+                    and "HOLDOUT_SNAPSHOT_AUDIT_LOG" in sql
                     and not self._paused_after_first_page
                 ):
                     self._paused_after_first_page = True
