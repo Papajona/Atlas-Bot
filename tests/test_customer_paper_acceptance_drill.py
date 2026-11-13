@@ -267,8 +267,12 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
     assert 'test "$deployment_name" = "Deploy Paper-Only Atlas Staging"' in workflow
     assert 'test "$deployment_sha" = "$TARGET_SHA"' in workflow
-    assert 'test "$deployment_status" = "completed"' in workflow
+    assert '[[ "$deployment_status" == "in_progress" || "$deployment_status" == "completed" ]]' in workflow
     assert 'test "$deployment_conclusion" = "success"' in workflow
+    assert 'test "$image_outcome" = "success"' in workflow
+    assert 'test "$deploy_outcome" = "success"' in workflow
+    assert 'test "$preflight_outcome" = "success"' in workflow
+    assert "preflight_outcome=" in workflow
     assert "ref: ${{ inputs.target_sha }}" in workflow
     assert "actions: read" in workflow
     assert "git ls-remote" not in workflow
