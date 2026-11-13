@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -636,6 +636,113 @@ def test_repair_rejects_valid_journal_when_customer_reserve_is_still_locked(monk
                 assert ledger.available == Decimal("0.000000")
                 assert ledger.withdrawal_reserved == Decimal("25.000000")
                 assert incident.status == "OPEN"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+
+def test_sqlite_bucket_balance_reconciliation_uses_exact_decimal_accumulation():
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="sqlite-decimal-reconciliation-customer",
+                    email="",
+                    display_name="SQLite decimal reconciliation test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                account_code = (
+                    f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE"
+                )
+                db.add(CustomerLedgerAccount(
+                    customer_id=customer_id,
+                    currency="USDT",
+                    available=Decimal("0.000001"),
+                    trading_reserved=Decimal("0"),
+                    withdrawal_reserved=Decimal("0"),
+                ))
+                journal = LedgerJournal(
+                    currency="USDT",
+                    entry_type="MANUAL_ADJUSTMENT",
+                    reference_type="TEST",
+                    reference_id="sqlite-decimal-aggregation",
+                    idempotency_key="sqlite-decimal-aggregation",
+                    description="Large cancelling turnover with a one-micro remainder",
+                )
+                db.add(journal)
+                await db.flush()
+
+                # SQLite SUM() converts its integer accumulator to binary float
+                # when the micro-unit row is encountered after large turnover.
+                # The following debit cancels that turnover; the exact remaining
+                # customer balance is one micro-unit, not zero.
+                lines = [
+                    LedgerJournalLine(
+                        journal_id=journal.id,
+                        line_no=line_no,
+                        account_code=account_code,
+                        customer_id=customer_id,
+                        currency="USDT",
+                        debit=Decimal("0"),
+                        credit=Decimal("10000000"),
+                    )
+                    for line_no in range(1, 10001)
+                ]
+                lines.extend([
+                    LedgerJournalLine(
+                        journal_id=journal.id,
+                        line_no=10001,
+                        account_code=account_code,
+                        customer_id=customer_id,
+                        currency="USDT",
+                        debit=Decimal("0"),
+                        credit=Decimal("0.000001"),
+                    ),
+                    LedgerJournalLine(
+                        journal_id=journal.id,
+                        line_no=10002,
+                        account_code=account_code,
+                        customer_id=customer_id,
+                        currency="USDT",
+                        debit=Decimal("100000000000"),
+                        credit=Decimal("0"),
+                    ),
+                ])
+                db.add_all(lines)
+                await db.flush()
+
+                naive_sqlite_sum = (
+                    await db.execute(
+                        select(
+                            func.coalesce(
+                                func.sum(
+                                    LedgerJournalLine.credit - LedgerJournalLine.debit
+                                ),
+                                0,
+                            )
+                        ).where(
+                            LedgerJournalLine.customer_id == customer_id,
+                            LedgerJournalLine.currency == "USDT",
+                            LedgerJournalLine.account_code == account_code,
+                        )
+                    )
+                ).scalar_one()
+                assert customer_funds._q(naive_sqlite_sum) == Decimal("0.000000")
+
+                ledger = await customer_funds.verify_customer_ledger_balances_match_journals(
+                    db, customer_id, "USDT"
+                )
+                assert ledger.available == Decimal("0.000001")
+                assert ledger.trading_reserved == Decimal("0.000000")
+                assert ledger.withdrawal_reserved == Decimal("0.000000")
         finally:
             await engine.dispose()
 
