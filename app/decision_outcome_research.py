@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime, timezone
 from collections import defaultdict
 from statistics import mean, median
 from typing import Any
@@ -11,6 +12,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 
 def _finite_return(label: dict, horizon: int) -> float | None:
@@ -432,3 +434,157 @@ async def load_decision_outcome_labels(*, limit: int = 10_000) -> list[dict]:
         if isinstance(record, dict):
             result.append(record)
     return result
+
+
+
+HOLDOUT_REGISTRY_VERSION = "decision-outcome-one-time-holdout-v1"
+
+
+async def evaluate_decision_outcome_labels_once(
+    records: list[dict],
+    *,
+    holdout_fraction: float = 0.30,
+    min_group_samples: int = 30,
+    min_unique_timestamps: int = 10,
+) -> dict:
+    """Consume and release the global chronological holdout once, across all workers.
+
+    The fixed registry scope is independent of the current input corpus and requested
+    fraction. Once a usable holdout is consumed, later calls return no held-out metrics,
+    even when new labels, parameters, or data are added.
+    """
+    from .db import ResearchHoldoutRegistry, SessionLocal
+    from .research_evidence import canonical_sha256
+
+    scope_sha = canonical_sha256({
+        "registry": "atlas-global-decision-outcome-holdout",
+        "version": HOLDOUT_REGISTRY_VERSION,
+    })
+    async with SessionLocal() as db:
+        existing = await db.get(ResearchHoldoutRegistry, scope_sha)
+        if existing is not None:
+            return {
+                "status": "HOLDOUT_ALREADY_CONSUMED",
+                "holdout_version": existing.holdout_version,
+                "consumed_at": existing.consumed_at.isoformat() if existing.consumed_at else None,
+                "metrics_released": False,
+                "report": None,
+                "reason": "one_time_holdout_is_global_and_cannot_be_reopened",
+            }
+
+    report = evaluate_decision_outcome_labels(
+        records,
+        holdout_fraction=holdout_fraction,
+        min_group_samples=min_group_samples,
+        min_unique_timestamps=min_unique_timestamps,
+    )
+    usable = [
+        row for row in report.get("out_of_sample", [])
+        if isinstance(row, dict)
+        and row.get("status") == "CHRONOLOGICAL_HOLDOUT"
+        and int(row.get("n_holdout", 0) or 0) > 0
+    ]
+    adequately_sampled = [
+        row for row in usable
+        if int(row.get("n_holdout", 0) or 0) >= max(1, int(min_group_samples))
+    ]
+    if not adequately_sampled:
+        return {
+            "status": "INSUFFICIENT_HOLDOUT",
+            "holdout_version": HOLDOUT_REGISTRY_VERSION,
+            "metrics_released": False,
+            "consumed": False,
+            "usable_holdout_groups": len(usable),
+            "adequately_sampled_holdout_groups": len(adequately_sampled),
+            "report": None,
+            "reason": "no_chronological_holdout_group_meets_the_minimum_sample_floor",
+        }
+
+    normalized, _coverage = _normalise_labels(records)
+    sample_identity = sorted(
+        (
+            str(row.get("decision_id") or ""),
+            str(row.get("label_version") or ""),
+            str(row.get("label_id") or ""),
+            str(row.get("source_decision_sha256") or ""),
+            str(row.get("outcome_window_sha256") or ""),
+        )
+        for row in normalized
+    )
+    source_sample_sha = canonical_sha256(sample_identity)
+    report_sha = canonical_sha256(report)
+    plan = [
+        {
+            "asset": row.get("asset"),
+            "symbol": row.get("symbol"),
+            "exchange": row.get("exchange"),
+            "timeframe": row.get("timeframe"),
+            "label_version": row.get("label_version"),
+            "horizon_bars": row.get("horizon_bars"),
+            "holdout_start": row.get("holdout_start"),
+            "n_train_before_purge": row.get("n_train_before_purge"),
+            "n_train_after_purge": row.get("n_train_after_purge"),
+            "n_purged_train_labels": row.get("n_purged_train_labels"),
+            "n_holdout": row.get("n_holdout"),
+        }
+        for row in usable
+    ]
+    plan_json = json.dumps(
+        {"version": HOLDOUT_REGISTRY_VERSION, "groups": plan},
+        sort_keys=True, separators=(",", ":"), allow_nan=False,
+    )
+    try:
+        async with SessionLocal() as db:
+            # A primary-key insert is the final race arbiter. The immutable database
+            # trigger prevents any worker from changing or resetting this consumption.
+            existing = await db.get(ResearchHoldoutRegistry, scope_sha)
+            if existing is not None:
+                return {
+                    "status": "HOLDOUT_ALREADY_CONSUMED",
+                    "holdout_version": existing.holdout_version,
+                    "consumed_at": existing.consumed_at.isoformat() if existing.consumed_at else None,
+                    "metrics_released": False,
+                    "report": None,
+                    "reason": "one_time_holdout_is_global_and_cannot_be_reopened",
+                }
+            async with db.begin_nested():
+                db.add(ResearchHoldoutRegistry(
+                    scope_sha256=scope_sha,
+                    holdout_version=HOLDOUT_REGISTRY_VERSION,
+                    source_sample_sha256=source_sample_sha,
+                    report_sha256=report_sha,
+                    holdout_plan_json=plan_json,
+                    consumed_at=datetime.now(timezone.utc),
+                ))
+                await db.flush()
+            await db.commit()
+    except IntegrityError:
+        # Another request consumed the global scope concurrently. Never return this
+        # request's report after losing the insert race.
+        return {
+            "status": "HOLDOUT_ALREADY_CONSUMED",
+            "holdout_version": HOLDOUT_REGISTRY_VERSION,
+            "metrics_released": False,
+            "report": None,
+            "reason": "concurrent_request_consumed_the_one_time_holdout",
+        }
+    except Exception as exc:
+        return {
+            "status": "HOLDOUT_CONSUMPTION_FAILED",
+            "holdout_version": HOLDOUT_REGISTRY_VERSION,
+            "metrics_released": False,
+            "report": None,
+            "reason": type(exc).__name__,
+        }
+
+    return {
+        "status": "HOLDOUT_CONSUMED_AND_RELEASED",
+        "holdout_version": HOLDOUT_REGISTRY_VERSION,
+        "consumed": True,
+        "consumed_at": datetime.now(timezone.utc).isoformat(),
+        "metrics_released": True,
+        "source_sample_sha256": source_sample_sha,
+        "report_sha256": report_sha,
+        "report": report,
+        "warning": "This global holdout is permanently consumed. Subsequent calls return no held-out metrics.",
+    }
