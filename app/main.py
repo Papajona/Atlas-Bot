@@ -1262,6 +1262,66 @@ async def _customer_paper_positions_for_exposure(
 
 
 
+
+async def _customer_paper_group_mark_prices(
+    customer_id: int, req, market_context: dict | None
+) -> dict[tuple[str, str, str], dict[str, str]]:
+    """Return fresh marks for each nonzero holding in the candidate's correlation group."""
+    context = market_context
+    try:
+        bid = float(context.get("bid", 0)) if isinstance(context, dict) else 0.0
+    except (TypeError, ValueError, OverflowError):
+        bid = 0.0
+    if not math.isfinite(bid) or bid <= 0:
+        # The manual API uses a candle-only context. Force fresh server marks rather
+        # than interpreting a candle close as a current quote.
+        context = None
+    exposure = await _customer_paper_positions_for_exposure(
+        customer_id=customer_id, req=req, market_context=context
+    )
+    if not exposure.get("ok"):
+        raise CustomerPaperFlowBlocked(
+            str(exposure.get("reason") or "current correlation-group marks could not be verified")
+        )
+    marks: dict[tuple[str, str, str], str] = {}
+    for position in exposure["positions"]:
+        venue = str(getattr(position, "exchange", "") or "").strip().lower()
+        symbol = str(getattr(position, "symbol", "") or "").strip().upper()
+        price = float(getattr(position, "mark_price", 0) or 0)
+        if not venue or not symbol or not math.isfinite(price) or price <= 0:
+            raise CustomerPaperFlowBlocked("current correlation-group position mark is invalid")
+        quote_timestamp = str(
+            getattr(position, "mark_quote_timestamp_utc", "") or ""
+        ).strip()
+        if not quote_timestamp:
+            raise CustomerPaperFlowBlocked(
+                "current correlation-group position mark timestamp is missing"
+            )
+        marks[(venue, "spot", symbol)] = {
+            "price": format(price, ".18f"),
+            "quote_timestamp_utc": quote_timestamp,
+        }
+    return marks
+
+async def _customer_paper_protective_history(req, start_bar: datetime, end_bar: datetime):
+    """Fetch a larger verified spot-candle window when a held position predates req.days."""
+    span_days = math.ceil(max(0.0, (end_bar - start_bar).total_seconds()) / 86_400) + 2
+    try:
+        requested_days = max(int(getattr(req, "days", 1)), span_days)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise CustomerPaperFlowBlocked("Protective history window is invalid") from exc
+    if requested_days > 1500:
+        raise CustomerPaperFlowBlocked(
+            "Protective history exceeds the maximum supported verified candle window"
+        )
+    historical_req = req.model_copy(update={"days": requested_days})
+    try:
+        return await asyncio.to_thread(market_data, historical_req)
+    except Exception as exc:
+        raise CustomerPaperFlowBlocked(
+            f"Protective history fetch failed ({type(exc).__name__})"
+        ) from exc
+
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
     if not settings.secret_key:
         raise HTTPException(503, "Step-up authentication is not configured")
