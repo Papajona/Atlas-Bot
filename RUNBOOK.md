@@ -251,3 +251,16 @@ Ownerless legacy orders are not assumed to belong to the autonomous bot. A row w
 Any position whose entry order has no explicit `execution_owner` is classified as `manual_customer_api`. The autonomous protective-exit path deliberately does not close it, and the lifecycle owner check prevents the autonomous bot from submitting a strategy exit against a manual position. Do not infer autonomous ownership from the legacy schema version alone. An operator must reconcile the order/fill/position event history, confirm the remaining quantity and cost basis, and close or otherwise resolve that position through its manual owning workflow before enabling autonomous activity for that market. Do not edit ledger rows or manufacture ownership metadata to bypass this check.
 
 This recovery is paper-ledger-only. Keep `LIVE_TRADING_ENABLED=false`, `PAYOUT_LIVE_ENABLED=false`, and `BROKER_SANDBOX=true` while reconciling legacy records.
+
+
+## Research integrity controls
+
+Migration `0059_research_integrity_controls` adds a prospective append-only trial hash chain and a database-enforced, write-once global decision-outcome holdout registry. Existing trial-archive rows are retained as `LEGACY_UNCHAINED`; the migration does not fabricate prior signatures or prove that an old archive contains every experiment ever run.
+
+The backend may authenticate new ledger entries with `ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY`. Configure this as a Secret Manager secret containing at least 32 bytes of high-entropy key material before the first HMAC-signed trial is written. Do not print, commit, or return the value. Without it, new entries are classified as `HASH_CHAIN_UNSIGNED`; a hash chain is tamper-evident only to the extent that its head and records are protected and is not a substitute for an externally signed historical archive.
+
+Administrators can inspect ledger integrity at `GET /api/research/trial-ledger/status`. The endpoint reports legacy rows separately and never exposes key material. A `HMAC_CHAIN_VALID` result requires the signing key to be present and every chained entry to verify; `HASH_CHAIN_VALID_UNSIGNED` is not HMAC authentication. Historical completeness remains false until a signed, complete, comparable trial archive is supplied to the existing promotion verifier.
+
+The descriptive decision-outcome holdout is global and one-use. The first administrator request to `POST /api/research/decision-outcomes/holdout-once` with adequate, valid observations records the exact normalized sample and report hashes, then releases the report. Subsequent calls return no held-out metrics. The registry has no reset path.
+
+Session-specific execution costs are applied only when the research input contains a valid signed venue calibration whose model fingerprint matches the current execution-cost model and whose `session_costs_bps` defines LONDON, NEW_YORK, NEW_YORK_LATE, and OTHER on a per-side turnover basis with venue-observed provenance. Missing or invalid evidence does not silently fall back to fabricated session values; the result remains explicitly incomplete for session-cost evidence.
