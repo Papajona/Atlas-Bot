@@ -86,6 +86,8 @@ def _settings(tmp_path):
         research_cost_max_spread_mae_bps=1.0,
         research_cost_max_slippage_mae_bps=1.0,
         research_order_notional_usd=10_000.0,
+        research_fee_source="binance-published-spot-fee-schedule",
+        research_fee_evidence_id="binance-btcusdt-fee-tier-2025q4",
         paper_impact_max_participation_rate=PARAMETERS["max_participation_rate"],
         paper_impact_coefficient=PARAMETERS["impact_coefficient"],
         paper_execution_rejection_probability=PARAMETERS["rejection_probability"],
@@ -135,6 +137,7 @@ def _research_cost_evidence(frame, settings):
         cost_stress_multiplier=2.0,
     )
     order_book = _source("order_book")
+    fee_schedule = _source("fee_schedule")
     document = {
         "evidence_type": "venue_execution_cost_calibration",
         "evidence_id": "binance-btc-usdt-execution-calibration-v1",
@@ -144,10 +147,14 @@ def _research_cost_evidence(frame, settings):
         "model_fingerprint": fingerprint,
         "synthetic_only": False,
         "testnet_only": False,
+        "fee_source": settings.research_fee_source,
+        "fee_evidence_id": settings.research_fee_evidence_id,
+        "taker_fee_bps": 5.5,
+        "fee_schedule_source_sha256": fee_schedule["sha256"],
         "sources": [
             _source("observed_fills"),
             order_book,
-            _source("fee_schedule"),
+            fee_schedule,
         ],
         "observed_order_count": 40,
         "observed_fill_count": 40,
