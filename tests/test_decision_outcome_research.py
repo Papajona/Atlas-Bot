@@ -192,3 +192,83 @@ def test_holdout_metrics_are_redacted_by_default():
     assert report["holdout_metrics_withheld"] is True
     assert report["out_of_sample"] == []
     assert report["research_only"] is True
+
+def test_all_market_groups_share_one_global_chronological_holdout_cutoff():
+    # Deliberately offset the groups and give them different sample-window lengths.
+    # A per-group percentile would choose different holdout dates (17h vs 24h).
+    bybit = [
+        {
+            **_label(i),
+            "decision_id": f"bybit-{i}",
+            "symbol": "BTC/USDT",
+            "exchange": "bybit",
+        }
+        for i in range(25)
+    ]
+    binance = [
+        {
+            **_label(i + 10),
+            "decision_id": f"binance-{i}",
+            "symbol": "BTC/USDT",
+            "exchange": "binance",
+        }
+        for i in range(20)
+    ]
+
+    report = evaluate_decision_outcome_labels(
+        bybit + binance,
+        holdout_fraction=0.30,
+        min_group_samples=1,
+        min_unique_timestamps=10,
+        redact_holdout=False,
+    )
+
+    splits = {row["exchange"]: row for row in report["out_of_sample"]}
+    assert set(splits) == {"bybit", "binance"}
+    expected_cutoff = "2026-01-01T21:00:00+00:00"
+    assert report["coverage"]["global_holdout_start"] == expected_cutoff
+    assert splits["bybit"]["holdout_start"] == expected_cutoff
+    assert splits["binance"]["holdout_start"] == expected_cutoff
+    assert splits["bybit"]["n_holdout"] == 4
+    assert splits["binance"]["n_holdout"] == 9
+    assert all(
+        row["global_holdout_start"] == expected_cutoff
+        for row in splits.values()
+    )
+
+def test_later_starting_group_without_training_baseline_is_excluded():
+    early_group = [
+        {
+            **_label(i),
+            "decision_id": f"early-{i}",
+            "exchange": "bybit",
+        }
+        for i in range(30)
+    ]
+    later_group = [
+        {
+            **_label(i + 21),
+            "decision_id": f"late-{i}",
+            "exchange": "binance",
+        }
+        for i in range(9)
+    ]
+
+    report = evaluate_decision_outcome_labels(
+        early_group + later_group,
+        holdout_fraction=0.30,
+        min_group_samples=1,
+        min_unique_timestamps=3,
+        redact_holdout=False,
+    )
+    groups = {row["exchange"]: row for row in report["out_of_sample"]}
+
+    assert groups["bybit"]["status"] == "CHRONOLOGICAL_HOLDOUT"
+    assert groups["bybit"]["n_train_after_purge"] > 0
+    assert groups["binance"]["holdout_start"] == "2026-01-01T21:00:00+00:00"
+    assert groups["binance"]["n_train_before_purge"] == 0
+    assert groups["binance"]["n_train_after_purge"] == 0
+    assert groups["binance"]["n_holdout"] == 9
+    assert groups["binance"]["status"] == "INSUFFICIENT_TRAINING_BASELINE"
+    assert groups["binance"]["holdout_by_decision"] == {}
+
