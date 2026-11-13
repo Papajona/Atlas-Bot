@@ -394,3 +394,25 @@ def test_customer_paper_api_and_worker_defer_risk_marks_until_fill_readiness():
     assert api.count("group_mark_prices_loader=group_mark_prices_loader") == 2
     assert worker.count("group_mark_prices_loader=group_mark_prices_loader") == 1
 
+def test_acceptance_restart_mark_is_created_after_readiness_preflight():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "customer_paper_acceptance_drill.py"
+    ).read_text(encoding="utf-8")
+    phase_two_start = source.index("async def _phase_two(")
+    phase_two_end = source.index("\\n\\ndef _run(", phase_two_start)
+    phase_two = source[phase_two_start:phase_two_end]
+    loader_start = phase_two.index("async def load_current_group_marks():")
+    loader_end = phase_two.index(
+        '_set_operation("phase_two.complete_primary_order_after_restart")',
+        loader_start,
+    )
+    loader = phase_two[loader_start:loader_end]
+    assert "datetime.now(timezone.utc).isoformat()" in loader
+    assert '"quote_timestamp_utc"' in loader
+    assert "group_mark_prices_loader=load_current_group_marks" in phase_two
+    assert "group_mark_prices=group_marks" not in phase_two
+
