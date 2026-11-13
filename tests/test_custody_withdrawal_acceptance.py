@@ -8,6 +8,7 @@ in-memory fallback.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from decimal import Decimal
@@ -18,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.customer_funds import (
+    DEFICIT_ACCOUNT,
     customer_balance,
     ledger_invariant_report,
     post_deposit,
@@ -419,3 +421,118 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
             await engine.dispose()
 
     asyncio.run(run())
+
+def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incident():
+    async def run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        reference_id = "corrupt-settlement-debit-split"
+        idem = f"withdrawal-settlement:{reference_id}"
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="corrupt-settlement-debit-split-test",
+                    email="",
+                    display_name="Replay validation test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                db.add(
+                    CustomerLedgerAccount(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        available=0,
+                        trading_reserved=0,
+                        withdrawal_reserved=0,
+                    )
+                )
+                journal = LedgerJournal(
+                    currency="USDT",
+                    entry_type="WITHDRAWAL_SETTLEMENT",
+                    reference_type="WITHDRAWAL",
+                    reference_id=reference_id,
+                    idempotency_key=idem,
+                    description="Deliberately inconsistent historical debit split",
+                )
+                db.add(journal)
+                await db.flush()
+                db.add_all(
+                    [
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=1,
+                            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=20,
+                            credit=0,
+                        ),
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=2,
+                            account_code=DEFICIT_ACCOUNT,
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=10,
+                            credit=0,
+                        ),
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=3,
+                            account_code="ASSET:TRON:WITHDRAWAL",
+                            customer_id=None,
+                            currency="USDT",
+                            debit=0,
+                            credit=30,
+                        ),
+                    ]
+                )
+                db.add(
+                    LedgerEntry(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        entry_type="WITHDRAWAL_SETTLEMENT",
+                        debit=30,
+                        credit=0,
+                        amount=30,
+                        reference_type="WITHDRAWAL",
+                        reference_id=reference_id,
+                        idempotency_key=idem,
+                        metadata_json=json.dumps(
+                            {
+                                "requested_amount": "30.000000",
+                                "settled_from_reserve": "30.000000",
+                                "shortfall": "0.000000",
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                )
+                await db.commit()
+
+                with pytest.raises(ValueError, match="different or inconsistent operation"):
+                    await settle_withdrawal(
+                        db, customer_id, 30, reference_id=reference_id
+                    )
+                await db.rollback()
+
+                incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key
+                            == f"WITHDRAWAL_REPLAY_MISMATCH:{idem}"
+                        )
+                    )
+                ).scalar_one()
+                assert incident.severity == "HIGH"
+                assert incident.status == "OPEN"
+                detail = json.loads(incident.detail_json)
+                assert "settlement journal lines" in detail["problems"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
