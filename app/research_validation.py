@@ -457,12 +457,22 @@ def oos_benchmark_comparison(
 
     buy_hold_values = []
     buy_hold_turnover = 0.0
-    for market in market_blocks:
+    for frame, market in zip(frame_blocks, market_blocks):
         turnover = np.zeros(len(market), dtype=float)
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
         buy_hold_turnover += float(turnover.sum())
-        net = market - turnover * cost_rate
+        if session_costs_bps is not None:
+            # Entry and terminal liquidation are separate fills and must use
+            # the fee schedule at their own observed execution sessions.
+            from .market_sessions import session_cost_series
+            session_fees = session_cost_series(frame.index, session_costs_bps).to_numpy(dtype=float)
+            transaction_drag = np.zeros(len(market), dtype=float)
+            transaction_drag[0] += session_fees[0] / 10_000.0
+            transaction_drag[-1] += session_fees[-1] / 10_000.0
+        else:
+            transaction_drag = turnover * cost_rate
+        net = market - transaction_drag
         if carry_rate is not None:
             net = net - carry_rate
         buy_hold_values.extend(np.clip(net, -1.0, None).tolist())
@@ -554,6 +564,10 @@ def oos_benchmark_comparison(
         "random_control_shift_max": max(valid_nonzero_shifts) if valid_nonzero_shifts else None,
         "random_control_exposure_matching": "EXACT_REQUESTED_EXPOSURE_BARS_AND_ENTRY_COUNT",
         "buy_and_hold_turnover": buy_hold_turnover,
+        "buy_and_hold_session_cost_model_complete": session_costs_bps is not None,
+        "buy_and_hold_session_costs_bps": (
+            dict(session_costs_bps) if session_costs_bps is not None else None
+        ),
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
