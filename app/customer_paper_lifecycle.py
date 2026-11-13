@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .config import settings
-from .correlation_risk import shares_risk_budget
+from .correlation_risk import RISK_GROUPS, shares_risk_budget
 from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
@@ -920,6 +920,7 @@ async def record_customer_paper_fill(
     try:
         async with engine.connect() as conn:
             risk_budget_lock_acquired = False
+            risk_budget_lock_keys: list[str] = []
             try:
                 # Read the immutable order side, then finish the read transaction
                 # before taking a session-level customer lock. This connection stays
@@ -937,15 +938,30 @@ async def record_customer_paper_fill(
                     raise CustomerPaperOrderConflict("customer paper order does not exist for this tenant")
 
                 if str(preflight_order["side"] or "").upper() == "BUY":
-                    risk_lock_key = f"paper-risk-budget:{customer_id}"
-                    await conn.execute(
-                        text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
-                        {"lock_key": risk_lock_key},
-                    )
-                    # Session-level advisory locks survive COMMIT. End the implicit
-                    # transaction started by SELECT before any provider/network call.
+                    # The customer-wide key serializes workers on this version. Also
+                    # acquire every legacy per-group key so old workers still using
+                    # paper-correlation-group:{customer_id}:{group} cannot race this
+                    # rollout. Every version acquires these legacy keys in sorted order.
+                    risk_lock_keys = [
+                        f"paper-risk-budget:{customer_id}",
+                        *[
+                            f"paper-correlation-group:{customer_id}:{group}"
+                            for group in RISK_GROUPS
+                        ],
+                    ]
+                    for risk_lock_key in risk_lock_keys:
+                        # Track before awaiting the command: if the server acquired the
+                        # lock but COMMIT/response fails, finally still unlocks or
+                        # invalidates the physical connection.
+                        risk_budget_lock_keys.append(risk_lock_key)
+                        await conn.execute(
+                            text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
+                            {"lock_key": risk_lock_key},
+                        )
+                        risk_budget_lock_acquired = True
+                    # Session-level locks survive COMMIT. End the implicit transaction
+                    # before any provider/network call.
                     await conn.commit()
-                    risk_budget_lock_acquired = True
                     if group_mark_prices_loader is not None:
                         try:
                             group_mark_prices = await group_mark_prices_loader()
@@ -1388,19 +1404,20 @@ async def record_customer_paper_fill(
                 }
 
             finally:
-                if risk_budget_lock_acquired:
+                if risk_budget_lock_keys:
                     try:
                         if conn.in_transaction():
                             await conn.rollback()
-                        unlocked = (await conn.execute(
-                            text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
-                            {"lock_key": f"paper-risk-budget:{customer_id}"},
-                        )).scalar_one()
+                        for risk_lock_key in reversed(risk_budget_lock_keys):
+                            unlocked = (await conn.execute(
+                                text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+                                {"lock_key": risk_lock_key},
+                            )).scalar_one()
+                            if not unlocked:
+                                raise CustomerPaperLedgerBlocked(
+                                    "customer risk-budget advisory lock could not be released"
+                                )
                         await conn.commit()
-                        if not unlocked:
-                            raise CustomerPaperLedgerBlocked(
-                                "customer risk-budget advisory lock could not be released"
-                            )
                     except Exception:
                         # Do not return a pooled connection that may still own a
                         # session lock; invalidation forces PostgreSQL to release it.
