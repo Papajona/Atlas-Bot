@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
+
+import pytest
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -115,13 +118,22 @@ def test_acceptance_phase_two_invokes_database_rls_helper():
     reason="requires disposable PostgreSQL paper and primary databases provisioned by CI",
 )
 def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
-    """Execute the production RLS helper against real rows and prove rows exist via a bypass role."""
+    """Run the drill's real RLS query against two populated tenants in disposable PostgreSQL."""
+    import hashlib
+    import uuid
+    from datetime import datetime, timedelta, timezone
+
     from sqlalchemy import text
     from sqlalchemy.engine import make_url
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from app.customer_paper_ledger import post_customer_paper_journal
-    from app.customer_paper_lifecycle import submit_customer_paper_order
+    from app.config import settings
+    from app.customer_paper_flow import ensure_customer_paper_account
+    from app.customer_paper_lifecycle import (
+        record_customer_paper_fill,
+        register_customer_paper_market_bar,
+        submit_customer_paper_order,
+    )
 
     paper_url = os.environ["ATLAS_PAPER_TEST_DATABASE_URL"]
     primary_url = os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"]
@@ -129,6 +141,7 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
     monkeypatch.setattr(settings, "customer_paper_database_url", paper_url)
     monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
     monkeypatch.setattr(settings, "customer_paper_shared_database_enabled", False)
+    monkeypatch.setattr(settings, "discipline_enabled", False)
     monkeypatch.setattr(settings, "paper_trading", True)
     monkeypatch.setattr(settings, "broker_sandbox", True)
     monkeypatch.setattr(settings, "live_trading_enabled", False)
@@ -138,28 +151,20 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
     monkeypatch.setattr(settings, "usdt_tron_enabled", False)
     monkeypatch.setattr(settings, "usdt_tron_sweep_enabled", False)
 
-    import hashlib
-    import uuid
-
     customer_a = 8_100_000_000_000_000_000 + (uuid.uuid4().int % 1_000_000_000)
     customer_b = customer_a + 1
     run_key = uuid.uuid4().hex
+    submission_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    bar_at = datetime.now(timezone.utc) - timedelta(minutes=3)
+    bar_digest = hashlib.sha256(f"rls-integration|{run_key}|bar".encode()).hexdigest()
 
     async def run():
-        # Seed each tenant with real accounts and two separate balanced journals.
         for customer_id, label in ((customer_a, "a"), (customer_b, "b")):
-            for index in (1, 2):
-                seeded = await post_customer_paper_journal(
-                    customer_id=customer_id,
-                    idempotency_key=f"rls-{run_key}-{label}-seed-{index}",
-                    event_type="PAPER_SEED",
-                    currency="USDT",
-                    lines=_seed_lines("100" if index == 1 else "1"),
-                    reference=f"disposable-ci-rls-{label}-{index}",
-                    metadata={"environment": "disposable-ci", "rls_test": True},
-                )
-                assert seeded["status"] == "APPENDED"
-
+            seeded = await ensure_customer_paper_account(customer_id, "USDT")
+            assert seeded.get("status") == "PASS"
+            order_digest = hashlib.sha256(
+                f"rls-integration|{run_key}|{label}|submission".encode()
+            ).hexdigest()
             order = await submit_customer_paper_order(
                 customer_id=customer_id,
                 client_order_id=f"rls-{run_key}-{label}-order",
@@ -169,12 +174,39 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
                 side="BUY",
                 quantity="0.001",
                 currency="USDT",
-                metadata={"execution_owner": "staging_acceptance_test", "rls_test": True},
+                order_type="MARKET",
+                metadata=drill._market_metadata(submission_at, order_digest),
             )
-            assert order["status"] == "APPENDED"
+            assert order.get("status") == "APPENDED"
 
-        # Use the existing primary test login (superuser in the disposable service)
-        # to prove the rows to be hidden really exist in the same paper database.
+        # One immutable completed bar is shared across both tenants; each allocation
+        # is small and remains below its aggregate capacity.
+        bar = await register_customer_paper_market_bar(
+            venue="binance",
+            symbol="BTC/USDT",
+            timeframe="1m",
+            bar_at=bar_at,
+            bar_data_sha256=bar_digest,
+            base_volume="1",
+            participation_rate="0.01",
+        )
+        assert bar.get("status") == "APPENDED"
+
+        for customer_id, label in ((customer_a, "a"), (customer_b, "b")):
+            fill = await record_customer_paper_fill(
+                customer_id=customer_id,
+                client_order_id=f"rls-{run_key}-{label}-order",
+                idempotency_key=f"rls-{run_key}-{label}-fill",
+                bar_key=bar["bar_key"],
+                quantity="0.001",
+                price="100",
+                fee_amount="0.01",
+                enforce_market_bar_budget=True,
+            )
+            assert fill.get("status") == "APPENDED"
+
+        # The disposable primary login is the unrestricted owner/superuser for
+        # this test cluster. It verifies tenant A's rows exist before the low-role query.
         owner_url = make_url(primary_url).set(
             database=make_url(paper_url).database
         ).render_as_string(hide_password=False)
@@ -199,8 +231,8 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
         finally:
             await owner_engine.dispose()
 
-        # The helper switches to tenant B's session context and queries both B and A.
-        # B's own rows must remain visible while A's known, owner-verified rows disappear.
+        # Invoke the same helper used by the staging acceptance drill, using tenant B
+        # as the session identity. Tenant B's own rows remain visible; A's known rows do not.
         visibility = await drill._verify_tenant_rls_visibility(
             visible_customer_id=customer_b,
             hidden_customer_id=customer_a,
