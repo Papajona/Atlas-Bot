@@ -81,3 +81,22 @@ def test_restore_audit_rejects_missing_required_schema_objects():
     assert required_table_failures(None) == [
         "required_tables_missing was not reported as a JSON array"
     ]
+
+
+
+def test_restore_audit_requires_research_integrity_tables_and_valid_retained_state():
+    from pathlib import Path
+
+    verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
+    assert "'research_trial_ledger_head'" in verifier
+    assert "'research_holdout_registry'" in verifier
+    assert "'research_trial_ledger_head_rows'" in verifier
+    assert "'research_trial_ledger_head_valid'" in verifier
+    assert "'research_holdout_registry_invalid_rows'" in verifier
+
+    assert required_table_failures([
+        "research_trial_ledger_head", "research_holdout_registry"
+    ]) == [
+        "required staging table missing: research_trial_ledger_head",
+        "required staging table missing: research_holdout_registry",
+    ]
