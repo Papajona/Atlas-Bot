@@ -8327,10 +8327,27 @@ async def research_decision_outcomes_holdout_once(
     """Consume the single global decision-outcome chronological holdout exactly once."""
     await auth(x_admin_token, authorization)
     from .decision_outcome_research import (
+        DecisionOutcomeHistoryResourceLimit,
+        decision_outcome_holdout_status,
         evaluate_decision_outcome_labels_once,
         load_all_decision_outcome_labels,
     )
-    records = await load_all_decision_outcome_labels(batch_size=5000)
+    existing = await decision_outcome_holdout_status()
+    if existing.get("consumed") is True:
+        return {
+            **existing,
+            "report": None,
+            "reason": "one_time_holdout_is_global_and_cannot_be_reopened",
+        }
+    try:
+        records = await load_all_decision_outcome_labels(
+            batch_size=2000, max_records=100_000
+        )
+    except DecisionOutcomeHistoryResourceLimit as exc:
+        raise HTTPException(
+            503,
+            "Complete decision-label history exceeds the bounded holdout evaluation budget; no holdout was consumed",
+        ) from exc
     return await evaluate_decision_outcome_labels_once(records)
 
 
