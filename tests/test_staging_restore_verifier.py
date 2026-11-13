@@ -100,3 +100,59 @@ def test_restore_audit_requires_research_integrity_tables_and_valid_retained_sta
         "required staging table missing: research_trial_ledger_head",
         "required staging table missing: research_holdout_registry",
     ]
+
+
+
+def test_restore_integrity_values_are_populated_from_sql_query_output():
+    import json
+    from types import SimpleNamespace
+    from scripts.verify_staging_restore import (
+        QUERY,
+        RESEARCH_INTEGRITY_QUERY,
+        add_research_integrity_observations,
+    )
+
+    observed = {
+        "research_trial_ledger_head_present": True,
+        "research_holdout_registry_present": True,
+    }
+    query_result = {
+        "research_trial_ledger_head_rows": 1,
+        "research_trial_ledger_head_valid": True,
+        "research_holdout_registry_invalid_rows": 0,
+    }
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        assert command[-1] == RESEARCH_INTEGRITY_QUERY
+        return SimpleNamespace(returncode=0, stdout=json.dumps(query_result))
+
+    result = add_research_integrity_observations(
+        observed, env={"PGHOST": "staging-db"}, run=fake_run
+    )
+    assert "research_trial_ledger_head_present" in QUERY
+    assert "research_holdout_registry_present" in QUERY
+    assert result["research_trial_ledger_head_rows"] == 1
+    assert result["research_trial_ledger_head_valid"] is True
+    assert result["research_holdout_registry_invalid_rows"] == 0
+    assert len(calls) == 1
+
+
+def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference():
+    from scripts.verify_staging_restore import add_research_integrity_observations
+
+    observed = {
+        "research_trial_ledger_head_present": False,
+        "research_holdout_registry_present": False,
+    }
+
+    def should_not_run(*_args, **_kwargs):
+        raise AssertionError("integrity query must not run when migration 0059 tables are absent")
+
+    result = add_research_integrity_observations(
+        observed, env={}, run=should_not_run
+    )
+    assert result["research_trial_ledger_head_rows"] is None
+    assert result["research_trial_ledger_head_valid"] is False
+    assert result["research_holdout_registry_invalid_rows"] is None
