@@ -174,6 +174,10 @@ def triple_barrier(
             frozen_vol = float(v[i])
             if not np.isfinite(frozen_vol) or frozen_vol <= 0:
                 continue
+        directional_dead_zone = (
+            0.5 * float(frozen_vol / entry_price)
+            if has_execution_atr else 0.5 * frozen_vol
+        )
         end = min(len(c), entry_i + hold)
         for j in range(entry_i, end):
             # For a session schedule, charge the entry-side rate at entry and the
@@ -189,15 +193,20 @@ def triple_barrier(
                 upper = entry_price + float(target_mult) * frozen_vol
                 lower = entry_price - float(stop_mult) * frozen_vol
             else:
-                upper = entry_price * (1.0 + pt_mult * frozen_vol + cost_fraction)
-                lower = entry_price * (1.0 - sl_mult * frozen_vol - cost_fraction)
+                # Fees are deducted from realized directional returns below; do not
+                # hide them by moving the executable offline label barriers as well.
+                upper = entry_price * (1.0 + pt_mult * frozen_vol)
+                lower = entry_price * (1.0 - sl_mult * frozen_vol)
             # Price gaps are executable at the observed open, not at a stale barrier.
             if has_executable_open and j > entry_i and opens[j] >= upper:
                 gross_return = opens[j] / entry_price - 1.0
-                y[i] = 1 if (not has_execution_atr or gross_return > cost_fraction) else 0
+                long_net_return = gross_return - cost_fraction
+                y[i] = 1 if long_net_return > directional_dead_zone else 0
                 break
             if has_executable_open and j > entry_i and opens[j] <= lower:
-                y[i] = -1
+                gross_return = (entry_price - opens[j]) / entry_price
+                short_net_return = gross_return - cost_fraction
+                y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
             up_hit = np.isfinite(h[j]) and h[j] >= upper
             down_hit = np.isfinite(l[j]) and l[j] <= lower
@@ -208,10 +217,16 @@ def triple_barrier(
             if up_hit:
                 fill = opens[j] if has_executable_open and j > entry_i and opens[j] > upper else upper
                 gross_return = fill / entry_price - 1.0
-                y[i] = 1 if (not has_execution_atr or gross_return > cost_fraction) else 0
+                long_net_return = gross_return - cost_fraction
+                y[i] = 1 if long_net_return > directional_dead_zone else 0
                 break
             if down_hit:
-                y[i] = -1
+                fill = lower
+                if has_executable_open and j > entry_i and opens[j] < lower:
+                    fill = opens[j]
+                gross_return = (entry_price - fill) / entry_price
+                short_net_return = gross_return - cost_fraction
+                y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
         else:
             terminal_return = c[end - 1] / entry_price - 1.0
@@ -219,17 +234,16 @@ def triple_barrier(
                 float(cost_bps[entry_i]) + float(cost_bps[end - 1])
                 if session_cost_schedule else float(cost_bps[entry_i])
             )
-            # Deduct transaction costs once, then apply the volatility dead zone
-            # to the resulting net return.
-            dead_zone = (
-                0.5 * float(frozen_vol / entry_price)
-                if has_execution_atr else 0.5 * frozen_vol
-            )
-            net_terminal_return = terminal_return - timeout_cost_bps / 10_000.0
-            if np.isfinite(net_terminal_return):
+            # Evaluate each direction after its own entry+exit costs. A flat or
+            # adverse-to-both trade cannot be mislabeled as a short just because
+            # long net return is negative.
+            cost_fraction = timeout_cost_bps / 10_000.0
+            long_net_return = terminal_return - cost_fraction
+            short_net_return = -terminal_return - cost_fraction
+            if np.isfinite(long_net_return) and np.isfinite(short_net_return):
                 y[i] = (
-                    1 if net_terminal_return > dead_zone
-                    else (-1 if net_terminal_return < -dead_zone else 0)
+                    1 if long_net_return > directional_dead_zone
+                    else (-1 if short_net_return > directional_dead_zone else 0)
                 )
     return pd.Series(y, index=close.index, dtype="float64")
 
