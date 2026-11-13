@@ -107,7 +107,7 @@ def triple_barrier(
     volatility estimate is frozen at i and barriers are measured from that entry
     price. The next max_hold executable bars are inspected, including the entry
     bar. A gap through a barrier is observed at the open; simultaneous intrabar
-    touches are neutral because OHLC cannot establish event ordering.
+    touches use the execution simulator's conservative stop-first convention.
     Round-trip costs widen both barriers and the timeout dead-zone so labels do not
     call a gross move a profitable outcome when configured fees/slippage consume it.
     If entry_open is omitted, close[i] is retained only for backwards-compatible
@@ -187,7 +187,11 @@ def triple_barrier(
                 break
         else:
             terminal_return = c[end - 1] / entry_price - 1.0
-            dead_zone = max(0.5 * float(v[i]), entry_cost_fraction)
+            timeout_cost_bps = (
+                float(cost_bps[entry_i]) + float(cost_bps[end - 1])
+                if session_cost_schedule else float(cost_bps[entry_i])
+            )
+            dead_zone = max(0.5 * float(v[i]), timeout_cost_bps / 10_000.0)
             if np.isfinite(terminal_return):
                 y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
     return pd.Series(y, index=close.index, dtype="float64")
