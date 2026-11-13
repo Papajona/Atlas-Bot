@@ -32,6 +32,24 @@ Two additional server-side limits must be set from a reviewed, venue/product-spe
 
 Missing thresholds, testnet/synthetic evidence, mismatched model fingerprints, insufficient samples, untrusted keys, or errors exceeding the configured bounds keep calibration unverified. Setting a fee estimate, stress multiplier, or error tolerance after seeing the result to make a strategy pass is not acceptable calibration.
 
+### Per-bar execution context for research returns
+
+For research and strategy-router returns to use the same execution-cost inputs as the calibrated paper estimator, the signed venue calibration document must additionally contain a `per_bar_execution_context` object:
+
+- `schema: "atlas-per-bar-execution-context-v1"`
+- `dataset_sha256`: the exact hash in the loader's immutable data provenance;
+- `bar_index_sha256`: canonical SHA-256 of the ordered UTC ISO-8601 bar timestamps;
+- `spread_source_sha256`: the SHA-256 of the single `order_book` source record;
+- `spread_bps`: one observed full bid/ask spread value for each data bar, in exact index order;
+- `spread_observation_count`: exactly the number of bars;
+- `spread_values_sha256`: canonical SHA-256 of the submitted spread list.
+
+The signed context must cover the exact dataset and bar index; reordering, truncating, resampling, or substituting bars invalidates it. Volume and volatility are not accepted from the request or the evidence author: Atlas derives the median base-asset volume and realized close-return volatility from the preceding 20 completed CCXT spot bars only. This deliberately excludes derivatives, FX, commodities, non-USD/stable quote pairs, and feeds whose volume units are not verified.
+
+The research simulator uses the same shared cost kernel as the paper estimator for half-spread, square-root volatility/participation impact, latency impact, adverse side, and per-side taker fee. Latency uses the shared deterministic SHA-256 draw and calibrated quantile interpolation. `RESEARCH_ORDER_NOTIONAL_USD` is required so the research exposure can be converted to a base-unit order quantity; there is no default. A candidate event whose modeled participation exceeds the calibrated ceiling is not represented as a successful fill: the candidate falls back to diagnostic-only costs, reports the rejection reason, and cannot set `execution_cost_model_complete=true`. Non-zero simulated rejection probability is also rejected until the research position-state simulator explicitly models rejected orders. These are intentional fail-closed limits, not reasons to relax the evidence gate.
+
+The exact execution-model fingerprint binds the per-bar context to the paper-model coefficients, paper calibration evidence ID, research taker fee, fixed research order notional, and cost-stress multiplier. It is returned as `execution_cost_model_fingerprint` with the per-bar context hash. Static-bps or session-only fallback returns remain diagnostic and are never labelled calibrated. Even with per-bar costs verified, the separate OHLC intrabar event-order limitation remains: this work does not make OHLC bars equivalent to tick-level execution evidence.
+
 ## 3. Comparable trial-performance archive
 
 Required evidence: an externally reviewed, signed archive of *all* relevant historical trials, including failed and discarded configurations, with results recomputed under the same evaluation protocol and exact held-out sample as the candidate.
