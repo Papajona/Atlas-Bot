@@ -484,6 +484,7 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
+    oos_session_cost_blocks: list[np.ndarray] = []
     oos_ohlc_blocks: list[pd.DataFrame] = []
     oos_entry_signal_blocks: list[np.ndarray] = []
     oos_entry_atr_blocks: list[np.ndarray] = []
@@ -546,6 +547,11 @@ def ai_walk_forward_backtest(
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
+        if session_costs_bps is not None:
+            from .market_sessions import session_cost_series
+            oos_session_cost_blocks.append(
+                session_cost_series(fold_frame.index, session_costs_bps).to_numpy(dtype=float)
+            )
         # Preserve raw OHLC and the requested entry stream before stops or risk halts
         # condition realized positions and returns. Benchmark controls resimulate both.
         oos_ohlc_blocks.append(fold_frame.copy())
@@ -578,6 +584,9 @@ def ai_walk_forward_backtest(
     turnover = pd.Series(np.concatenate(oos_turnover_blocks), dtype=float)
     position = pd.Series(np.concatenate(oos_position_blocks), dtype=float)
     carry = np.concatenate(oos_carry_blocks)
+    session_variable_costs = (
+        np.concatenate(oos_session_cost_blocks) if oos_session_cost_blocks else None
+    )
     equity = (1 + net).cumprod()
     peak = equity.cummax()
     dd = equity / peak - 1
@@ -589,6 +598,7 @@ def ai_walk_forward_backtest(
         bars_per_year=annualization,
         stress_multiplier=cost_stress_multiplier,
         fixed_cost_drag=carry,
+        variable_cost_bps_per_bar=session_variable_costs,
     )
     dsr_report = _research_trial_dsr_report(
         net.to_numpy(),
@@ -619,6 +629,7 @@ def ai_walk_forward_backtest(
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
+        session_costs_bps=session_costs_bps,
     )
     return {
         "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
@@ -640,6 +651,8 @@ def ai_walk_forward_backtest(
         "trade_boundary_overlap_bars": 0,
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) and carry_evidence_complete if cost_report.get("status") == "OK" else False,
+        "session_cost_model_complete": session_variable_costs is not None,
+        "session_costs_bps": dict(session_costs_bps) if session_variable_costs is not None else None,
         "cost_stress_multiplier": float(stress_multiplier),
         "carry_rate_configured": bool(carry_rate_configured),
         "carry_evidence_source": carry_evidence_source or None,
