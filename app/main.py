@@ -55,7 +55,7 @@ from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account
 from .tron_reconciliation import parse_tron_usdt_balance
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
-from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay
+from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay, verify_customer_ledger_balances_match_journals
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
@@ -8320,6 +8320,9 @@ async def repair_withdrawal_ledger(
                 reference_id=reference_id,
                 action=action,
             )
+            await verify_customer_ledger_balances_match_journals(
+                db, w.customer_id, w.currency or "USDT"
+            )
         except WithdrawalReplayMismatch as mismatch:
             raise HTTPException(
                 409,
@@ -8328,7 +8331,7 @@ async def repair_withdrawal_ledger(
         except ValueError as exc:
             raise HTTPException(
                 409,
-                "A pre-existing corrected withdrawal journal is required; this endpoint does not create accounting entries",
+                "The original journal and customer ledger balances must both reconcile; keep the reserve held until the manual balance correction is complete",
             ) from exc
 
         # The ledger correction is already present and validated. Refresh only the
