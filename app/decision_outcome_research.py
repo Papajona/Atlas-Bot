@@ -501,16 +501,10 @@ async def evaluate_decision_outcome_labels_once(
         }
 
     normalized, _coverage = _normalise_labels(records)
-    sample_identity = sorted(
-        (
-            str(row.get("decision_id") or ""),
-            str(row.get("label_version") or ""),
-            str(row.get("label_id") or ""),
-            str(row.get("source_decision_sha256") or ""),
-            str(row.get("outcome_window_sha256") or ""),
-        )
-        for row in normalized
-    )
+    # Bind all normalized metadata and every horizon outcome, not merely label IDs.
+    # This makes a changed return, execution cost, timestamp, or decision field a new
+    # sample fingerprint rather than silently replaying the prior holdout.
+    sample_identity = sorted(canonical_sha256(row) for row in normalized)
     source_sample_sha = canonical_sha256(sample_identity)
     report_sha = canonical_sha256(report)
     plan = [
