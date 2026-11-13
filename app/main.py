@@ -8328,6 +8328,7 @@ async def research_decision_outcomes_holdout_once(
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "RISK_OFFICER")
     from .decision_outcome_research import (
+        DecisionOutcomeHistoryIntegrityError,
         DecisionOutcomeHistoryResourceLimit,
         decision_outcome_holdout_status,
         evaluate_decision_outcome_labels_once,
@@ -8344,10 +8345,10 @@ async def research_decision_outcomes_holdout_once(
         records = await load_all_decision_outcome_labels(
             batch_size=2000, max_records=100_000
         )
-    except DecisionOutcomeHistoryResourceLimit as exc:
+    except (DecisionOutcomeHistoryResourceLimit, DecisionOutcomeHistoryIntegrityError) as exc:
         raise HTTPException(
             503,
-            "Complete decision-label history exceeds the bounded holdout evaluation budget; no holdout was consumed",
+            "Complete decision-label history failed integrity or resource validation; no holdout was consumed",
         ) from exc
     return await evaluate_decision_outcome_labels_once(records)
 
