@@ -55,7 +55,7 @@ def test_trial_ledger_explicitly_marks_hash_only_when_no_external_key_exists():
 def test_parameter_plateau_uses_oos_values_and_counts_invalid_variants_against_plateau():
     values = [1.0, 0.95, 0.90, 0.85, 0.80, 0.75, 0.70, 0.1, 0.05]
     result = parameter_plateau_score(
-        {"variants": [{"oos_sharpe": value} for value in values]},
+        {"variants": [{"oos_status": "OK", "oos_sharpe": value} for value in values]},
         metric="oos_sharpe",
         minimum_valid_variants=7,
         minimum_plateau_ratio=0.50,
@@ -66,7 +66,7 @@ def test_parameter_plateau_uses_oos_values_and_counts_invalid_variants_against_p
     assert result["plateau_ratio"] == pytest.approx(5 / 9)
 
     invalid = parameter_plateau_score(
-        {"variants": [{"oos_sharpe": value} for value in values] + [{"oos_sharpe": None}]},
+        {"variants": [{"oos_status": "OK", "oos_sharpe": value} for value in values] + [{"oos_status": "INSUFFICIENT_DATA", "oos_sharpe": 2.0}]},
         metric="oos_sharpe",
         minimum_valid_variants=7,
         minimum_plateau_ratio=0.50,
