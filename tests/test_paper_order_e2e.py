@@ -182,7 +182,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, PaperFillEvent
+    from app.db import init_db, SessionLocal, Trade, Position, PaperFillEvent
 
     symbol = f"PAPER-COST-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
@@ -193,8 +193,6 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     monkeypatch.setattr(settings, "max_consecutive_losses", 0)
     monkeypatch.setattr(settings, "max_order_latency_ms_p95", 0)
     monkeypatch.setattr(settings, "max_order_error_rate_5m", 0.0)
-    # Isolate the test from unrelated open positions left in the shared CI database.
-    monkeypatch.setattr(settings, "max_open_positions", 10_000)
     # This test exercises invalid cost context, not the independent protective-stop gate.
     monkeypatch.setattr(settings, "discipline_enabled", False)
 
@@ -203,6 +201,16 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
+            # The test database is shared by paper-order regressions. Close only
+            # prior platform-paper positions so the real production position cap
+            # remains enabled and is not affected by test execution order.
+            open_platform_positions = (await db.execute(
+                select(Position).where(
+                    Position.customer_id.is_(None), Position.quantity != 0,
+                )
+            )).scalars().all()
+            for position in open_platform_positions:
+                position.quantity = 0.0
             await db.commit()
 
         current_floor = pd.Timestamp.now(tz="UTC").floor("5min")
@@ -277,11 +285,9 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
             row_count=len(df1),
             sha256="e" * 64,
         )
-        monkeypatch.setattr(
-            execution,
-            "market_impact_bps",
-            lambda **_kwargs: (_ for _ in ()).throw(ValueError("test impact context invalid")),
-        )
+        # Exercise the real shared kernel: infinity survives the caller's
+        # non-negative clamp and must be rejected by its finite-value validator.
+        monkeypatch.setattr(settings, "paper_market_impact_coefficient", float("inf"))
         rejected = await execution.advance_platform_paper_orders(
             df1, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
         )
@@ -301,7 +307,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
             assert trade.filled_quantity == 0.0
             assert trade.remaining_quantity == pytest.approx(0.3)
             assert events[-1].outcome == "INVALID_EXECUTION_COST_CONTEXT"
-            assert events[-1].reason == "test impact context invalid"
+            assert events[-1].reason == "impact_coefficient must be finite and non-negative"
             assert events[-1].filled_quantity == 0.0
             assert events[-1].fill_price == 0.0
 
