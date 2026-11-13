@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 import sqlalchemy as sa
-from sqlalchemy import String, Float, Boolean, DateTime, Integer, BigInteger, Text, UniqueConstraint, Index, Numeric, ForeignKey, ForeignKeyConstraint
+from sqlalchemy import String, Float, Boolean, DateTime, Integer, BigInteger, Text, UniqueConstraint, Index, Numeric, ForeignKey, ForeignKeyConstraint, event
+from sqlalchemy.engine import make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from decimal import Decimal
@@ -31,7 +32,49 @@ else:
         },
     })
 
+def _configure_sqlite_wal(async_engine, database_url: str) -> bool:
+    """Enable WAL for file-backed SQLite databases so long read snapshots do not block writers.
+
+    WAL is persistent for the database file. In-memory SQLite cannot use WAL and is
+    intentionally left unchanged. If a file-backed database cannot enter WAL mode,
+    fail connection setup rather than silently accepting writer starvation.
+    """
+    url = make_url(database_url)
+    if url.get_backend_name() != "sqlite":
+        return False
+    database = url.database
+    uri_enabled = str(url.query.get("uri", "")).casefold() in {"true", "1", "yes"}
+    shared_memory_uri = bool(
+        uri_enabled
+        and isinstance(database, str)
+        and database.casefold().startswith("file::memory:")
+    )
+    if (
+        database in (None, "", ":memory:")
+        or str(url.query.get("mode", "")).casefold() == "memory"
+        or shared_memory_uri
+    ):
+        return False
+
+    def _enable_wal(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA journal_mode=WAL")
+            mode = cursor.fetchone()
+            if not mode or str(mode[0]).casefold() != "wal":
+                raise RuntimeError(
+                    "file-backed SQLite database must support WAL for consistent research holdout snapshots"
+                )
+        finally:
+            cursor.close()
+
+    event.listen(async_engine.sync_engine, "connect", _enable_wal)
+    return True
+
+
 engine = create_async_engine(settings.database_url, **engine_kwargs)
+if settings.database_url.startswith("sqlite"):
+    _configure_sqlite_wal(engine, settings.database_url)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

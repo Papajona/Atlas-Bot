@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+
 from app.decision_outcome_research import evaluate_decision_outcome_labels_once
 from app.execution_aware_research import (
     costed_execution_returns,
@@ -455,6 +456,7 @@ def test_trial_archive_append_uses_bounded_head_check_not_full_history_scan():
 
 def test_large_complete_label_history_fails_closed_without_truncation(monkeypatch):
     import json
+    from types import SimpleNamespace
     from app import db as db_module
     from app.decision_outcome_research import (
         DecisionOutcomeHistoryResourceLimit,
@@ -462,25 +464,222 @@ def test_large_complete_label_history_fails_closed_without_truncation(monkeypatc
     )
 
     class _Rows:
-        def all(self):
-            return [
+        def __init__(self, rows=None):
+            self.rows = rows if rows is not None else [
                 (1, json.dumps(_outcome_label(1))),
                 (2, json.dumps(_outcome_label(2))),
             ]
 
-    class _Db:
+        def all(self):
+            return self.rows
+
+    class _Transaction:
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def execute(self, _query):
+    class _Db:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get_bind(self):
+            return self.bind
+
+        def begin(self):
+            return _Transaction()
+
+        async def execute(self, query):
+            if str(query).startswith("SET TRANSACTION"):
+                return _Rows([])
             return _Rows()
 
     monkeypatch.setattr(db_module, "SessionLocal", _Db)
     with pytest.raises(DecisionOutcomeHistoryResourceLimit, match="holdout was not consumed"):
         asyncio.run(load_all_decision_outcome_labels(batch_size=100, max_records=1))
+
+
+def test_complete_label_history_uses_one_repeatable_read_snapshot(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from app import db as db_module
+    from app.decision_outcome_research import load_all_decision_outcome_labels
+
+    statements = []
+
+    class _Rows:
+        def __init__(self, rows=()):
+            self._rows = list(rows)
+
+        def all(self):
+            return self._rows
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Db:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get_bind(self):
+            return self.bind
+
+        def begin(self):
+            return _Transaction()
+
+        async def execute(self, query):
+            sql = str(query).strip()
+            statements.append(sql)
+            if sql.startswith("SET TRANSACTION"):
+                return _Rows()
+            if not sql.startswith("SELECT"):
+                raise AssertionError(f"unexpected SQL before history scan: {sql}")
+            return _Rows([(1, json.dumps(_outcome_label(1)))])
+
+    monkeypatch.setattr(db_module, "SessionLocal", _Db)
+    loaded = asyncio.run(load_all_decision_outcome_labels(batch_size=100))
+    assert len(loaded) == 1
+    assert statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    assert len(statements) == 2
+    assert statements[1].startswith("SELECT")
+
+
+def test_sqlite_shared_memory_uri_skips_wal_and_connects():
+    import asyncio
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.db import _configure_sqlite_wal
+
+    async def run():
+        url = "sqlite+aiosqlite:///file::memory:?cache=shared&uri=true"
+        engine = create_async_engine(url)
+        try:
+            assert _configure_sqlite_wal(engine, url) is False
+            async with engine.connect() as connection:
+                mode = await connection.scalar(text("PRAGMA journal_mode"))
+                assert str(mode).casefold() == "memory"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_rows(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from sqlalchemy import Column, Integer, String, Table, Text, func, select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.orm import registry
+    from app import db as db_module
+    from app.decision_outcome_research import load_all_decision_outcome_labels
+
+    test_mapper_registry = registry()
+    test_audit_table = Table(
+        "holdout_snapshot_audit_log",
+        test_mapper_registry.metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("event", String(80), nullable=False),
+        Column("detail", Text, nullable=False),
+    )
+
+    class _TestAuditLog:
+        pass
+
+    test_mapper_registry.map_imperatively(_TestAuditLog, test_audit_table)
+
+    async def run():
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'holdout-snapshot.db'}"
+        engine = create_async_engine(database_url, connect_args={"timeout": 0.25})
+        assert db_module._configure_sqlite_wal(engine, database_url) is True
+        writer_sessions = async_sessionmaker(engine, expire_on_commit=False)
+        first_page_read = asyncio.Event()
+        writer_committed = asyncio.Event()
+        writer_errors = []
+
+        class _PausingReaderSession(AsyncSession):
+            _paused_after_first_page = False
+
+            async def execute(self, statement, *args, **kwargs):
+                result = await super().execute(statement, *args, **kwargs)
+                sql = str(statement).lstrip().upper()
+                if (
+                    sql.startswith("SELECT")
+                    and "HOLDOUT_SNAPSHOT_AUDIT_LOG" in sql
+                    and not self._paused_after_first_page
+                ):
+                    self._paused_after_first_page = True
+                    first_page_read.set()
+                    await writer_committed.wait()
+                return result
+
+        reader_sessions = async_sessionmaker(
+            engine, class_=_PausingReaderSession, expire_on_commit=False,
+        )
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(test_mapper_registry.metadata.create_all)
+            async with writer_sessions() as db:
+                db.add_all([
+                    _TestAuditLog(
+                        event="ADAPTIVE_DECISION_OUTCOME_LABEL",
+                        detail=json.dumps(_outcome_label(i)),
+                    )
+                    for i in range(100)
+                ])
+                await db.commit()
+
+            monkeypatch.setattr(db_module, "AuditLog", _TestAuditLog)
+            monkeypatch.setattr(db_module, "SessionLocal", reader_sessions)
+
+            async def concurrent_writer():
+                await first_page_read.wait()
+                try:
+                    async with writer_sessions() as db:
+                        db.add(_TestAuditLog(
+                            event="ADAPTIVE_DECISION_OUTCOME_LABEL",
+                            detail=json.dumps(_outcome_label(100)),
+                        ))
+                        await db.commit()
+                except Exception as exc:
+                    writer_errors.append(exc)
+                finally:
+                    writer_committed.set()
+
+            loaded, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    load_all_decision_outcome_labels(batch_size=100),
+                    concurrent_writer(),
+                ),
+                timeout=10,
+            )
+            assert writer_errors == []
+            assert len(loaded) == 100
+            async with writer_sessions() as db:
+                total = await db.scalar(select(func.count(_TestAuditLog.id)))
+            assert total == 101
+
+            async with engine.connect() as connection:
+                mode = await connection.exec_driver_sql("PRAGMA journal_mode")
+                assert str(mode.scalar_one()).casefold() == "wal"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 
 def test_holdout_route_checks_consumption_before_loading_history():
@@ -491,6 +690,7 @@ def test_holdout_route_checks_consumption_before_loading_history():
     route = route.split('@app.post("/api/research/backtest-all")', 1)[0]
     assert route.index("decision_outcome_holdout_status()") < route.index("load_all_decision_outcome_labels(")
     assert "DecisionOutcomeHistoryResourceLimit" in route
+    assert "DecisionOutcomeHistoryIntegrityError" in route
     assert "no holdout was consumed" in route
 
 
