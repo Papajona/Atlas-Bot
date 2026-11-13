@@ -106,15 +106,12 @@ def triple_barrier(
 ) -> pd.Series:
     """Create forward labels using the same entry/exit timing as the OHLC executor.
 
-    The signal is known at close[i]; the hypothetical entry is open[i+1]. The
-    volatility estimate is frozen at i and barriers are measured from that entry
-    price. The next max_hold executable bars are inspected, including the entry
-    bar. A gap through a barrier is observed at the open; simultaneous intrabar
-    touches use the execution simulator's conservative stop-first convention.
-    Round-trip costs widen both barriers and the timeout dead-zone so labels do not
-    call a gross move a profitable outcome when configured fees/slippage consume it.
-    If entry_open is omitted, close[i] is retained only for backwards-compatible
-    offline callers; the production training and walk-forward paths always supply it.
+    The signal is known at close[i]; entry is open[i+1]. Production calls pass the
+    same prior-completed-bar ATR, stop multiplier, and target multiplier as the OHLC
+    execution simulator, so label barriers are identical to simulated order exits.
+    Costs affect the realized target/timeout outcome, not the executable stop/target
+    levels. A gap is filled at the observed next open and simultaneous touches are
+    resolved stop-first. The vol/pt/sl fallback is only for legacy offline callers.
     """
     c = close.to_numpy(dtype=float)
     v = vol.reindex(close.index).to_numpy(dtype=float)
