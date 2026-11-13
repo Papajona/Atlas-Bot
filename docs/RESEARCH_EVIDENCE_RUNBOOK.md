@@ -43,6 +43,8 @@ For research and strategy-router returns to use the same execution-cost inputs a
 - `spread_bps`: one observed full bid/ask spread value for each data bar, in exact index order;
 - `spread_observation_count`: exactly the number of bars;
 - `spread_values_sha256`: canonical SHA-256 of the submitted spread list.
+
+These fee fields belong to the **top-level signed calibration document**, not inside `per_bar_execution_context`:
 - `fee_source` and `fee_evidence_id`: exact matches for `RESEARCH_FEE_SOURCE` and `RESEARCH_FEE_EVIDENCE_ID`;
 - `taker_fee_bps`: the exact configured `RESEARCH_TAKER_BPS` rate used in the research returns;
 - `fee_schedule_source_sha256`: the hash of the single `fee_schedule` source record in the signed source list.
