@@ -162,11 +162,12 @@ def test_customer_paper_entry_discipline_is_isolated_and_serialized():
 
 def test_customer_paper_group_marks_are_filtered_before_fetching():
     source = Path("app/main.py").read_text(encoding="utf-8")
-    assert "from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group" in source
+    assert "from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, conservative_position_valuation_price, limit_increase_when_valuation_incomplete, shares_risk_budget" in source
     # The current helper filters by the target risk group before it fetches any marks.
     assert "relevant_positions = [" in source
-    assert 'if risk_group(str(row.get("symbol") or "")) == target_group' in source
-    assert source.index("relevant_positions = [") < source.index("for row in relevant_positions:")
+    assert 'if shares_risk_budget(req.symbol, str(row.get("symbol") or ""))' in source
+    gather = "loaded = await asyncio.gather(*(load_one_position(row) for row in relevant_positions))"
+    assert source.index("relevant_positions = [") < source.index(gather)
     assert "if not group_check[\"allowed\"] and not group_reduce_only:" in source
 
 

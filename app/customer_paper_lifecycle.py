@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -19,7 +20,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .config import settings
-from .correlation_risk import risk_group
+from .correlation_risk import RISK_GROUPS, shares_risk_budget
 from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
@@ -34,6 +35,8 @@ _CURRENCY_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9/_:.-]{0,79}$")
 _VENUE_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 _MARKET_TYPES = {"spot"}
+
+logger = logging.getLogger(__name__)
 
 
 class CustomerPaperOrderConflict(CustomerPaperLedgerBlocked):
@@ -914,450 +917,526 @@ async def record_customer_paper_fill(
     # preflight. A mark fetched before preflight can age beyond the five-second
     # limit while database identity and RLS checks run.
     await _assert_customer_paper_ready()
-    if group_mark_prices_loader is not None:
-        if group_mark_prices is not None:
-            raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
-        try:
-            group_mark_prices = await group_mark_prices_loader()
-        except CustomerPaperMarkVerificationError:
-            raise
-        except CustomerPaperLedgerBlocked:
-            raise
-        except Exception as exc:
-            raise CustomerPaperMarkVerificationError(
-                "current correlation-group marks could not be verified"
-            ) from exc
-        if not isinstance(group_mark_prices, Mapping):
-            raise CustomerPaperMarkVerificationError(
-                "current correlation-group mark loader returned invalid data"
-            )
+    if group_mark_prices_loader is not None and group_mark_prices is not None:
+        raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
     engine = _paper_engine()
     try:
-        async with engine.begin() as conn:
-            await _set_tenant(conn, customer_id)
-            order = (await conn.execute(text(
-                """
-                SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency, metadata_json
-                FROM customer_paper.orders
-                WHERE customer_id=:customer_id AND client_order_id=:client_order_id
-                """
-            ), {"customer_id": customer_id, "client_order_id": client_id})).mappings().first()
-            if order is None:
-                raise CustomerPaperOrderConflict("customer paper order does not exist for this tenant")
-            order_id = str(order["id"])
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": f"paper-order-fill:{customer_id}:{order_id}"},
-            )
-            if enforce_market_bar_budget:
-                await conn.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                    {"lock_key": f"paper-market-bar:{normalized_bar_key}"},
-                )
-            currency = str(order["currency"])
-            payload = {
-                "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
-                "bar_key": normalized_bar_key, "quantity": _fmt(requested_amount), "price": _fmt(fill_price),
-                "fee_amount": _fmt(requested_fee), "currency": currency,
-            }
-            digest = _canonical_sha(payload)
-            existing = (await conn.execute(text(
-                """
-                SELECT id, payload_sha256 FROM customer_paper.fills
-                WHERE customer_id=:customer_id AND idempotency_key=:idempotency_key
-                """
-            ), {"customer_id": customer_id, "idempotency_key": fill_key})).first()
-            if existing is not None:
-                if str(existing[1]) != digest:
-                    raise CustomerPaperIdempotencyConflict(
-                        "fill idempotency key already exists for a different fill payload"
-                    )
-                return {"status": "REPLAYED", "fill_id": str(existing[0]), "idempotency_key": fill_key}
+        async with engine.connect() as conn:
+            risk_budget_lock_acquired = False
+            risk_budget_lock_keys: list[str] = []
+            try:
+                # Read the immutable order side, then finish the read transaction
+                # before taking a session-level customer lock. This connection stays
+                # checked out, but no database transaction or row lock remains open
+                # while fresh quotes are fetched from providers.
+                async with conn.begin():
+                    await _set_tenant(conn, customer_id)
+                    preflight_order = (await conn.execute(text(
+                        """
+                        SELECT side FROM customer_paper.orders
+                        WHERE customer_id=:customer_id AND client_order_id=:client_order_id
+                        """
+                    ), {"customer_id": customer_id, "client_order_id": client_id})).mappings().first()
+                if preflight_order is None:
+                    raise CustomerPaperOrderConflict("customer paper order does not exist for this tenant")
 
-            duplicate_bar = (await conn.execute(text(
-                """
-                SELECT id FROM customer_paper.fills
-                WHERE customer_id=:customer_id AND order_id=:order_id AND bar_key=:bar_key
-                """
-            ), {"customer_id": customer_id, "order_id": order_id, "bar_key": normalized_bar_key})).first()
-            if duplicate_bar is not None:
-                raise CustomerPaperIdempotencyConflict(
-                    "an order may receive at most one fill attempt per completed bar"
-                )
-            status = await _current_order_state(conn, customer_id, order_id)
-            if status not in {"SUBMITTED", "PARTIALLY_FILLED"}:
-                raise CustomerPaperOrderConflict(f"order is not fillable from state {status}")
-            total_filled = Decimal((await conn.execute(text(
-                "SELECT COALESCE(SUM(quantity), 0) FROM customer_paper.fills WHERE customer_id=:customer_id AND order_id=:order_id"
-            ), {"customer_id": customer_id, "order_id": order_id})).scalar_one())
-            order_quantity = Decimal(order["quantity"])
-            venue = str(order["venue"])
-            market_type = str(order["market_type"])
-            symbol = str(order["symbol"])
-            stored_metadata = order["metadata_json"]
-            if isinstance(stored_metadata, str):
-                try:
-                    stored_metadata = json.loads(stored_metadata)
-                except ValueError:
-                    stored_metadata = {}
-            order_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
-            if enforce_market_bar_budget:
-                budget = (await conn.execute(text(
-                    """
-                    SELECT venue, market_type, symbol, timeframe, bar_at, capacity
-                    FROM customer_paper.market_bar_budgets WHERE bar_key=:bar_key
-                    """
-                ), {"bar_key": normalized_bar_key})).mappings().first()
-                if budget is None:
-                    raise CustomerPaperOrderConflict("fill lacks a registered immutable market-bar budget")
-                if (
-                    str(budget["venue"]) != venue
-                    or str(budget["market_type"]) != market_type
-                    or str(budget["symbol"]) != symbol
-                    or str(order_metadata.get("exchange") or "") != venue
-                    or str(order_metadata.get("timeframe") or "") != str(budget["timeframe"])
-                ):
-                    raise CustomerPaperOrderConflict("market-bar budget does not match the persisted order market")
-                try:
-                    submitted_at = datetime.fromisoformat(str(order_metadata["submission_bar_at"]).replace("Z", "+00:00"))
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise CustomerPaperOrderConflict("persisted paper order has no valid submission-bar timestamp") from exc
-                if submitted_at.tzinfo is None or submitted_at.utcoffset() is None:
-                    raise CustomerPaperOrderConflict("persisted paper order submission timestamp is not timezone-aware")
-                if budget["bar_at"].astimezone(timezone.utc) <= submitted_at.astimezone(timezone.utc):
-                    raise CustomerPaperOrderConflict("paper fills must use a completed bar strictly after the submission bar")
-                expected_bar_key = hashlib.sha256(
-                    f"paper-market-bar-v1|{venue}|spot|{symbol}|{budget['timeframe']}|{budget['bar_at'].astimezone(timezone.utc).isoformat()}".encode("utf-8")
-                ).hexdigest()
-                if expected_bar_key != normalized_bar_key:
-                    raise CustomerPaperOrderConflict("market-bar key does not match persisted bar identity")
-                consumed = Decimal((await conn.execute(text(
-                    "SELECT COALESCE(SUM(allocated_quantity), 0) FROM customer_paper.market_bar_allocations WHERE bar_key=:bar_key"
-                ), {"bar_key": normalized_bar_key})).scalar_one())
-                available = Decimal(budget["capacity"]) - consumed
-                remaining = order_quantity - total_filled
-                if available < 0 or remaining < 0:
-                    raise CustomerPaperLedgerBlocked("paper bar allocation or order fill totals are inconsistent")
-                amount = min(requested_amount, remaining, available)
-                if amount <= 0:
-                    return {
-                        "status": "NO_LIQUIDITY", "order_id": order_id, "bar_key": normalized_bar_key,
-                        "available_quantity": _fmt(max(Decimal("0"), available)),
+                if str(preflight_order["side"] or "").upper() == "BUY":
+                    # New workers serialize all customer BUY budgets while current
+                    # marks are fetched. Keep the legacy per-group locks out of this
+                    # preflight phase: old workers acquire order/bar locks before their
+                    # group lock, so taking group locks here would invert lock order.
+                    risk_lock_key = f"paper-risk-budget:{customer_id}"
+                    risk_budget_lock_keys.append(risk_lock_key)
+                    await conn.execute(
+                        text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": risk_lock_key},
+                    )
+                    risk_budget_lock_acquired = True
+                    # Session-level locks survive COMMIT. End the implicit transaction
+                    # before any provider/network call.
+                    await conn.commit()
+                    if group_mark_prices_loader is not None:
+                        try:
+                            group_mark_prices = await group_mark_prices_loader()
+                        except CustomerPaperMarkVerificationError:
+                            raise
+                        except CustomerPaperLedgerBlocked:
+                            raise
+                        except Exception as exc:
+                            raise CustomerPaperMarkVerificationError(
+                                "current correlation-group marks could not be verified"
+                            ) from exc
+                        if not isinstance(group_mark_prices, Mapping):
+                            raise CustomerPaperMarkVerificationError(
+                                "current correlation-group mark loader returned invalid data"
+                            )
+
+                # Re-read the order and all position state after quote collection.
+                # The session advisory lock serializes this customer's BUY fills
+                # without holding a transaction open during provider calls.
+                async with conn.begin():
+                    await _set_tenant(conn, customer_id)
+                    order = (await conn.execute(text(
+                        """
+                        SELECT id, venue, market_type, symbol, side, order_type, quantity, limit_price, currency, metadata_json
+                        FROM customer_paper.orders
+                        WHERE customer_id=:customer_id AND client_order_id=:client_order_id
+                        """
+                    ), {"customer_id": customer_id, "client_order_id": client_id})).mappings().first()
+                    if order is None:
+                        raise CustomerPaperOrderConflict("customer paper order does not exist for this tenant")
+                    order_id = str(order["id"])
+                    await conn.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": f"paper-order-fill:{customer_id}:{order_id}"},
+                    )
+                    if enforce_market_bar_budget:
+                        await conn.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                            {"lock_key": f"paper-market-bar:{normalized_bar_key}"},
+                        )
+                    if str(preflight_order["side"] or "").upper() == "BUY":
+                        # Preserve compatibility with older workers that still use
+                        # per-group xact locks. Acquire them only after order and bar
+                        # locks, matching the legacy lock order and avoiding roll-deploy
+                        # deadlocks. Sorted acquisition is deterministic across workers.
+                        for group in RISK_GROUPS:
+                            await conn.execute(
+                                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                                {"lock_key": f"paper-correlation-group:{customer_id}:{group}"},
+                            )
+                    currency = str(order["currency"])
+                    payload = {
+                        "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
+                        "bar_key": normalized_bar_key, "quantity": _fmt(requested_amount), "price": _fmt(fill_price),
+                        "fee_amount": _fmt(requested_fee), "currency": currency,
                     }
-                if amount < requested_amount:
-                    fee = _money(requested_fee * amount / requested_amount, "pro-rated fill fee")
-                else:
-                    fee = requested_fee
-            elif total_filled + amount > order_quantity:
-                raise CustomerPaperOrderConflict("simulated fill would exceed the immutable order quantity")
-            limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
-            side = str(order["side"])
-            if limit is not None and ((side == "BUY" and fill_price > limit) or (side == "SELL" and fill_price < limit)):
-                raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
+                    digest = _canonical_sha(payload)
+                    existing = (await conn.execute(text(
+                        """
+                        SELECT id, payload_sha256 FROM customer_paper.fills
+                        WHERE customer_id=:customer_id AND idempotency_key=:idempotency_key
+                        """
+                    ), {"customer_id": customer_id, "idempotency_key": fill_key})).first()
+                    if existing is not None:
+                        if str(existing[1]) != digest:
+                            raise CustomerPaperIdempotencyConflict(
+                                "fill idempotency key already exists for a different fill payload"
+                            )
+                        return {"status": "REPLAYED", "fill_id": str(existing[0]), "idempotency_key": fill_key}
 
-            if side == "BUY":
-                # A per-symbol position lock cannot protect a shared risk budget across
-                # different markets. Serialize all BUY fills for this customer's group,
-                # then reread the latest committed position events inside this transaction.
-                target_group = risk_group(symbol)
-                await conn.execute(
-                    text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                    {"lock_key": f"paper-correlation-group:{customer_id}:{target_group}"},
-                )
-                cap = Decimal(str(settings.correlation_group_cap_usd))
-                if not cap.is_finite() or cap < 0:
-                    raise CustomerPaperLedgerBlocked("correlation-group cap is not a finite non-negative amount")
-                latest_positions = (await conn.execute(text("""
-                    SELECT DISTINCT ON (venue, market_type, symbol)
-                           venue, market_type, symbol, quantity_after, average_entry_after
-                    FROM customer_paper.position_events
-                    WHERE customer_id = :customer_id
-                    ORDER BY venue, market_type, symbol, id DESC
-                """), {"customer_id": customer_id})).mappings().all()
-                existing_group_notional = Decimal("0")
-                for current_position in latest_positions:
-                    current_symbol = str(current_position["symbol"] or "")
-                    if risk_group(current_symbol) != target_group:
-                        continue
-                    current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
-                    if not current_quantity.is_finite():
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position quantity is not finite"
+                    duplicate_bar = (await conn.execute(text(
+                        """
+                        SELECT id FROM customer_paper.fills
+                        WHERE customer_id=:customer_id AND order_id=:order_id AND bar_key=:bar_key
+                        """
+                    ), {"customer_id": customer_id, "order_id": order_id, "bar_key": normalized_bar_key})).first()
+                    if duplicate_bar is not None:
+                        raise CustomerPaperIdempotencyConflict(
+                            "an order may receive at most one fill attempt per completed bar"
                         )
-                    if current_quantity == 0:
-                        continue
-                    average_entry = Decimal(str(current_position["average_entry_after"] or "0"))
-                    if not average_entry.is_finite() or average_entry <= 0:
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position has no valid entry valuation"
-                        )
-                    mark_key = (
-                        str(current_position["venue"] or "").strip().lower(),
-                        str(current_position["market_type"] or "").strip().lower(),
-                        current_symbol.strip().upper(),
+                    status = await _current_order_state(conn, customer_id, order_id)
+                    if status not in {"SUBMITTED", "PARTIALLY_FILLED"}:
+                        raise CustomerPaperOrderConflict(f"order is not fillable from state {status}")
+                    total_filled = Decimal((await conn.execute(text(
+                        "SELECT COALESCE(SUM(quantity), 0) FROM customer_paper.fills WHERE customer_id=:customer_id AND order_id=:order_id"
+                    ), {"customer_id": customer_id, "order_id": order_id})).scalar_one())
+                    order_quantity = Decimal(order["quantity"])
+                    venue = str(order["venue"])
+                    market_type = str(order["market_type"])
+                    symbol = str(order["symbol"])
+                    stored_metadata = order["metadata_json"]
+                    if isinstance(stored_metadata, str):
+                        try:
+                            stored_metadata = json.loads(stored_metadata)
+                        except ValueError:
+                            stored_metadata = {}
+                    order_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
+                    if enforce_market_bar_budget:
+                        budget = (await conn.execute(text(
+                            """
+                            SELECT venue, market_type, symbol, timeframe, bar_at, capacity
+                            FROM customer_paper.market_bar_budgets WHERE bar_key=:bar_key
+                            """
+                        ), {"bar_key": normalized_bar_key})).mappings().first()
+                        if budget is None:
+                            raise CustomerPaperOrderConflict("fill lacks a registered immutable market-bar budget")
+                        if (
+                            str(budget["venue"]) != venue
+                            or str(budget["market_type"]) != market_type
+                            or str(budget["symbol"]) != symbol
+                            or str(order_metadata.get("exchange") or "") != venue
+                            or str(order_metadata.get("timeframe") or "") != str(budget["timeframe"])
+                        ):
+                            raise CustomerPaperOrderConflict("market-bar budget does not match the persisted order market")
+                        try:
+                            submitted_at = datetime.fromisoformat(str(order_metadata["submission_bar_at"]).replace("Z", "+00:00"))
+                        except (KeyError, TypeError, ValueError) as exc:
+                            raise CustomerPaperOrderConflict("persisted paper order has no valid submission-bar timestamp") from exc
+                        if submitted_at.tzinfo is None or submitted_at.utcoffset() is None:
+                            raise CustomerPaperOrderConflict("persisted paper order submission timestamp is not timezone-aware")
+                        if budget["bar_at"].astimezone(timezone.utc) <= submitted_at.astimezone(timezone.utc):
+                            raise CustomerPaperOrderConflict("paper fills must use a completed bar strictly after the submission bar")
+                        expected_bar_key = hashlib.sha256(
+                            f"paper-market-bar-v1|{venue}|spot|{symbol}|{budget['timeframe']}|{budget['bar_at'].astimezone(timezone.utc).isoformat()}".encode("utf-8")
+                        ).hexdigest()
+                        if expected_bar_key != normalized_bar_key:
+                            raise CustomerPaperOrderConflict("market-bar key does not match persisted bar identity")
+                        consumed = Decimal((await conn.execute(text(
+                            "SELECT COALESCE(SUM(allocated_quantity), 0) FROM customer_paper.market_bar_allocations WHERE bar_key=:bar_key"
+                        ), {"bar_key": normalized_bar_key})).scalar_one())
+                        available = Decimal(budget["capacity"]) - consumed
+                        remaining = order_quantity - total_filled
+                        if available < 0 or remaining < 0:
+                            raise CustomerPaperLedgerBlocked("paper bar allocation or order fill totals are inconsistent")
+                        amount = min(requested_amount, remaining, available)
+                        if amount <= 0:
+                            return {
+                                "status": "NO_LIQUIDITY", "order_id": order_id, "bar_key": normalized_bar_key,
+                                "available_quantity": _fmt(max(Decimal("0"), available)),
+                            }
+                        if amount < requested_amount:
+                            fee = _money(requested_fee * amount / requested_amount, "pro-rated fill fee")
+                        else:
+                            fee = requested_fee
+                    elif total_filled + amount > order_quantity:
+                        raise CustomerPaperOrderConflict("simulated fill would exceed the immutable order quantity")
+                    limit = Decimal(order["limit_price"]) if order["limit_price"] is not None else None
+                    side = str(order["side"])
+                    if limit is not None and ((side == "BUY" and fill_price > limit) or (side == "SELL" and fill_price < limit)):
+                        raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
+
+                    if side == "BUY":
+                        if not risk_budget_lock_acquired:
+                            raise CustomerPaperLedgerBlocked(
+                                "customer risk-budget lock was not acquired before the BUY transaction"
+                            )
+                        cap = Decimal(str(settings.correlation_group_cap_usd))
+                        if not cap.is_finite() or cap < 0:
+                            raise CustomerPaperLedgerBlocked("correlation-group cap is not a finite non-negative amount")
+                        latest_positions = (await conn.execute(text("""
+                            SELECT DISTINCT ON (venue, market_type, symbol)
+                                   venue, market_type, symbol, quantity_after, average_entry_after
+                            FROM customer_paper.position_events
+                            WHERE customer_id = :customer_id
+                            ORDER BY venue, market_type, symbol, id DESC
+                        """), {"customer_id": customer_id})).mappings().all()
+                        existing_group_notional = Decimal("0")
+                        for current_position in latest_positions:
+                            current_symbol = str(current_position["symbol"] or "")
+                            if not shares_risk_budget(symbol, current_symbol):
+                                continue
+                            current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
+                            if not current_quantity.is_finite():
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position quantity is not finite"
+                                )
+                            if current_quantity == 0:
+                                continue
+                            average_entry = Decimal(str(current_position["average_entry_after"] or "0"))
+                            if not average_entry.is_finite() or average_entry <= 0:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position has no valid entry valuation"
+                                )
+                            mark_key = (
+                                str(current_position["venue"] or "").strip().lower(),
+                                str(current_position["market_type"] or "").strip().lower(),
+                                current_symbol.strip().upper(),
+                            )
+                            raw_mark = (group_mark_prices or {}).get(mark_key)
+                            if raw_mark is None:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current mark is missing for an open correlation-group position; refusing to add exposure"
+                                )
+                            if not isinstance(raw_mark, Mapping):
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position mark must include a price and quote timestamp"
+                                )
+                            try:
+                                mark_price = Decimal(str(raw_mark.get("price")))
+                                raw_quote_timestamp = str(
+                                    raw_mark.get("quote_timestamp_utc") or ""
+                                ).strip()
+                                mark_timestamp = datetime.fromisoformat(
+                                    raw_quote_timestamp.replace("Z", "+00:00")
+                                )
+                            except (InvalidOperation, TypeError, ValueError) as exc:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position mark or quote timestamp is invalid"
+                                ) from exc
+                            if mark_timestamp.tzinfo is None or mark_timestamp.utcoffset() is None:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position mark timestamp must be timezone-aware"
+                                )
+                            mark_age_seconds = (
+                                datetime.now(timezone.utc)
+                                - mark_timestamp.astimezone(timezone.utc)
+                            ).total_seconds()
+                            if mark_age_seconds < -1.0 or mark_age_seconds > 5.0:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position mark is stale or from the future"
+                                )
+                            if not mark_price.is_finite() or mark_price <= 0:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position mark is not finite and positive"
+                                )
+                            # A price drop must not free cap headroom below the booked entry cost.
+                            # Value exposure at the higher of its booked average entry or latest verified market mark.
+                            existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
+
+                        projected_notional = existing_group_notional + amount * fill_price
+                        if projected_notional > cap:
+                            # Preserve safe partial fills where there is headroom; never append a
+                            # fill whose actual fill-price notional would exceed the shared cap.
+                            headroom = max(Decimal("0"), cap - existing_group_notional)
+                            with localcontext() as calculation:
+                                calculation.prec = 50
+                                cap_quantity = (headroom / fill_price).quantize(
+                                    _AMOUNT_QUANTUM, rounding=ROUND_DOWN
+                                )
+                            previous_amount = amount
+                            amount = min(amount, cap_quantity)
+                            if amount <= 0:
+                                return {
+                                    "status": "NO_CORRELATION_GROUP_HEADROOM",
+                                    "order_id": order_id,
+                                    "bar_key": normalized_bar_key,
+                                    "existing_group_notional": _fmt(existing_group_notional),
+                                    "cap_usd": _fmt(cap),
+                                }
+                            if amount < previous_amount:
+                                fee = _money(
+                                    fee * amount / previous_amount,
+                                    "correlation-cap prorated fill fee",
+                                )
+
+                    await conn.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": f"paper-position:{customer_id}:{venue}:{market_type}:{symbol}"},
                     )
-                    raw_mark = (group_mark_prices or {}).get(mark_key)
-                    if raw_mark is None:
-                        raise CustomerPaperLedgerBlocked(
-                            "current mark is missing for an open correlation-group position; refusing to add exposure"
+                    position = (await conn.execute(text(
+                        """
+                        SELECT pe.quantity_after, pe.average_entry_after, pe.cost_basis_after,
+                               pe.realized_pnl_after, entry_order.metadata_json AS entry_metadata
+                        FROM customer_paper.position_events AS pe
+                        LEFT JOIN LATERAL (
+                            SELECT opening_order.metadata_json
+                            FROM customer_paper.position_events AS opening_event
+                            JOIN customer_paper.fills AS opening_fill
+                              ON opening_fill.id = opening_event.fill_id
+                             AND opening_fill.customer_id = opening_event.customer_id
+                            JOIN customer_paper.orders AS opening_order
+                              ON opening_order.id = opening_fill.order_id
+                             AND opening_order.customer_id = opening_fill.customer_id
+                            WHERE opening_event.customer_id = pe.customer_id
+                              AND opening_event.venue = pe.venue
+                              AND opening_event.market_type = pe.market_type
+                              AND opening_event.symbol = pe.symbol
+                              AND opening_event.id <= pe.id
+                              AND opening_event.quantity_before = 0
+                              AND opening_event.quantity_after > 0
+                              AND opening_order.side = 'BUY'
+                            ORDER BY opening_event.id DESC
+                            LIMIT 1
+                        ) AS entry_order ON TRUE
+                        WHERE pe.customer_id=:customer_id AND pe.venue=:venue
+                          AND pe.market_type=:market_type AND pe.symbol=:symbol
+                        ORDER BY pe.id DESC
+                        LIMIT 1
+                        """
+                    ), {"customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol})).first()
+                    quantity_before = Decimal(position[0]) if position is not None else Decimal("0")
+                    if quantity_before > 0:
+                        position_metadata = position[4] if position is not None else {}
+                        if isinstance(position_metadata, str):
+                            try:
+                                position_metadata = json.loads(position_metadata)
+                            except ValueError:
+                                position_metadata = {}
+                        position_metadata = (
+                            dict(position_metadata)
+                            if isinstance(position_metadata, Mapping)
+                            else {}
                         )
-                    if not isinstance(raw_mark, Mapping):
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position mark must include a price and quote timestamp"
-                        )
-                    try:
-                        mark_price = Decimal(str(raw_mark.get("price")))
-                        raw_quote_timestamp = str(
-                            raw_mark.get("quote_timestamp_utc") or ""
+                        position_owner = str(
+                            position_metadata.get("execution_owner") or "manual_customer_api"
                         ).strip()
-                        mark_timestamp = datetime.fromisoformat(
-                            raw_quote_timestamp.replace("Z", "+00:00")
-                        )
-                    except (InvalidOperation, TypeError, ValueError) as exc:
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position mark or quote timestamp is invalid"
-                        ) from exc
-                    if mark_timestamp.tzinfo is None or mark_timestamp.utcoffset() is None:
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position mark timestamp must be timezone-aware"
-                        )
-                    mark_age_seconds = (
-                        datetime.now(timezone.utc)
-                        - mark_timestamp.astimezone(timezone.utc)
-                    ).total_seconds()
-                    if mark_age_seconds < -1.0 or mark_age_seconds > 5.0:
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position mark is stale or from the future"
-                        )
-                    if not mark_price.is_finite() or mark_price <= 0:
-                        raise CustomerPaperLedgerBlocked(
-                            "current correlation-group position mark is not finite and positive"
-                        )
-                    # A price drop must not free cap headroom below the booked entry cost.
-                    # Value exposure at the higher of its booked average entry or latest verified market mark.
-                    existing_group_notional += abs(current_quantity) * max(average_entry, mark_price)
-
-                projected_notional = existing_group_notional + amount * fill_price
-                if projected_notional > cap:
-                    # Preserve safe partial fills where there is headroom; never append a
-                    # fill whose actual fill-price notional would exceed the shared cap.
-                    headroom = max(Decimal("0"), cap - existing_group_notional)
-                    with localcontext() as calculation:
-                        calculation.prec = 50
-                        cap_quantity = (headroom / fill_price).quantize(
-                            _AMOUNT_QUANTUM, rounding=ROUND_DOWN
-                        )
-                    previous_amount = amount
-                    amount = min(amount, cap_quantity)
-                    if amount <= 0:
-                        return {
-                            "status": "NO_CORRELATION_GROUP_HEADROOM",
-                            "order_id": order_id,
-                            "bar_key": normalized_bar_key,
-                            "existing_group_notional": _fmt(existing_group_notional),
-                            "cap_usd": _fmt(cap),
-                        }
-                    if amount < previous_amount:
-                        fee = _money(
-                            fee * amount / previous_amount,
-                            "correlation-cap prorated fill fee",
-                        )
-
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": f"paper-position:{customer_id}:{venue}:{market_type}:{symbol}"},
-            )
-            position = (await conn.execute(text(
-                """
-                SELECT pe.quantity_after, pe.average_entry_after, pe.cost_basis_after,
-                       pe.realized_pnl_after, entry_order.metadata_json AS entry_metadata
-                FROM customer_paper.position_events AS pe
-                LEFT JOIN LATERAL (
-                    SELECT opening_order.metadata_json
-                    FROM customer_paper.position_events AS opening_event
-                    JOIN customer_paper.fills AS opening_fill
-                      ON opening_fill.id = opening_event.fill_id
-                     AND opening_fill.customer_id = opening_event.customer_id
-                    JOIN customer_paper.orders AS opening_order
-                      ON opening_order.id = opening_fill.order_id
-                     AND opening_order.customer_id = opening_fill.customer_id
-                    WHERE opening_event.customer_id = pe.customer_id
-                      AND opening_event.venue = pe.venue
-                      AND opening_event.market_type = pe.market_type
-                      AND opening_event.symbol = pe.symbol
-                      AND opening_event.id <= pe.id
-                      AND opening_event.quantity_before = 0
-                      AND opening_event.quantity_after > 0
-                      AND opening_order.side = 'BUY'
-                    ORDER BY opening_event.id DESC
-                    LIMIT 1
-                ) AS entry_order ON TRUE
-                WHERE pe.customer_id=:customer_id AND pe.venue=:venue
-                  AND pe.market_type=:market_type AND pe.symbol=:symbol
-                ORDER BY pe.id DESC
-                LIMIT 1
-                """
-            ), {"customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol})).first()
-            quantity_before = Decimal(position[0]) if position is not None else Decimal("0")
-            if quantity_before > 0:
-                position_metadata = position[4] if position is not None else {}
-                if isinstance(position_metadata, str):
-                    try:
-                        position_metadata = json.loads(position_metadata)
-                    except ValueError:
-                        position_metadata = {}
-                position_metadata = (
-                    dict(position_metadata)
-                    if isinstance(position_metadata, Mapping)
-                    else {}
-                )
-                position_owner = str(
-                    position_metadata.get("execution_owner") or "manual_customer_api"
-                ).strip()
-                order_owner = str(
-                    order_metadata.get("execution_owner") or "manual_customer_api"
-                ).strip()
-                if position_owner != order_owner:
-                    action = "SELL" if side == "SELL" else "BUY"
-                    raise CustomerPaperOrderConflict(
-                        f"{action} fill owner does not match the owner of the open customer paper position"
+                        order_owner = str(
+                            order_metadata.get("execution_owner") or "manual_customer_api"
+                        ).strip()
+                        if position_owner != order_owner:
+                            action = "SELL" if side == "SELL" else "BUY"
+                            raise CustomerPaperOrderConflict(
+                                f"{action} fill owner does not match the owner of the open customer paper position"
+                            )
+                    average_before = Decimal(position[1]) if position is not None else Decimal("0")
+                    cost_before = Decimal(position[2]) if position is not None else Decimal("0")
+                    realized_before = Decimal(position[3]) if position is not None else Decimal("0")
+                    notional = _money(amount * fill_price, "fill notional")
+                    if side == "BUY":
+                        quantity_after = _money(quantity_before + amount, "position quantity after BUY")
+                        cost_after = _money(cost_before + notional, "position cost basis after BUY")
+                        position_delta = notional
+                        realized = Decimal("0")
+                        average_after = _money(cost_after / quantity_after, "average entry price after BUY")
+                    else:
+                        if quantity_before <= 0 or amount > quantity_before:
+                            raise CustomerPaperOrderConflict("SELL fills cannot create a short position or exceed the open long quantity")
+                        cost_closed = cost_before if amount == quantity_before else _money(cost_before * amount / quantity_before, "closed position cost basis")
+                        quantity_after = _money(quantity_before - amount, "position quantity after SELL")
+                        cost_after = _money(cost_before - cost_closed, "position cost basis after SELL")
+                        if quantity_after == 0:
+                            cost_after = Decimal("0")
+                            average_after = Decimal("0")
+                        else:
+                            average_after = _money(cost_after / quantity_after, "average entry price after SELL")
+                        position_delta = -cost_closed
+                        realized = _money(notional - cost_closed, "realized P&L")
+                    pnl_delta = -realized
+                    cash_delta = _money((-notional if side == "BUY" else notional) - fee, "cash delta")
+                    realized_after = _money(realized_before + realized, "cumulative realized P&L")
+                    # Serialize cash checks across different symbols for this tenant/currency.
+                    # The position lock alone is insufficient: concurrent orders in two symbols
+                    # otherwise can both spend the same available paper cash.
+                    await conn.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": "paper-cash:" + str(customer_id) + ":" + currency},
                     )
-            average_before = Decimal(position[1]) if position is not None else Decimal("0")
-            cost_before = Decimal(position[2]) if position is not None else Decimal("0")
-            realized_before = Decimal(position[3]) if position is not None else Decimal("0")
-            notional = _money(amount * fill_price, "fill notional")
-            if side == "BUY":
-                quantity_after = _money(quantity_before + amount, "position quantity after BUY")
-                cost_after = _money(cost_before + notional, "position cost basis after BUY")
-                position_delta = notional
-                realized = Decimal("0")
-                average_after = _money(cost_after / quantity_after, "average entry price after BUY")
-            else:
-                if quantity_before <= 0 or amount > quantity_before:
-                    raise CustomerPaperOrderConflict("SELL fills cannot create a short position or exceed the open long quantity")
-                cost_closed = cost_before if amount == quantity_before else _money(cost_before * amount / quantity_before, "closed position cost basis")
-                quantity_after = _money(quantity_before - amount, "position quantity after SELL")
-                cost_after = _money(cost_before - cost_closed, "position cost basis after SELL")
-                if quantity_after == 0:
-                    cost_after = Decimal("0")
-                    average_after = Decimal("0")
-                else:
-                    average_after = _money(cost_after / quantity_after, "average entry price after SELL")
-                position_delta = -cost_closed
-                realized = _money(notional - cost_closed, "realized P&L")
-            pnl_delta = -realized
-            cash_delta = _money((-notional if side == "BUY" else notional) - fee, "cash delta")
-            realized_after = _money(realized_before + realized, "cumulative realized P&L")
-            # Serialize cash checks across different symbols for this tenant/currency.
-            # The position lock alone is insufficient: concurrent orders in two symbols
-            # otherwise can both spend the same available paper cash.
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": "paper-cash:" + str(customer_id) + ":" + currency},
-            )
-            cash_before = Decimal((await conn.execute(text(
-                """
-                SELECT COALESCE(SUM(l.signed_amount), 0)
-                FROM customer_paper.accounts a
-                LEFT JOIN customer_paper.journal_lines l
-                  ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
-                WHERE a.customer_id=:customer_id AND a.currency=:currency AND a.account_code='PAPER_CASH'
-                """
-            ), {"customer_id": customer_id, "currency": currency})).scalar_one())
-            if cash_before + cash_delta < 0:
-                raise CustomerPaperCashShortfall("paper fill would overdraw the customer's paper cash")
+                    cash_before = Decimal((await conn.execute(text(
+                        """
+                        SELECT COALESCE(SUM(l.signed_amount), 0)
+                        FROM customer_paper.accounts a
+                        LEFT JOIN customer_paper.journal_lines l
+                          ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
+                        WHERE a.customer_id=:customer_id AND a.currency=:currency AND a.account_code='PAPER_CASH'
+                        """
+                    ), {"customer_id": customer_id, "currency": currency})).scalar_one())
+                    if cash_before + cash_delta < 0:
+                        raise CustomerPaperCashShortfall("paper fill would overdraw the customer's paper cash")
 
-            fill_id = str(uuid.uuid4())
-            filled_row = (await conn.execute(text(
-                """
-                INSERT INTO customer_paper.fills
-                    (id, customer_id, order_id, idempotency_key, bar_key, venue, market_type, symbol, side,
-                     quantity, price, fee_amount, currency, realized_pnl, cash_delta, position_delta, pnl_delta,
-                     quantity_before, average_entry_before, cost_basis_before,
-                     quantity_after, average_entry_after, cost_basis_after,
-                     realized_pnl_before, realized_pnl_after, payload_sha256, metadata_json)
-                VALUES
-                    (:id, :customer_id, :order_id, :idempotency_key, :bar_key, :venue, :market_type, :symbol, :side,
-                     :quantity, :price, :fee_amount, :currency, :realized_pnl, :cash_delta, :position_delta, :pnl_delta,
-                     :quantity_before, :average_entry_before, :cost_basis_before,
-                     :quantity_after, :average_entry_after, :cost_basis_after,
-                     :realized_pnl_before, :realized_pnl_after, :payload_sha256, CAST(:metadata AS jsonb))
-                ON CONFLICT (customer_id, idempotency_key) DO NOTHING
-                RETURNING id
-                """
-            ), {
-                "id": fill_id, "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
-                "bar_key": normalized_bar_key, "venue": venue, "market_type": market_type, "symbol": symbol,
-                "side": side, "quantity": amount, "price": fill_price, "fee_amount": fee, "currency": currency,
-                "realized_pnl": realized, "cash_delta": cash_delta, "position_delta": position_delta, "pnl_delta": pnl_delta,
-                "quantity_before": quantity_before, "average_entry_before": average_before, "cost_basis_before": cost_before,
-                "quantity_after": quantity_after, "average_entry_after": average_after, "cost_basis_after": cost_after,
-                "realized_pnl_before": realized_before, "realized_pnl_after": realized_after,
-                "payload_sha256": digest,
-                "metadata": json.dumps({"bar_key": normalized_bar_key, "input_sha256": digest}, sort_keys=True, separators=(",", ":")),
-            })).first()
-            if filled_row is None:
-                raise CustomerPaperIdempotencyConflict("fill idempotency key raced with a concurrent request")
-            if enforce_market_bar_budget:
-                await conn.execute(text(
-                    """
-                    INSERT INTO customer_paper.market_bar_allocations
-                        (allocation_id, bar_key, allocated_quantity)
-                    VALUES (:allocation_id, :bar_key, :allocated_quantity)
-                    """
-                ), {
-                    "allocation_id": fill_id,
-                    "bar_key": normalized_bar_key,
-                    "allocated_quantity": amount,
-                })
+                    fill_id = str(uuid.uuid4())
+                    filled_row = (await conn.execute(text(
+                        """
+                        INSERT INTO customer_paper.fills
+                            (id, customer_id, order_id, idempotency_key, bar_key, venue, market_type, symbol, side,
+                             quantity, price, fee_amount, currency, realized_pnl, cash_delta, position_delta, pnl_delta,
+                             quantity_before, average_entry_before, cost_basis_before,
+                             quantity_after, average_entry_after, cost_basis_after,
+                             realized_pnl_before, realized_pnl_after, payload_sha256, metadata_json)
+                        VALUES
+                            (:id, :customer_id, :order_id, :idempotency_key, :bar_key, :venue, :market_type, :symbol, :side,
+                             :quantity, :price, :fee_amount, :currency, :realized_pnl, :cash_delta, :position_delta, :pnl_delta,
+                             :quantity_before, :average_entry_before, :cost_basis_before,
+                             :quantity_after, :average_entry_after, :cost_basis_after,
+                             :realized_pnl_before, :realized_pnl_after, :payload_sha256, CAST(:metadata AS jsonb))
+                        ON CONFLICT (customer_id, idempotency_key) DO NOTHING
+                        RETURNING id
+                        """
+                    ), {
+                        "id": fill_id, "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
+                        "bar_key": normalized_bar_key, "venue": venue, "market_type": market_type, "symbol": symbol,
+                        "side": side, "quantity": amount, "price": fill_price, "fee_amount": fee, "currency": currency,
+                        "realized_pnl": realized, "cash_delta": cash_delta, "position_delta": position_delta, "pnl_delta": pnl_delta,
+                        "quantity_before": quantity_before, "average_entry_before": average_before, "cost_basis_before": cost_before,
+                        "quantity_after": quantity_after, "average_entry_after": average_after, "cost_basis_after": cost_after,
+                        "realized_pnl_before": realized_before, "realized_pnl_after": realized_after,
+                        "payload_sha256": digest,
+                        "metadata": json.dumps({"bar_key": normalized_bar_key, "input_sha256": digest}, sort_keys=True, separators=(",", ":")),
+                    })).first()
+                    if filled_row is None:
+                        raise CustomerPaperIdempotencyConflict("fill idempotency key raced with a concurrent request")
+                    if enforce_market_bar_budget:
+                        await conn.execute(text(
+                            """
+                            INSERT INTO customer_paper.market_bar_allocations
+                                (allocation_id, bar_key, allocated_quantity)
+                            VALUES (:allocation_id, :bar_key, :allocated_quantity)
+                            """
+                        ), {
+                            "allocation_id": fill_id,
+                            "bar_key": normalized_bar_key,
+                            "allocated_quantity": amount,
+                        })
 
-            journal_lines: list[dict[str, Any]] = [
-                {"account_code": "PAPER_CASH", "signed_amount": cash_delta},
-                {"account_code": "PAPER_POSITION", "signed_amount": position_delta},
-            ]
-            if pnl_delta != 0:
-                journal_lines.append({"account_code": "PAPER_PNL", "signed_amount": pnl_delta})
-            if fee != 0:
-                journal_lines.append({"account_code": "PAPER_FEES", "signed_amount": fee})
-            journal_id = await _append_journal_on_connection(
-                conn, customer_id=customer_id, idempotency_key=f"fill:{fill_key}",
-                event_type="SIMULATED_FILL", currency=currency, lines=journal_lines,
-                reference=fill_id,
-                metadata={"fill_id": fill_id, "order_id": order_id, "symbol": symbol, "side": side, "payload_sha256": digest},
-            )
-            await conn.execute(text(
-                """
-                INSERT INTO customer_paper.position_events
-                    (customer_id, venue, market_type, symbol, fill_id, event_type, idempotency_key,
-                     signed_quantity, fill_price, quantity_before, average_entry_before, cost_basis_before,
-                     quantity_after, average_entry_after, cost_basis_after, realized_pnl_delta, realized_pnl_after)
-                VALUES
-                    (:customer_id, :venue, :market_type, :symbol, :fill_id, 'FILL', :idempotency_key,
-                     :signed_quantity, :price, :quantity_before, :average_entry_before, :cost_basis_before,
-                     :quantity_after, :average_entry_after, :cost_basis_after, :realized_pnl_delta, :realized_pnl_after)
-                """
-            ), {
-                "customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol,
-                "fill_id": fill_id, "idempotency_key": f"fill:{fill_key}",
-                "signed_quantity": amount if side == "BUY" else -amount, "price": fill_price,
-                "quantity_before": quantity_before, "average_entry_before": average_before, "cost_basis_before": cost_before,
-                "quantity_after": quantity_after, "average_entry_after": average_after, "cost_basis_after": cost_after,
-                "realized_pnl_delta": realized, "realized_pnl_after": realized_after,
-            })
-            filled_after = total_filled + amount
-            next_state = "FILLED" if filled_after == order_quantity else "PARTIALLY_FILLED"
-            await _insert_order_event(
-                conn, customer_id=customer_id, order_id=order_id,
-                event_key=f"fill-state:{fill_key}", event_type=next_state,
-                filled_quantity=filled_after,
-                metadata={"fill_id": fill_id, "bar_key": normalized_bar_key, "journal_id": journal_id},
-            )
-        return {
-            "status": "APPENDED", "fill_id": fill_id, "journal_id": journal_id,
-            "order_id": order_id, "idempotency_key": fill_key, "order_status": next_state,
-            "filled_quantity": _fmt(filled_after), "position_quantity": _fmt(quantity_after),
-            "average_entry_price": _fmt(average_after), "realized_pnl": _fmt(realized),
-        }
+                    journal_lines: list[dict[str, Any]] = [
+                        {"account_code": "PAPER_CASH", "signed_amount": cash_delta},
+                        {"account_code": "PAPER_POSITION", "signed_amount": position_delta},
+                    ]
+                    if pnl_delta != 0:
+                        journal_lines.append({"account_code": "PAPER_PNL", "signed_amount": pnl_delta})
+                    if fee != 0:
+                        journal_lines.append({"account_code": "PAPER_FEES", "signed_amount": fee})
+                    journal_id = await _append_journal_on_connection(
+                        conn, customer_id=customer_id, idempotency_key=f"fill:{fill_key}",
+                        event_type="SIMULATED_FILL", currency=currency, lines=journal_lines,
+                        reference=fill_id,
+                        metadata={"fill_id": fill_id, "order_id": order_id, "symbol": symbol, "side": side, "payload_sha256": digest},
+                    )
+                    await conn.execute(text(
+                        """
+                        INSERT INTO customer_paper.position_events
+                            (customer_id, venue, market_type, symbol, fill_id, event_type, idempotency_key,
+                             signed_quantity, fill_price, quantity_before, average_entry_before, cost_basis_before,
+                             quantity_after, average_entry_after, cost_basis_after, realized_pnl_delta, realized_pnl_after)
+                        VALUES
+                            (:customer_id, :venue, :market_type, :symbol, :fill_id, 'FILL', :idempotency_key,
+                             :signed_quantity, :price, :quantity_before, :average_entry_before, :cost_basis_before,
+                             :quantity_after, :average_entry_after, :cost_basis_after, :realized_pnl_delta, :realized_pnl_after)
+                        """
+                    ), {
+                        "customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol,
+                        "fill_id": fill_id, "idempotency_key": f"fill:{fill_key}",
+                        "signed_quantity": amount if side == "BUY" else -amount, "price": fill_price,
+                        "quantity_before": quantity_before, "average_entry_before": average_before, "cost_basis_before": cost_before,
+                        "quantity_after": quantity_after, "average_entry_after": average_after, "cost_basis_after": cost_after,
+                        "realized_pnl_delta": realized, "realized_pnl_after": realized_after,
+                    })
+                    filled_after = total_filled + amount
+                    next_state = "FILLED" if filled_after == order_quantity else "PARTIALLY_FILLED"
+                    await _insert_order_event(
+                        conn, customer_id=customer_id, order_id=order_id,
+                        event_key=f"fill-state:{fill_key}", event_type=next_state,
+                        filled_quantity=filled_after,
+                        metadata={"fill_id": fill_id, "bar_key": normalized_bar_key, "journal_id": journal_id},
+                    )
+                return {
+                    "status": "APPENDED", "fill_id": fill_id, "journal_id": journal_id,
+                    "order_id": order_id, "idempotency_key": fill_key, "order_status": next_state,
+                    "filled_quantity": _fmt(filled_after), "position_quantity": _fmt(quantity_after),
+                    "average_entry_price": _fmt(average_after), "realized_pnl": _fmt(realized),
+                }
+
+            finally:
+                if risk_budget_lock_keys:
+                    try:
+                        if conn.in_transaction():
+                            await conn.rollback()
+                        for risk_lock_key in reversed(risk_budget_lock_keys):
+                            unlocked = (await conn.execute(
+                                text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+                                {"lock_key": risk_lock_key},
+                            )).scalar_one()
+                            if not unlocked:
+                                raise CustomerPaperLedgerBlocked(
+                                    "customer risk-budget advisory lock could not be released"
+                                )
+                        await conn.commit()
+                    except Exception:
+                        # A cleanup failure must never turn a committed fill into a
+                        # reported failure or replace the original domain exception.
+                        logger.exception(
+                            "customer_paper_risk_lock_release_failed customer_id=%s",
+                            customer_id,
+                        )
+                        # Invalidation drops any session locks that PostgreSQL may
+                        # still associate with this physical connection.
+                        try:
+                            await conn.invalidate()
+                        except Exception:
+                            logger.exception(
+                                "customer_paper_risk_lock_connection_invalidation_failed customer_id=%s",
+                                customer_id,
+                            )
     finally:
         await engine.dispose()
 
