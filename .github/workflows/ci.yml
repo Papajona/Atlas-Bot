@@ -60,19 +60,54 @@ jobs:
           echo "ATLAS_PAPER_TEST_DATABASE_URL=postgresql+asyncpg://atlas_paper_app:paper_test_password@localhost:5432/atlas_paper_test" >> "$GITHUB_ENV"
           echo "ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test" >> "$GITHUB_ENV"
           echo "ATLAS_PAPER_SHARED_PRIMARY_TEST_DATABASE_URL=postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_paper_test" >> "$GITHUB_ENV"
-      - name: Verify pinned Python base-image digest
+
+      - name: Run end-to-end customer-paper lifecycle acceptance drill
+        env:
+          ENVIRONMENT: development
+          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+          CUSTOMER_PAPER_DATABASE_URL: postgresql+asyncpg://atlas_paper_app:paper_test_password@localhost:5432/atlas_paper_test
+          CUSTOMER_PAPER_LEDGER_ENABLED: "true"
+          CUSTOMER_PAPER_SHARED_DATABASE_ENABLED: "false"
+          CUSTOMER_PAPER_INITIAL_BALANCE: "10000"
+          CUSTOMER_PAPER_INITIAL_CURRENCY: USDT
+          CUSTOMER_TOTP_REQUIRED: "true"
+          PAPER_TRADING: "true"
+          LIVE_TRADING_ENABLED: "false"
+          CUSTOMER_LIVE_TRADING_ENABLED: "false"
+          PAYOUT_LIVE_ENABLED: "false"
+          BROKER_SANDBOX: "true"
+          DERIV_LIVE_ENABLED: "false"
+          USDT_TRON_ENABLED: "false"
+          USDT_TRON_SWEEP_ENABLED: "false"
+        run: |
+          set -euo pipefail
+          python scripts/customer_paper_acceptance_drill.py \
+            --run-id "$GITHUB_RUN_ID" \
+            --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --commit "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/customer-paper-acceptance.json"
+      - name: Verify pinned Python base-image digests
         shell: bash
         run: |
           set -euo pipefail
-          digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile)"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-            echo "Dockerfile Python base image is not pinned to a SHA-256 digest" >&2
+          runtime_digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile)"
+          verify_digest="$(sed -nE '1s#^FROM python:3\.13-slim@(sha256:[0-9a-f]{64})$#\1#p' Dockerfile.verify)"
+          for digest in "$runtime_digest" "$verify_digest"; do
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "Runtime and verification Dockerfiles must pin Python 3.13 slim by SHA-256 digest" >&2
+              exit 1
+            }
+          done
+          [[ "$runtime_digest" == "$verify_digest" ]] || {
+            echo "Runtime and verification Dockerfiles must use the same reviewed Python base-image digest" >&2
             exit 1
           }
-          docker pull "docker.io/library/python@${digest}"
-          echo "Verified pinned Python base-image digest: $digest"
+          docker pull "docker.io/library/python@${runtime_digest}"
+          echo "Verified shared runtime/verification Python base-image digest: $runtime_digest"
       - name: Build application container image
         run: docker build --tag atlas-bot-ci:repair .
+      - name: Build verification container image
+        run: docker build --file Dockerfile.verify --tag atlas-bot-verify-ci:repair .
       - name: Smoke-test paper-only container startup and liveness
         shell: bash
         run: |
