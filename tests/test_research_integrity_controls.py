@@ -625,9 +625,9 @@ def test_ai_triple_barrier_marks_target_neutral_when_execution_cost_exceeds_rewa
         entry_atr=frozen_atr,
         stop_atr=2.0,
         take_profit_atr=1.0,
-        round_trip_cost_bps=20.0,
+        round_trip_cost_bps=200.0,
     )
-    # The target is only 1% away while round-trip execution costs are 20 bps.
+    # The target is only 1% away while round-trip execution costs are 2%.
     assert labels.iloc[0] == 0.0
 
 
