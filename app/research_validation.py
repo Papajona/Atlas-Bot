@@ -771,7 +771,6 @@ def fixed_signal_walk_forward_oos(
     oos_gross_returns = []
     oos_turnover = []
     oos_fixed_costs = []
-    oos_session_costs = []
     oos_ohlc_blocks: list[pd.DataFrame] = []
     oos_benchmark_entry_signal_blocks: list[np.ndarray] = []
     oos_benchmark_atr_blocks: list[np.ndarray] = []
@@ -792,8 +791,6 @@ def fixed_signal_walk_forward_oos(
         oos_candidate_net_blocks.append(x.to_numpy(dtype=float))
         if fixed_cost is not None:
             oos_fixed_costs.append(fixed_cost.iloc[start:end])
-        if session_cost_values is not None:
-            oos_session_costs.append(session_cost_values.iloc[start:end])
         prior_p = p.shift(1).fillna(0.0)
         trade_starts = (p != 0.0) & ((prior_p == 0.0) | (np.sign(p) != np.sign(prior_p)))
         trades += int(trade_starts.sum())
@@ -823,7 +820,6 @@ def fixed_signal_walk_forward_oos(
     all_oos_gross = pd.concat(oos_gross_returns) if oos_gross_returns else pd.Series(dtype=float)
     all_oos_turnover = pd.concat(oos_turnover) if oos_turnover else pd.Series(dtype=float)
     all_fixed_cost = pd.concat(oos_fixed_costs) if oos_fixed_costs else None
-    all_session_costs = pd.concat(oos_session_costs) if oos_session_costs else None
     cost_analysis = cost_breakeven_report(
         all_oos_gross.to_numpy(dtype=float),
         all_oos_turnover.to_numpy(dtype=float),
