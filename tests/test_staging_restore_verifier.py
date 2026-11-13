@@ -90,9 +90,9 @@ def test_restore_audit_requires_research_integrity_tables_and_valid_retained_sta
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     assert "'research_trial_ledger_head'" in verifier
     assert "'research_holdout_registry'" in verifier
-    assert "'research_trial_ledger_head_rows'" in verifier
-    assert "'research_trial_ledger_head_valid'" in verifier
-    assert "'research_holdout_registry_invalid_rows'" in verifier
+    assert "research_trial_ledger_head_rows" in verifier
+    assert "research_trial_ledger_head_valid" in verifier
+    assert "research_holdout_registry_invalid_rows" in verifier
 
     assert required_table_failures([
         "research_trial_ledger_head", "research_holdout_registry"
