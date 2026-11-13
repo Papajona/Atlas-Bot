@@ -99,6 +99,9 @@ def triple_barrier(
     max_hold: int = 12,
     *,
     entry_open: pd.Series | None = None,
+    entry_atr: pd.Series | None = None,
+    stop_atr: float | None = None,
+    take_profit_atr: float | None = None,
     round_trip_cost_bps: float | pd.Series = 0.0,
 ) -> pd.Series:
     """Create forward labels using the same entry/exit timing as the OHLC executor.
@@ -122,6 +125,11 @@ def triple_barrier(
         entry_open.reindex(close.index).to_numpy(dtype=float)
         if has_executable_open else c.copy()
     )
+    has_execution_atr = entry_atr is not None
+    entry_atr_values = (
+        entry_atr.reindex(close.index).to_numpy(dtype=float)
+        if has_execution_atr else np.full(len(c), np.nan, dtype=float)
+    )
     y = np.full(len(c), np.nan, dtype=float)
     session_cost_schedule = isinstance(round_trip_cost_bps, pd.Series)
     try:
@@ -133,6 +141,8 @@ def triple_barrier(
         else:
             cost_bps = np.full(len(c), float(round_trip_cost_bps), dtype=float)
         pt_mult, sl_mult = float(pt), float(sl)
+        stop_mult = None if stop_atr is None else float(stop_atr)
+        target_mult = None if take_profit_atr is None else float(take_profit_atr)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("invalid triple-barrier configuration") from exc
     if isinstance(max_hold, bool) or hold != max_hold or hold < 1:
@@ -143,18 +153,30 @@ def triple_barrier(
         or pt_mult <= 0 or sl_mult <= 0
     ):
         raise ValueError("barriers and round-trip costs must be finite and positive/non-negative")
-    if not (len(v) == len(h) == len(l) == len(opens) == len(c)):
+    if has_execution_atr and (
+        not has_executable_open
+        or stop_mult is None or target_mult is None
+        or not np.isfinite([stop_mult, target_mult]).all()
+        or stop_mult <= 0 or target_mult <= 0
+    ):
+        raise ValueError("execution-aligned labels require next-open and positive ATR stop/target")
+    if not (len(v) == len(h) == len(l) == len(opens) == len(entry_atr_values) == len(c)):
         raise ValueError("triple-barrier inputs must align to close index")
     for i in range(len(c) - hold):
         entry_i = i + 1
         # Older offline callers without OHLC open data retain the historical close[i]
         # entry anchor. Production training and walk-forward callers supply next-open.
         entry_price = opens[entry_i] if has_executable_open else c[i]
-        if (
-            not np.isfinite(v[i]) or v[i] <= 0
-            or not np.isfinite(entry_price) or entry_price <= 0
-        ):
+        if not np.isfinite(entry_price) or entry_price <= 0:
             continue
+        if has_execution_atr:
+            frozen_vol = float(entry_atr_values[entry_i])
+            if not np.isfinite(frozen_vol) or frozen_vol <= 0:
+                continue
+        else:
+            frozen_vol = float(v[i])
+            if not np.isfinite(frozen_vol) or frozen_vol <= 0:
+                continue
         end = min(len(c), entry_i + hold)
         for j in range(entry_i, end):
             # For a session schedule, charge the entry-side rate at entry and the
@@ -164,8 +186,14 @@ def triple_barrier(
                 if session_cost_schedule else float(cost_bps[entry_i])
             )
             cost_fraction = exit_cost_bps / 10_000.0
-            upper = entry_price * (1.0 + pt_mult * v[i] + cost_fraction)
-            lower = entry_price * (1.0 - sl_mult * v[i] - cost_fraction)
+            if has_execution_atr:
+                # Match simulate_execution_aware_strategy exactly: its stop/target
+                # prices are fixed from next-open and the prior completed ATR.
+                upper = entry_price + float(target_mult) * frozen_vol
+                lower = entry_price - float(stop_mult) * frozen_vol
+            else:
+                upper = entry_price * (1.0 + pt_mult * frozen_vol + cost_fraction)
+                lower = entry_price * (1.0 - sl_mult * frozen_vol - cost_fraction)
             # Price gaps are executable at the observed open, not at a stale barrier.
             if has_executable_open and j > entry_i and opens[j] >= upper:
                 y[i] = 1
@@ -180,7 +208,9 @@ def triple_barrier(
                 y[i] = -1
                 break
             if up_hit:
-                y[i] = 1
+                fill = opens[j] if has_executable_open and j > entry_i and opens[j] > upper else upper
+                gross_return = fill / entry_price - 1.0
+                y[i] = 1 if (not has_execution_atr or gross_return > cost_fraction) else 0
                 break
             if down_hit:
                 y[i] = -1
@@ -191,7 +221,8 @@ def triple_barrier(
                 float(cost_bps[entry_i]) + float(cost_bps[end - 1])
                 if session_cost_schedule else float(cost_bps[entry_i])
             )
-            dead_zone = max(0.5 * float(v[i]), timeout_cost_bps / 10_000.0)
+            dead_zone = max(0.5 * float(frozen_vol / entry_price) if has_execution_atr else 0.5 * frozen_vol,
+                            timeout_cost_bps / 10_000.0)
             if np.isfinite(terminal_return):
                 y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
     return pd.Series(y, index=close.index, dtype="float64")
