@@ -532,8 +532,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Parameter-plateau check: small changes to the signal threshold should not destroy
     # the measured edge. A narrow single-point optimum is treated as fragile research.
     import hashlib
+    # A wider, symmetric nine-point grid tests broad plateaus instead of a narrow local optimum.
+    plateau_grid = tuple(round(float(value), 2) for value in np.linspace(0.60, 1.40, 9))
     variants=[]
-    for mult in (0.80,0.90,1.00,1.10,1.20):
+    for mult in plateau_grid:
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
         vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry)
         variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
@@ -583,8 +585,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         ),
         "monte_carlo_block_size": bootstrap_block_size,
         "parameter_plateau": parameter_plateau_score(
-            {"variants": variants}, metric="sharpe", tolerance=0.20
+            {"variants": variants}, metric="oos_sharpe", tolerance=0.20,
+            minimum_valid_variants=7, minimum_plateau_ratio=0.50,
         ),
+        "parameter_plateau_grid": list(plateau_grid),
         "parameter_variants": variants,
     }
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
