@@ -258,6 +258,34 @@ def test_signature_binds_spread_series_and_dataset_context(tmp_path):
     assert audit["execution_cost_calibration_status"] == "EVIDENCE_SIGNATURE_INVALID"
 
 
+
+def test_signed_research_evidence_cannot_override_the_configured_taker_fee(tmp_path):
+    frame = _research_frame()
+    settings = _settings(tmp_path)
+    _research_cost_evidence(frame, settings)
+
+    document = dict(frame.attrs["execution_cost_calibration_evidence"])
+    document.pop("attestation")
+    document["taker_fee_bps"] = 6.0
+    signed, public_keys = _signed(document)
+    settings.research_evidence_public_keys_json = public_keys
+    frame.attrs["execution_cost_calibration_evidence"] = signed
+
+    context, audit = build_research_execution_cost_context(
+        frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+    )
+
+    assert context is None
+    assert audit["execution_cost_model_complete"] is False
+    assert audit["reason"] == "SIGNED_TAKER_FEE_DOES_NOT_MATCH_RESEARCH_FEE_POLICY"
+
+
+
 def test_router_cost_series_uses_event_specific_per_bar_rates():
     index = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h")
     context = {
