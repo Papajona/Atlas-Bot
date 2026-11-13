@@ -754,9 +754,17 @@ def oos_benchmark_comparison(
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
-        "gate_passed": candidate_return > buy_hold_return and candidate_return > random_p95,
+        "gate_passed": (
+            benchmark_cost_complete
+            and candidate_return > buy_hold_return
+            and candidate_return > random_p95
+        ),
         "cost_assumptions": {"transaction_cost_bps_per_turnover": float(transaction_cost_bps), "carry_bps_per_bar": carry_bps_per_bar},
-        "note": "Candidate and random controls are independently re-simulated from requested positions inside each fold. Every fold starts flat and liquidates at its observed terminal close; market returns come from raw OHLC.",
+        "note": (
+            "Candidate and random controls are independently re-simulated from requested positions inside each fold. "
+            "Every fold starts flat and liquidates at its observed terminal close; market returns come from raw OHLC. "
+            "Benchmark promotion remains incomplete unless every control event uses verified per-bar execution evidence."
+        ),
     }
 
 
