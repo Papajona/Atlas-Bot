@@ -351,12 +351,12 @@ jobs:
           dispatch_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
           expected_run_name="Customer Paper Acceptance $GITHUB_SHA deploy $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT correlation $dispatch_id"
           acceptance_dispatch_started_at="$(date +%s)"
-          gh workflow run customer-paper-staging-acceptance.yml \\
-            --repo "$GITHUB_REPOSITORY" \\
-            --ref main \\
-            -f "target_sha=$GITHUB_SHA" \\
-            -f "deployment_run_id=$GITHUB_RUN_ID" \\
-            -f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT" \\
+          gh workflow run customer-paper-staging-acceptance.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "target_sha=$GITHUB_SHA" \
+            -f "deployment_run_id=$GITHUB_RUN_ID" \
+            -f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT" \
             -f "dispatch_id=$dispatch_id"
 
           acceptance_run_id=0
@@ -369,12 +369,12 @@ jobs:
             fi
 
             if [[ "$acceptance_run_id" -eq 0 ]]; then
-              run_list="$(gh run list \\
-                --repo "$GITHUB_REPOSITORY" \\
-                --workflow "customer-paper-staging-acceptance.yml" \\
-                --event workflow_dispatch \\
-                --commit "$GITHUB_SHA" \\
-                --limit 100 \\
+              run_list="$(gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "customer-paper-staging-acceptance.yml" \
+                --event workflow_dispatch \
+                --commit "$GITHUB_SHA" \
+                --limit 100 \
                 --json databaseId,headSha,headBranch,displayTitle)"
               run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
               candidate_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
@@ -404,7 +404,7 @@ jobs:
                   echo "BLOCKED: customer-paper acceptance run $acceptance_run_id completed with conclusion '${run_conclusion:-missing}'."
                   exit 1
                 fi
-                echo "PASS: unique customer-paper acceptance run $acceptance_run_id succeeded on exact deployed commit $GITHUB_SHA (deployment attempt $GITHUB_RUN_ATTEMPT)"
+                echo "PASS: customer-paper acceptance run $acceptance_run_id succeeded on exact deployed commit $GITHUB_SHA (deployment attempt $GITHUB_RUN_ATTEMPT; unique correlation verified)"
                 exit 0
               fi
             fi
