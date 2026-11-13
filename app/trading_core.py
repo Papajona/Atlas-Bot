@@ -99,7 +99,7 @@ def triple_barrier(
     max_hold: int = 12,
     *,
     entry_open: pd.Series | None = None,
-    round_trip_cost_bps: float = 0.0,
+    round_trip_cost_bps: float | pd.Series = 0.0,
 ) -> pd.Series:
     """Create forward labels using the same entry/exit timing as the OHLC executor.
 
@@ -124,13 +124,22 @@ def triple_barrier(
     y = np.full(len(c), np.nan, dtype=float)
     try:
         hold = int(max_hold)
-        cost_bps = float(round_trip_cost_bps)
+        if isinstance(round_trip_cost_bps, pd.Series):
+            if not round_trip_cost_bps.index.equals(close.index):
+                raise ValueError("round-trip session costs must align exactly to close index")
+            cost_bps = round_trip_cost_bps.to_numpy(dtype=float)
+        else:
+            cost_bps = np.full(len(c), float(round_trip_cost_bps), dtype=float)
         pt_mult, sl_mult = float(pt), float(sl)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError("invalid triple-barrier configuration") from exc
     if isinstance(max_hold, bool) or hold != max_hold or hold < 1:
         raise ValueError("max_hold must be a positive integer")
-    if not np.isfinite([cost_bps, pt_mult, sl_mult]).all() or cost_bps < 0 or pt_mult <= 0 or sl_mult <= 0:
+    if (
+        not np.isfinite(cost_bps).all() or np.any(cost_bps < 0)
+        or not np.isfinite([pt_mult, sl_mult]).all()
+        or pt_mult <= 0 or sl_mult <= 0
+    ):
         raise ValueError("barriers and round-trip costs must be finite and positive/non-negative")
     if not (len(v) == len(h) == len(l) == len(opens) == len(c)):
         raise ValueError("triple-barrier inputs must align to close index")
@@ -144,8 +153,9 @@ def triple_barrier(
             or not np.isfinite(entry_price) or entry_price <= 0
         ):
             continue
-        upper = entry_price * (1.0 + pt_mult * v[i] + cost_fraction)
-        lower = entry_price * (1.0 - sl_mult * v[i] - cost_fraction)
+        entry_cost_fraction = float(cost_bps[entry_i]) / 10_000.0
+        upper = entry_price * (1.0 + pt_mult * v[i] + entry_cost_fraction)
+        lower = entry_price * (1.0 - sl_mult * v[i] - entry_cost_fraction)
         end = min(len(c), entry_i + hold)
         for j in range(entry_i, end):
             # Price gaps are executable at the observed open, not at a stale barrier.
@@ -168,7 +178,7 @@ def triple_barrier(
                 break
         else:
             terminal_return = c[end - 1] / entry_price - 1.0
-            dead_zone = max(0.5 * float(v[i]), cost_fraction)
+            dead_zone = max(0.5 * float(v[i]), entry_cost_fraction)
             if np.isfinite(terminal_return):
                 y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
     return pd.Series(y, index=close.index, dtype="float64")
@@ -421,10 +431,16 @@ def ai_walk_forward_backtest(
         raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
+    label_round_trip_costs: float | pd.Series = 2.0 * (taker_cost_bps + slippage_cost_bps)
+    if session_costs_bps is not None:
+        from .market_sessions import session_cost_series
+        label_round_trip_costs = 2.0 * session_cost_series(
+            aligned.index, session_costs_bps
+        )
     y = triple_barrier(
         aligned.close, X.vol_24, aligned.high, aligned.low,
         max_hold=hold_horizon, entry_open=aligned.open,
-        round_trip_cost_bps=2.0 * (taker_cost_bps + slippage_cost_bps),
+        round_trip_cost_bps=label_round_trip_costs,
     )
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
