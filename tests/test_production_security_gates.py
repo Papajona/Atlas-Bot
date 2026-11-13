@@ -456,6 +456,21 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
 
 
 
+def test_staging_deployment_cancels_superseded_runs_and_rechecks_sha_before_deploy():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
+    assert "cancel-in-progress: true" in deploy
+    assert "gate_wait_seconds=7200" in deploy
+
+    deploy_step = deploy.split(
+        "      - name: Deploy restricted paper-only Cloud Run service", 1
+    )[1].split("\n      - name:", 1)[0]
+    guard = deploy_step.index('current_main_sha="$(gh api')
+    comparison = deploy_step.index('if [[ "$current_main_sha" != "$GITHUB_SHA" ]]', guard)
+    image = deploy_step.index('IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")', comparison)
+    mutation = deploy_step.index('gcloud run deploy "$STAGING_SERVICE"', image)
+    assert guard < comparison < image < mutation
+    assert "main advanced before Cloud Run deployment" in deploy_step
+
 def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_gates():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     trigger_header = deploy.split("\npermissions:", 1)[0]
