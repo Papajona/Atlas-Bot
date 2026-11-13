@@ -261,9 +261,18 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     assert "workflow_run:" not in trigger_header
     assert "target_sha:" in trigger_header
     assert "deployment_run_id:" in trigger_header
-    assert "run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }}" in workflow
+    assert "deployment_run_attempt:" in trigger_header
+    assert "dispatch_id:" in trigger_header
+    assert "run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }} attempt ${{ inputs.deployment_run_attempt }} correlation ${{ inputs.dispatch_id }}" in workflow
     assert "TARGET_SHA: ${{ inputs.target_sha }}" in workflow
     assert "DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}" in workflow
+    assert "DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}" in workflow
+    assert "DISPATCH_ID: ${{ inputs.dispatch_id }}" in workflow
+    assert '[[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]' in workflow
+    assert '[[ "$DISPATCH_ID" =~ ^[a-f0-9]{32}$ ]]' in workflow
+    assert "--jq '.run_attempt'" in workflow
+    assert 'test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
+    assert 'test "$deployment_attempt_after" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
     assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
     assert 'test "$deployment_name" = "Deploy Paper-Only Atlas Staging"' in workflow
     assert 'test "$deployment_sha" = "$TARGET_SHA"' in workflow
@@ -294,6 +303,14 @@ def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_pre
     assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
     assert '-f "target_sha=$GITHUB_SHA"' in deploy
     assert '-f "deployment_run_id=$GITHUB_RUN_ID"' in deploy
+    assert '-f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT"' in deploy
+    assert '-f "dispatch_id=$dispatch_id"' in deploy
+    assert 'secrets.token_hex(16)' in deploy
+    assert '$GITHUB_RUN_ATTEMPT correlation $dispatch_id' in deploy
+    assert 'acceptance_wait_seconds=12600' in deploy
+    assert 'acceptance_poll_interval_seconds=30' in deploy
+    assert 'while true; do' in deploy
+    assert 'timeout-minutes: 300' in deploy
     assert 'gh run view "$acceptance_run_id"' in deploy
     assert "PASS: customer-paper acceptance run" in deploy
     assert "BLOCKED: customer-paper acceptance run" in deploy
