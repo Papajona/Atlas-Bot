@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+# SQLAlchemy resolves postponed Mapped annotations from module globals.
+from sqlalchemy.orm import Mapped
+
 from app.decision_outcome_research import evaluate_decision_outcome_labels_once
 from app.execution_aware_research import (
     costed_execution_returns,
