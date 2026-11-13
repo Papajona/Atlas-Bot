@@ -19,6 +19,8 @@ from .execution_costs import (
     EXECUTION_COST_MODEL_VERSION,
     adverse_fill_price,
     execution_cost_components,
+    deterministic_execution_draws,
+    latency_from_quantiles,
 )
 
 
@@ -354,10 +356,8 @@ def estimate_paper_fill(
     if not minimum_ms <= median_ms <= p95_ms <= maximum_ms:
         raise PaperExecutionModelError("latency quantiles must satisfy min <= median <= p95 <= max")
 
-    digest = hashlib.sha256(key.encode("utf-8")).digest()
-    rejection_draw = int.from_bytes(digest[:8], "big") / float(2**64)
-    latency_draw = int.from_bytes(digest[8:16], "big") / float(2**64)
-    simulated_latency_ms = _latency_from_quantiles(
+    rejection_draw, latency_draw = deterministic_execution_draws(key)
+    simulated_latency_ms = latency_from_quantiles(
         latency_draw,
         minimum_ms=minimum_ms,
         median_ms=median_ms,
