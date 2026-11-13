@@ -1,4 +1,5 @@
 from pathlib import Path
+import os
 
 import pytest
 
@@ -156,3 +157,30 @@ def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference(
     assert result["research_trial_ledger_head_rows"] is None
     assert result["research_trial_ledger_head_valid"] is False
     assert result["research_holdout_registry_invalid_rows"] is None
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.getenv("DATABASE_URL"),
+    reason="requires the migrated disposable PostgreSQL database provisioned by CI",
+)
+def test_research_integrity_query_executes_against_postgres():
+    import asyncio
+    import json
+    import asyncpg
+    from scripts.verify_staging_restore import RESEARCH_INTEGRITY_QUERY
+
+    dsn = os.environ["DATABASE_URL"].replace(
+        "postgresql+asyncpg://", "postgresql://", 1
+    )
+
+    async def execute_query():
+        connection = await asyncpg.connect(dsn)
+        try:
+            return await connection.fetchval(RESEARCH_INTEGRITY_QUERY)
+        finally:
+            await connection.close()
+
+    result = json.loads(asyncio.run(execute_query()))
+    assert result["research_trial_ledger_head_rows"] == 1
+    assert result["research_trial_ledger_head_valid"] is True
+    assert result["research_holdout_registry_invalid_rows"] == 0
