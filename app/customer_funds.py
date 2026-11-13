@@ -70,7 +70,14 @@ async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMisma
     an autoflushed Withdrawal update can block until the database busy timeout.
     Endpoint handlers commit the confirmed outcome first, then call this helper.
     """
-    await record_ledger_incident(db, **mismatch.incident_args)
+    try:
+        await record_ledger_incident(db, **mismatch.incident_args)
+    except IntegrityError:
+        # Two independently verified duplicate replays can race to create the
+        # same unique incident key. The caller's confirmed withdrawal state was
+        # already committed, so retry the upsert after clearing this transaction.
+        await db.rollback()
+        await record_ledger_incident(db, **mismatch.incident_args)
 
 
 async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> CustomerLedgerAccount:
