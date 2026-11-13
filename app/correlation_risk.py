@@ -91,6 +91,25 @@ def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notiona
     }
 
 
+def limit_increase_when_valuation_incomplete(
+    requested_quantity: float,
+    reducing_quantity: float,
+    *,
+    valuation_complete: bool,
+) -> float:
+    """When exposure cannot be fully valued, permit only a verified position reduction."""
+    try:
+        requested = float(requested_quantity)
+        reducing = float(reducing_quantity)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(requested) or not math.isfinite(reducing):
+        return 0.0
+    requested = max(0.0, requested)
+    reducing = min(requested, max(0.0, reducing))
+    return requested if valuation_complete else reducing
+
+
 def cap_quantity_preserving_reduction(
     quantity: float,
     opposing_quantity: float,
