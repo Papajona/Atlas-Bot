@@ -21,6 +21,13 @@ from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns
 from .research_validation import purged_walk_forward_splits
 from .strategy_selection import paired_return_lead
 from .execution_costs import EXECUTION_COST_MODEL_VERSION, net_returns_after_costs
+from .config import settings
+from .research_execution_costs import (
+    build_research_execution_cost_context,
+    execution_cost_for_event,
+    execution_cost_series_for_positions,
+    slice_research_execution_context,
+)
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
@@ -51,22 +58,41 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     return regime
 
 
-def _strategy_returns(df: pd.DataFrame, cfg: StrategyConfig, strategy: str,
-                      costs_bps: float, asset: str) -> pd.Series:
-    s = strategy_signals(df, cfg, asset=asset)
-    # Keep research sizing/threshold behavior identical to the authoritative live rule.
-    # The shift places a completed-bar signal onto the following executable bar.
-    pos = target_positions(s[strategy], s["realized_vol"], cfg).shift(1).fillna(0.0)
-    ret = next_open_returns(df) - 1.0
-    turnover = pos.diff().abs().fillna(pos.abs())
-    net_values = net_returns_after_costs(
-        pos.to_numpy(dtype=float) * ret.to_numpy(dtype=float),
-        turnover=turnover.to_numpy(dtype=float),
-        execution_cost_bps=float(costs_bps),
-        exposure=pos.to_numpy(dtype=float),
+def _strategy_returns(
+    df: pd.DataFrame,
+    cfg: StrategyConfig,
+    strategy: str,
+    costs_bps: float,
+    asset: str,
+    *,
+    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_namespace: str = "strategy-router",
+) -> pd.Series:
+    """Return the executable strategy stream with evidence-backed event costs when available."""
+    signal_frame = strategy_signals(df, cfg, asset=asset)
+    # A completed-bar signal becomes an executable position at the next bar open.
+    position = target_positions(
+        signal_frame[strategy], signal_frame["realized_vol"], cfg
+    ).shift(1).fillna(0.0)
+    market_returns = next_open_returns(df) - 1.0
+    turnover = position.diff().abs().fillna(position.abs())
+    reference_prices = df["open"].astype(float)
+    per_bar_costs, cost_audit = execution_cost_series_for_positions(
+        execution_cost_context,
+        position,
+        reference_prices,
+        namespace=f"{execution_cost_namespace}:{strategy}",
+        fallback_cost_bps=costs_bps,
     )
-    return pd.Series(net_values, index=pos.index, dtype=float, name="net_return")
-
+    net_values = net_returns_after_costs(
+        position.to_numpy(dtype=float) * market_returns.to_numpy(dtype=float),
+        turnover=turnover.to_numpy(dtype=float),
+        execution_cost_bps=per_bar_costs.to_numpy(dtype=float),
+        exposure=position.to_numpy(dtype=float),
+    )
+    result = pd.Series(net_values, index=position.index, dtype=float, name="net_return")
+    result.attrs.update(cost_audit)
+    return result
 
 def _metrics(
     x: pd.Series, *, asset: str = "crypto", annualization_factor: float | None = None
@@ -97,21 +123,25 @@ def _metrics(
     }
 
 
-def regime_conditioned_strategy_performance(df: pd.DataFrame, cfg: StrategyConfig | None = None,
-                                             *, costs_bps: float = 7.5,
-                                             asset: str = "crypto") -> dict:
+def regime_conditioned_strategy_performance(
+    df: pd.DataFrame,
+    cfg: StrategyConfig | None = None,
+    *,
+    costs_bps: float = 7.5,
+    asset: str = "crypto",
+    execution_cost_context: dict[str, object] | None = None,
+) -> dict:
     """Compute per-strategy performance separately inside each market regime."""
     cfg = cfg or StrategyConfig()
-    # Compute cadence from the complete source series once; filtering to a regime
-    # changes timestamp spacing and would distort annualized metrics.
     annualization_factor = _annualization_factor(df.index, asset=asset)
     regimes = classify_regime(df, asset=asset)
     result: dict[str, dict] = {}
     for strategy in STRATEGIES:
-        returns = _strategy_returns(df, cfg, strategy, costs_bps, asset)
+        returns = _strategy_returns(
+            df, cfg, strategy, costs_bps, asset,
+            execution_cost_context=execution_cost_context,
+        )
         signal_frame = strategy_signals(df, cfg, asset=asset)
-        # Trade counts must use the same risk-scaled, thresholded executable stream
-        # as the reported net returns, not an unscaled raw-signal proxy.
         positions = target_positions(
             signal_frame[strategy], signal_frame["realized_vol"], cfg
         ).shift(1).fillna(0.0)
@@ -119,12 +149,21 @@ def regime_conditioned_strategy_performance(df: pd.DataFrame, cfg: StrategyConfi
         for regime in sorted(set(regimes.dropna().astype(str))):
             mask = regimes == regime
             x = returns.loc[mask]
-            m = _metrics(x, asset=asset, annualization_factor=annualization_factor)
-            p = positions.loc[mask]
-            m["trades"] = int(np.count_nonzero(np.diff(np.r_[0.0, p.to_numpy()])))
-            result[strategy][regime] = m
+            metrics = _metrics(x, asset=asset, annualization_factor=annualization_factor)
+            regime_positions = positions.loc[mask]
+            metrics["trades"] = int(
+                np.count_nonzero(np.diff(np.r_[0.0, regime_positions.to_numpy()]))
+            )
+            for audit_key in (
+                "execution_cost_model_complete",
+                "execution_cost_model_status",
+                "execution_cost_model_fingerprint",
+                "per_bar_execution_context_sha256",
+                "execution_cost_failure_reasons",
+            ):
+                metrics[audit_key] = returns.attrs.get(audit_key)
+            result[strategy][regime] = metrics
     return result
-
 
 def _score_metrics(m: dict, *, min_trades: int = 20) -> float:
     if int(m.get("bars", 0)) < 30:
@@ -235,7 +274,8 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                     switch_min_advantage: float = 0.15, min_trades: int = 20,
                     costs_bps: float = 7.5, online_scores: dict[str, float] | None = None,
                     online_weight: float = 0.25, blend_enabled: bool = True,
-                    blend_top_n: int = 3) -> dict:
+                    blend_top_n: int = 3,
+                    execution_cost_context: dict[str, object] | None = None) -> dict:
     """Select/hold/blend using completed history and an uncertainty-aware switch test.
 
     The last bar is the decision bar. Strategy ranking uses prior history only.
@@ -255,7 +295,13 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                 "regime": current_regime, "regime_stable_bars": stable_bars,
                 "reason": "regime_not_stable"}
 
-    perf = regime_conditioned_strategy_performance(history, cfg, costs_bps=costs_bps, asset=asset)
+    history_execution_context = slice_research_execution_context(
+        execution_cost_context, history.index
+    )
+    perf = regime_conditioned_strategy_performance(
+        history, cfg, costs_bps=costs_bps, asset=asset,
+        execution_cost_context=history_execution_context,
+    )
     ranked = []
     for name in STRATEGIES:
         m = perf.get(name, {}).get(current_regime, {})
@@ -299,10 +345,12 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                 historical_regimes = classify_regime(history, asset=asset)
                 regime_mask = historical_regimes == current_regime
                 challenger_stream = _strategy_returns(
-                    history, cfg, best["strategy"], costs_bps, asset
+                    history, cfg, best["strategy"], costs_bps, asset,
+                    execution_cost_context=history_execution_context,
                 ).loc[regime_mask]
                 incumbent_stream = _strategy_returns(
-                    history, cfg, current_strategy, costs_bps, asset
+                    history, cfg, current_strategy, costs_bps, asset,
+                    execution_cost_context=history_execution_context,
                 ).loc[regime_mask]
                 switch_inference = paired_return_lead(
                     challenger_stream.to_numpy(dtype=float),
@@ -372,6 +420,21 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         "switch_inference": switch_inference,
         "switch_hold_reason": switch_hold_reason,
         "blend_scope": blend_scope,
+        "execution_cost_model_complete": bool(
+            execution_cost_context is not None
+            and all(
+                perf.get(name, {}).get(current_regime, {}).get("execution_cost_model_complete") is True
+                for name in STRATEGIES
+            )
+        ),
+        "execution_cost_model_fingerprint": (
+            execution_cost_context.get("model_fingerprint")
+            if isinstance(execution_cost_context, dict) else None
+        ),
+        "per_bar_execution_context_sha256": (
+            execution_cost_context.get("context_sha256")
+            if isinstance(execution_cost_context, dict) else None
+        ),
         "policy": {"switch_min_advantage": float(switch_min_advantage),
                    "switch_test": "PAIRED_NEWEY_WEST_HAC",
                    "execution_cost_model_version": EXECUTION_COST_MODEL_VERSION,
