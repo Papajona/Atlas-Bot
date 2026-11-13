@@ -1357,12 +1357,15 @@ def cost_breakeven_report(
     g = np.asarray(list(returns_gross), dtype=float)
     t = np.asarray(list(turnover), dtype=float)
     fixed = np.zeros(len(g), dtype=float) if fixed_cost_drag is None else np.asarray(list(fixed_cost_drag), dtype=float)
-    default_variable = float(taker_bps) + float(slippage_bps)
-    variable = (
-        np.full(len(g), default_variable, dtype=float)
-        if variable_cost_bps_per_bar is None
-        else np.asarray(list(variable_cost_bps_per_bar), dtype=float)
-    )
+    try:
+        default_variable = float(taker_bps) + float(slippage_bps)
+        variable = (
+            np.full(len(g), default_variable, dtype=float)
+            if variable_cost_bps_per_bar is None
+            else np.asarray(list(variable_cost_bps_per_bar), dtype=float)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_COST_INPUT", "observations": 0, "stress_ok": False}
     n = min(len(g), len(t), len(fixed), len(variable))
     if n < 30:
         return {"status": "INSUFFICIENT_DATA", "observations": int(n), "stress_ok": False}
