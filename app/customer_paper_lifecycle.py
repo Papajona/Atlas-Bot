@@ -1800,9 +1800,9 @@ async def reverse_customer_paper_fill(
                             {"lock_key": risk_lock_key},
                         )
                     except Exception:
-                        # The server may have granted the lock even if its response
-                        # was lost. Never return this connection to the pool uncertain.
-                        await conn.invalidate()
+                        # The outcome may be uncertain if the server granted the lock
+                        # before the response was lost. The finally block invalidates
+                        # this connection without attempting an unlock.
                         raise
                     risk_lock_acquired = True
                     await conn.commit()
