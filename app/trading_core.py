@@ -211,8 +211,14 @@ def triple_barrier(
             up_hit = np.isfinite(h[j]) and h[j] >= upper
             down_hit = np.isfinite(l[j]) and l[j] <= lower
             if up_hit and down_hit:
-                # Match the OHLC execution simulator's conservative stop-first rule.
-                y[i] = -1
+                # Match the OHLC executor's stop-first fill, but only label a
+                # short when its realized return remains profitable after costs.
+                fill = lower
+                if has_executable_open and j > entry_i and opens[j] < lower:
+                    fill = opens[j]
+                gross_return = (entry_price - fill) / entry_price
+                short_net_return = gross_return - cost_fraction
+                y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
             if up_hit:
                 fill = opens[j] if has_executable_open and j > entry_i and opens[j] > upper else upper
