@@ -219,10 +219,18 @@ def triple_barrier(
                 float(cost_bps[entry_i]) + float(cost_bps[end - 1])
                 if session_cost_schedule else float(cost_bps[entry_i])
             )
-            dead_zone = max(0.5 * float(frozen_vol / entry_price) if has_execution_atr else 0.5 * frozen_vol,
-                            timeout_cost_bps / 10_000.0)
-            if np.isfinite(terminal_return):
-                y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
+            # Deduct transaction costs once, then apply the volatility dead zone
+            # to the resulting net return.
+            dead_zone = (
+                0.5 * float(frozen_vol / entry_price)
+                if has_execution_atr else 0.5 * frozen_vol
+            )
+            net_terminal_return = terminal_return - timeout_cost_bps / 10_000.0
+            if np.isfinite(net_terminal_return):
+                y[i] = (
+                    1 if net_terminal_return > dead_zone
+                    else (-1 if net_terminal_return < -dead_zone else 0)
+                )
     return pd.Series(y, index=close.index, dtype="float64")
 
 
