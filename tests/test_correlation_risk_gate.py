@@ -414,3 +414,88 @@ def test_unvalued_unclassified_position_blocks_known_group_increase():
     )
     assert check["valuation_complete"] is False
     assert check["allowed"] is False
+
+def test_customer_paper_buy_marks_unclassified_positions_for_known_candidate(monkeypatch):
+    """Unknown exposure consumes known budgets and must be valued before a paper BUY."""
+    import asyncio
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [{
+            "symbol": "UNLISTED_TOKEN",
+            "venue": "binance",
+            "quantity": "1",
+            "average_entry_price": "100",
+        }]
+
+    class Request:
+        symbol = "BTC/USDT:USDT"
+        exchange = "binance"
+
+        def model_copy(self, update):
+            return SimpleNamespace(**{**vars(self), **update})
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(main, "market_data", lambda *_args, **_kwargs: object())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        main,
+        "_server_paper_market_context",
+        lambda *_args, **_kwargs: {
+            "bid": 100.0,
+            "quote_age_seconds": 0.0,
+            "quote_timestamp_utc": timestamp,
+        },
+    )
+    result = asyncio.run(main._customer_paper_positions_for_exposure(
+        customer_id=881, req=Request(), market_context=None,
+    ))
+
+    assert result["ok"] is True
+    assert [row.symbol for row in result["positions"]] == ["UNLISTED_TOKEN"]
+
+
+def test_unclassified_customer_paper_candidate_marks_all_known_positions(monkeypatch):
+    """An unknown proposal cannot discard known positions before its global risk check."""
+    import asyncio
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [{
+            "symbol": "BTC/USDT:USDT",
+            "venue": "binance",
+            "quantity": "1",
+            "average_entry_price": "50000",
+        }]
+
+    class Request:
+        symbol = "UNLISTED_TOKEN"
+        exchange = "binance"
+
+        def model_copy(self, update):
+            return SimpleNamespace(**{**vars(self), **update})
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(main, "market_data", lambda *_args, **_kwargs: object())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        main,
+        "_server_paper_market_context",
+        lambda *_args, **_kwargs: {
+            "bid": 50000.0,
+            "quote_age_seconds": 0.0,
+            "quote_timestamp_utc": timestamp,
+        },
+    )
+    result = asyncio.run(main._customer_paper_positions_for_exposure(
+        customer_id=882, req=Request(), market_context=None,
+    ))
+
+    assert result["ok"] is True
+    assert [row.symbol for row in result["positions"]] == ["BTC/USDT:USDT"]
