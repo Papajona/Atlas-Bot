@@ -7831,9 +7831,8 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                 try:
                     await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=_withdrawal_release_ref(w2.request_id))
                 except WithdrawalReplayMismatch as mismatch:
-                    # Commit the definitive provider outcome first. Persist the HIGH
-                    # incident afterward on this same session to avoid a SQLite
-                    # second-writer lock while preserving the FAILED state.
+                    # Persist the confirmed FAILED outcome and HIGH replay incident together
+                    # in this transaction; the helper uses a SAVEPOINT for duplicate-key races.
                     await persist_withdrawal_replay_mismatch(db2, mismatch)
                     await db2.commit()
                     await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -7882,8 +7881,8 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                         await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=_withdrawal_release_ref(w3.request_id))
                         await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
                 except WithdrawalReplayMismatch as mismatch:
-                    # Provider outcome is definitive; persist it before the replay
-                    # incident, using the same session after the first commit.
+                    # The confirmed provider outcome and replay incident are committed together
+                    # so an incident-store failure cannot strand an unrepairable terminal withdrawal.
                     await persist_withdrawal_replay_mismatch(db3, mismatch)
                     await db3.commit()
                     await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -8075,8 +8074,8 @@ async def mark_withdrawal_not_sent(
             await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
             await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         except WithdrawalReplayMismatch as mismatch:
-            # The provider lookup proved no payout exists. Commit its terminal
-            # state, then durably record the replay incident on this same session.
+            # The provider lookup proved no payout exists. Persist its terminal
+            # state and replay incident together in this transaction.
             await persist_withdrawal_replay_mismatch(db, mismatch)
             await db.commit()
             await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
