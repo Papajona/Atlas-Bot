@@ -313,10 +313,6 @@ async def release_trading(
         )
     ).scalar_one_or_none()
     if existing:
-        await _validate_withdrawal_action_replay(
-            db, existing, customer_id=customer_id, amount_d=amount_d,
-            reference_id=reference_id, action="settle",
-        )
         return fresh_ledger
     release = min(amount_d, fresh_ledger.trading_reserved)
     if release <= 0:
