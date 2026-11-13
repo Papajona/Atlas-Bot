@@ -11,6 +11,10 @@ _GROUPS={
  "XAU_USD":"METALS","XAG_USD":"METALS","WTICO_USD":"ENERGY","BCO_USD":"ENERGY","NATGAS_USD":"ENERGY",
 }
 
+# All legacy correlation buckets, including OTHER, remain locked during the
+# rolling deployment so workers on the previous per-group lock scheme serialize.
+RISK_GROUPS = tuple(sorted(set(_GROUPS.values()) | {"OTHER"}))
+
 def risk_group(symbol: str) -> str:
     raw=str(symbol or "").upper().replace("/","_").replace(":USDT","")
     # Crypto keys in _GROUPS are base-asset tickers ("BTC"); FX/metals/energy keys are the
@@ -26,28 +30,49 @@ def risk_group(symbol: str) -> str:
     base=raw.split("_")[0]
     return _GROUPS.get(base, "OTHER")
 
+
+def conservative_position_valuation_price(mark_price: object, average_entry_price: object) -> float:
+    """Value exposure at the higher of a valid live mark and booked average entry."""
+    valid_prices = []
+    for raw in (mark_price, average_entry_price):
+        try:
+            price = float(raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(price) and price > 0:
+            valid_prices.append(price)
+    return max(valid_prices, default=0.0)
+
+
+def shares_risk_budget(proposed_symbol: str, existing_symbol: str) -> bool:
+    """Treat unclassified open positions as potentially related to every known group."""
+    proposed_group = risk_group(proposed_symbol)
+    existing_group = risk_group(existing_symbol)
+    return (
+        proposed_group == existing_group
+        or proposed_group == "OTHER"
+        or existing_group == "OTHER"
+    )
+
+
 def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notional: float, cap_usd: float) -> dict:
     target = risk_group(proposed_symbol)
     existing = 0.0
     members = []
     valuation_complete = True
     for p in positions or []:
-        if risk_group(getattr(p, "symbol", "")) != target:
+        if not shares_risk_budget(proposed_symbol, getattr(p, "symbol", "")):
             continue
         quantity = float(getattr(p, "quantity", 0) or 0)
         if math.isfinite(quantity) and quantity == 0:
             members.append((getattr(p, "symbol", ""), 0.0))
             continue
-        raw_price = getattr(p, "mark_price", 0)
-        try:
-            price = float(raw_price or 0)
-        except (TypeError, ValueError):
-            price = 0.0
-        if not math.isfinite(price) or price <= 0:
-            try:
-                price = float(getattr(p, "average_entry_price", 0) or 0)
-            except (TypeError, ValueError):
-                price = 0.0
+        # Do not let a market-price drop release cap headroom below
+        # the booked entry cost; the atomic customer-paper fill uses this same rule.
+        price = conservative_position_valuation_price(
+            getattr(p, "mark_price", 0),
+            getattr(p, "average_entry_price", 0),
+        )
         if not math.isfinite(quantity) or not math.isfinite(price) or price <= 0:
             # Unknown exposure cannot safely be treated as zero.
             valuation_complete = False
@@ -70,6 +95,25 @@ def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notiona
         "valuation_complete": valuation_complete,
         "members": members,
     }
+
+
+def limit_increase_when_valuation_incomplete(
+    requested_quantity: float,
+    reducing_quantity: float,
+    *,
+    valuation_complete: bool,
+) -> float:
+    """When exposure cannot be fully valued, permit only a verified position reduction."""
+    try:
+        requested = float(requested_quantity)
+        reducing = float(reducing_quantity)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(requested) or not math.isfinite(reducing):
+        return 0.0
+    requested = max(0.0, requested)
+    reducing = min(requested, max(0.0, reducing))
+    return requested if valuation_complete else reducing
 
 
 def cap_quantity_preserving_reduction(
