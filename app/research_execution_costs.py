@@ -469,8 +469,28 @@ def execution_cost_series_for_positions(
     if not prices.index.equals(positions.index):
         raise ValueError("execution prices must align exactly with position index")
     values = np.full(len(positions), fallback, dtype=float)
+    if not isinstance(context, Mapping):
+        # No calibrated evidence: the static caller cost is authoritative.
+        # Avoid per-bar hashing/event calculations in repeated router prefixes.
+        count = len(positions)
+        return pd.Series(
+            values, index=positions.index, dtype=float, name="execution_cost_bps"
+        ), {
+            "execution_cost_model_complete": False,
+            "execution_cost_model_status": "STATIC_FALLBACK_NO_EXECUTION_CONTEXT",
+            "execution_cost_model_fingerprint": None,
+            "per_bar_execution_context_sha256": None,
+            "execution_cost_failure_reasons": {
+                "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED": 1
+            },
+            "_execution_cost_model_complete_by_bar": [False] * count,
+            "_execution_cost_failure_reasons_by_bar": [
+                {"EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED": 1}
+                for _ in range(count)
+            ],
+        }
     reasons: dict[str, int] = {}
-    complete = isinstance(context, Mapping)
+    complete = True
     complete_by_bar = [bool(complete)] * len(positions)
     reasons_by_bar: list[dict[str, int]] = [{} for _ in range(len(positions))]
     previous = 0.0
