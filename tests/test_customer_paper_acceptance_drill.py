@@ -308,7 +308,7 @@ def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_pre
     assert '-f "dispatch_id=$dispatch_id"' in deploy
     assert 'secrets.token_hex(16)' in deploy
     assert '$GITHUB_RUN_ATTEMPT correlation $dispatch_id' in deploy
-    assert 'acceptance_wait_seconds=12600' in deploy
+    assert 'acceptance_wait_seconds=5400' in deploy
     assert 'acceptance_poll_interval_seconds=30' in deploy
     assert 'while true; do' in deploy
     assert 'timeout-minutes: 300' in deploy
