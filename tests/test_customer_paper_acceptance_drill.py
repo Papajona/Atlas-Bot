@@ -306,3 +306,23 @@ def test_acceptance_drill_wires_aggregate_capacity_and_rls_helper_calls():
     phase_two = source[phase_two_start:phase_two_end]
     assert "phase_one.enforce_aggregate_shared_bar_capacity" in phase_one
     assert "_verify_tenant_rls_visibility(" in phase_two
+
+
+def test_staging_acceptance_uses_pinned_runner_and_hashlock_python_version():
+    from pathlib import Path
+
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "customer-paper-staging-acceptance.yml"
+    ).read_text(encoding="utf-8")
+    assert "runs-on: ubuntu-24.04" in workflow
+    assert "runs-on: ubuntu-latest" not in workflow
+
+    setup_python = workflow.index(
+        "uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065"
+    )
+    python_version = workflow.index('python-version: "3.13"', setup_python)
+    dependency_install = workflow.index("Install hash-locked Atlas dependencies")
+    assert setup_python < python_version < dependency_install
