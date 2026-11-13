@@ -671,19 +671,24 @@ async def _fill_open_order(
             }
         fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
 
+    group_mark_prices_loader = None
     if side == "BUY" and group_mark_prices is None and group_mark_price_loader is not None:
         if request is None:
             raise CustomerPaperFlowBlocked("Paper BUY group-mark request context is unavailable")
-        try:
-            group_mark_prices = await group_mark_price_loader(
-                customer_id, request, market["market_context"]
-            )
-        except CustomerPaperFlowBlocked:
-            raise
-        except Exception as exc:
-            raise CustomerPaperFlowBlocked(
-                f"Current correlation-group marks could not be verified ({type(exc).__name__})"
-            ) from exc
+
+        async def load_group_marks_after_preflight():
+            try:
+                return await group_mark_price_loader(
+                    customer_id, request, market["market_context"]
+                )
+            except CustomerPaperFlowBlocked:
+                raise
+            except Exception as exc:
+                raise CustomerPaperFlowBlocked(
+                    f"Current correlation-group marks could not be verified ({type(exc).__name__})"
+                ) from exc
+
+        group_mark_prices_loader = load_group_marks_after_preflight
 
     try:
         result = await _paper_call(record_customer_paper_fill(
@@ -696,6 +701,7 @@ async def _fill_open_order(
             fee_amount=fee,
             enforce_market_bar_budget=True,
             group_mark_prices=group_mark_prices,
+            group_mark_prices_loader=group_mark_prices_loader,
         ), "append isolated paper fill")
     except CustomerPaperFlowBlocked as exc:
         # The paper-cash advisory lock can reveal a concurrent spend after the
