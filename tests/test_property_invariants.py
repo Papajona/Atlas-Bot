@@ -154,6 +154,13 @@ async def _run_lifecycle(operations):
 
 
 
+operation = st.tuples(
+    st.decimals(min_value=Decimal("0.000001"), max_value=Decimal("600"), places=6),
+    st.sampled_from(["pending", "release", "settle"]),
+    st.integers(1, 3),
+)
+
+
 @hyp_settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(operations=st.lists(operation, min_size=1, max_size=8))
 def test_withdrawal_lifecycle_conserves_funds_under_retries(operations):
