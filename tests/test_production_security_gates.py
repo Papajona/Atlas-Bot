@@ -456,20 +456,23 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
 
 
 
-def test_staging_deployment_is_marker_gated_and_waits_for_exact_commit_gates():
+def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_gates():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     trigger_header = deploy.split("\npermissions:", 1)[0]
+    job = deploy.split("  deploy-paper-staging:", 1)[1].split("\n    steps:", 1)[0]
+
     assert "workflow_dispatch:" in trigger_header
     assert "push:" in trigger_header
-    assert "branches:\n      - main" in trigger_header
-    assert "contains(github.event.head_commit.message, '[atlas-paper-staging-deploy-once-20261023]')" in deploy
-    assert "github.ref == 'refs/heads/main'" in deploy
+    assert "branches:\\n      - main" in trigger_header
+    assert "workflow_run:" not in trigger_header
+    assert "github.event_name == 'push' || github.event_name == 'workflow_dispatch'" in job
+    assert "atlas-paper-staging-deploy-once-20261023" not in deploy
+    assert "github.ref == 'refs/heads/main'" in job
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
     assert '--event workflow_dispatch' in deploy  # used for the uniquely correlated preflight dispatch
     assert '.event == "workflow_dispatch"' in deploy
     assert '.event == "push"' in deploy
-    assert "github.event.workflow_run.event == 'workflow_dispatch' || github.event.workflow_run.event == 'push'" in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
