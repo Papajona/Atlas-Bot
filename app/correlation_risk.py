@@ -26,13 +26,25 @@ def risk_group(symbol: str) -> str:
     base=raw.split("_")[0]
     return _GROUPS.get(base, "OTHER")
 
+
+def shares_risk_budget(proposed_symbol: str, existing_symbol: str) -> bool:
+    """Treat unclassified open positions as potentially related to every known group."""
+    proposed_group = risk_group(proposed_symbol)
+    existing_group = risk_group(existing_symbol)
+    return (
+        proposed_group == existing_group
+        or proposed_group == "OTHER"
+        or existing_group == "OTHER"
+    )
+
+
 def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notional: float, cap_usd: float) -> dict:
     target = risk_group(proposed_symbol)
     existing = 0.0
     members = []
     valuation_complete = True
     for p in positions or []:
-        if risk_group(getattr(p, "symbol", "")) != target:
+        if not shares_risk_budget(proposed_symbol, getattr(p, "symbol", "")):
             continue
         quantity = float(getattr(p, "quantity", 0) or 0)
         if math.isfinite(quantity) and quantity == 0:
