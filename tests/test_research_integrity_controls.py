@@ -99,7 +99,7 @@ def test_triple_barrier_costs_widen_barriers_and_timeout_dead_zone():
     close = pd.Series([120.0, 100.0, 101.9, 103.0], index=idx)
     vol = pd.Series([0.01] * 4, index=idx)
     high = pd.Series([121.0, 101.5, 102.9, 104.0], index=idx)
-    low = pd.Series([119.0, 99.0, 100.0, 101.0], index=idx)
+    low = pd.Series([119.0, 99.5, 100.0, 101.0], index=idx)
     opens = pd.Series([120.0, 100.0, 102.0, 103.0], index=idx)
 
     gross_label = triple_barrier(
