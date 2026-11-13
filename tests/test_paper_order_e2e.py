@@ -182,7 +182,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, Position, PaperFillEvent
+    from app.db import init_db, SessionLocal, Trade, PaperFillEvent
 
     symbol = f"PAPER-COST-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
@@ -193,6 +193,8 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     monkeypatch.setattr(settings, "max_consecutive_losses", 0)
     monkeypatch.setattr(settings, "max_order_latency_ms_p95", 0)
     monkeypatch.setattr(settings, "max_order_error_rate_5m", 0.0)
+    # Ignore unrelated open-position rows left by other tests in the shared DB.
+    monkeypatch.setattr(settings, "max_open_positions", 10_000)
     # This test exercises invalid cost context, not the independent protective-stop gate.
     monkeypatch.setattr(settings, "discipline_enabled", False)
 
@@ -201,16 +203,6 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
         async with SessionLocal() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
-            # The test database is shared by paper-order regressions. Close only
-            # prior platform-paper positions so the real production position cap
-            # remains enabled and is not affected by test execution order.
-            open_platform_positions = (await db.execute(
-                select(Position).where(
-                    Position.customer_id.is_(None), Position.quantity != 0,
-                )
-            )).scalars().all()
-            for position in open_platform_positions:
-                position.quantity = 0.0
             await db.commit()
 
         current_floor = pd.Timestamp.now(tz="UTC").floor("5min")
