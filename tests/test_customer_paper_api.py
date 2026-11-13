@@ -1415,7 +1415,12 @@ def test_manual_paper_api_returns_conflict_for_failed_deferred_mark_loader(monke
     async def invoke_deferred_loader(**kwargs):
         assert kwargs["group_mark_prices"] is None
         assert kwargs["group_mark_prices_loader"] is not None
-        return await kwargs["group_mark_prices_loader"]()
+        try:
+            return await kwargs["group_mark_prices_loader"]()
+        except Exception as mark_exc:
+            raise paper_lifecycle.CustomerPaperMarkVerificationError(
+                "Current paper correlation-group marks could not be verified"
+            ) from mark_exc
 
     monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
     monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
@@ -1428,6 +1433,8 @@ def test_manual_paper_api_returns_conflict_for_failed_deferred_mark_loader(monke
     monkeypatch.setattr(paper_api, "get_customer_paper_balances", enough_cash)
     monkeypatch.setattr(paper_api, "record_customer_paper_fill", invoke_deferred_loader)
     monkeypatch.setattr(paper_api, "_paper_order_draw", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(paper_api, "PROFILES", {
         **paper_api.PROFILES,
         "crypto": SimpleNamespace(slippage_bps=0, taker_bps=0),
