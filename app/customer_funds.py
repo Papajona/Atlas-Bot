@@ -603,6 +603,79 @@ async def _validate_withdrawal_action_replay(
         raise WithdrawalReplayMismatch(incident_args)
 
 
+async def verify_customer_ledger_balances_match_journals(
+    db, customer_id: int, currency: str = USDT
+) -> CustomerLedgerAccount:
+    """Fail closed unless customer ledger buckets reconcile to immutable journals.
+
+    A valid replay journal alone is insufficient: the denormalized account row may
+    still retain the reserve (or another stale bucket value). Reconstruct available,
+    trading-reserved, and withdrawal-reserved balances from their customer-account
+    journal lines and compare them with the locked ledger account before any repair
+    incident is resolved or the wallet mirror is synchronized.
+    """
+    currency = str(currency or "").upper()
+    if not currency:
+        raise ValueError("customer ledger currency is required")
+    ledger = (
+        await db.execute(
+            select(CustomerLedgerAccount)
+            .where(
+                CustomerLedgerAccount.customer_id == customer_id,
+                CustomerLedgerAccount.currency == currency,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if ledger is None:
+        raise ValueError("customer ledger account is missing")
+
+    buckets = {
+        "AVAILABLE": "available",
+        "TRADING_RESERVED": "trading_reserved",
+        "WITHDRAWAL_RESERVED": "withdrawal_reserved",
+    }
+    account_codes = {
+        _customer_account(customer_id, bucket, currency): field
+        for bucket, field in buckets.items()
+    }
+    rows = (
+        await db.execute(
+            select(
+                LedgerJournalLine.account_code,
+                func.coalesce(
+                    func.sum(LedgerJournalLine.credit - LedgerJournalLine.debit), 0
+                ),
+            )
+            .where(
+                LedgerJournalLine.customer_id == customer_id,
+                LedgerJournalLine.currency == currency,
+                LedgerJournalLine.account_code.in_(tuple(account_codes)),
+            )
+            .group_by(LedgerJournalLine.account_code)
+        )
+    ).all()
+    journal_balances = {
+        str(account_code): _q(balance)
+        for account_code, balance in rows
+    }
+    mismatches = []
+    for account_code, field in account_codes.items():
+        journal_balance = journal_balances.get(account_code, D("0"))
+        ledger_balance = _q(getattr(ledger, field))
+        if ledger_balance != journal_balance:
+            mismatches.append(
+                f"{field}: ledger={ledger_balance} journal={journal_balance}"
+            )
+    if mismatches:
+        raise ValueError(
+            "customer ledger balances do not reconcile with immutable journal history ("
+            + "; ".join(mismatches)
+            + ")"
+        )
+    return ledger
+
+
 async def verify_existing_withdrawal_action_replay(
     db, customer_id: int, amount: float, *, reference_id: str, action: str
 ) -> LedgerJournal:
