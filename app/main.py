@@ -61,7 +61,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group
+from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group, shares_risk_budget
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
@@ -1158,11 +1158,11 @@ def _validated_customer_paper_mark(context: dict | None) -> tuple[float, str]:
 async def _customer_paper_positions_for_exposure(
     *, customer_id: int, req, market_context: dict | None
 ) -> dict[str, Any]:
-    """Load only same-correlation-group paper positions and mark them before a BUY cap check.
+    """Load same-group and unclassified paper positions before a BUY cap check.
 
-    Unrelated markets must not veto a proposed BUY merely because their quote is
-    unavailable. Any nonzero position in the proposed risk group must have a fresh,
-    validated server bid; otherwise the exposure check fails closed.
+    Unrelated known groups do not consume this candidate budget. Unclassified positions
+    count against every known budget, and an unclassified candidate considers all open
+    positions. Every included nonzero position needs a fresh validated server bid.
     """
     from types import SimpleNamespace
     from .customer_paper_lifecycle import get_customer_paper_positions
@@ -1177,11 +1177,11 @@ async def _customer_paper_positions_for_exposure(
         }
 
     target_group = risk_group(req.symbol)
-    # Filter BEFORE requesting any marks. Different risk buckets do not consume
-    # this candidate's correlation-group budget.
+    # Filter BEFORE requesting marks. Unrelated known groups do not consume this
+    # budget, but unclassified positions conservatively count against every group.
     relevant_positions = [
         row for row in paper_positions
-        if risk_group(str(row.get("symbol") or "")) == target_group
+        if shares_risk_budget(req.symbol, str(row.get("symbol") or ""))
     ]
     open_positions = []
     for row in relevant_positions:
