@@ -1300,7 +1300,9 @@ async def advance_platform_paper_orders(
     min_latency = max(1, int(settings.paper_fill_latency_bars))
     ttl_bars = max(1, int(settings.paper_order_ttl_bars))
     max_impact_bps = max(0.0, float(settings.paper_max_market_impact_bps))
-    impact_coefficient = max(0.0, float(settings.paper_market_impact_coefficient))
+    # Preserve invalid runtime values so the shared kernel can reject them;
+    # clamping NaN to zero would silently turn a bad cost context into a fill.
+    impact_coefficient = float(settings.paper_market_impact_coefficient)
 
     counts = {"attempts": 0, "fills": 0, "partial_fills": 0, "queue_misses": 0,
               "rejected": 0, "expired": 0, "waiting_for_liquidity": 0,
