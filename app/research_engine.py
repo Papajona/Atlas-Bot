@@ -299,11 +299,13 @@ def _component_backtest(
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
     execution_cost_context: dict[str, object] | None = None,
+    execution_cost_namespace: str | None = None,
 ) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
+    namespace = execution_cost_namespace or f"research:{component}"
     s, _, _, _, protected, protected_net, protection_audit, _, _ = _protected_component_position(
         df, component, cfg, taker_bps, slippage_bps, asset, carry_bps_per_bar,
-        session_costs_bps, execution_cost_context, f"research:{component}",
+        session_costs_bps, execution_cost_context, namespace,
     )
     ann = float(s.attrs.get("annualization_factor", 252.0))
     active = protected != 0
@@ -623,6 +625,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos["execution_cost_model_fingerprint"] = ensemble_audit.get("execution_cost_model_fingerprint")
     oos["per_bar_execution_context_sha256"] = ensemble_audit.get("per_bar_execution_context_sha256")
     oos["per_bar_execution_cost_failure"] = ensemble_audit.get("per_bar_execution_cost_failure")
+    if isinstance(oos.get("cost_analysis"), dict):
+        oos["cost_analysis"].update({
+            "execution_cost_model_complete": oos["execution_cost_model_complete"],
+            "execution_cost_model_status": oos["execution_cost_model_status"],
+            "execution_cost_model_fingerprint": oos["execution_cost_model_fingerprint"],
+            "per_bar_execution_context_sha256": oos["per_bar_execution_context_sha256"],
+            "per_bar_execution_cost_failure": oos["per_bar_execution_cost_failure"],
+        })
     ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
     oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
     oos["trade_boundary_overlap_by_fold"] = ensemble_overlap["by_fold"]
@@ -696,14 +706,14 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "stop_atr": float(cfg.stop_atr * risk_mult),
             "take_profit_atr": float(cfg.take_profit_atr * risk_mult),
         })
+        variant_namespace = f"research:variant:{threshold_mult:.2f}:{risk_mult:.2f}"
         vr = _component_backtest(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
-            session_costs_bps, execution_cost_context,
+            session_costs_bps, execution_cost_context, variant_namespace,
         )
         variant_signals, _, variant_requested, variant_returns, variant_position, _, variant_audit, variant_exits, variant_cost_bps = _protected_component_position(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
-            session_costs_bps, execution_cost_context,
-            f"research:variant:{threshold_mult:.2f}:{risk_mult:.2f}",
+            session_costs_bps, execution_cost_context, variant_namespace,
         )
         is_baseline = (
             math.isclose(threshold_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
