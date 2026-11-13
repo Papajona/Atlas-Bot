@@ -158,9 +158,23 @@ def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference(
     assert result["research_trial_ledger_head_valid"] is False
     assert result["research_holdout_registry_invalid_rows"] is None
 
+def _configured_postgres_dsn() -> str | None:
+    """Return only an explicitly PostgreSQL DSN, never an application SQLite fallback."""
+    for name in (
+        "ATLAS_POSTGRES_URL",
+        "ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL",
+        "ATLAS_PAPER_TEST_DATABASE_URL",
+        "DATABASE_URL",
+    ):
+        candidate = os.getenv(name, "").strip()
+        if candidate.startswith(("postgresql+asyncpg://", "postgresql://", "postgres://")):
+            return candidate.replace("postgresql+asyncpg://", "postgresql://", 1)
+    return None
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(
-    not (os.getenv("ATLAS_POSTGRES_URL") or os.getenv("DATABASE_URL")),
+    _configured_postgres_dsn() is None,
     reason="requires the migrated disposable PostgreSQL database provisioned by CI",
 )
 def test_research_integrity_query_executes_against_postgres():
@@ -169,12 +183,9 @@ def test_research_integrity_query_executes_against_postgres():
     import asyncpg
     from scripts.verify_staging_restore import RESEARCH_INTEGRITY_QUERY
 
-    # Prefer the explicitly PostgreSQL-only DSN: conftest may supply a default
-    # SQLite DATABASE_URL when the caller did not export a database URL.
-    postgres_url = os.environ.get("ATLAS_POSTGRES_URL") or os.environ["DATABASE_URL"]
-    dsn = postgres_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    if not dsn.startswith(("postgresql://", "postgres://")):
-        raise AssertionError("PostgreSQL integration test requires a PostgreSQL DSN")
+    dsn = _configured_postgres_dsn()
+    if dsn is None:
+        pytest.skip("requires an explicitly configured PostgreSQL DSN")
 
     async def execute_query():
         connection = await asyncpg.connect(dsn)
