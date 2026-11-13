@@ -27,9 +27,12 @@ def normalize_session_costs_bps(schedule: Mapping[str, object] | None) -> dict[s
 def session_cost_series(index: pd.DatetimeIndex, schedule: Mapping[str, object]) -> pd.Series:
     """Map verified per-session per-side costs (bps per unit turnover) onto UTC bars."""
     costs = normalize_session_costs_bps(schedule)
-    state = session_state(pd.DatetimeIndex(index))
+    original_index = pd.DatetimeIndex(index)
+    state = session_state(original_index)
     values = [costs[str(session)] for session in state["session"].tolist()]
-    return pd.Series(values, index=state.index, dtype="float64")
+    # session_state converts naive UTC inputs to aware timestamps for classification.
+    # Return the cost vector on the original index so all aligned research streams match.
+    return pd.Series(values, index=original_index, dtype="float64")
 
 LONDON = ZoneInfo("Europe/London")
 NEW_YORK = ZoneInfo("America/New_York")
