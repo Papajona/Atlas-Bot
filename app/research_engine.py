@@ -11,6 +11,12 @@ from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
 from .config import settings
+from .research_execution_costs import (
+    ResearchExecutionCostError,
+    build_research_execution_cost_context,
+    make_execution_cost_provider,
+    research_execution_model_fingerprint,
+)
 
 # Fail-closed release gate: no trusted signed comparable-trial archive verifier is
 # integrated into this code path yet. Do not enable from report fields or fixtures.
@@ -225,27 +231,57 @@ def _protected_component_position(
     asset: str = "crypto",
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
+    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_namespace: str = "research",
 ):
-    """Return one execution-aware, costed, risk-controlled stream for all research metrics."""
+    """Return one costed, execution-aware and risk-controlled return stream."""
     signals = strategy_signals(df, cfg, asset=asset)
     raw = signals[component].fillna(0.0)
     requested = target_positions(raw, signals["realized_vol"], cfg).shift(1).fillna(0.0)
     carry = carry_bps_per_bar
     if carry is None:
         carry = settings.research_carry_bps_per_bar
-    execution = simulate_execution_aware_strategy(
-        df,
-        requested,
-        signals["atr"].shift(1),
-        stop_atr=cfg.stop_atr,
-        take_profit_atr=cfg.take_profit_atr,
-        transaction_cost_bps=float(taker_bps) + float(slippage_bps),
-        session_costs_bps=session_costs_bps,
-        carry_bps_per_bar=carry,
-        drawdown_limit=settings.strategy_drawdown_halt,
-        daily_loss_limit=settings.strategy_daily_loss_halt,
-        loss_event_threshold=settings.strategy_stoploss_guard_trades,
-        cooldown_bars=settings.strategy_stoploss_guard_bars,
+    cost_provider = make_execution_cost_provider(
+        execution_cost_context, namespace=execution_cost_namespace
+    )
+    execution_session_costs = None if cost_provider is not None else session_costs_bps
+    execution_kwargs = {
+        "stop_atr": cfg.stop_atr,
+        "take_profit_atr": cfg.take_profit_atr,
+        "transaction_cost_bps": float(taker_bps) + float(slippage_bps),
+        "session_costs_bps": execution_session_costs,
+        "transaction_cost_provider": cost_provider,
+        "carry_bps_per_bar": carry,
+        "drawdown_limit": settings.strategy_drawdown_halt,
+        "daily_loss_limit": settings.strategy_daily_loss_halt,
+        "loss_event_threshold": settings.strategy_stoploss_guard_trades,
+        "cooldown_bars": settings.strategy_stoploss_guard_bars,
+    }
+    try:
+        execution = simulate_execution_aware_strategy(
+            df, requested, signals["atr"].shift(1), **execution_kwargs
+        )
+    except ResearchExecutionCostError as exc:
+        # Keep diagnostic returns available, but never mix calibrated and static
+        # costs inside one candidate stream after a participation/context violation.
+        fallback_kwargs = dict(execution_kwargs)
+        fallback_kwargs["transaction_cost_provider"] = None
+        fallback_kwargs["session_costs_bps"] = session_costs_bps
+        execution = simulate_execution_aware_strategy(
+            df, requested, signals["atr"].shift(1), **fallback_kwargs
+        )
+        execution["audit"]["per_bar_execution_cost_model_complete"] = False
+        execution["audit"]["per_bar_execution_cost_model_status"] = "FALLBACK_AFTER_EVENT_REJECTION"
+        execution["audit"]["per_bar_execution_cost_failure"] = str(exc)
+    execution["audit"]["execution_cost_model_fingerprint"] = (
+        execution_cost_context.get("model_fingerprint")
+        if isinstance(execution_cost_context, dict)
+        else None
+    )
+    execution["audit"]["per_bar_execution_context_sha256"] = (
+        execution_cost_context.get("context_sha256")
+        if isinstance(execution_cost_context, dict)
+        else None
     )
     return (
         signals, raw, requested, execution["market_returns"], execution["positions"],
