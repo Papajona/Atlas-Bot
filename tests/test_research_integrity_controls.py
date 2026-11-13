@@ -438,3 +438,45 @@ def test_trial_archive_append_uses_bounded_head_check_not_full_history_scan():
     append = source[source.index("async def archive_research_trials("):]
     assert "_verify_trial_ledger_head_in_session" in append
     assert "verify_research_trial_ledger()" not in append
+
+
+
+def test_large_complete_label_history_fails_closed_without_truncation(monkeypatch):
+    import json
+    from app import db as db_module
+    from app.decision_outcome_research import (
+        DecisionOutcomeHistoryResourceLimit,
+        load_all_decision_outcome_labels,
+    )
+
+    class _Rows:
+        def all(self):
+            return [
+                (1, json.dumps(_outcome_label(1))),
+                (2, json.dumps(_outcome_label(2))),
+            ]
+
+    class _Db:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, _query):
+            return _Rows()
+
+    monkeypatch.setattr(db_module, "SessionLocal", _Db)
+    with pytest.raises(DecisionOutcomeHistoryResourceLimit, match="holdout was not consumed"):
+        asyncio.run(load_all_decision_outcome_labels(batch_size=100, max_records=1))
+
+
+def test_holdout_route_checks_consumption_before_loading_history():
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    route = source.split('@app.post("/api/research/decision-outcomes/holdout-once")', 1)[1]
+    route = route.split('@app.post("/api/research/backtest-all")', 1)[0]
+    assert route.index("decision_outcome_holdout_status()") < route.index("load_all_decision_outcome_labels(")
+    assert "DecisionOutcomeHistoryResourceLimit" in route
+    assert "no holdout was consumed" in route
