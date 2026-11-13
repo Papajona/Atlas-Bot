@@ -447,9 +447,9 @@ def ai_walk_forward_backtest(
     label_round_trip_costs: float | pd.Series = 2.0 * (taker_cost_bps + slippage_cost_bps)
     if session_costs_bps is not None:
         from .market_sessions import session_cost_series
-        label_round_trip_costs = 2.0 * session_cost_series(
-            aligned.index, session_costs_bps
-        )
+        # The labeler combines entry-session and exit-session per-side rates for
+        # each candidate exit bar; do not flatten them into a static round-trip fee.
+        label_round_trip_costs = session_cost_series(aligned.index, session_costs_bps)
     y = triple_barrier(
         aligned.close, X.vol_24, aligned.high, aligned.low,
         max_hold=hold_horizon, entry_open=aligned.open,
