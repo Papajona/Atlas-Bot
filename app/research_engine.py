@@ -874,7 +874,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         fixed_cost_drag=None if carry is None else (ensemble_pos.abs() * (float(carry) / 10000.0)).to_numpy(),
         variable_cost_bps_per_bar=(
             ensemble_cost_bps.to_numpy(dtype=float)
-            if applied_session_costs is not None else None
+            if applied_session_costs is not None or execution_cost_context is not None else None
         ),
     )
     ens_cost["carry_rate_configured"] = carry is not None
@@ -882,12 +882,23 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["carry_evidence_id_present"] = bool(carry_evidence_id)
     ens_cost["financing_cost_model_complete"] = carry_evidence_complete
     ens_cost["intrabar_stop_target_model_complete"] = False
-    ens_cost["execution_cost_model_complete"] = False
-    ens_cost["session_cost_model_complete"] = applied_session_costs is not None
+    ens_cost["execution_cost_model_complete"] = (
+        ensemble_audit.get("per_bar_execution_cost_model_complete") is True
+    )
+    ens_cost["execution_cost_model_fingerprint"] = ensemble_audit.get("execution_cost_model_fingerprint")
+    ens_cost["per_bar_execution_context_sha256"] = ensemble_audit.get("per_bar_execution_context_sha256")
+    ens_cost["per_bar_execution_cost_failure"] = ensemble_audit.get("per_bar_execution_cost_failure")
+    ens_cost["session_cost_model_complete"] = (
+        applied_session_costs is not None and execution_cost_context is None
+    )
     ens_cost["session_costs_bps"] = session_costs_bps
     ens_cost["session_costs_reason"] = cost_validation.get("session_costs_reason")
-    ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
-    ens_cost["execution_cost_calibration_evidence_id"] = None
+    ens_cost["execution_cost_calibration_status"] = str(
+        cost_validation.get("reason") or "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    ) if not calibration_ok else "VERIFIED"
+    ens_cost["execution_cost_calibration_evidence_id"] = (
+        cost_validation.get("evidence_id") if calibration_ok else None
+    )
     if not carry_evidence_complete:
         ens_cost["note"] = (
             str(ens_cost.get("note") or "")
@@ -982,14 +993,31 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # applied the calibrated model. Keep execution_cost_model_complete false until
     # the calibrated estimator is wired into the actual research return stream.
     for cost_target in [ens_cost, oos, *per_strategy_oos.values()]:
+        per_bar_costs_complete = cost_target.get("execution_cost_model_complete") is True
         cost_target["execution_cost_calibration_status"] = calibration_status
         cost_target["execution_cost_calibration_evidence_id"] = calibration_evidence_id
-        cost_target["execution_cost_model_complete"] = False
-        cost_target["session_cost_model_complete"] = applied_session_costs is not None
+        cost_target["execution_cost_model_complete"] = per_bar_costs_complete
+        cost_target["execution_cost_model_fingerprint"] = (
+            cost_target.get("execution_cost_model_fingerprint")
+            or execution_context_audit.get("execution_cost_model_fingerprint")
+            or model_fingerprint
+        )
+        cost_target["per_bar_execution_context_sha256"] = (
+            cost_target.get("per_bar_execution_context_sha256")
+            or execution_context_audit.get("per_bar_execution_context_sha256")
+        )
+        cost_target["execution_cost_model_reason"] = execution_context_audit.get("reason")
+        cost_target["session_cost_model_complete"] = (
+            applied_session_costs is not None and execution_cost_context is None
+        )
         cost_target["session_costs_bps"] = session_costs_bps
         cost_target["session_costs_reason"] = cost_validation.get("session_costs_reason")
-        cost_target["slippage_model_complete"] = False
-        cost_target["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
+        cost_target["slippage_model_complete"] = per_bar_costs_complete
+        cost_target["slippage_model_status"] = (
+            "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+            if per_bar_costs_complete
+            else "STATIC_OR_SESSION_COST_FALLBACK"
+        )
 
     trial_registry_complete = False
     # DSR is calculated from every distinct candidate evaluated on the identical
