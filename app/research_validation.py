@@ -1148,15 +1148,80 @@ def monte_carlo_bootstrap(returns, *, trials: int = 2000, seed: int = 7, block_s
         outcomes[i]=equity[-1]-1.0; max_dd[i]=dd.min()
     return {"status":"OK","observations":int(n),"trials":int(trials),"block_size":int(size),"return_p05":float(np.quantile(outcomes,0.05)),"return_median":float(np.quantile(outcomes,0.50)),"return_p95":float(np.quantile(outcomes,0.95)),"drawdown_p05":float(np.quantile(max_dd,0.05)),"drawdown_median":float(np.quantile(max_dd,0.50)),"probability_negative_return":float(np.mean(outcomes<0))}
 
-def parameter_plateau_score(results: dict, *, metric: str = "sharpe", tolerance: float = 0.20) -> dict:
-    """Measure whether nearby parameter variants retain most of the best metric."""
-    rows=results.get("variants") if isinstance(results,dict) else None
-    if not rows: return {"status":"INSUFFICIENT_DATA"}
-    vals=[float(r.get(metric,0.0)) for r in rows if np.isfinite(float(r.get(metric,0.0)))]
-    if not vals: return {"status":"INSUFFICIENT_DATA"}
-    best=max(vals); floor=best*(1.0-float(tolerance))
-    plateau=sum(v>=floor for v in vals)/len(vals)
-    return {"status":"OK","metric":metric,"best":best,"floor":floor,"plateau_ratio":plateau,"robust":plateau>=0.30,"variants":len(vals)}
+def parameter_plateau_score(
+    results: dict,
+    *,
+    metric: str = "oos_sharpe",
+    tolerance: float = 0.20,
+    minimum_valid_variants: int = 7,
+    minimum_plateau_ratio: float = 0.50,
+) -> dict:
+    """Score plateau stability using held-out values; invalid variants remain in the denominator."""
+    rows = results.get("variants") if isinstance(results, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return {"status": "INSUFFICIENT_DATA", "reason": "parameter_variants_missing"}
+    try:
+        tol = float(tolerance)
+        min_ratio = float(minimum_plateau_ratio)
+        min_valid = int(minimum_valid_variants)
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_CONFIG"}
+    if (
+        not math.isfinite(tol) or not 0.0 < tol < 1.0
+        or not math.isfinite(min_ratio) or not 0.0 < min_ratio <= 1.0
+        or isinstance(minimum_valid_variants, bool) or min_valid != minimum_valid_variants
+        or min_valid < 2
+    ):
+        return {"status": "INVALID_CONFIG"}
+    tested = len(rows)
+    values = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get(metric)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    if len(values) < min_valid:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "metric": metric,
+            "tested_variants": tested,
+            "valid_variants": len(values),
+            "minimum_valid_variants": min_valid,
+        }
+    best = max(values)
+    if best <= 0.0:
+        return {
+            "status": "NOT_ROBUST",
+            "metric": metric,
+            "best": best,
+            "plateau_ratio": 0.0,
+            "valid_variants": len(values),
+            "tested_variants": tested,
+            "reason": "best_held_out_metric_not_positive",
+        }
+    floor = best * (1.0 - tol)
+    plateau_count = sum(value >= floor for value in values)
+    plateau_ratio = plateau_count / tested
+    return {
+        "status": "OK",
+        "metric": metric,
+        "best": best,
+        "floor": floor,
+        "plateau_count": plateau_count,
+        "plateau_ratio": plateau_ratio,
+        "robust": plateau_ratio >= min_ratio and len(values) == tested,
+        "variants": tested,
+        "valid_variants": len(values),
+        "minimum_valid_variants": min_valid,
+        "minimum_plateau_ratio": min_ratio,
+        "tolerance": tol,
+        "note": "Uses OOS Sharpe only; any invalid/missing variant reduces the plateau ratio and blocks robustness.",
+    }
 
 
 def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bars_per_year: int,
