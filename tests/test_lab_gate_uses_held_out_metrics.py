@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from app.strategy_lab_validation import strategy_lab_candidate_passes
 
 
@@ -72,3 +74,19 @@ def test_lab_rejects_missing_or_nonfinite_oos_metrics():
             min_total_return=-1.0,
         )
         assert passed is False
+
+
+def test_lab_endpoint_archives_trial_and_uses_oos_gate_for_pass():
+    source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(encoding="utf-8")
+    start = source.index('@app.post("/api/customer/strategy-lab/candidates/{candidate_id}/validate")')
+    end = source.index('@app.get("/api/customer/strategy-lab/candidates/{candidate_id}/runs")', start)
+    endpoint = source[start:end]
+
+    assert "archive_research_trials(result, req)" in endpoint
+    assert 'archive_recording_ok = trial_archive_recording.get("status") in {"APPENDED", "REPLAYED"}' in endpoint
+    assert "strategy_lab_candidate_passes(" in endpoint
+    assert 'gate["sharpe"]>=' not in endpoint
+    assert 'gate["max_drawdown"]>=' not in endpoint
+    assert 'gate["trades"]>=' not in endpoint
+    assert 'gate["total_return"]>=' not in endpoint
+    assert '"in_sample_note": "Selected-on data. Diagnostic only; never a pass criterion."' in endpoint
