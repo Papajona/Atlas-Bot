@@ -10,6 +10,18 @@ from .db import AppState, CustomerLedgerAccount, Incident, LedgerEntry, LedgerJo
 USDT = "USDT"
 D = Decimal
 logger = logging.getLogger(__name__)
+
+
+class WithdrawalReplayMismatch(ValueError):
+    """A persisted withdrawal idempotency record does not match the requested action."""
+
+    def __init__(self, incident_args: dict) -> None:
+        self.incident_args = dict(incident_args)
+        super().__init__(
+            "withdrawal idempotency key already used with a different or inconsistent operation"
+        )
+
+
 LEGACY_MIGRATION_ACCOUNT = "ASSET:LEGACY:WALLET_MIGRATION"
 _SCALE = Decimal("0.000001")  # matches the Numeric(38,6) ledger columns
 
@@ -50,6 +62,16 @@ async def record_ledger_incident(
         return
     db.add(Incident(incident_key=key, severity=severity, status="OPEN", category="LEDGER_RECONCILIATION",
                     customer_id=customer_id, summary=summary[:500], detail_json=payload))
+
+async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMismatch) -> None:
+    """Persist a replay incident after the caller commits pending withdrawal state.
+
+    Use the caller's session. Opening a second SQLite writer while the caller has
+    an autoflushed Withdrawal update can block until the database busy timeout.
+    Endpoint handlers commit the confirmed outcome first, then call this helper.
+    """
+    await record_ledger_incident(db, **mismatch.incident_args)
+
 
 async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> CustomerLedgerAccount:
     row = (await db.execute(select(CustomerLedgerAccount).where(
@@ -415,19 +437,16 @@ async def _validate_withdrawal_action_replay(
         except (TypeError, ValueError):
             metadata = {}
             problems.append("invalid replay metadata")
-        # New releases persist the requested amount. For a legacy release
-        # journal, recover it from the original withdrawal row rather than
-        # mistaking a partial effective release for the requested payout amount.
+        # New releases persist the requested amount. Legacy partial releases
+        # only recorded the effective amount, so recover the original request
+        # from the immutable Withdrawal row. If that row is missing, the original
+        # request is unknowable and the replay must fail closed.
         recorded_request = metadata.get("requested_amount", entry.amount)
-        source_withdrawal = None
         if (
             action == "release"
             and "requested_amount" not in metadata
             and reference_id.endswith(":release")
         ):
-            # Legacy partial releases only stored the effective amount in the
-            # ledger. Recover the original request amount when that source row
-            # exists; if it does not, fall back to the old conservative check.
             source_request_id = reference_id[:-len(":release")]
             source_withdrawal = (
                 await db.execute(
@@ -440,16 +459,21 @@ async def _validate_withdrawal_action_replay(
                     .with_for_update()
                 )
             ).scalar_one_or_none()
-            if source_withdrawal is not None:
+            if source_withdrawal is None:
+                problems.append("missing source withdrawal request")
+                recorded_request = None
+            else:
                 try:
                     recorded_request = _q(source_withdrawal.amount)
                 except (TypeError, ValueError, ArithmeticError):
                     problems.append("invalid source withdrawal amount")
-        try:
-            if _q(recorded_request) != amount_d:
-                problems.append("requested amount")
-        except (TypeError, ValueError, ArithmeticError):
-            problems.append("invalid recorded amount")
+                    recorded_request = None
+        if recorded_request is not None:
+            try:
+                if _q(recorded_request) != amount_d:
+                    problems.append("requested amount")
+            except (TypeError, ValueError, ArithmeticError):
+                problems.append("invalid recorded amount")
 
     lines = (
         await db.execute(
@@ -562,35 +586,10 @@ async def _validate_withdrawal_action_replay(
             "customer_id": customer_id,
             "severity": "HIGH",
         }
-        try:
-            # Do not roll back or commit the caller's transaction here. The
-            # withdrawal workflow owns its status transition and decides whether
-            # to preserve a confirmed FAILED/REJECTED outcome after a mismatch.
-            async with SessionLocal() as incident_db:
-                await record_ledger_incident(incident_db, **incident_args)
-                await incident_db.commit()
-        except IntegrityError:
-            # A concurrent mismatched replay may create the same incident key
-            # between SELECT and INSERT. Retry through a fresh session.
-            try:
-                async with SessionLocal() as incident_db:
-                    await record_ledger_incident(incident_db, **incident_args)
-                    await incident_db.commit()
-            except Exception:
-                logger.critical(
-                    "withdrawal_replay_incident_persist_failed key=%s",
-                    incident_args["key"],
-                    exc_info=True,
-                )
-        except Exception:
-            logger.critical(
-                "withdrawal_replay_incident_persist_failed key=%s",
-                incident_args["key"],
-                exc_info=True,
-            )
-        raise ValueError(
-            "withdrawal idempotency key already used with a different or inconsistent operation"
-        )
+        # The workflow handler owns persistence order: it first commits any
+        # confirmed provider/rejection state, then writes this incident through
+        # the same session so SQLite never contends with its own writer.
+        raise WithdrawalReplayMismatch(incident_args)
 
 
 async def release_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
