@@ -651,6 +651,7 @@ def fixed_signal_walk_forward_oos(
     benchmark_loss_event_threshold: int = 0,
     benchmark_cooldown_bars: int = 0,
     benchmark_random_trials: int = 100,
+    session_costs_bps: dict[str, float] | None = None,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -731,8 +732,17 @@ def fixed_signal_walk_forward_oos(
         benchmark_atr = benchmark_atr_for_entry.astype(float)
     gross = position * ret
     turnover = execution_turnover(position, exit_flags)
+    session_cost_values = None
+    transaction_cost_values: float | pd.Series = total_cost_bps
+    if session_costs_bps is not None:
+        try:
+            from .market_sessions import session_cost_series
+            session_cost_values = session_cost_series(df.index, session_costs_bps)
+            transaction_cost_values = session_cost_values
+        except (TypeError, ValueError) as exc:
+            return {"status": "INVALID_CONFIG", "reason": f"invalid_session_cost_schedule:{type(exc).__name__}", "folds": []}
     net = costed_execution_returns(
-        position, ret, transaction_cost_bps=total_cost_bps,
+        position, ret, transaction_cost_bps=transaction_cost_values,
         carry_bps_per_bar=carry, exit_mask=exit_flags,
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=-1.0)
     fixed_cost = position.abs() * (carry / 10_000.0) if carry is not None else None
@@ -742,6 +752,7 @@ def fixed_signal_walk_forward_oos(
     oos_gross_returns = []
     oos_turnover = []
     oos_fixed_costs = []
+    oos_session_costs = []
     oos_ohlc_blocks: list[pd.DataFrame] = []
     oos_benchmark_entry_signal_blocks: list[np.ndarray] = []
     oos_benchmark_atr_blocks: list[np.ndarray] = []
@@ -762,6 +773,8 @@ def fixed_signal_walk_forward_oos(
         oos_candidate_net_blocks.append(x.to_numpy(dtype=float))
         if fixed_cost is not None:
             oos_fixed_costs.append(fixed_cost.iloc[start:end])
+        if session_cost_values is not None:
+            oos_session_costs.append(session_cost_values.iloc[start:end])
         prior_p = p.shift(1).fillna(0.0)
         trade_starts = (p != 0.0) & ((prior_p == 0.0) | (np.sign(p) != np.sign(prior_p)))
         trades += int(trade_starts.sum())
@@ -791,6 +804,7 @@ def fixed_signal_walk_forward_oos(
     all_oos_gross = pd.concat(oos_gross_returns) if oos_gross_returns else pd.Series(dtype=float)
     all_oos_turnover = pd.concat(oos_turnover) if oos_turnover else pd.Series(dtype=float)
     all_fixed_cost = pd.concat(oos_fixed_costs) if oos_fixed_costs else None
+    all_session_costs = pd.concat(oos_session_costs) if oos_session_costs else None
     cost_analysis = cost_breakeven_report(
         all_oos_gross.to_numpy(dtype=float),
         all_oos_turnover.to_numpy(dtype=float),
@@ -799,6 +813,7 @@ def fixed_signal_walk_forward_oos(
         bars_per_year=max(1, int(round(annualization))),
         stress_multiplier=stress_multiplier,
         fixed_cost_drag=None if all_fixed_cost is None else all_fixed_cost.to_numpy(dtype=float),
+        variable_cost_bps_per_bar=None if all_session_costs is None else all_session_costs.to_numpy(dtype=float),
     )
     evidence_source = str(carry_evidence_source or "").strip()
     evidence_id = str(carry_evidence_id or "").strip()
@@ -811,6 +826,8 @@ def fixed_signal_walk_forward_oos(
     cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
     cost_analysis["financing_cost_model_complete"] = cost_complete
+    cost_analysis["session_cost_model_complete"] = session_cost_values is not None
+    cost_analysis["session_costs_bps"] = dict(session_costs_bps) if session_cost_values is not None else None
     cost_analysis["intrabar_stop_target_model_complete"] = execution_complete
     # The configured fee/slippage stress is not proof of venue-calibrated execution costs.
     cost_analysis["execution_cost_model_complete"] = False
@@ -905,6 +922,8 @@ def fixed_signal_walk_forward_oos(
         "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
         "execution_cost_calibration_evidence_id": None,
         "carry_bps_per_bar": carry,
+        "session_cost_model_complete": session_cost_values is not None,
+        "session_costs_bps": dict(session_costs_bps) if session_cost_values is not None else None,
     }
 
 
