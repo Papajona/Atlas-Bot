@@ -551,3 +551,81 @@ def test_thin_decision_arm_does_not_consume_one_time_holdout(monkeypatch):
     assert result["metrics_released"] is False
     assert result["consumed"] is False
     assert registry == {}
+
+
+
+def test_ai_triple_barrier_uses_the_exact_execution_atr_stop_and_target_levels():
+    index = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+    close = pd.Series([120.0, 100.0, 100.5, 101.0, 101.0], index=index)
+    opens = pd.Series([120.0, 100.0, 100.0, 100.5, 101.0], index=index)
+    high = pd.Series([121.0, 102.0, 103.2, 101.5, 101.5], index=index)
+    low = pd.Series([119.0, 99.0, 99.5, 100.0, 100.0], index=index)
+    volatility = pd.Series([0.01] * len(index), index=index)
+    frozen_atr = pd.Series([np.nan, 2.0, 2.0, 2.0, 2.0], index=index)
+
+    labels = triple_barrier(
+        close,
+        volatility,
+        high,
+        low,
+        max_hold=2,
+        entry_open=opens,
+        entry_atr=frozen_atr,
+        stop_atr=1.0,
+        take_profit_atr=1.5,
+        round_trip_cost_bps=0.0,
+    )
+
+    # Entry is open[1]=100; the execution target is 100 + 1.5*2 = 103.
+    # high[1]=102 does not hit it; high[2]=103.2 does.
+    # The former percentage-volatility barrier would have triggered on bar 1.
+    assert labels.iloc[0] == 1.0
+
+
+def test_ai_triple_barrier_and_execution_share_stop_first_atr_ambiguity():
+    index = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+    close = pd.Series([120.0, 100.0, 100.0, 100.0, 100.0], index=index)
+    opens = pd.Series([120.0, 100.0, 100.0, 100.0, 100.0], index=index)
+    high = pd.Series([121.0, 104.0, 100.0, 100.0, 100.0], index=index)
+    low = pd.Series([119.0, 97.0, 100.0, 100.0, 100.0], index=index)
+    volatility = pd.Series([0.01] * len(index), index=index)
+    frozen_atr = pd.Series([np.nan, 2.0, 2.0, 2.0, 2.0], index=index)
+
+    labels = triple_barrier(
+        close,
+        volatility,
+        high,
+        low,
+        max_hold=2,
+        entry_open=opens,
+        entry_atr=frozen_atr,
+        stop_atr=1.0,
+        take_profit_atr=1.5,
+        round_trip_cost_bps=0.0,
+    )
+    assert labels.iloc[0] == -1.0
+
+
+def test_ai_triple_barrier_marks_target_neutral_when_execution_cost_exceeds_reward():
+    index = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+    close = pd.Series([120.0, 100.0, 100.0, 100.0, 100.0], index=index)
+    opens = pd.Series([120.0, 100.0, 100.0, 100.0, 100.0], index=index)
+    high = pd.Series([121.0, 101.1, 100.0, 100.0, 100.0], index=index)
+    low = pd.Series([119.0, 99.0, 99.0, 99.0, 99.0], index=index)
+    volatility = pd.Series([0.01] * len(index), index=index)
+    frozen_atr = pd.Series([np.nan, 1.0, 1.0, 1.0, 1.0], index=index)
+
+    labels = triple_barrier(
+        close,
+        volatility,
+        high,
+        low,
+        max_hold=2,
+        entry_open=opens,
+        entry_atr=frozen_atr,
+        stop_atr=2.0,
+        take_profit_atr=1.0,
+        round_trip_cost_bps=20.0,
+    )
+    # The target is only 1% away while round-trip execution costs are 20 bps.
+    assert labels.iloc[0] == 0.0
