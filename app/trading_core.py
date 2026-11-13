@@ -196,7 +196,8 @@ def triple_barrier(
                 lower = entry_price * (1.0 - sl_mult * frozen_vol - cost_fraction)
             # Price gaps are executable at the observed open, not at a stale barrier.
             if has_executable_open and j > entry_i and opens[j] >= upper:
-                y[i] = 1
+                gross_return = opens[j] / entry_price - 1.0
+                y[i] = 1 if (not has_execution_atr or gross_return > cost_fraction) else 0
                 break
             if has_executable_open and j > entry_i and opens[j] <= lower:
                 y[i] = -1
@@ -475,6 +476,14 @@ def ai_walk_forward_backtest(
         raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
+    # Use the identical completed-bar ATR input used by the execution simulator:
+    # ATR is shifted one bar so the signal at close[i] enters at open[i+1].
+    label_true_range = pd.concat([
+        (aligned["high"] - aligned["low"]).abs(),
+        (aligned["high"] - aligned["close"].shift(1)).abs(),
+        (aligned["low"] - aligned["close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    entry_atr_for_label = label_true_range.rolling(14, min_periods=14).mean().shift(1)
     label_round_trip_costs: float | pd.Series = 2.0 * (taker_cost_bps + slippage_cost_bps)
     if session_costs_bps is not None:
         from .market_sessions import session_cost_series
@@ -484,6 +493,9 @@ def ai_walk_forward_backtest(
     y = triple_barrier(
         aligned.close, X.vol_24, aligned.high, aligned.low,
         max_hold=hold_horizon, entry_open=aligned.open,
+        entry_atr=entry_atr_for_label,
+        stop_atr=float(settings.strategy_stop_atr),
+        take_profit_atr=float(settings.strategy_take_profit_atr),
         round_trip_cost_bps=label_round_trip_costs,
     )
     valid = y.notna()
@@ -542,12 +554,7 @@ def ai_walk_forward_backtest(
         scores.extend(score.tolist())
         # The model decision and ATR are shifted to use only the prior completed bar.
         fold_position = np.r_[0, sig[:-1]].astype(float)
-        true_range = pd.concat([
-            (aligned["high"] - aligned["low"]).abs(),
-            (aligned["high"] - aligned["close"].shift(1)).abs(),
-            (aligned["low"] - aligned["close"].shift(1)).abs(),
-        ], axis=1).max(axis=1)
-        entry_atr = true_range.rolling(14, min_periods=14).mean().shift(1)
+        entry_atr = entry_atr_for_label
         fold_frame = aligned.iloc[te]
         fold_targets = pd.Series(fold_position, index=fold_frame.index, dtype=float)
         execution = simulate_execution_aware_strategy(
