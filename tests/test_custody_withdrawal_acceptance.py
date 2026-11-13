@@ -35,6 +35,7 @@ from app.db import (
     LedgerEntry,
     LedgerJournal,
     LedgerJournalLine,
+    Withdrawal,
 )
 
 
@@ -531,6 +532,103 @@ def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incid
                 assert incident.status == "OPEN"
                 detail = json.loads(incident.detail_json)
                 assert "settlement journal lines" in detail["problems"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+def test_legacy_partial_release_retry_uses_original_withdrawal_amount():
+    async def run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        request_id = "legacy-partial-release-request"
+        reference_id = f"{request_id}:release"
+        idem = f"withdrawal-release:{reference_id}"
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="legacy-partial-release-test",
+                    email="",
+                    display_name="Legacy partial release test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                db.add(
+                    CustomerLedgerAccount(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        available=Decimal("100"),
+                        trading_reserved=Decimal("0"),
+                        withdrawal_reserved=Decimal("0"),
+                    )
+                )
+                db.add(
+                    Withdrawal(
+                        customer_id=customer_id,
+                        wallet_id=None,
+                        request_id=request_id,
+                        amount=Decimal("30"),
+                        currency="USDT",
+                        status="FAILED",
+                    )
+                )
+                journal = LedgerJournal(
+                    currency="USDT",
+                    entry_type="WITHDRAWAL_RELEASE",
+                    reference_type="WITHDRAWAL",
+                    reference_id=reference_id,
+                    idempotency_key=idem,
+                    description="Legacy partial release without requested-amount metadata",
+                )
+                db.add(journal)
+                await db.flush()
+                db.add_all(
+                    [
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=1,
+                            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=10,
+                            credit=0,
+                        ),
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=2,
+                            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE",
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=0,
+                            credit=10,
+                        ),
+                    ]
+                )
+                db.add(
+                    LedgerEntry(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        entry_type="WITHDRAWAL_RELEASE",
+                        debit=0,
+                        credit=10,
+                        amount=10,
+                        reference_type="WITHDRAWAL",
+                        reference_id=reference_id,
+                        idempotency_key=idem,
+                        metadata_json="{}",
+                    )
+                )
+                await db.commit()
+
+                # The old ledger only stored the effective release (10), while
+                # the immutable withdrawal request preserves the original ask (30).
+                result = await release_withdrawal(
+                    db, customer_id, 30, reference_id=reference_id
+                )
+                assert result.customer_id == customer_id
         finally:
             await engine.dispose()
 
