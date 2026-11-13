@@ -55,7 +55,7 @@ from .usdt_tron import derive_usdt_tron_address_from_xpub, validate_tron_account
 from .tron_reconciliation import parse_tron_usdt_balance
 from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, classify_solidified_sweep, USDT_SCALE
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
-from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal
+from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay, verify_customer_ledger_balances_match_journals
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
@@ -7831,10 +7831,8 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                 try:
                     await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=_withdrawal_release_ref(w2.request_id))
                 except WithdrawalReplayMismatch as mismatch:
-                    # Commit the definitive provider outcome first. Persist the HIGH
-                    # incident afterward on this same session to avoid a SQLite
-                    # second-writer lock while preserving the FAILED state.
-                    await db2.commit()
+                    # Persist the confirmed FAILED outcome and HIGH replay incident together
+                    # in this transaction; the helper uses a SAVEPOINT for duplicate-key races.
                     await persist_withdrawal_replay_mismatch(db2, mismatch)
                     await db2.commit()
                     await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -7883,9 +7881,8 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                         await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=_withdrawal_release_ref(w3.request_id))
                         await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
                 except WithdrawalReplayMismatch as mismatch:
-                    # Provider outcome is definitive; persist it before the replay
-                    # incident, using the same session after the first commit.
-                    await db3.commit()
+                    # The confirmed provider outcome and replay incident are committed together
+                    # so an incident-store failure cannot strand an unrepairable terminal withdrawal.
                     await persist_withdrawal_replay_mismatch(db3, mismatch)
                     await db3.commit()
                     await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -8001,7 +7998,6 @@ async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileReque
                 await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
                 await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         except WithdrawalReplayMismatch as mismatch:
-            await db.commit()
             await persist_withdrawal_replay_mismatch(db, mismatch)
             await db.commit()
             await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -8078,9 +8074,8 @@ async def mark_withdrawal_not_sent(
             await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
             await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         except WithdrawalReplayMismatch as mismatch:
-            # The provider lookup proved no payout exists. Commit its terminal
-            # state, then durably record the replay incident on this same session.
-            await db.commit()
+            # The provider lookup proved no payout exists. Persist its terminal
+            # state and replay incident together in this transaction.
             await persist_withdrawal_replay_mismatch(db, mismatch)
             await db.commit()
             await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -8123,7 +8118,6 @@ async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin
             await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
             await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         except WithdrawalReplayMismatch as mismatch:
-            await db.commit()
             await persist_withdrawal_replay_mismatch(db, mismatch)
             await db.commit()
             await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
@@ -8149,13 +8143,15 @@ async def repair_withdrawal_ledger(
     x_release_token: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
 ):
-    """Repair a quarantined terminal ledger action after independent outcome verification.
+    """Confirm an out-of-band ledger repair after independent outcome verification.
 
-    This route never submits a payout. It requires separate Treasury operator and
-    approver identities, a configured release credential, a matching OPEN HIGH
-    replay incident, and either a verified provider terminal state or a recorded
-    pre-execution rejection. Existing journal entries are revalidated by the ledger
-    service before they can be treated as idempotent.
+    This route never submits a payout or posts a corrective journal. It requires
+    separate Treasury operator and approver identities, a configured release
+    credential, a matching OPEN HIGH replay incident, and a verified provider
+    terminal state (or a recorded pre-execution rejection). An operator must first
+    complete the ledger correction through the approved accounting process. This
+    endpoint only resolves the incident after the original journal, LedgerEntry,
+    and complete journal line shape pass the replay-integrity validator.
     """
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
@@ -8317,26 +8313,30 @@ async def repair_withdrawal_ledger(
             raise HTTPException(409, "Replay incident identity does not match this withdrawal")
 
         try:
-            if action == "settle":
-                await settle_withdrawal(db, w.customer_id, w.amount, reference_id=reference_id)
-            else:
-                await ledger_release_withdrawal(
-                    db, w.customer_id, w.amount, reference_id=reference_id
-                )
-            await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+            await verify_existing_withdrawal_action_replay(
+                db,
+                w.customer_id,
+                w.amount,
+                reference_id=reference_id,
+                action=action,
+            )
+            await verify_customer_ledger_balances_match_journals(
+                db, w.customer_id, w.currency or "USDT"
+            )
         except WithdrawalReplayMismatch as mismatch:
-            # Preserve the already-confirmed terminal status and evidence before
-            # persisting the still-open mismatch incident on this same session.
-            await db.commit()
-            await persist_withdrawal_replay_mismatch(db, mismatch)
-            await db.commit()
-            await _audit("WITHDRAWAL_LEDGER_REPAIR_BLOCKED", {
-                "id": w.id, "action": action, "provider_status": confirmed_provider_status,
-                "reason": str(mismatch),
-            })
             raise HTTPException(
-                409, "Existing ledger journal remains inconsistent; reserve is held for manual ledger reconciliation"
+                409,
+                "The original withdrawal journal is still inconsistent; complete the manual ledger repair before resolving this incident",
             ) from mismatch
+        except ValueError as exc:
+            raise HTTPException(
+                409,
+                "The original journal and customer ledger balances must both reconcile; keep the reserve held until the manual balance correction is complete",
+            ) from exc
+
+        # The ledger correction is already present and validated. Refresh only the
+        # legacy wallet mirror; never call the failed release/settlement posting again.
+        await sync_wallet_from_ledger(db, w.customer_id, "USDT")
 
         incident.status = "RESOLVED"
         incident.resolved_at = datetime.now(timezone.utc)
@@ -8345,6 +8345,7 @@ async def repair_withdrawal_ledger(
             {
                 **incident_detail,
                 "repair": {
+                    "method": "verified_preexisting_manual_ledger_repair",
                     "operator_id": req.operator_id,
                     "approver_id": req.admin_id,
                     "evidence": req.evidence.strip(),

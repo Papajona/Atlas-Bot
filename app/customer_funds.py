@@ -64,22 +64,22 @@ async def record_ledger_incident(
                     customer_id=customer_id, summary=summary[:500], detail_json=payload))
 
 async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMismatch) -> None:
-    """Persist a replay incident after the caller commits pending withdrawal state.
+    """Persist the HIGH replay incident in the caller's still-open transaction.
 
-    Use the caller's session. Opening a second SQLite writer while the caller has
-    an autoflushed Withdrawal update can block until the database busy timeout.
-    Endpoint handlers commit the confirmed outcome first, then call this helper.
+    Callers commit the confirmed withdrawal outcome and this incident together.
+    The SAVEPOINT isolates a concurrent duplicate incident-key insert without
+    rolling back (or expiring ORM objects in) the caller's transaction.
     """
     try:
-        await record_ledger_incident(db, **mismatch.incident_args)
-        # Force the unique-key insert here so an IntegrityError is handled before
-        # the caller's final commit. Otherwise the race would escape this helper.
-        await db.flush()
+        async with db.begin_nested():
+            await record_ledger_incident(db, **mismatch.incident_args)
+            # Surface unique-key races inside the SAVEPOINT, not at outer commit.
+            await db.flush()
     except IntegrityError:
-        # Two independently verified duplicate replays can race to create the
-        # same unique incident key. The caller's confirmed withdrawal state was
-        # already committed, so retry the upsert after clearing this transaction.
-        await db.rollback()
+        # Another transaction may have inserted the same deterministic incident
+        # key after our SELECT. The failed SAVEPOINT is rolled back; the outer
+        # transaction and its already-flushed Withdrawal state remain untouched.
+        # Retry the upsert now that the competing row is visible.
         await record_ledger_incident(db, **mismatch.incident_args)
         await db.flush()
 
@@ -597,10 +597,148 @@ async def _validate_withdrawal_action_replay(
             "customer_id": customer_id,
             "severity": "HIGH",
         }
-        # The workflow handler owns persistence order: it first commits any
-        # confirmed provider/rejection state, then writes this incident through
-        # the same session so SQLite never contends with its own writer.
+        # The workflow handler persists this mismatch through the caller's
+        # session and commits the confirmed withdrawal outcome with the incident.
+        # Keeping the write out of this validator avoids a separate SQLite writer.
         raise WithdrawalReplayMismatch(incident_args)
+
+
+async def verify_customer_ledger_balances_match_journals(
+    db, customer_id: int, currency: str = USDT
+) -> CustomerLedgerAccount:
+    """Fail closed unless customer ledger buckets reconcile to immutable journals.
+
+    A valid replay journal alone is insufficient: the denormalized account row may
+    still retain the reserve (or another stale bucket value). Reconstruct available,
+    trading-reserved, and withdrawal-reserved balances from their customer-account
+    journal lines and compare them with the locked ledger account before any repair
+    incident is resolved or the wallet mirror is synchronized.
+    """
+    currency = str(currency or "").upper()
+    if not currency:
+        raise ValueError("customer ledger currency is required")
+    ledger = (
+        await db.execute(
+            select(CustomerLedgerAccount)
+            .where(
+                CustomerLedgerAccount.customer_id == customer_id,
+                CustomerLedgerAccount.currency == currency,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if ledger is None:
+        raise ValueError("customer ledger account is missing")
+
+    buckets = {
+        "AVAILABLE": "available",
+        "TRADING_RESERVED": "trading_reserved",
+        "WITHDRAWAL_RESERVED": "withdrawal_reserved",
+    }
+    account_codes = {
+        _customer_account(customer_id, bucket, currency): field
+        for bucket, field in buckets.items()
+    }
+    if db.bind.dialect.name == "sqlite":
+        # SQLite stores NUMERIC values as binary floating point and its SUM()
+        # accumulator can discard micro-unit remainders after large turnover.
+        # Read each six-decimal line independently and accumulate with Decimal.
+        rows = (
+            await db.execute(
+                select(
+                    LedgerJournalLine.account_code,
+                    LedgerJournalLine.debit,
+                    LedgerJournalLine.credit,
+                ).where(
+                    LedgerJournalLine.customer_id == customer_id,
+                    LedgerJournalLine.currency == currency,
+                    LedgerJournalLine.account_code.in_(tuple(account_codes)),
+                )
+            )
+        ).all()
+        journal_balances = {account_code: D("0") for account_code in account_codes}
+        for account_code, debit, credit in rows:
+            journal_balances[str(account_code)] += _q(credit) - _q(debit)
+    else:
+        # PostgreSQL NUMERIC (and other exact numeric backends) aggregate exactly
+        # in the database and avoid transferring the complete journal history.
+        rows = (
+            await db.execute(
+                select(
+                    LedgerJournalLine.account_code,
+                    func.coalesce(
+                        func.sum(LedgerJournalLine.credit - LedgerJournalLine.debit), 0
+                    ),
+                )
+                .where(
+                    LedgerJournalLine.customer_id == customer_id,
+                    LedgerJournalLine.currency == currency,
+                    LedgerJournalLine.account_code.in_(tuple(account_codes)),
+                )
+                .group_by(LedgerJournalLine.account_code)
+            )
+        ).all()
+        journal_balances = {
+            str(account_code): _q(balance)
+            for account_code, balance in rows
+        }
+    mismatches = []
+    for account_code, field in account_codes.items():
+        journal_balance = journal_balances.get(account_code, D("0"))
+        ledger_balance = _q(getattr(ledger, field))
+        if ledger_balance != journal_balance:
+            mismatches.append(
+                f"{field}: ledger={ledger_balance} journal={journal_balance}"
+            )
+    if mismatches:
+        raise ValueError(
+            "customer ledger balances do not reconcile with immutable journal history ("
+            + "; ".join(mismatches)
+            + ")"
+        )
+    return ledger
+
+
+async def verify_existing_withdrawal_action_replay(
+    db, customer_id: int, amount: float, *, reference_id: str, action: str
+) -> LedgerJournal:
+    """Confirm that an operator's manual ledger repair restored the original journal.
+
+    This function is intentionally read/validate-only: it never posts a second
+    release or settlement under a new or reused idempotency key. A repair may be
+    acknowledged only when the original journal, LedgerEntry, and complete line
+    shape now pass the same replay-integrity validator used by normal workflows.
+    """
+    if action not in {"release", "settle"}:
+        raise ValueError("unsupported withdrawal replay action")
+    amount_d = _q(amount)
+    if amount_d <= 0:
+        raise ValueError("withdrawal replay amount must be positive")
+    idem = (
+        f"withdrawal-release:{reference_id}"
+        if action == "release"
+        else f"withdrawal-settlement:{reference_id}"
+    )
+    journal = (
+        await db.execute(
+            select(LedgerJournal)
+            .where(LedgerJournal.idempotency_key == idem)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if journal is None:
+        raise ValueError(
+            "the original withdrawal journal is missing; manual ledger reconciliation is required"
+        )
+    await _validate_withdrawal_action_replay(
+        db,
+        journal,
+        customer_id=customer_id,
+        amount_d=amount_d,
+        reference_id=reference_id,
+        action=action,
+    )
+    return journal
 
 
 async def release_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:

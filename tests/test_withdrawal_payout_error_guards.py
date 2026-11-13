@@ -125,31 +125,32 @@ def test_sweep_and_withdrawal_terminal_states_are_explicit():
     assert 'return "UNKNOWN"' in sweep
 
 def test_confirmed_provider_outcomes_survive_ledger_replay_mismatches():
-    release = ast.unparse(_fn("release_withdrawal"))
-    assert "except WithdrawalReplayMismatch as mismatch" in release
-    assert "await db2.commit()" in release
-    assert "persist_withdrawal_replay_mismatch(db2, mismatch)" in release
-    assert "await db3.commit()" in release
-    assert "persist_withdrawal_replay_mismatch(db3, mismatch)" in release
-    assert "WITHDRAWAL_LEDGER_REPLAY_MISMATCH" in release
-
-    reconcile = ast.unparse(_fn("reconcile_withdrawal"))
-    assert "except WithdrawalReplayMismatch as mismatch" in reconcile
-    assert "await db.commit()" in reconcile
-    assert "persist_withdrawal_replay_mismatch(db, mismatch)" in reconcile
-
-    mark_not_sent = ast.unparse(_fn("mark_withdrawal_not_sent"))
-    assert "except WithdrawalReplayMismatch as mismatch" in mark_not_sent
-    assert "w.provider_status = 'NOT_SENT'" in mark_not_sent
-    assert "await db.commit()" in mark_not_sent
-    assert "persist_withdrawal_replay_mismatch(db, mismatch)" in mark_not_sent
+    for function_name in (
+        "release_withdrawal",
+        "reconcile_withdrawal",
+        "mark_withdrawal_not_sent",
+        "reject_withdrawal",
+    ):
+        handlers = [
+            node for node in ast.walk(_fn(function_name))
+            if isinstance(node, ast.ExceptHandler)
+            and ast.unparse(node.type) == "WithdrawalReplayMismatch"
+        ]
+        assert handlers, function_name
+        if function_name == "release_withdrawal":
+            assert len(handlers) == 2
+        for handler in handlers:
+            source = ast.unparse(handler)
+            persist_at = source.find("persist_withdrawal_replay_mismatch(")
+            commit_at = source.find(".commit(")
+            assert persist_at >= 0, source
+            assert commit_at > persist_at, source
+            assert source.count(".commit(") == 1, source
 
     reject = ast.unparse(_fn("reject_withdrawal"))
-    assert "except WithdrawalReplayMismatch as mismatch" in reject
     assert "w.rejected_by = req.admin_id" in reject
     assert "w.rejection_reason = req.reason.strip()" in reject
-    assert "await db.commit()" in reject
-    assert "persist_withdrawal_replay_mismatch(db, mismatch)" in reject
+
 
 
 def test_terminal_withdrawal_ledger_repair_is_authorized_and_never_sends():
@@ -165,11 +166,14 @@ def test_terminal_withdrawal_ledger_repair_is_authorized_and_never_sends():
         "recover(",
         "PayoutNotFound",
         "WITHDRAWAL_REPLAY_MISMATCH:",
-        "persist_withdrawal_replay_mismatch(db, mismatch)",
+        "verify_existing_withdrawal_action_replay(",
+        "verify_customer_ledger_balances_match_journals(",
         "incident.status = 'RESOLVED'",
         "'provider_send_attempted': False",
     ):
         assert required in repair, required
     assert "provider.send(" not in repair
     assert ".send(" not in repair
+    assert "settle_withdrawal(" not in repair
+    assert "ledger_release_withdrawal(" not in repair
 
