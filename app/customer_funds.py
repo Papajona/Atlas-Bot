@@ -431,62 +431,90 @@ async def _validate_withdrawal_action_replay(
             )
         )
     ).scalars().all()
+    reserved_account = _customer_account(customer_id, "WITHDRAWAL_RESERVED")
+    available_account = _customer_account(customer_id, "AVAILABLE")
     if action == "release":
-        reserved_debit = sum(
-            (
-                D(str(line.debit))
-                for line in lines
-                if line.account_code == _customer_account(customer_id, "WITHDRAWAL_RESERVED")
-            ),
-            D("0"),
-        )
-        available_credit = sum(
-            (
-                D(str(line.credit))
-                for line in lines
-                if line.account_code == _customer_account(customer_id, "AVAILABLE")
-            ),
-            D("0"),
+        reserved_lines = [line for line in lines if line.account_code == reserved_account]
+        available_lines = [line for line in lines if line.account_code == available_account]
+        reserved_debit = sum((D(str(line.debit)) for line in reserved_lines), D("0"))
+        available_credit = sum((D(str(line.credit)) for line in available_lines), D("0"))
+        valid_release_shape = (
+            len(lines) == 2
+            and len(reserved_lines) == 1
+            and len(available_lines) == 1
+            and all(str(line.currency or "").upper() == USDT for line in lines)
+            and all(line.customer_id == customer_id for line in reserved_lines + available_lines)
+            and reserved_lines[0].credit == 0
+            and available_lines[0].debit == 0
         )
         if (
             entry is None
+            or not valid_release_shape
             or reserved_debit != D(str(entry.amount))
             or available_credit != D(str(entry.amount))
             or reserved_debit <= 0
+            or D(str(entry.debit)) != 0
+            or D(str(entry.credit)) != D(str(entry.amount))
+            or (
+                "effective_amount" in metadata
+                and _q(metadata["effective_amount"]) != D(str(entry.amount))
+            )
         ):
             problems.append("release journal lines")
     else:
-        custody_credit = sum(
-            (
-                D(str(line.credit))
-                for line in lines
-                if line.account_code == "ASSET:TRON:WITHDRAWAL"
-            ),
-            D("0"),
+        deficit_account = DEFICIT_ACCOUNT
+        deficit_lines = [line for line in lines if line.account_code == deficit_account]
+        reserved_lines = [line for line in lines if line.account_code == reserved_account]
+        custody_lines = [line for line in lines if line.account_code == "ASSET:TRON:WITHDRAWAL"]
+        reserved_debit = sum((D(str(line.debit)) for line in reserved_lines), D("0"))
+        deficit_debit = sum((D(str(line.debit)) for line in deficit_lines), D("0"))
+        custody_credit = sum((D(str(line.credit)) for line in custody_lines), D("0"))
+        expected_line_count = 1 + int(bool(reserved_lines)) + int(bool(deficit_lines))
+        valid_settlement_shape = (
+            len(lines) == expected_line_count
+            and len(custody_lines) == 1
+            and len(reserved_lines) <= 1
+            and len(deficit_lines) <= 1
+            and all(str(line.currency or "").upper() == USDT for line in lines)
+            and all(line.customer_id == customer_id for line in reserved_lines + deficit_lines)
+            and custody_lines[0].customer_id is None
+            and custody_lines[0].debit == 0
+            and all(line.credit == 0 for line in reserved_lines + deficit_lines)
+            and sum((D(str(line.debit)) for line in lines), D("0")) == amount_d
         )
-        customer_line_present = any(
-            line.customer_id == customer_id
-            and line.account_code
-            in {
-                _customer_account(customer_id, "WITHDRAWAL_RESERVED"),
-                DEFICIT_ACCOUNT,
-            }
-            for line in lines
-        )
+        if entry is None:
+            valid_entry_shape = False
+        else:
+            valid_entry_shape = (
+                D(str(entry.debit)) == amount_d
+                and D(str(entry.credit)) == 0
+                and D(str(entry.amount)) == amount_d
+            )
         if (
-            entry is None
+            not valid_settlement_shape
+            or not valid_entry_shape
             or custody_credit != amount_d
-            or D(str(entry.amount)) != amount_d
-            or not customer_line_present
+            or reserved_debit + deficit_debit != amount_d
+            or (
+                "settled_from_reserve" in metadata
+                and _q(metadata["settled_from_reserve"]) != reserved_debit
+            )
+            or (
+                "shortfall" in metadata
+                and _q(metadata["shortfall"]) != deficit_debit
+            )
         ):
             problems.append("settlement journal lines")
 
     if problems:
-        await record_ledger_incident(
-            db,
-            key=f"WITHDRAWAL_REPLAY_MISMATCH:{journal.idempotency_key}",
-            summary="Withdrawal idempotency key replayed with a different or inconsistent operation",
-            detail={
+        # Roll back the failed caller transaction first. Persist the incident in
+        # a new transaction on this same session so a later caller rollback cannot
+        # erase the security/audit record. The rejected replay remains an error.
+        await db.rollback()
+        incident_args = {
+            "key": f"WITHDRAWAL_REPLAY_MISMATCH:{journal.idempotency_key}",
+            "summary": "Withdrawal idempotency key replayed with a different or inconsistent operation",
+            "detail": {
                 "action": action,
                 "customer_id": customer_id,
                 "reference_id": reference_id,
@@ -494,9 +522,25 @@ async def _validate_withdrawal_action_replay(
                 "idempotency_key": journal.idempotency_key,
                 "problems": problems,
             },
-            customer_id=customer_id,
-            severity="HIGH",
-        )
+            "customer_id": customer_id,
+            "severity": "HIGH",
+        }
+        try:
+            await record_ledger_incident(db, **incident_args)
+            await db.commit()
+        except IntegrityError:
+            # A concurrent mismatched replay may create the same incident key
+            # between our SELECT and INSERT. Retry after observing the winner.
+            await db.rollback()
+            await record_ledger_incident(db, **incident_args)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.critical(
+                "withdrawal_replay_incident_persist_failed key=%s",
+                incident_args["key"],
+                exc_info=True,
+            )
         raise ValueError(
             "withdrawal idempotency key already used with a different or inconsistent operation"
         )
