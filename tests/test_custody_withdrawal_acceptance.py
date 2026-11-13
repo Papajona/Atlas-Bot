@@ -437,18 +437,31 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
 
     asyncio.run(run())
 
-def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incident():
+@pytest.mark.parametrize(
+    "reserved_debit,deficit_debit,metadata_reserved,metadata_shortfall",
+    [
+        (Decimal("20"), Decimal("10"), Decimal("20"), Decimal("10")),
+        (Decimal("-5"), Decimal("35"), Decimal("-5"), Decimal("35")),
+    ],
+)
+def test_settlement_replay_rejects_invalid_debit_components_and_persists_incident(
+    reserved_debit, deficit_debit, metadata_reserved, metadata_shortfall
+):
     async def run():
-        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        sqlite_path = os.path.join(tempfile.gettempdir(), f"atlas-corrupt-settlement-{uuid.uuid4().hex}.db")
+        engine = create_async_engine(f"sqlite+aiosqlite:///{sqlite_path}", pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
-        reference_id = "corrupt-settlement-debit-split"
+        reference_id = f"corrupt-settlement-debit-split-{uuid.uuid4().hex}"
         idem = f"withdrawal-settlement:{reference_id}"
         try:
+            async with engine.connect() as conn:
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                await conn.commit()
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             async with sessions() as db:
                 profile = CustomerProfile(
-                    auth_user_id="corrupt-settlement-debit-split-test",
+                    auth_user_id=f"corrupt-settlement-debit-split-{uuid.uuid4().hex}",
                     email="",
                     display_name="Replay validation test",
                 )
@@ -482,7 +495,7 @@ def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incid
                             account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
                             customer_id=customer_id,
                             currency="USDT",
-                            debit=20,
+                            debit=reserved_debit,
                             credit=0,
                         ),
                         LedgerJournalLine(
@@ -491,7 +504,7 @@ def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incid
                             account_code=DEFICIT_ACCOUNT,
                             customer_id=customer_id,
                             currency="USDT",
-                            debit=10,
+                            debit=deficit_debit,
                             credit=0,
                         ),
                         LedgerJournalLine(
@@ -519,8 +532,8 @@ def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incid
                         metadata_json=json.dumps(
                             {
                                 "requested_amount": "30.000000",
-                                "settled_from_reserve": "30.000000",
-                                "shortfall": "0.000000",
+                                "settled_from_reserve": format(metadata_reserved, "f"),
+                                "shortfall": format(metadata_shortfall, "f"),
                             },
                             separators=(",", ":"),
                         ),
@@ -528,10 +541,11 @@ def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incid
                 )
                 await db.commit()
 
-                with pytest.raises(ValueError, match="different or inconsistent operation"):
-                    await settle_withdrawal(
-                        db, customer_id, 30, reference_id=reference_id
-                    )
+                with mock.patch("app.customer_funds.SessionLocal", sessions):
+                    with pytest.raises(ValueError, match="different or inconsistent operation"):
+                        await settle_withdrawal(
+                            db, customer_id, 30, reference_id=reference_id
+                        )
                 await db.rollback()
 
                 incident = (
@@ -548,8 +562,14 @@ def test_settlement_replay_rejects_wrong_customer_debit_split_and_persists_incid
                 assert "settlement journal lines" in detail["problems"]
         finally:
             await engine.dispose()
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(sqlite_path + suffix)
+                except FileNotFoundError:
+                    pass
 
     asyncio.run(run())
+
 
 def test_legacy_partial_release_retry_uses_original_withdrawal_amount():
     async def run():
