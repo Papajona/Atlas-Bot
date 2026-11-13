@@ -1126,7 +1126,8 @@ def parameter_plateau_score(results: dict, *, metric: str = "sharpe", tolerance:
     return {"status":"OK","metric":metric,"best":best,"floor":floor,"plateau_ratio":plateau,"robust":plateau>=0.30,"variants":len(vals)}
 
 
-def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bars_per_year: int) -> dict:
+def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bars_per_year: int,
+                           *, use_effective_n: bool = True) -> dict:
     """Formal Deflated Sharpe Ratio (Bailey & Lopez de Prado 2014) for the selected strategy's net per-bar returns.
 
     n_trials must count EVERY variant evaluated on this data (strategies, parameter variants, AI configs, earlier runs);
@@ -1143,10 +1144,17 @@ def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bar
     per_period = [float(s) / math.sqrt(max(1, bars_per_year)) for s in trial_sharpes_annual if np.isfinite(s)]
     var = float(np.var(per_period, ddof=1)) if len(per_period) > 1 else 0.0
     trials = max(1, int(n_trials))
-    dsr = deflated_sharpe_ratio(sr, len(x), trials, var, skew=skew, kurt=kurt)
+    # Strategy returns are rarely independent. Use the autocorrelation-aware effective sample size
+    # (the same Newey-West diagnostic the promotion gate uses) so the DSR is not more confident than the t-test.
+    n_eff = int(len(x))
+    if use_effective_n:
+        nw = newey_west_mean_inference(x)
+        if nw.get("status") == "OK":
+            n_eff = int(min(len(x), max(2, nw["effective_observations"])))
+    dsr = deflated_sharpe_ratio(sr, n_eff, trials, var, skew=skew, kurt=kurt)
     return {"status": "OK", "deflated_sharpe_ratio": float(dsr), "per_period_sharpe": sr,
             "sharpe_hurdle_per_period": float(expected_max_sharpe(trials, var)), "trials": trials,
-            "observations": int(len(x)), "skew": skew, "kurtosis": kurt,
+            "observations": int(len(x)), "effective_observations": n_eff, "skew": skew, "kurtosis": kurt,
             "note": "Probability the Sharpe is real after correcting for selection among `trials`; >= 0.95 is the usual bar."}
 
 
