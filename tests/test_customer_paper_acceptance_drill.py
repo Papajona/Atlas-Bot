@@ -247,7 +247,7 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
     asyncio.run(run())
 
 
-def test_acceptance_workflow_is_pinned_to_the_triggering_deployment_sha():
+def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     from pathlib import Path
 
     workflow = (
@@ -256,12 +256,43 @@ def test_acceptance_workflow_is_pinned_to_the_triggering_deployment_sha():
         / "workflows"
         / "customer-paper-staging-acceptance.yml"
     ).read_text(encoding="utf-8")
-    assert "github.event.workflow_run.head_sha || github.sha" in workflow
-    assert 'test "$TARGET_SHA" = "${{ github.event.workflow_run.head_sha }}"' in workflow
-    assert 'ref: ${{ github.event.workflow_run.head_sha || github.sha }}' in workflow
-    assert 'test "$TARGET_SHA" = "$GITHUB_SHA"' in workflow
+    trigger_header = workflow.split("\\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger_header
+    assert "workflow_run:" not in trigger_header
+    assert "target_sha:" in trigger_header
+    assert "deployment_run_id:" in trigger_header
+    assert "run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }}" in workflow
+    assert "TARGET_SHA: ${{ inputs.target_sha }}" in workflow
+    assert "DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}" in workflow
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
+    assert 'test "$deployment_name" = "Deploy Paper-Only Atlas Staging"' in workflow
+    assert 'test "$deployment_sha" = "$TARGET_SHA"' in workflow
+    assert 'test "$deployment_status" = "completed"' in workflow
+    assert 'test "$deployment_conclusion" = "success"' in workflow
+    assert "ref: ${{ inputs.target_sha }}" in workflow
+    assert "actions: read" in workflow
     assert "git ls-remote" not in workflow
     assert "[atlas-paper-acceptance-drill]" not in workflow
+
+
+def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_preflight():
+    from pathlib import Path
+
+    deploy = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "staging-paper-deploy.yml"
+    ).read_text(encoding="utf-8")
+    preflight = deploy.index("Dispatch and require read-only staging identity preflight on this exact commit")
+    acceptance = deploy.index("Dispatch and require customer-paper acceptance on this exact deployment")
+    assert preflight < acceptance
+    assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
+    assert '-f "target_sha=$GITHUB_SHA"' in deploy
+    assert '-f "deployment_run_id=$GITHUB_RUN_ID"' in deploy
+    assert 'gh run view "$acceptance_run_id"' in deploy
+    assert "PASS: customer-paper acceptance run" in deploy
+    assert "BLOCKED: customer-paper acceptance run" in deploy
 
 
 def test_acceptance_workflow_checks_project_and_least_privilege_roles_before_drill():
