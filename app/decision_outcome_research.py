@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 
@@ -700,46 +700,64 @@ async def load_all_decision_outcome_labels(
     decoded_bytes = 0
     before_id = None
     async with SessionLocal() as db:
-        while True:
-            query = (
-                select(AuditLog.id, AuditLog.detail)
-                .where(AuditLog.event == "ADAPTIVE_DECISION_OUTCOME_LABEL")
-                .order_by(AuditLog.id.asc())
-                .limit(batch_size)
-            )
-            if before_id is not None:
-                query = query.where(AuditLog.id > before_id)
-            batch = (await db.execute(query)).all()
-            if not batch:
-                break
-            before_id = int(batch[-1][0])
-            for _row_id, detail in batch:
-                if isinstance(detail, dict):
-                    record = detail
-                elif isinstance(detail, str):
-                    try:
-                        record = json.loads(detail)
-                    except (TypeError, ValueError) as exc:
+        # All keyset pages must observe the same committed audit-log snapshot.
+        # Under PostgreSQL's default READ COMMITTED isolation, each SELECT can see
+        # a different snapshot; a concurrent label write could otherwise create
+        # a partially mixed corpus while this one-time holdout is being frozen.
+        async with db.begin():
+            dialect = db.get_bind().dialect.name
+            if dialect == "postgresql":
+                # Must be the first database statement in this transaction.
+                await db.execute(text(
+                    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+                ))
+            elif dialect == "sqlite":
+                # sqlite3 legacy transaction mode does not start a read snapshot
+                # for SELECT statements, so explicitly begin before the first page.
+                await db.execute(text("BEGIN"))
+            else:
+                raise RuntimeError(
+                    f"consistent decision-label snapshots are unsupported for {dialect!r}"
+                )
+            while True:
+                query = (
+                    select(AuditLog.id, AuditLog.detail)
+                    .where(AuditLog.event == "ADAPTIVE_DECISION_OUTCOME_LABEL")
+                    .order_by(AuditLog.id.asc())
+                    .limit(batch_size)
+                )
+                if before_id is not None:
+                    query = query.where(AuditLog.id > before_id)
+                batch = (await db.execute(query)).all()
+                if not batch:
+                    break
+                before_id = int(batch[-1][0])
+                for _row_id, detail in batch:
+                    if isinstance(detail, dict):
+                        record = detail
+                    elif isinstance(detail, str):
+                        try:
+                            record = json.loads(detail)
+                        except (TypeError, ValueError) as exc:
+                            raise DecisionOutcomeHistoryIntegrityError(
+                                f"matching decision-outcome audit row {int(_row_id)} contains malformed JSON; "
+                                "holdout was not consumed"
+                            ) from exc
+                    else:
                         raise DecisionOutcomeHistoryIntegrityError(
-                            f"matching decision-outcome audit row {int(_row_id)} contains malformed JSON; "
+                            f"matching decision-outcome audit row {int(_row_id)} has an unsupported detail type; "
                             "holdout was not consumed"
-                        ) from exc
-                else:
-                    raise DecisionOutcomeHistoryIntegrityError(
-                        f"matching decision-outcome audit row {int(_row_id)} has an unsupported detail type; "
-                        "holdout was not consumed"
-                    )
-                if not isinstance(record, dict):
-                    raise DecisionOutcomeHistoryIntegrityError(
-                        f"matching decision-outcome audit row {int(_row_id)} is not a JSON object; "
-                        "holdout was not consumed"
-                    )
-                if record.get("record_type") != "adaptive_decision_outcome_label":
-                    raise DecisionOutcomeHistoryIntegrityError(
-                        f"matching decision-outcome audit row {int(_row_id)} has an invalid record_type; "
-                        "holdout was not consumed"
-                    )
-                if isinstance(record, dict):
+                        )
+                    if not isinstance(record, dict):
+                        raise DecisionOutcomeHistoryIntegrityError(
+                            f"matching decision-outcome audit row {int(_row_id)} is not a JSON object; "
+                            "holdout was not consumed"
+                        )
+                    if record.get("record_type") != "adaptive_decision_outcome_label":
+                        raise DecisionOutcomeHistoryIntegrityError(
+                            f"matching decision-outcome audit row {int(_row_id)} has an invalid record_type; "
+                            "holdout was not consumed"
+                        )
                     try:
                         record_bytes = len(json.dumps(
                             record, sort_keys=True, separators=(",", ":"), allow_nan=False,
@@ -757,6 +775,6 @@ async def load_all_decision_outcome_labels(
                             "holdout was not consumed"
                         )
                     result.append(record)
-            if len(batch) < batch_size:
-                break
+                if len(batch) < batch_size:
+                    break
     return result
