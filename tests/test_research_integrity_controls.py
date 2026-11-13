@@ -584,20 +584,25 @@ def test_sqlite_shared_memory_uri_skips_wal_and_connects():
 def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_rows(tmp_path, monkeypatch):
     import asyncio
     import json
-    from sqlalchemy import Integer, String, Text, func, select
+    from sqlalchemy import Column, Integer, MetaData, String, Table, Text, func, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-    from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+    from sqlalchemy.orm import registry
     from app import db as db_module
     from app.decision_outcome_research import load_all_decision_outcome_labels
 
-    class _TestBase(DeclarativeBase):
+    test_mapper_registry = registry()
+    test_audit_table = Table(
+        "holdout_snapshot_audit_log",
+        test_mapper_registry.metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("event", String(80), nullable=False),
+        Column("detail", Text, nullable=False),
+    )
+
+    class _TestAuditLog:
         pass
 
-    class _TestAuditLog(_TestBase):
-        __tablename__ = "holdout_snapshot_audit_log"
-        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-        event: Mapped[str] = mapped_column(String(80), nullable=False)
-        detail: Mapped[str] = mapped_column(Text, nullable=False)
+    test_mapper_registry.map_imperatively(_TestAuditLog, test_audit_table)
 
     async def run():
         database_url = f"sqlite+aiosqlite:///{tmp_path / 'holdout-snapshot.db'}"
@@ -629,7 +634,7 @@ def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_row
         )
         try:
             async with engine.begin() as connection:
-                await connection.run_sync(_TestBase.metadata.create_all)
+                await connection.run_sync(test_mapper_registry.metadata.create_all)
             async with writer_sessions() as db:
                 db.add_all([
                     _TestAuditLog(
