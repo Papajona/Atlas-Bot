@@ -617,6 +617,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             if execution_cost_context is not None or session_costs_bps is not None
             else None
         ),
+        execution_cost_context=execution_cost_context,
+        benchmark_execution_cost_namespace="research:ensemble",
     )
     oos["execution_cost_model_complete"] = (
         ensemble_audit.get("per_bar_execution_cost_model_complete") is True
@@ -674,6 +676,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 if execution_cost_context is not None or session_costs_bps is not None
                 else None
             ),
+            execution_cost_context=execution_cost_context,
+            benchmark_execution_cost_namespace=f"research:{component}",
         )
         per_strategy_oos[component]["execution_cost_model_complete"] = (
             component_audit.get("per_bar_execution_cost_model_complete") is True
@@ -746,6 +750,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                     if execution_cost_context is not None or session_costs_bps is not None
                     else None
                 ),
+                execution_cost_context=execution_cost_context,
+                benchmark_execution_cost_namespace=variant_namespace,
             )
         variant_oos["execution_cost_model_complete"] = (
             variant_audit.get("per_bar_execution_cost_model_complete") is True
