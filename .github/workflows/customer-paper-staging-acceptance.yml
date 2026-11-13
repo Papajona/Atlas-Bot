@@ -1,18 +1,23 @@
 
 name: Customer Paper Staging Acceptance Drill
 
+run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }}
+
 on:
-  workflow_run:
-    workflows:
-      - Deploy Paper-Only Atlas Staging
-    types:
-      - completed
-    branches:
-      - main
   workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Exact commit deployed to paper-only staging
+        required: true
+        type: string
+      deployment_run_id:
+        description: Successful Deploy Paper-Only Atlas Staging workflow run ID
+        required: true
+        type: string
 
 permissions:
   contents: read
+  actions: read
   id-token: write
 
 concurrency:
@@ -21,13 +26,6 @@ concurrency:
 
 jobs:
   customer-paper-acceptance:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event_name == 'workflow_run' &&
-        github.event.workflow_run.head_branch == 'main' &&
-        github.event.workflow_run.conclusion == 'success'
-      )
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: staging
@@ -41,26 +39,40 @@ jobs:
       PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET || secrets.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
       EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE || secrets.ATLAS_STAGING_RUNTIME_DB_ROLE }}
       EXPECTED_PAPER_DB_ROLE: ${{ vars.ATLAS_STAGING_PAPER_DB_ROLE || secrets.ATLAS_STAGING_PAPER_DB_ROLE }}
-      TARGET_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      TARGET_SHA: ${{ inputs.target_sha }}
+      DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
     steps:
-      - name: Validate successful main deployment or manual main dispatch
+      - name: Validate exact successful main deployment
+        env:
+          GH_TOKEN: \${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            test "${{ github.event.workflow_run.head_branch }}" = "main"
-            test "${{ github.event.workflow_run.conclusion }}" = "success"
-            test "$TARGET_SHA" = "${{ github.event.workflow_run.head_sha }}"
-          else
-            test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
-            test "$GITHUB_REF" = "refs/heads/main"
-            test "$TARGET_SHA" = "$GITHUB_SHA"
-          fi
+          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          test "$GITHUB_REF" = "refs/heads/main"
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOYMENT_RUN_ID" =~ ^[0-9]+$ ]]
+          [[ "$DEPLOYMENT_RUN_ID" -gt 0 ]]
+
+          deployment_json="$(gh run view "$DEPLOYMENT_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json name,headSha,headBranch,status,conclusion)"
+          deployment_name="$(jq -r '.name // ""' <<< "$deployment_json")"
+          deployment_sha="$(jq -r '.headSha // ""' <<< "$deployment_json")"
+          deployment_branch="$(jq -r '.headBranch // ""' <<< "$deployment_json")"
+          deployment_status="$(jq -r '.status // ""' <<< "$deployment_json")"
+          deployment_conclusion="$(jq -r '.conclusion // ""' <<< "$deployment_json")"
+
+          test "$deployment_name" = "Deploy Paper-Only Atlas Staging"
+          test "$deployment_sha" = "$TARGET_SHA"
+          test "$deployment_branch" = "main"
+          test "$deployment_status" = "completed"
+          test "$deployment_conclusion" = "success"
+          echo "PASS: acceptance is authorized by successful paper-only staging deployment $DEPLOYMENT_RUN_ID on exact main commit $TARGET_SHA"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ inputs.target_sha }}
           fetch-depth: 1
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -72,7 +84,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          echo "PASS: acceptance drill is pinned to the completed deployment or reviewed manual-dispatch commit $TARGET_SHA; later main commits do not invalidate this deployment's evidence"
+          echo "PASS: acceptance checkout matches successful staging deployment run $DEPLOYMENT_RUN_ID on exact commit $TARGET_SHA"
 
       - name: Validate protected staging identity inputs
         shell: bash
