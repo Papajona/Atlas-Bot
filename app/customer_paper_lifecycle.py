@@ -1112,7 +1112,7 @@ async def record_customer_paper_fill(
                         raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
 
                     if side == "BUY":
-                        if not risk_budget_lock_acquired:
+                        if not risk_budget_lock_keys:
                             raise CustomerPaperLedgerBlocked(
                                 "customer risk-budget lock was not acquired before the BUY transaction"
                             )
