@@ -44,7 +44,7 @@ jobs:
     steps:
       - name: Validate exact successful main deployment
         env:
-          GH_TOKEN: \${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
