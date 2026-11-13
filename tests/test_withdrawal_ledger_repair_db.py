@@ -62,16 +62,29 @@ async def _seed_release_journal(
     db, *, customer_id: int, request_id: str, amount: str = "25.000000",
     corrupt: bool = False,
 ) -> None:
-    """Seed the pre-existing journal as it would appear after manual repair.
-
-    With corrupt=True, the original journal exists but its line amounts disagree
-    with the immutable LedgerEntry, reproducing the real replay-conflict state.
-    """
+    """Seed a funded, reserved withdrawal and its release/correction journal."""
     reference_id = f"{request_id}:release"
     idempotency_key = f"withdrawal-release:{reference_id}"
     requested = Decimal(amount)
     posted = Decimal("24.000000") if corrupt else requested
-    journal = LedgerJournal(
+
+    # Initial funding -> available; withdrawal reserve -> reserved; release -> available.
+    # This lets the account-balance verifier reconstruct the exact post-release state.
+    opening = LedgerJournal(
+        currency="USDT", entry_type="OPENING_BALANCE",
+        reference_type="LEGACY_WALLET", reference_id=f"wallet:{customer_id}",
+        idempotency_key=f"opening:{customer_id}:USDT",
+        description="Opening funds for withdrawal repair fixture",
+    )
+    reserve = LedgerJournal(
+        currency="USDT", entry_type="WITHDRAWAL_RESERVE",
+        reference_type="WITHDRAWAL", reference_id=request_id,
+        idempotency_key=f"withdrawal-reserve:{request_id}",
+        description="Original withdrawal reserve fixture",
+    )
+    db.add_all([opening, reserve])
+    await db.flush()
+    release = LedgerJournal(
         currency="USDT",
         entry_type="WITHDRAWAL_RELEASE",
         reference_type="WITHDRAWAL",
@@ -79,18 +92,50 @@ async def _seed_release_journal(
         idempotency_key=idempotency_key,
         description="Operator-reviewed withdrawal ledger repair fixture",
     )
-    db.add(journal)
+    db.add(release)
     await db.flush()
     db.add_all([
         LedgerJournalLine(
-            journal_id=journal.id, line_no=1,
+            journal_id=opening.id, line_no=1,
+            account_code="ASSET:LEGACY:WALLET_MIGRATION",
+            customer_id=None, currency="USDT", debit=requested, credit=0,
+        ),
+        LedgerJournalLine(
+            journal_id=opening.id, line_no=2,
+            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE",
+            customer_id=customer_id, currency="USDT", debit=0, credit=requested,
+        ),
+        LedgerJournalLine(
+            journal_id=reserve.id, line_no=1,
+            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE",
+            customer_id=customer_id, currency="USDT", debit=requested, credit=0,
+        ),
+        LedgerJournalLine(
+            journal_id=reserve.id, line_no=2,
+            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
+            customer_id=customer_id, currency="USDT", debit=0, credit=requested,
+        ),
+        LedgerJournalLine(
+            journal_id=release.id, line_no=1,
             account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
             customer_id=customer_id, currency="USDT", debit=posted, credit=0,
         ),
         LedgerJournalLine(
-            journal_id=journal.id, line_no=2,
+            journal_id=release.id, line_no=2,
             account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE",
             customer_id=customer_id, currency="USDT", debit=0, credit=posted,
+        ),
+        LedgerEntry(
+            customer_id=customer_id, currency="USDT", entry_type="OPENING_BALANCE",
+            debit=0, credit=requested, amount=requested,
+            reference_type="LEGACY_WALLET", reference_id=f"wallet:{customer_id}",
+            idempotency_key=f"opening:{customer_id}:USDT",
+        ),
+        LedgerEntry(
+            customer_id=customer_id, currency="USDT", entry_type="WITHDRAWAL_RESERVE",
+            debit=requested, credit=0, amount=requested,
+            reference_type="WITHDRAWAL", reference_id=request_id,
+            idempotency_key=f"withdrawal-reserve:{request_id}",
         ),
         LedgerEntry(
             customer_id=customer_id, currency="USDT",
@@ -103,7 +148,6 @@ async def _seed_release_journal(
             }),
         ),
     ])
-
 
 def _replay_mismatch(customer_id: int, request_id: str) -> WithdrawalReplayMismatch:
     reference_id = f"{request_id}:release"
@@ -123,7 +167,7 @@ def _replay_mismatch(customer_id: int, request_id: str) -> WithdrawalReplayMisma
     })
 
 
-async def _call_repair(sessions, withdrawal, monkeypatch, *, provider=None):
+async def _call_repair(sessions, withdrawal, monkeypatch, *, provider=None, sync_wallet=None):
     async def fake_auth(*_args, **_kwargs):
         return {"sub": "operator-1", "role": "TREASURY"}
 
@@ -137,7 +181,7 @@ async def _call_repair(sessions, withdrawal, monkeypatch, *, provider=None):
     monkeypatch.setattr(main, "verify_release_operator", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(main, "release_separation_violation", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main, "_audit", AsyncMock())
-    monkeypatch.setattr(main, "sync_wallet_from_ledger", AsyncMock())
+    monkeypatch.setattr(main, "sync_wallet_from_ledger", sync_wallet or AsyncMock())
     if provider is not None:
         monkeypatch.setattr(main, "get_payout_provider", lambda *_args, **_kwargs: provider)
     return await main.repair_withdrawal_ledger(
@@ -508,6 +552,90 @@ def test_duplicate_replay_incident_race_preserves_async_session_objects(monkeypa
                 assert saved.status == "FAILED"
                 assert incident.status == "OPEN"
                 assert incident.severity == "HIGH"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_repair_rejects_valid_journal_when_customer_reserve_is_still_locked(monkeypatch):
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="terminal-repair-stale-reserve-customer",
+                    email="",
+                    display_name="Terminal repair stale reserve test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                request_id = "terminal-repair-stale-reserve"
+                # Journal reflects the manual release, but the authoritative account
+                # still holds this withdrawal's reserve.
+                db.add(CustomerLedgerAccount(
+                    customer_id=customer_id, currency="USDT",
+                    available=Decimal("0"), trading_reserved=Decimal("0"),
+                    withdrawal_reserved=Decimal("25"),
+                ))
+                withdrawal = Withdrawal(
+                    customer_id=customer_id, wallet_id=None, request_id=request_id,
+                    amount=Decimal("25"), currency="USDT", provider="external_signer",
+                    provider_id="", status="FAILED",
+                    execution_started_at=datetime.now(timezone.utc),
+                    provider_error="Provider definitively failed before assigning an ID.",
+                )
+                db.add(withdrawal)
+                db.add(_incident(customer_id=customer_id, request_id=request_id))
+                await _seed_release_journal(
+                    db, customer_id=customer_id, request_id=request_id
+                )
+                await db.commit()
+                await db.refresh(withdrawal)
+
+            class Provider:
+                send = AsyncMock(side_effect=AssertionError("repair must never send a payout"))
+
+                async def recover(self, *_args, **_kwargs):
+                    raise PayoutNotFound("Provider confirms no payout exists.")
+
+            sync_wallet = AsyncMock()
+            with pytest.raises(main.HTTPException) as blocked:
+                await _call_repair(
+                    sessions, withdrawal, monkeypatch,
+                    provider=Provider(), sync_wallet=sync_wallet,
+                )
+            assert blocked.value.status_code == 409
+            sync_wallet.assert_not_awaited()
+
+            async with sessions() as db:
+                saved = await db.get(Withdrawal, withdrawal.id)
+                ledger = (
+                    await db.execute(
+                        select(CustomerLedgerAccount).where(
+                            CustomerLedgerAccount.customer_id == customer_id,
+                            CustomerLedgerAccount.currency == "USDT",
+                        )
+                    )
+                ).scalar_one()
+                incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key.like(
+                                "WITHDRAWAL_REPLAY_MISMATCH:withdrawal-release:%"
+                            )
+                        )
+                    )
+                ).scalar_one()
+                assert saved.status == "FAILED"
+                assert saved.provider_status in (None, "")
+                assert ledger.available == Decimal("0.000000")
+                assert ledger.withdrawal_reserved == Decimal("25.000000")
+                assert incident.status == "OPEN"
         finally:
             await engine.dispose()
 
