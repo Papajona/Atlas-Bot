@@ -186,6 +186,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     from app.config import settings
     from app.db import init_db, Trade, PaperFillEvent
 
+    configured_position_cap = settings.max_open_positions
     symbol = f"PAPER-COST-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
@@ -199,6 +200,9 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     monkeypatch.setattr(settings, "discipline_enabled", False)
 
     async def run():
+        # The production risk limit is never monkeypatched; isolation comes only
+        # from this test-owned database containing no pre-existing positions.
+        assert settings.max_open_positions == configured_position_cap
         # This regression needs an empty position book. Give it a private
         # temporary SQLite database instead of changing the configured position
         # cap or mutating positions created by other tests/developers.
@@ -317,6 +321,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
             assert events[-1].filled_quantity == 0.0
             assert events[-1].fill_price == 0.0
 
+        assert settings.max_open_positions == configured_position_cap
         await test_engine.dispose()
 
     asyncio.run(run())
