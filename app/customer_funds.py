@@ -438,6 +438,15 @@ async def _validate_withdrawal_action_replay(
         available_lines = [line for line in lines if line.account_code == available_account]
         reserved_debit = sum((D(str(line.debit)) for line in reserved_lines), D("0"))
         available_credit = sum((D(str(line.credit)) for line in available_lines), D("0"))
+        effective_amount_matches = True
+        if "effective_amount" in metadata:
+            try:
+                effective_amount_matches = _q(metadata["effective_amount"]) == (
+                    D(str(entry.amount)) if entry is not None else D("-1")
+                )
+            except (TypeError, ValueError, ArithmeticError):
+                effective_amount_matches = False
+                problems.append("invalid effective amount metadata")
         valid_release_shape = (
             len(lines) == 2
             and len(reserved_lines) == 1
@@ -455,10 +464,7 @@ async def _validate_withdrawal_action_replay(
             or reserved_debit <= 0
             or D(str(entry.debit)) != 0
             or D(str(entry.credit)) != D(str(entry.amount))
-            or (
-                "effective_amount" in metadata
-                and _q(metadata["effective_amount"]) != D(str(entry.amount))
-            )
+            or not effective_amount_matches
         ):
             problems.append("release journal lines")
     else:
@@ -490,36 +496,44 @@ async def _validate_withdrawal_action_replay(
                 and D(str(entry.credit)) == 0
                 and D(str(entry.amount)) == amount_d
             )
+        metadata_amounts_match = True
+        try:
+            if "settled_from_reserve" in metadata:
+                metadata_amounts_match = metadata_amounts_match and (
+                    _q(metadata["settled_from_reserve"]) == reserved_debit
+                )
+            if "shortfall" in metadata:
+                metadata_amounts_match = metadata_amounts_match and (
+                    _q(metadata["shortfall"]) == deficit_debit
+                )
+        except (TypeError, ValueError, ArithmeticError):
+            metadata_amounts_match = False
+            problems.append("invalid settlement amount metadata")
         if (
             not valid_settlement_shape
             or not valid_entry_shape
+            or not metadata_amounts_match
             or custody_credit != amount_d
             or reserved_debit + deficit_debit != amount_d
-            or (
-                "settled_from_reserve" in metadata
-                and _q(metadata["settled_from_reserve"]) != reserved_debit
-            )
-            or (
-                "shortfall" in metadata
-                and _q(metadata["shortfall"]) != deficit_debit
-            )
         ):
             problems.append("settlement journal lines")
 
     if problems:
+        # Capture immutable identifiers before rollback expires ORM objects.
+        replay_key = str(journal.idempotency_key)
         # Roll back the failed caller transaction first. Persist the incident in
         # a new transaction on this same session so a later caller rollback cannot
         # erase the security/audit record. The rejected replay remains an error.
         await db.rollback()
         incident_args = {
-            "key": f"WITHDRAWAL_REPLAY_MISMATCH:{journal.idempotency_key}",
+            "key": f"WITHDRAWAL_REPLAY_MISMATCH:{replay_key}",
             "summary": "Withdrawal idempotency key replayed with a different or inconsistent operation",
             "detail": {
                 "action": action,
                 "customer_id": customer_id,
                 "reference_id": reference_id,
                 "requested_amount": str(amount_d),
-                "idempotency_key": journal.idempotency_key,
+                "idempotency_key": replay_key,
                 "problems": problems,
             },
             "customer_id": customer_id,
