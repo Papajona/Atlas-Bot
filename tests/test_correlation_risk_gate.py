@@ -522,6 +522,46 @@ def test_group_exposure_uses_higher_of_mark_and_booked_entry_price():
     ]
 
 
+
+
+def test_mixed_close_and_increase_credits_booked_entry_not_lower_mark():
+    from app.correlation_risk import (
+        cap_quantity_preserving_reduction,
+        conservative_position_valuation_price,
+    )
+
+    # The closing short is booked at 1,100 while its current mark is 900.
+    # Closing two units releases the full 2,200 booked exposure.
+    closing_price = conservative_position_valuation_price(900, 1100)
+    assert closing_price == 1100
+    permitted = cap_quantity_preserving_reduction(
+        3, 2, existing_notional=2200, reducing_notional=2 * closing_price,
+        cap_usd=3000, unit_price=1000,
+    )
+    assert permitted == 3
+
+
+def test_paper_fill_fetches_fresh_group_marks_after_customer_budget_lock():
+    from pathlib import Path
+
+    source = Path("app/customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    lock = source.index('"paper-risk-budget:{customer_id}"')
+    fetch = source.index("group_mark_prices = await group_mark_prices_loader()", lock)
+    positions = source.index("latest_positions =", fetch)
+    assert lock < fetch < positions
+
+
+def test_group_marks_use_bounded_concurrent_fetches():
+    from pathlib import Path
+
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    start = source.index("async def _customer_paper_positions_for_exposure(")
+    end = source.index("\ndef _stepup_token(", start)
+    helper = source[start:end]
+    assert "asyncio.Semaphore(8)" in helper
+    assert "asyncio.gather(" in helper
+
+
 def test_incomplete_exposure_valuation_allows_only_verified_reduction():
     from app.correlation_risk import limit_increase_when_valuation_incomplete
 
