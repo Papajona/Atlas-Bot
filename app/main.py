@@ -8308,6 +8308,17 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         raise _safe_http_error(400, e, "Invalid request") from e
 
 
+@app.get("/api/research/trial-ledger/status")
+async def research_trial_ledger_status(
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Return chain-integrity metadata without exposing signing material."""
+    await auth(x_admin_token, authorization)
+    from .research_trial_archive import verify_research_trial_ledger
+    return await verify_research_trial_ledger()
+
+
 @app.post("/api/research/decision-outcomes/holdout-once")
 async def research_decision_outcomes_holdout_once(
     x_admin_token: str | None = Header(default=None),
