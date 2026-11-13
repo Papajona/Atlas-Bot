@@ -167,6 +167,7 @@ def test_terminal_withdrawal_ledger_repair_is_authorized_and_never_sends():
         "PayoutNotFound",
         "WITHDRAWAL_REPLAY_MISMATCH:",
         "verify_existing_withdrawal_action_replay(",
+        "verify_customer_ledger_balances_match_journals(",
         "incident.status = 'RESOLVED'",
         "'provider_send_attempted': False",
     ):
