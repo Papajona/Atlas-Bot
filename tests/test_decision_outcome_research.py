@@ -236,3 +236,39 @@ def test_all_market_groups_share_one_global_chronological_holdout_cutoff():
         for row in splits.values()
     )
 
+def test_later_starting_group_without_training_baseline_is_excluded():
+    early_group = [
+        {
+            **_label(i),
+            "decision_id": f"early-{i}",
+            "exchange": "bybit",
+        }
+        for i in range(30)
+    ]
+    later_group = [
+        {
+            **_label(i + 21),
+            "decision_id": f"late-{i}",
+            "exchange": "binance",
+        }
+        for i in range(9)
+    ]
+
+    report = evaluate_decision_outcome_labels(
+        early_group + later_group,
+        holdout_fraction=0.30,
+        min_group_samples=1,
+        min_unique_timestamps=3,
+        redact_holdout=False,
+    )
+    groups = {row["exchange"]: row for row in report["out_of_sample"]}
+
+    assert groups["bybit"]["status"] == "CHRONOLOGICAL_HOLDOUT"
+    assert groups["bybit"]["n_train_after_purge"] > 0
+    assert groups["binance"]["holdout_start"] == "2026-01-01T21:00:00+00:00"
+    assert groups["binance"]["n_train_before_purge"] == 0
+    assert groups["binance"]["n_train_after_purge"] == 0
+    assert groups["binance"]["n_holdout"] == 9
+    assert groups["binance"]["status"] == "INSUFFICIENT_TRAINING_BASELINE"
+    assert groups["binance"]["holdout_by_decision"] == {}
+
