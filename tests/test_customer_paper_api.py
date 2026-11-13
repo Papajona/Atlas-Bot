@@ -1327,42 +1327,132 @@ def test_anchored_daily_replay_fetches_required_context_beyond_30_days(monkeypat
     assert requests[0].days == 31
 
 def test_manual_paper_api_returns_conflict_for_failed_deferred_mark_loader(monkeypatch):
-    async def readiness_passes():
-        return {"status": "PASS"}
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    latest_bar_at = now - timedelta(minutes=2)
+    frame = _verified_bars(latest_bar_at)
+    bars = paper_api._market_bar_contexts(
+        frame, symbol="BTC/USDT", timeframe="1m"
+    )
+    submission_bar = bars[-2]
+    latest_bar = bars[-1]
+    profile_id = 99099
+    order_id = "manual-deferred-mark-error"
+    order = {
+        "order_id": "99099-order",
+        "client_order_id": order_id,
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "side": "BUY",
+        "order_type": "MARKET",
+        "quantity": "1",
+        "remaining_quantity": "1",
+        "currency": "USDT",
+        "status": "SUBMITTED",
+        "filled_quantity": "0",
+        "metadata": {
+            "timeframe": "1m",
+            "execution_model": "completed_bar_volume_capped_heuristic_v1",
+            "submission_bar_at": submission_bar["timestamp"].isoformat(),
+            "submission_bar_sha256": submission_bar["bar_data_sha256"],
+        },
+    }
+    provider_calls = []
 
-    async def invalid_provider_mark():
+    async def get_customer(authorization, _db, require_aal2=True):
+        assert authorization == "Bearer manual-customer"
+        assert require_aal2 is True
+        return SimpleNamespace(id=profile_id), {"aal": "aal2"}
+
+    class DummySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def commit(self):
+            return None
+
+    async def state_guard():
+        return None
+
+    async def fetch_snapshot(**kwargs):
+        assert kwargs["customer_id"] == profile_id
+        assert kwargs["symbol"] == "BTC/USDT"
+        assert kwargs["timeframe"] == "1m"
+        return frame, latest_bar
+
+    async def market_contexts_off_loop(_df, *, symbol, timeframe):
+        assert symbol == "BTC/USDT"
+        assert timeframe == "1m"
+        return bars
+
+    async def get_order(*, customer_id, client_order_id):
+        assert customer_id == profile_id
+        assert client_order_id == order_id
+        return dict(order)
+
+    async def register_bar(**_kwargs):
+        return {
+            "bar_key": "manual-mark-error-bar",
+            "bar_at": latest_bar["timestamp"],
+            "capacity": "10",
+            "available": "10",
+        }
+
+    async def no_prior_fill(**_kwargs):
+        return None
+
+    async def enough_cash(*, customer_id):
+        assert customer_id == profile_id
+        return [{"account_code": "PAPER_CASH", "currency": "USDT", "balance": "10000"}]
+
+    async def invalid_provider_mark(customer_id, request, market_context):
+        provider_calls.append((customer_id, request.symbol, market_context))
         raise RuntimeError("sensitive provider response must not reach the client")
 
-    monkeypatch.setattr(
-        paper_lifecycle, "_assert_customer_paper_ready", readiness_passes
-    )
+    async def invoke_deferred_loader(**kwargs):
+        assert kwargs["group_mark_prices"] is None
+        assert kwargs["group_mark_prices_loader"] is not None
+        return await kwargs["group_mark_prices_loader"]()
+
+    monkeypatch.setattr(paper_api, "SessionLocal", lambda: DummySession())
+    monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
+    monkeypatch.setattr(paper_api, "_fetch_verified_market_snapshot", fetch_snapshot)
+    monkeypatch.setattr(paper_api, "_market_bar_contexts_off_loop", market_contexts_off_loop)
+    monkeypatch.setattr(paper_api, "_paper_preflight_completed_bar", lambda *_args, **_kwargs: (Decimal("100"), 0.01))
+    monkeypatch.setattr(paper_api, "get_customer_paper_order", get_order)
+    monkeypatch.setattr(paper_api, "register_customer_paper_market_bar", register_bar)
+    monkeypatch.setattr(paper_api, "get_customer_paper_fill_for_bar", no_prior_fill)
+    monkeypatch.setattr(paper_api, "get_customer_paper_balances", enough_cash)
+    monkeypatch.setattr(paper_api, "record_customer_paper_fill", invoke_deferred_loader)
+    monkeypatch.setattr(paper_api, "_paper_order_draw", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr(paper_api, "PROFILES", {
+        **paper_api.PROFILES,
+        "crypto": SimpleNamespace(slippage_bps=0, taker_bps=0),
+    })
+
     api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=get_customer,
+        market_data=lambda _request: frame,
+        market_request_type=PaperMarketRequest,
+        state_guard=state_guard,
+        group_mark_price_loader=invalid_provider_mark,
+    ))
+    response = TestClient(api_app).post(
+        f"/api/customer/paper/orders/{order_id}/advance",
+        headers={"Authorization": "Bearer manual-customer"},
+    )
 
-    @api_app.post("/test/manual-paper-fill")
-    async def manual_paper_fill():
-        try:
-            return await paper_lifecycle.record_customer_paper_fill(
-                customer_id=99099,
-                client_order_id="manual-deferred-mark-error",
-                idempotency_key="manual-deferred-mark-error-fill",
-                bar_key="manual-deferred-mark-error-bar",
-                quantity="1",
-                price="100",
-                group_mark_prices_loader=invalid_provider_mark,
-            )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise paper_api._handle_paper_error(exc) from exc
-
-    response = TestClient(api_app).post("/test/manual-paper-fill")
-
-    assert response.status_code == 409
+    assert response.status_code == 409, response.text
     assert response.json()["detail"] == (
-        "current correlation-group marks could not be verified"
+        "Current paper correlation-group marks could not be verified"
     )
     assert "sensitive provider response" not in response.text
-    # Database readiness failures are distinct and remain service-unavailable errors.
+    assert provider_calls == [(profile_id, "BTC/USDT", None)]
+    # Readiness/database failures remain service-unavailable errors.
     database_error = paper_api._handle_paper_error(
         paper_lifecycle.CustomerPaperLedgerBlocked("paper readiness is blocked")
     )
