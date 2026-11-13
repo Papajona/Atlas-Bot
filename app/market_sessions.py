@@ -5,6 +5,7 @@ import math
 from collections.abc import Mapping
 import pandas as pd
 
+SESSION_COST_MODEL_VERSION = "market-sessions-v1"
 SESSION_COST_KEYS = frozenset({"LONDON", "NEW_YORK", "NEW_YORK_LATE", "OTHER"})
 
 
