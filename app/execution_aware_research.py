@@ -84,6 +84,7 @@ def simulate_execution_aware_strategy(
     take_profit_atr: float,
     transaction_cost_bps: float,
     carry_bps_per_bar: float | None = None,
+    session_costs_bps: dict[str, float] | None = None,
     drawdown_limit: float | None = None,
     daily_loss_limit: float | None = None,
     loss_event_threshold: int = 0,
@@ -123,6 +124,12 @@ def simulate_execution_aware_strategy(
     if not math.isfinite(stop_mult) or stop_mult <= 0 or not math.isfinite(target_mult) or target_mult <= 0:
         raise ValueError("stop and target ATR multipliers must be finite and positive")
     transaction_bps = _finite_nonnegative(transaction_cost_bps, "transaction_cost_bps")
+    session_schedule = None
+    per_bar_transaction_bps = np.full(len(df), transaction_bps, dtype=float)
+    if session_costs_bps is not None:
+        from .market_sessions import normalize_session_costs_bps, session_cost_series
+        session_schedule = normalize_session_costs_bps(session_costs_bps)
+        per_bar_transaction_bps = session_cost_series(df.index, session_schedule).to_numpy(dtype=float)
     carry = (
         None if carry_bps_per_bar is None
         else _finite_nonnegative(carry_bps_per_bar, "carry_bps_per_bar")
@@ -304,7 +311,7 @@ def simulate_execution_aware_strategy(
         market_returns[i] = float(bar_return)
         exit_mask[i] = exited
         turnover[i] = abs(actual - previous_position) + (abs(actual) if exited and actual != 0.0 else 0.0)
-        step = actual * float(bar_return) - turnover[i] * transaction_bps / 10_000.0
+        step = actual * float(bar_return) - turnover[i] * per_bar_transaction_bps[i] / 10_000.0
         if carry is not None:
             step -= abs(actual) * carry / 10_000.0
         step = max(-1.0, float(step))
@@ -361,6 +368,9 @@ def simulate_execution_aware_strategy(
         "financing_cost_model_complete": carry is not None,
         "carry_bps_per_bar": carry,
         "transaction_cost_bps": transaction_bps,
+        "session_cost_model_complete": session_schedule is not None,
+        "session_costs_bps": session_schedule,
+        "session_cost_observations": int(len(per_bar_transaction_bps)) if session_schedule is not None else 0,
         "risk_halted_bars": halted_bars,
         "risk_hard_halt": hard_halt,
         "risk_halt_reason": halt_reason,
