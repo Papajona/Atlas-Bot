@@ -155,7 +155,7 @@ async def _run_lifecycle(operations):
 
 
 operation = st.tuples(
-    st.decimals(min_value=Decimal("0.000001"), max_value=Decimal("600"), places=6),
+    st.decimals(min_value=Decimal("0.000001"), max_value=Decimal("600"), places=6, allow_nan=False, allow_infinity=False),
     st.sampled_from(["pending", "release", "settle"]),
     st.integers(1, 3),
 )
