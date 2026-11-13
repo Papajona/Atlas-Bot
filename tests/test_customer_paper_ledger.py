@@ -49,7 +49,10 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
     return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
-def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without_open_transaction(monkeypatch):
+@pytest.mark.parametrize("fail_lock_commit", [False, True])
+def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without_open_transaction(
+    monkeypatch, fail_lock_commit,
+):
     from app.correlation_risk import RISK_GROUPS
 
     events = []
@@ -106,6 +109,10 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
                 lock_key = params["lock_key"]
                 self.session_locks.add(lock_key)
                 events.append(("lock", lock_key, self._in_transaction))
+                if fail_lock_commit and len(self.session_locks) == len(RISK_GROUPS) + 1:
+                    # Simulate a live connection failing COMMIT immediately after all
+                    # session locks were acquired; the finally block must still unlock.
+                    self.fail_next_commit = True
                 return FakeResult()
 
             if "SELECT id, venue, market_type, symbol, side" in query:
@@ -195,7 +202,11 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
     monkeypatch.setattr(paper_lifecycle, "_set_tenant", set_tenant)
     monkeypatch.setattr(paper_lifecycle, "_paper_engine", lambda: engine)
 
-    with pytest.raises(StopBeforeFill, match="outside a transaction"):
+    expected_exception = RuntimeError if fail_lock_commit else StopBeforeFill
+    expected_message = (
+        "simulated commit failure" if fail_lock_commit else "outside a transaction"
+    )
+    with pytest.raises(expected_exception, match=expected_message):
         asyncio.run(record_customer_paper_fill(
             customer_id=92001,
             client_order_id="session-lock-order",
@@ -206,19 +217,27 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
             group_mark_prices_loader=load_group_marks,
         ))
 
-    mark_event = next(item for item in events if isinstance(item, tuple) and item[0] == "marks")
-    write_event_index = next(
+    mark_events = [item for item in events if isinstance(item, tuple) and item[0] == "marks"]
+    write_event_indexes = [
         index for index, item in enumerate(events)
         if isinstance(item, tuple) and item[0] == "write_order_read"
-    )
+    ]
     unlock_events = [item for item in events if isinstance(item, tuple) and item[0] == "unlock"]
 
-    assert mark_event[1] is False
-    assert mark_event[2] == {
-        f"paper-risk-budget:92001",
-        *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
-    }
-    assert events.index(mark_event) < write_event_index
+    if fail_lock_commit:
+        assert not mark_events
+        assert not write_event_indexes
+    else:
+        assert len(mark_events) == 1
+        mark_event = mark_events[0]
+        assert mark_event[1] is False
+        assert mark_event[2] == {
+            f"paper-risk-budget:92001",
+            *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
+        }
+        assert write_event_indexes
+        assert events.index(mark_event) < write_event_indexes[0]
+
     assert len(unlock_events) == len(RISK_GROUPS) + 1
     assert all(item[2] is True for item in unlock_events)
     assert conn.session_locks == set()
