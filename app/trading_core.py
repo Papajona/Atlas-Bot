@@ -89,26 +89,75 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     return result
 
 
-def triple_barrier(close: pd.Series, vol: pd.Series, high: pd.Series | None = None,
-                   low: pd.Series | None = None, pt: float = 2.0, sl: float = 2.0,
-                   max_hold: int = 12) -> pd.Series:
+def triple_barrier(
+    close: pd.Series,
+    vol: pd.Series,
+    high: pd.Series | None = None,
+    low: pd.Series | None = None,
+    pt: float = 2.0,
+    sl: float = 2.0,
+    max_hold: int = 12,
+    *,
+    entry_open: pd.Series | None = None,
+    round_trip_cost_bps: float = 0.0,
+) -> pd.Series:
+    """Create forward labels using the same entry/exit timing as the OHLC executor.
+
+    The signal is known at close[i]; the hypothetical entry is open[i+1]. The
+    volatility estimate is frozen at i and barriers are measured from that entry
+    price. The next max_hold executable bars are inspected, including the entry
+    bar. A gap through a barrier is observed at the open; simultaneous intrabar
+    touches are neutral because OHLC cannot establish event ordering.
+    Round-trip costs widen both barriers and the timeout dead-zone so labels do not
+    call a gross move a profitable outcome when configured fees/slippage consume it.
+    If entry_open is omitted, close[i] is retained only for backwards-compatible
+    offline callers; the production training and walk-forward paths always supply it.
+    """
     c = close.to_numpy(dtype=float)
-    v = vol.to_numpy(dtype=float)
-    h = (high.reindex(close.index).to_numpy(dtype=float) if high is not None else c.copy())
-    l = (low.reindex(close.index).to_numpy(dtype=float) if low is not None else c.copy())
+    v = vol.reindex(close.index).to_numpy(dtype=float)
+    h = high.reindex(close.index).to_numpy(dtype=float) if high is not None else c.copy()
+    l = low.reindex(close.index).to_numpy(dtype=float) if low is not None else c.copy()
+    opens = (
+        entry_open.reindex(close.index).to_numpy(dtype=float)
+        if entry_open is not None else c.copy()
+    )
     y = np.full(len(c), np.nan, dtype=float)
-    if max_hold < 1:
-        raise ValueError("max_hold must be at least 1")
-    for i in range(len(c) - max_hold):
-        if not np.isfinite(v[i]) or v[i] <= 0 or not np.isfinite(c[i]) or c[i] <= 0:
+    try:
+        hold = int(max_hold)
+        cost_bps = float(round_trip_cost_bps)
+        pt_mult, sl_mult = float(pt), float(sl)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid triple-barrier configuration") from exc
+    if isinstance(max_hold, bool) or hold != max_hold or hold < 1:
+        raise ValueError("max_hold must be a positive integer")
+    if not np.isfinite([cost_bps, pt_mult, sl_mult]).all() or cost_bps < 0 or pt_mult <= 0 or sl_mult <= 0:
+        raise ValueError("barriers and round-trip costs must be finite and positive/non-negative")
+    if not (len(v) == len(h) == len(l) == len(opens) == len(c)):
+        raise ValueError("triple-barrier inputs must align to close index")
+    cost_fraction = cost_bps / 10_000.0
+
+    for i in range(len(c) - hold):
+        entry_i = i + 1
+        entry_price = opens[entry_i]
+        if (
+            not np.isfinite(v[i]) or v[i] <= 0
+            or not np.isfinite(entry_price) or entry_price <= 0
+        ):
             continue
-        upper, lower = c[i] * (1 + pt * v[i]), c[i] * (1 - sl * v[i])
-        end = min(len(c), i + max_hold + 1)
-        for j in range(i + 1, end):
-            up_hit = h[j] >= upper
-            down_hit = l[j] <= lower
+        upper = entry_price * (1.0 + pt_mult * v[i] + cost_fraction)
+        lower = entry_price * (1.0 - sl_mult * v[i] - cost_fraction)
+        end = min(len(c), entry_i + hold)
+        for j in range(entry_i, end):
+            # Price gaps are executable at the observed open, not at a stale barrier.
+            if j > entry_i and opens[j] >= upper:
+                y[i] = 1
+                break
+            if j > entry_i and opens[j] <= lower:
+                y[i] = -1
+                break
+            up_hit = np.isfinite(h[j]) and h[j] >= upper
+            down_hit = np.isfinite(l[j]) and l[j] <= lower
             if up_hit and down_hit:
-                # Intrabar touch order is unknowable from OHLC alone: use conservative neutral label.
                 y[i] = 0
                 break
             if up_hit:
@@ -118,10 +167,8 @@ def triple_barrier(close: pd.Series, vol: pd.Series, high: pd.Series | None = No
                 y[i] = -1
                 break
         else:
-            # A complete holding window elapsed without touching either barrier.
-            # Label the timeout by terminal return, with a volatility-scaled dead zone.
-            terminal_return = c[end - 1] / c[i] - 1.0
-            dead_zone = 0.5 * v[i]
+            terminal_return = c[end - 1] / entry_price - 1.0
+            dead_zone = max(0.5 * float(v[i]), cost_fraction)
             if np.isfinite(terminal_return):
                 y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
     return pd.Series(y, index=close.index, dtype="float64")
@@ -157,7 +204,11 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     profile = PROFILES[asset]
     X = build_features(df)
     aligned = df.reindex(X.index)
-    y = triple_barrier(aligned["close"], X["vol_24"], aligned["high"], aligned["low"], max_hold=profile.max_hold)
+    y = triple_barrier(
+        aligned["close"], X["vol_24"], aligned["high"], aligned["low"],
+        max_hold=profile.max_hold, entry_open=aligned["open"],
+        round_trip_cost_bps=2.0 * (float(profile.taker_bps) + float(profile.slippage_bps)),
+    )
     mask = y.notna()
     X, y = X.loc[mask], y.loc[mask]
     if y.nunique() < 2:
@@ -326,6 +377,7 @@ def ai_walk_forward_backtest(
     carry_bps_per_bar: float | None = None,
     max_hold_bars: int | None = None,
     research_trial_evidence_verified: bool = False,
+    session_costs_bps: dict[str, float] | None = None,
 ) -> dict:
     """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
     try:
@@ -369,7 +421,11 @@ def ai_walk_forward_backtest(
         raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
-    y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=hold_horizon)
+    y = triple_barrier(
+        aligned.close, X.vol_24, aligned.high, aligned.low,
+        max_hold=hold_horizon, entry_open=aligned.open,
+        round_trip_cost_bps=2.0 * (taker_cost_bps + slippage_cost_bps),
+    )
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
     # Use an explicitly expanding chronological split with a full label-horizon purge
@@ -440,6 +496,7 @@ def ai_walk_forward_backtest(
             stop_atr=float(settings.strategy_stop_atr),
             take_profit_atr=float(settings.strategy_take_profit_atr),
             transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
+            session_costs_bps=session_costs_bps,
             carry_bps_per_bar=carry_cost_bps,
             drawdown_limit=settings.strategy_drawdown_halt,
             daily_loss_limit=settings.strategy_daily_loss_halt,
