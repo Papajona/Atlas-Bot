@@ -256,7 +256,7 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
         / "workflows"
         / "customer-paper-staging-acceptance.yml"
     ).read_text(encoding="utf-8")
-    trigger_header = workflow.split("\\npermissions:", 1)[0]
+    trigger_header = workflow.split("\npermissions:", 1)[0]
     assert "workflow_dispatch:" in trigger_header
     assert "workflow_run:" not in trigger_header
     assert "target_sha:" in trigger_header
