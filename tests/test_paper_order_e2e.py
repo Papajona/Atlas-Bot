@@ -177,12 +177,14 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
 
 
-def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatch):
+def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatch, tmp_path):
     import pandas as pd
     from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app import db as app_db
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, PaperFillEvent
+    from app.db import init_db, Trade, PaperFillEvent
 
     symbol = f"PAPER-COST-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
@@ -193,14 +195,26 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
     monkeypatch.setattr(settings, "max_consecutive_losses", 0)
     monkeypatch.setattr(settings, "max_order_latency_ms_p95", 0)
     monkeypatch.setattr(settings, "max_order_error_rate_5m", 0.0)
-    # Ignore unrelated open-position rows left by other tests in the shared DB.
-    monkeypatch.setattr(settings, "max_open_positions", 10_000)
     # This test exercises invalid cost context, not the independent protective-stop gate.
     monkeypatch.setattr(settings, "discipline_enabled", False)
 
     async def run():
+        # This regression needs an empty position book. Give it a private
+        # temporary SQLite database instead of changing the configured position
+        # cap or mutating positions created by other tests/developers.
+        test_engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'paper-cost-isolated.db'}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+            pool_pre_ping=True,
+        )
+        test_sessions = async_sessionmaker(
+            test_engine, expire_on_commit=False, class_=AsyncSession
+        )
+        monkeypatch.setattr(app_db, "engine", test_engine)
+        monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
+        monkeypatch.setattr(execution, "SessionLocal", test_sessions)
         await init_db()
-        async with SessionLocal() as db:
+        async with test_sessions() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
             await db.commit()
@@ -287,7 +301,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
         assert rejected["attempts"] >= 1
         assert rejected["fills"] == 0
 
-        async with SessionLocal() as db:
+        async with test_sessions() as db:
             trade = (await db.execute(
                 select(Trade).where(Trade.symbol == symbol, Trade.mode == "PAPER")
             )).scalar_one()
@@ -302,6 +316,8 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
             assert events[-1].reason == "impact_coefficient must be finite and non-negative"
             assert events[-1].filled_quantity == 0.0
             assert events[-1].fill_price == 0.0
+
+        await test_engine.dispose()
 
     asyncio.run(run())
 
