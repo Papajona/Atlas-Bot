@@ -2,7 +2,7 @@
 
 Implements the Probabilistic and Deflated Sharpe Ratio from Bailey & Lopez de Prado (2014), "The Deflated Sharpe Ratio:
 Correcting for Selection Bias, Backtest Overfitting and Non-Normality". All Sharpe inputs are PER-PERIOD (not annualized).
-NOT yet wired into the promotion gate: call deflated_sharpe_ratio() with the number of strategy variants actually tried.
+Used by research_validation.deflated_sharpe_report(); callers must pass the number of strategy variants actually tried.
 """
 from __future__ import annotations
 
