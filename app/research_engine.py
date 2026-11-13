@@ -585,19 +585,36 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         per_strategy_oos[component]["trade_boundary_overlap_by_fold"] = component_overlap["by_fold"]
         for fold_row, overlap_bars in zip(per_strategy_oos[component].get("folds", []), component_overlap["by_fold"]):
             fold_row["boundary_overlap_bars"] = overlap_bars
-    # Parameter-plateau check: small changes to the signal threshold should not destroy
-    # the measured edge. A narrow single-point optimum is treated as fragile research.
+    # Two-dimensional 3x3 plateau: signal threshold and joint stop/target scale.
+    # The base point reuses the identical OOS run; the other eight are independently
+    # evaluated on the same purged folds and cost model.
     import hashlib
-    # A wider, symmetric nine-point grid tests broad plateaus instead of a narrow local optimum.
-    plateau_grid = tuple(round(float(value), 2) for value in np.linspace(0.60, 1.40, 9))
-    variants=[]
-    for mult in plateau_grid:
-        vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
-        vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry,session_costs_bps)
+    threshold_multipliers = (0.80, 1.00, 1.20)
+    risk_multipliers = (0.80, 1.00, 1.20)
+    plateau_grid = tuple(
+        (threshold_mult, risk_mult)
+        for threshold_mult in threshold_multipliers
+        for risk_mult in risk_multipliers
+    )
+    variants = []
+    for threshold_mult, risk_mult in plateau_grid:
+        vcfg = StrategyConfig(**{
+            **asdict(cfg),
+            "signal_threshold": float(cfg.signal_threshold * threshold_mult),
+            "stop_atr": float(cfg.stop_atr * risk_mult),
+            "take_profit_atr": float(cfg.take_profit_atr * risk_mult),
+        })
+        vr = _component_backtest(
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        )
         variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
         )
-        if math.isclose(float(mult), 1.00, rel_tol=0.0, abs_tol=1e-12):
+        is_baseline = (
+            math.isclose(threshold_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
+            and math.isclose(risk_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
+        )
+        if is_baseline:
             variant_oos = oos
         else:
             variant_oos = fixed_signal_walk_forward_oos(
@@ -627,14 +644,21 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             json.dumps(asdict(vcfg), default=str, sort_keys=True).encode()
         ).hexdigest()
         variants.append({
-            "multiplier":mult, "sharpe":vr.get("sharpe",0.0),
+            "multiplier": threshold_mult,
+            "threshold_multiplier": threshold_mult,
+            "risk_multiplier": risk_mult,
+            "sharpe": vr.get("sharpe", 0.0),
             "trade_boundary_overlap_bars": variant_oos.get("trade_boundary_overlap_bars"),
-            "total_return":vr.get("total_return",0.0), "max_drawdown":vr.get("max_drawdown",0.0),
-            "config_sha256":variant_config_sha, "oos_status":variant_oos.get("status"),
-            "oos_sharpe":variant_oos.get("sharpe"), "oos_total_return":variant_oos.get("oos_total_return"),
-            "oos_max_drawdown":variant_oos.get("max_drawdown"), "oos_trades":variant_oos.get("trades"),
-            "oos_return_sample":variant_oos.get("oos_return_sample", []),
-            "full_sample_statistics":variant_oos.get("full_sample_statistics", {}),
+            "total_return": vr.get("total_return", 0.0),
+            "max_drawdown": vr.get("max_drawdown", 0.0),
+            "config_sha256": variant_config_sha,
+            "oos_status": variant_oos.get("status"),
+            "oos_sharpe": variant_oos.get("sharpe"),
+            "oos_total_return": variant_oos.get("oos_total_return"),
+            "oos_max_drawdown": variant_oos.get("max_drawdown"),
+            "oos_trades": variant_oos.get("trades"),
+            "oos_return_sample": variant_oos.get("oos_return_sample", []),
+            "full_sample_statistics": variant_oos.get("full_sample_statistics", {}),
         })
     robustness={
         "monte_carlo": monte_carlo_bootstrap(
@@ -645,7 +669,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             {"variants": variants}, metric="oos_sharpe", tolerance=0.20,
             minimum_valid_variants=7, minimum_plateau_ratio=0.50,
         ),
-        "parameter_plateau_grid": list(plateau_grid),
+        "parameter_plateau_grid": [
+            {"threshold_multiplier": threshold, "risk_multiplier": risk}
+            for threshold, risk in plateau_grid
+        ],
         "parameter_variants": variants,
     }
     # Formal DSR. Count every variant evaluated on this data: components + parameter variants (+ AI when included).
@@ -705,9 +732,18 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         json.dumps(ai_trial_config, default=str, sort_keys=True).encode("utf-8")
     ).hexdigest()
     fp = hashlib.sha256(json.dumps(asdict(cfg), default=str, sort_keys=True).encode()).hexdigest()
+    def _variant_trial_label(variant: dict) -> str:
+        return (
+            f"variant:t{float(variant['threshold_multiplier']):.2f}:"
+            f"r{float(variant['risk_multiplier']):.2f}@{variant['config_sha256']}"
+        )
+
     this_labels = {f"{r.get('strategy')}@{fp}" for r in results} | {
-        f"variant:{v['multiplier']}@{fp}" for v in variants
-        if not math.isclose(float(v.get("multiplier", 1.0)), 1.0, rel_tol=0.0, abs_tol=1e-12)
+        _variant_trial_label(variant) for variant in variants
+        if not (
+            math.isclose(float(variant["threshold_multiplier"]), 1.0, rel_tol=0.0, abs_tol=1e-12)
+            and math.isclose(float(variant["risk_multiplier"]), 1.0, rel_tol=0.0, abs_tol=1e-12)
+        )
     }
     # A set of trial labels proves only that configurations were named in prior runs.
     # It does not provide the historical trial Sharpe distribution evaluated on the
@@ -882,17 +918,20 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             current_trial_sharpes_full.append(float(full_value))
             current_trial_labels_full.append(f"component:{component}")
     for variant in variants:
-        if math.isclose(float(variant.get("multiplier", 1.0)), 1.0, rel_tol=0.0, abs_tol=1e-12):
+        if (
+            math.isclose(float(variant["threshold_multiplier"]), 1.0, rel_tol=0.0, abs_tol=1e-12)
+            and math.isclose(float(variant["risk_multiplier"]), 1.0, rel_tol=0.0, abs_tol=1e-12)
+        ):
             continue
         value = _sample_annualized_sharpe(variant.get("oos_return_sample") or [])
         if variant.get("oos_status") == "OK" and value is not None and math.isfinite(value):
             current_trial_sharpes.append(value)
-            current_trial_labels.append(f"variant:{variant['multiplier']}")
+            current_trial_labels.append(_variant_trial_label(variant))
         full_stats = variant.get("full_sample_statistics") if isinstance(variant.get("full_sample_statistics"), dict) else {}
         full_value = full_stats.get("annualized_sharpe")
         if variant.get("oos_status") == "OK" and isinstance(full_value, (int, float)) and math.isfinite(float(full_value)):
             current_trial_sharpes_full.append(float(full_value))
-            current_trial_labels_full.append(f"variant:{variant['multiplier']}")
+            current_trial_labels_full.append(_variant_trial_label(variant))
     current_trials_complete = (
         len(current_trial_sharpes) == len(this_labels)
         and len(current_trial_sharpes) >= 2
