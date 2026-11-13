@@ -6870,6 +6870,11 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         spec=json.loads(row.spec_json or "{}")
         candidate_config=_candidate_backtest_config(spec)
         result=await asyncio.to_thread(backtest_all_strategies,df,candidate_config,5.5,2.0,True,row.asset,5,800,settings.research_ai_threshold)
+        # Persist every Strategy Lab evaluation in the existing append-only DB
+        # trial ledger. This is prospective audit history, not a substitute for
+        # the signed comparable-trial archive required by the promotion gate.
+        trial_archive_recording = await archive_research_trials(result, req)
+        result["trial_archive_recording"] = trial_archive_recording
         rows=result.get("strategies",[])
         family_map={"TREND":"trend","MOMENTUM":"momentum","BREAKOUT":"breakout","MEAN_REVERSION":"mean_reversion","ENSEMBLE":"ensemble"}
         family=str(spec.get("strategy_family") or "ENSEMBLE").upper()
@@ -6883,8 +6888,10 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         gate["oos_positive_fold_ratio"]=positive_ratio
         oos_gate=oos_promotion_gate(oos,min_dsr=settings.research_min_deflated_sharpe,require_cost_stress=settings.research_require_cost_stress,min_folds=settings.strategy_oos_min_folds,min_total_return=settings.research_min_oos_total_return,min_positive_fold_ratio=settings.research_min_oos_positive_fold_ratio,max_negative_fold_return=settings.strategy_oos_max_negative_fold_return,require_last_fold_positive=settings.strategy_oos_require_last_fold_positive,min_sharpe=settings.strategy_oos_min_sharpe,max_drawdown=settings.strategy_oos_max_drawdown,min_trades=settings.strategy_oos_min_trades)
         gate["oos_gate"]=oos_gate
+        archive_recording_ok = trial_archive_recording.get("status") in {"APPENDED", "REPLAYED"}
         validation_unavailable = (
-            oos.get("status") != "OK"
+            not archive_recording_ok
+            or oos.get("status") != "OK"
             or oos.get("trial_registry_complete") is not True
             or not isinstance(oos.get("deflated_sharpe"), (int, float))
             or not math.isfinite(float(oos.get("deflated_sharpe", float("nan"))))
@@ -6892,10 +6899,28 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             or oos.get("intrabar_stop_target_model_complete") is not True
         )
         gate["validation_available"] = not validation_unavailable
-        if validation_unavailable:
+        if not archive_recording_ok:
+            gate["validation_unavailable_reason"] = "TRIAL_HISTORY_RECORDING_FAILED"
+        elif validation_unavailable:
             gate["validation_unavailable_reason"] = "COMPLETE_COMPARABLE_TRIAL_HISTORY_AND_DEFLATED_SHARPE_REQUIRED"
         gate["robustness_monte_carlo"]=monte_carlo_bootstrap([float(x) for x in (oos.get("oos_return_sample") or [])],trials=500)
-        passed=(not validation_unavailable and gate["sharpe"]>=settings.adaptive_min_sharpe and gate["max_drawdown"]>=-abs(settings.adaptive_max_drawdown) and gate["trades"]>=settings.adaptive_min_trades and gate["total_return"]>=settings.adaptive_min_total_return and oos_gate["passed"])
+        # The selected-on metrics above remain visible for diagnosis only. They
+        # never contribute to the promotion decision.
+        gate["display_only"] = {
+            "in_sample_sharpe": float(selected.get("sharpe", 0.0)),
+            "in_sample_max_drawdown": float(selected.get("max_drawdown", -1.0)),
+            "in_sample_note": "Selected-on data. Diagnostic only; never a pass criterion.",
+        }
+        from .strategy_lab_validation import strategy_lab_candidate_passes
+        passed, oos_metrics = strategy_lab_candidate_passes(
+            oos_gate,
+            validation_available=not validation_unavailable,
+            min_sharpe=settings.adaptive_min_sharpe,
+            max_drawdown=settings.adaptive_max_drawdown,
+            min_trades=settings.adaptive_min_trades,
+            min_total_return=settings.adaptive_min_total_return,
+        )
+        gate["oos"] = oos_metrics
     except Exception as exc:
         result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True
     async with SessionLocal() as db:

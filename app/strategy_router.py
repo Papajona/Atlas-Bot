@@ -19,6 +19,7 @@ import pandas as pd
 
 from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns, _annualization_factor, target_positions
 from .research_validation import purged_walk_forward_splits
+from .strategy_selection import paired_return_lead
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
@@ -228,17 +229,20 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                     costs_bps: float = 7.5, online_scores: dict[str, float] | None = None,
                     online_weight: float = 0.25, blend_enabled: bool = True,
                     blend_top_n: int = 3) -> dict:
-    """Select/hold/blend using only history up to the previous completed bar.
+    """Select/hold/blend using completed history and an uncertainty-aware switch test.
 
-    The last bar is the decision bar. Historical performance is calculated on
-    all preceding bars, so the selector never rewards itself using the bar it is
-    about to trade.
+    The last bar is the decision bar. Strategy ranking uses prior history only.
+    A challenger may replace an incumbent only when its paired net-return stream
+    has a positive Newey-West HAC lead that clears a multiplicity-adjusted hurdle.
+    Missing or underpowered comparisons always retain the incumbent.
     """
     if len(df) < 260:
         return {"status": "INSUFFICIENT_DATA", "strategy": "none", "regime": "UNKNOWN"}
+    cfg = cfg or StrategyConfig()
     history = df.iloc[:-1].copy()
-    current_regime = str(classify_regime(df, asset=asset).iloc[-1])
-    _, stable_bars = _recent_regime_stability(classify_regime(df, asset=asset), min_regime_bars)
+    regimes = classify_regime(df, asset=asset)
+    current_regime = str(regimes.iloc[-1])
+    _, stable_bars = _recent_regime_stability(regimes, min_regime_bars)
     if stable_bars < min_regime_bars:
         return {"status": "TRANSITION", "strategy": current_strategy or "none",
                 "regime": current_regime, "regime_stable_bars": stable_bars,
@@ -258,9 +262,55 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
     current_row = next((x for x in ranked if x["strategy"] == current_strategy), None)
     chosen = best["strategy"]
     action = "SELECT"
+    switch_inference = None
+    switch_hold_reason = None
     if current_row and current_strategy in STRATEGIES:
         advantage = best["score"] - current_row["score"]
-        if cooldown_active or advantage < float(switch_min_advantage):
+        significant_lead = best["strategy"] == current_strategy
+        if best["strategy"] != current_strategy:
+            # Apply existing cheap switch controls before computing either expensive
+            # return stream. A cooldown or inadequate score advantage already means HOLD.
+            if cooldown_active:
+                switch_hold_reason = "cooldown_active"
+                switch_inference = {
+                    "status": "SKIPPED",
+                    "significant_lead": False,
+                    "reason": switch_hold_reason,
+                }
+            elif advantage < float(switch_min_advantage):
+                switch_hold_reason = "score_advantage_below_minimum"
+                switch_inference = {
+                    "status": "SKIPPED",
+                    "significant_lead": False,
+                    "reason": switch_hold_reason,
+                    "score_advantage": float(advantage),
+                    "minimum_score_advantage": float(switch_min_advantage),
+                }
+            else:
+                # Compare net returns on identical bars in the regime being selected.
+                # This is a paired test, not a comparison of two noisy Sharpe estimates.
+                historical_regimes = classify_regime(history, asset=asset)
+                regime_mask = historical_regimes == current_regime
+                challenger_stream = _strategy_returns(
+                    history, cfg, best["strategy"], costs_bps, asset
+                ).loc[regime_mask]
+                incumbent_stream = _strategy_returns(
+                    history, cfg, current_strategy, costs_bps, asset
+                ).loc[regime_mask]
+                switch_inference = paired_return_lead(
+                    challenger_stream.to_numpy(dtype=float),
+                    incumbent_stream.to_numpy(dtype=float),
+                    candidate_count=len(STRATEGIES),
+                    alpha=0.05,
+                    min_observations=60,
+                    min_effective_observations=30,
+                )
+                significant_lead = switch_inference.get("significant_lead") is True
+                if not significant_lead:
+                    switch_hold_reason = str(
+                        switch_inference.get("reason") or "paired_lead_not_significant"
+                    )
+        if cooldown_active or advantage < float(switch_min_advantage) or not significant_lead:
             chosen = current_strategy
             action = "HOLD"
         else:
@@ -270,8 +320,26 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         action = "HOLD" if current_strategy else "ABSTAIN"
 
     blend = []
+    blend_scope = "RANKED_POSITIVE_STRATEGIES"
     if blend_enabled and action != "ABSTAIN":
-        eligible = [x for x in ranked if x["score"] > 0][:max(1, int(blend_top_n))]
+        # Restrict the blend only when HOLD rejected a different top-ranked
+        # challenger. If the incumbent is already best, preserve its configured
+        # ranked ensemble blend instead of silently collapsing to one strategy.
+        rejected_challenger = (
+            action == "HOLD"
+            and current_strategy in STRATEGIES
+            and best["strategy"] != current_strategy
+        )
+        if rejected_challenger:
+            eligible = [
+                row for row in ranked
+                if row["strategy"] == current_strategy and row["score"] > 0
+            ]
+            blend_scope = "INCUMBENT_ONLY"
+        else:
+            eligible = [
+                row for row in ranked if row["score"] > 0
+            ][:max(1, int(blend_top_n))]
         if eligible:
             scores = np.asarray([x["score"] for x in eligible], dtype=float)
             # Stable softmax; never let one weak strategy dominate a strong one by noise.
@@ -294,7 +362,14 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         "regime_stable_bars": stable_bars, "score": float(best["score"]),
         "signal": float(composite), "strategy_signals": signals, "ranked": ranked,
         "blend": blend, "selection_history_bars": int(len(history)),
+        "switch_inference": switch_inference,
+        "switch_hold_reason": switch_hold_reason,
+        "blend_scope": blend_scope,
         "policy": {"switch_min_advantage": float(switch_min_advantage),
+                   "switch_test": "PAIRED_NEWEY_WEST_HAC",
+                   "switch_significance_alpha": 0.05,
+                   "switch_min_observations": 60,
+                   "switch_min_effective_observations": 30,
                    "min_regime_bars": int(min_regime_bars), "min_trades": int(min_trades),
                    "online_weight": float(online_weight), "blend_top_n": int(blend_top_n),
                    "cooldown_active": bool(cooldown_active)},
