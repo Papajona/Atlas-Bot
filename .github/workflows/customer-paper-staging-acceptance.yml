@@ -56,19 +56,27 @@ jobs:
 
           deployment_json="$(gh run view "$DEPLOYMENT_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --json name,headSha,headBranch,status,conclusion)"
+            --json name,headSha,headBranch,status,conclusion,jobs)"
           deployment_name="$(jq -r '.name // ""' <<< "$deployment_json")"
           deployment_sha="$(jq -r '.headSha // ""' <<< "$deployment_json")"
           deployment_branch="$(jq -r '.headBranch // ""' <<< "$deployment_json")"
           deployment_status="$(jq -r '.status // ""' <<< "$deployment_json")"
           deployment_conclusion="$(jq -r '.conclusion // ""' <<< "$deployment_json")"
+          image_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Build and push exact commit image to Artifact Registry") | .conclusion][0] // ""' <<< "$deployment_json")"
+          deploy_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Deploy restricted paper-only Cloud Run service") | .conclusion][0] // ""' <<< "$deployment_json")"
+          preflight_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Dispatch and require read-only staging identity preflight on this exact commit") | .conclusion][0] // ""' <<< "$deployment_json")"
 
           test "$deployment_name" = "Deploy Paper-Only Atlas Staging"
           test "$deployment_sha" = "$TARGET_SHA"
           test "$deployment_branch" = "main"
-          test "$deployment_status" = "completed"
-          test "$deployment_conclusion" = "success"
-          echo "PASS: acceptance is authorized by successful paper-only staging deployment $DEPLOYMENT_RUN_ID on exact main commit $TARGET_SHA"
+          [[ "$deployment_status" == "in_progress" || "$deployment_status" == "completed" ]]
+          if [[ "$deployment_status" == "completed" ]]; then
+            test "$deployment_conclusion" = "success"
+          fi
+          test "$image_outcome" = "success"
+          test "$deploy_outcome" = "success"
+          test "$preflight_outcome" = "success"
+          echo "PASS: exact paper-only deployment $DEPLOYMENT_RUN_ID built and deployed $TARGET_SHA and passed read-only staging identity/readiness before acceptance"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
