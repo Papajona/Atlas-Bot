@@ -123,3 +123,5 @@ def test_predict_latest_maps_sparse_reordered_class_probabilities(monkeypatch):
     assert result["flat_probability"] == pytest.approx(0.0)
     assert result["score"] == pytest.approx(0.5)
     assert result["signal"] == 1
+
+
