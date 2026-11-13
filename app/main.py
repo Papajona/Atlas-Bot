@@ -61,7 +61,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, limit_increase_when_valuation_incomplete, shares_risk_budget
+from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, conservative_position_valuation_price, limit_increase_when_valuation_incomplete, shares_risk_budget
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
@@ -1162,7 +1162,9 @@ async def _customer_paper_positions_for_exposure(
 
     Unrelated known groups do not consume this candidate budget. Unclassified positions
     count against every known budget, and an unclassified candidate considers all open
-    positions. Every included nonzero position needs a fresh validated server bid.
+    positions. Marks are fetched concurrently with bounded fan-out; every included
+    nonzero position must still pass the five-second freshness check when the fill
+    transaction consumes the returned timestamps.
     """
     from types import SimpleNamespace
     from .customer_paper_lifecycle import get_customer_paper_positions
@@ -1182,8 +1184,9 @@ async def _customer_paper_positions_for_exposure(
         row for row in paper_positions
         if shares_risk_budget(req.symbol, str(row.get("symbol") or ""))
     ]
-    open_positions = []
-    for row in relevant_positions:
+    semaphore = asyncio.Semaphore(8)
+
+    async def load_one_position(row):
         symbol = str(row.get("symbol") or "")
         venue = str(row.get("venue") or "").lower()
         try:
@@ -1191,18 +1194,22 @@ async def _customer_paper_positions_for_exposure(
             average = float(row.get("average_entry_price") or 0)
         except (TypeError, ValueError, OverflowError):
             return {
-                "ok": False,
-                "stage": "paper_exposure_mark_unavailable",
-                "reason": f"same-group paper exposure is malformed for {symbol or 'unknown symbol'}",
+                "error": {
+                    "ok": False,
+                    "stage": "paper_exposure_mark_unavailable",
+                    "reason": f"same-group paper exposure is malformed for {symbol or 'unknown symbol'}",
+                }
             }
         if not math.isfinite(quantity):
             return {
-                "ok": False,
-                "stage": "paper_exposure_mark_unavailable",
-                "reason": f"same-group paper quantity is not finite for {symbol or 'unknown symbol'}",
+                "error": {
+                    "ok": False,
+                    "stage": "paper_exposure_mark_unavailable",
+                    "reason": f"same-group paper quantity is not finite for {symbol or 'unknown symbol'}",
+                }
             }
         if quantity == 0:
-            continue
+            return {"position": None}
 
         try:
             if (
@@ -1213,91 +1220,46 @@ async def _customer_paper_positions_for_exposure(
                 mark, mark_timestamp = _validated_customer_paper_mark(market_context)
             else:
                 mark_req = req.model_copy(update={"symbol": symbol, "exchange": venue})
-                mark_df = await asyncio.to_thread(market_data, mark_req)
-                mark_context = await asyncio.to_thread(
-                    _server_paper_market_context, mark_req, mark_df
-                )
+                async with semaphore:
+                    mark_df = await asyncio.to_thread(market_data, mark_req)
+                    mark_context = await asyncio.to_thread(
+                        _server_paper_market_context, mark_req, mark_df
+                    )
                 if mark_context is None:
                     raise ValueError("no fresh validated bid")
                 mark, mark_timestamp = _validated_customer_paper_mark(mark_context)
         except Exception as exc:
             return {
-                "ok": False,
-                "stage": "paper_exposure_mark_unavailable",
-                "reason": f"current server mark unavailable for same-group position {symbol} ({type(exc).__name__})",
-                "symbol": symbol,
+                "error": {
+                    "ok": False,
+                    "stage": "paper_exposure_mark_unavailable",
+                    "reason": f"current server mark unavailable for same-group position {symbol} ({type(exc).__name__})",
+                    "symbol": symbol,
+                }
             }
 
-        open_positions.append(SimpleNamespace(
-            exchange=venue,
-            symbol=symbol,
-            quantity=quantity,
-            average_entry_price=average,
-            mark_price=mark,
-            mark_quote_timestamp_utc=mark_timestamp,
-        ))
-    return {"ok": True, "positions": open_positions}
-
-
-async def _customer_paper_group_mark_prices(
-    customer_id: int, req, market_context: dict | None
-) -> dict[tuple[str, str, str], dict[str, str]]:
-    """Return fresh marks for each nonzero holding in the candidate's correlation group."""
-    context = market_context
-    try:
-        bid = float(context.get("bid", 0)) if isinstance(context, dict) else 0.0
-    except (TypeError, ValueError, OverflowError):
-        bid = 0.0
-    if not math.isfinite(bid) or bid <= 0:
-        # The manual API uses a candle-only context. Force fresh server marks rather
-        # than interpreting a candle close as a current quote.
-        context = None
-    exposure = await _customer_paper_positions_for_exposure(
-        customer_id=customer_id, req=req, market_context=context
-    )
-    if not exposure.get("ok"):
-        raise CustomerPaperFlowBlocked(
-            str(exposure.get("reason") or "current correlation-group marks could not be verified")
-        )
-    marks: dict[tuple[str, str, str], str] = {}
-    for position in exposure["positions"]:
-        venue = str(getattr(position, "exchange", "") or "").strip().lower()
-        symbol = str(getattr(position, "symbol", "") or "").strip().upper()
-        price = float(getattr(position, "mark_price", 0) or 0)
-        if not venue or not symbol or not math.isfinite(price) or price <= 0:
-            raise CustomerPaperFlowBlocked("current correlation-group position mark is invalid")
-        quote_timestamp = str(
-            getattr(position, "mark_quote_timestamp_utc", "") or ""
-        ).strip()
-        if not quote_timestamp:
-            raise CustomerPaperFlowBlocked(
-                "current correlation-group position mark timestamp is missing"
+        return {
+            "position": SimpleNamespace(
+                exchange=venue,
+                symbol=symbol,
+                quantity=quantity,
+                average_entry_price=average,
+                mark_price=mark,
+                mark_quote_timestamp_utc=mark_timestamp,
             )
-        marks[(venue, "spot", symbol)] = {
-            "price": format(price, ".18f"),
-            "quote_timestamp_utc": quote_timestamp,
         }
-    return marks
 
+    # Concurrent requests reduce the age spread between the first and last mark.
+    # Fan-out is capped to avoid exhausting provider connections or worker threads.
+    loaded = await asyncio.gather(*(load_one_position(row) for row in relevant_positions))
+    for item in loaded:
+        if item.get("error") is not None:
+            return item["error"]
+    return {
+        "ok": True,
+        "positions": [item["position"] for item in loaded if item["position"] is not None],
+    }
 
-async def _customer_paper_protective_history(req, start_bar: datetime, end_bar: datetime):
-    """Fetch a larger verified spot-candle window when a held position predates req.days."""
-    span_days = math.ceil(max(0.0, (end_bar - start_bar).total_seconds()) / 86_400) + 2
-    try:
-        requested_days = max(int(getattr(req, "days", 1)), span_days)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise CustomerPaperFlowBlocked("Protective history window is invalid") from exc
-    if requested_days > 1500:
-        raise CustomerPaperFlowBlocked(
-            "Protective history exceeds the maximum supported verified candle window"
-        )
-    historical_req = req.model_copy(update={"days": requested_days})
-    try:
-        return await asyncio.to_thread(market_data, historical_req)
-    except Exception as exc:
-        raise CustomerPaperFlowBlocked(
-            f"Protective history fetch failed ({type(exc).__name__})"
-        ) from exc
 
 
 def _stepup_token(uid: str, purpose: str = "withdrawal", destination_fingerprint: str = "", proposal_digest_value: str = "") -> tuple[str, str, int]:
@@ -2494,9 +2456,11 @@ async def _run_persisted_adaptive_bot_cycle(
                 close_quantity = min(remaining_to_close, position_quantity)
                 if close_quantity <= 0:
                     continue
-                try:
-                    mark = float(getattr(position, "mark_price", 0) or 0)
-                    if not math.isfinite(mark) or mark <= 0:
+                mark = conservative_position_valuation_price(
+                    getattr(position, "mark_price", 0),
+                    getattr(position, "average_entry_price", 0),
+                )
+                if not math.isfinite(mark) or mark <= 0:
                         mark = float(getattr(position, "average_entry_price", 0) or 0)
                 except (TypeError, ValueError, OverflowError):
                     mark = 0.0
