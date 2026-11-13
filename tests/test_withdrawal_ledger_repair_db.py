@@ -248,8 +248,8 @@ def test_failed_terminal_repair_requires_provider_recovery_and_never_sends(monke
                 request_id = "terminal-repair-failed"
                 db.add(CustomerLedgerAccount(
                     customer_id=customer_id, currency="USDT",
-                    available=Decimal("0"), trading_reserved=Decimal("0"),
-                    withdrawal_reserved=Decimal("25"),
+                    available=Decimal("25"), trading_reserved=Decimal("0"),
+                    withdrawal_reserved=Decimal("0"),
                 ))
                 withdrawal = Withdrawal(
                     customer_id=customer_id, wallet_id=None, request_id=request_id,
@@ -260,6 +260,9 @@ def test_failed_terminal_repair_requires_provider_recovery_and_never_sends(monke
                 )
                 db.add(withdrawal)
                 db.add(_incident(customer_id=customer_id, request_id=request_id))
+                await _seed_release_journal(
+                    db, customer_id=customer_id, request_id=request_id
+                )
                 await db.commit()
                 await db.refresh(withdrawal)
 
