@@ -639,26 +639,54 @@ async def verify_customer_ledger_balances_match_journals(
         _customer_account(customer_id, bucket, currency): field
         for bucket, field in buckets.items()
     }
-    rows = (
-        await db.execute(
-            select(
-                LedgerJournalLine.account_code,
-                func.coalesce(
-                    func.sum(LedgerJournalLine.credit - LedgerJournalLine.debit), 0
-                ),
+    ledger_lines = select(LedgerJournalLine).where(
+        LedgerJournalLine.customer_id == customer_id,
+        LedgerJournalLine.currency == currency,
+        LedgerJournalLine.account_code.in_(tuple(account_codes)),
+    )
+    if db.bind.dialect.name == "sqlite":
+        # SQLite stores NUMERIC values as binary floating point and its SUM()
+        # accumulator can discard micro-unit remainders after large turnover.
+        # Read each six-decimal line independently and accumulate with Decimal.
+        rows = (
+            await db.execute(
+                select(
+                    LedgerJournalLine.account_code,
+                    LedgerJournalLine.debit,
+                    LedgerJournalLine.credit,
+                ).where(
+                    LedgerJournalLine.customer_id == customer_id,
+                    LedgerJournalLine.currency == currency,
+                    LedgerJournalLine.account_code.in_(tuple(account_codes)),
+                )
             )
-            .where(
-                LedgerJournalLine.customer_id == customer_id,
-                LedgerJournalLine.currency == currency,
-                LedgerJournalLine.account_code.in_(tuple(account_codes)),
+        ).all()
+        journal_balances = {account_code: D("0") for account_code in account_codes}
+        for account_code, debit, credit in rows:
+            journal_balances[str(account_code)] += _q(credit) - _q(debit)
+    else:
+        # PostgreSQL NUMERIC (and other exact numeric backends) aggregate exactly
+        # in the database and avoid transferring the complete journal history.
+        rows = (
+            await db.execute(
+                select(
+                    LedgerJournalLine.account_code,
+                    func.coalesce(
+                        func.sum(LedgerJournalLine.credit - LedgerJournalLine.debit), 0
+                    ),
+                )
+                .where(
+                    LedgerJournalLine.customer_id == customer_id,
+                    LedgerJournalLine.currency == currency,
+                    LedgerJournalLine.account_code.in_(tuple(account_codes)),
+                )
+                .group_by(LedgerJournalLine.account_code)
             )
-            .group_by(LedgerJournalLine.account_code)
-        )
-    ).all()
-    journal_balances = {
-        str(account_code): _q(balance)
-        for account_code, balance in rows
-    }
+        ).all()
+        journal_balances = {
+            str(account_code): _q(balance)
+            for account_code, balance in rows
+        }
     mismatches = []
     for account_code, field in account_codes.items():
         journal_balance = journal_balances.get(account_code, D("0"))
