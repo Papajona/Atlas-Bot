@@ -63,7 +63,7 @@ def _secure_service_tables(bind) -> None:
         $atlas_research_integrity_acl$;
     """))
     op.execute(sa.text("""
-        CREATE FUNCTION public.atlas_research_holdout_registry_immutable()
+        CREATE OR REPLACE FUNCTION public.atlas_research_holdout_registry_immutable()
         RETURNS trigger
         LANGUAGE plpgsql
         AS $atlas_holdout_immutable$
