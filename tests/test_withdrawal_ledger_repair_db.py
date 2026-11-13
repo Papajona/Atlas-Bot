@@ -71,7 +71,7 @@ async def _call_repair(sessions, withdrawal, monkeypatch, *, provider=None):
         monkeypatch.setattr(main, "get_payout_provider", lambda *_args, **_kwargs: provider)
     return await main.repair_withdrawal_ledger(
         withdrawal.id,
-        main.WithdrawalNotSentRequest(
+        main.WithdrawalLedgerRepairRequest(
             operator_id="operator-1",
             admin_id="approver-1",
             evidence="Two-person review verified the recorded terminal outcome and ledger repair.",
