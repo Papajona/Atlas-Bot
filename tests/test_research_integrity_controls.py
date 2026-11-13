@@ -629,3 +629,16 @@ def test_ai_triple_barrier_marks_target_neutral_when_execution_cost_exceeds_rewa
     )
     # The target is only 1% away while round-trip execution costs are 20 bps.
     assert labels.iloc[0] == 0.0
+
+
+
+def test_one_time_holdout_release_requires_risk_officer_authorization():
+    from pathlib import Path
+
+    source = (
+        Path(__file__).resolve().parents[1] / "app" / "main.py"
+    ).read_text(encoding="utf-8")
+    route = source.split(
+        '@app.post("/api/research/decision-outcomes/holdout-once")', 1
+    )[1].split('@app.post("/api/research/backtest-all")', 1)[0]
+    assert 'await require_role(claims, "RISK_OFFICER")' in route
