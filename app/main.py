@@ -8325,7 +8325,8 @@ async def research_decision_outcomes_holdout_once(
     authorization: str | None = Header(default=None),
 ):
     """Consume the single global decision-outcome chronological holdout exactly once."""
-    await auth(x_admin_token, authorization)
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "RISK_OFFICER")
     from .decision_outcome_research import (
         DecisionOutcomeHistoryResourceLimit,
         decision_outcome_holdout_status,
