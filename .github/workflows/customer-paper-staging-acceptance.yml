@@ -47,6 +47,9 @@ jobs:
       PAPER_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_PAPER_DATABASE_SECRET || secrets.ATLAS_STAGING_PAPER_DATABASE_SECRET }}
       EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE || secrets.ATLAS_STAGING_RUNTIME_DB_ROLE }}
       EXPECTED_PAPER_DB_ROLE: ${{ vars.ATLAS_STAGING_PAPER_DB_ROLE || secrets.ATLAS_STAGING_PAPER_DB_ROLE }}
+      # This drill validates the paper ledger, not adaptive-model promotion.
+      # Match the deployed staging service and avoid requiring a model-signing key here.
+      ADAPTIVE_AI_ENABLED: "false"
       TARGET_SHA: ${{ inputs.target_sha }}
       DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
       DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}
