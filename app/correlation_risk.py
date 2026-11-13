@@ -27,6 +27,19 @@ def risk_group(symbol: str) -> str:
     return _GROUPS.get(base, "OTHER")
 
 
+def conservative_position_valuation_price(mark_price: object, average_entry_price: object) -> float:
+    """Value exposure at the higher of a valid live mark and booked average entry."""
+    valid_prices = []
+    for raw in (mark_price, average_entry_price):
+        try:
+            price = float(raw or 0)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(price) and price > 0:
+            valid_prices.append(price)
+    return max(valid_prices, default=0.0)
+
+
 def shares_risk_budget(proposed_symbol: str, existing_symbol: str) -> bool:
     """Treat unclassified open positions as potentially related to every known group."""
     proposed_group = risk_group(proposed_symbol)
@@ -50,23 +63,12 @@ def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notiona
         if math.isfinite(quantity) and quantity == 0:
             members.append((getattr(p, "symbol", ""), 0.0))
             continue
-        raw_price = getattr(p, "mark_price", 0)
-        raw_entry = getattr(p, "average_entry_price", 0)
-        try:
-            mark_price = float(raw_price or 0)
-        except (TypeError, ValueError):
-            mark_price = 0.0
-        try:
-            entry_price = float(raw_entry or 0)
-        except (TypeError, ValueError):
-            entry_price = 0.0
-        # Do not let a market-price drop release concentration headroom below
+        # Do not let a market-price drop release cap headroom below
         # the booked entry cost; the atomic customer-paper fill uses this same rule.
-        valid_prices = [
-            price for price in (mark_price, entry_price)
-            if math.isfinite(price) and price > 0
-        ]
-        price = max(valid_prices, default=0.0)
+        price = conservative_position_valuation_price(
+            getattr(p, "mark_price", 0),
+            getattr(p, "average_entry_price", 0),
+        )
         if not math.isfinite(quantity) or not math.isfinite(price) or price <= 0:
             # Unknown exposure cannot safely be treated as zero.
             valuation_complete = False
