@@ -278,6 +278,7 @@ def evaluate_decision_outcome_labels(
 
     oos_groups: dict[tuple, list[tuple[pd.Timestamp, dict, float]]] = defaultdict(list)
     invalid_oos_timestamps = 0
+    global_holdout_timestamps: set[pd.Timestamp] = set()
     for label in labels:
         if label["candidate_side"] is None:
             continue
@@ -309,6 +310,18 @@ def evaluate_decision_outcome_labels(
                 _text(label, "regime"),
             )
             oos_groups[key].append((timestamp, label, value))
+            global_holdout_timestamps.add(timestamp)
+
+    # Every subgroup uses the same chronological boundary. Computing a separate
+    # percentile inside each subgroup lets the same calendar date be training data
+    # for one group and holdout data for another, making cross-group comparisons
+    # non-comparable and allowing temporal selection effects.
+    global_unique_times = sorted(global_holdout_timestamps)
+    global_holdout_start = None
+    if len(global_unique_times) >= min_unique_timestamps:
+        global_split_position = int((1.0 - float(holdout_fraction)) * len(global_unique_times))
+        global_split_position = max(1, min(len(global_unique_times) - 1, global_split_position))
+        global_holdout_start = global_unique_times[global_split_position]
 
     out_of_sample = []
     for key, entries in sorted(oos_groups.items(), key=lambda item: tuple(str(x) for x in item[0])):
@@ -334,13 +347,19 @@ def evaluate_decision_outcome_labels(
             "regime": regime,
             "n_labels": len(entries),
             "n_unique_decision_timestamps": len(unique_times),
+            "n_global_unique_decision_timestamps": len(global_unique_times),
+            "global_holdout_start": (
+                global_holdout_start.isoformat() if global_holdout_start is not None else None
+            ),
         }
-        if len(unique_times) < min_unique_timestamps:
+        if len(unique_times) < min_unique_timestamps or global_holdout_start is None:
             out_of_sample.append({
                 **base,
                 "status": "INSUFFICIENT_UNIQUE_TIMESTAMPS",
                 "minimum_unique_timestamps": min_unique_timestamps,
-                "holdout_start": None,
+                "holdout_start": (
+                    global_holdout_start.isoformat() if global_holdout_start is not None else None
+                ),
                 "n_train_after_purge": 0,
                 "n_purged_train_labels": 0,
                 "n_holdout": 0,
@@ -349,9 +368,7 @@ def evaluate_decision_outcome_labels(
             })
             continue
 
-        split_position = int((1.0 - float(holdout_fraction)) * len(unique_times))
-        split_position = max(1, min(len(unique_times) - 1, split_position))
-        holdout_start = unique_times[split_position]
+        holdout_start = global_holdout_start
         train_candidates = [item for item in entries if item[0] < holdout_start]
         holdout_entries = [item for item in entries if item[0] >= holdout_start]
         train_kept = []
@@ -370,6 +387,25 @@ def evaluate_decision_outcome_labels(
                 result[decision] = _metrics(values, min_group_samples=min_group_samples)
             return result
 
+        if not train_kept:
+            # A group entirely after the shared boundary, or one whose every
+            # pre-boundary outcome overlaps it, has no independent training
+            # baseline. It must not qualify for one-time holdout release.
+            out_of_sample.append({
+                **base,
+                "status": "INSUFFICIENT_TRAINING_BASELINE",
+                "holdout_fraction": float(holdout_fraction),
+                "holdout_start": holdout_start.isoformat(),
+                "n_train_before_purge": len(train_candidates),
+                "n_train_after_purge": 0,
+                "n_purged_train_labels": purged,
+                "n_holdout": len(holdout_entries),
+                "train_by_decision": {},
+                "holdout_by_decision": {},
+                "interpretation": "excluded; no post-purge pre-cutoff training baseline",
+            })
+            continue
+
         out_of_sample.append({
             **base,
             "status": "CHRONOLOGICAL_HOLDOUT",
@@ -385,13 +421,13 @@ def evaluate_decision_outcome_labels(
         })
 
     return {
-        "report_version": "rejected-signal-evaluation-v2",
+        "report_version": "rejected-signal-evaluation-v4",
         "research_only": True,
         "automatic_promotion": False,
         "methodology": {
             "outcome_metric": "candidate-side hypothetical net return in bps",
             "costs": "label-time configured taker/slippage plus per-bar carry assumptions",
-            "holdout": "chronological; training labels whose outcome close reaches holdout start are purged",
+            "holdout": "one shared UTC cutoff from the union of eligible decision timestamps across all groups; training labels whose outcome close reaches that cutoff are purged",
             "minimum_group_samples": min_group_samples,
             "minimum_unique_timestamps_for_holdout": min_unique_timestamps,
             "not_a_profitability_or_significance_claim": True,
@@ -402,6 +438,10 @@ def evaluate_decision_outcome_labels(
             "mode_counts": dict(sorted(mode_counts.items())),
             "candidate_side_counts": dict(sorted(candidate_side_counts.items())),
             "invalid_holdout_timestamps": invalid_oos_timestamps,
+            "global_unique_decision_timestamps": len(global_unique_times),
+            "global_holdout_start": (
+                global_holdout_start.isoformat() if global_holdout_start is not None else None
+            ),
         },
         "by_market_and_decision": by_market,
         "rejected_by_reason": rejected_by_reason,
@@ -524,6 +564,7 @@ async def evaluate_decision_outcome_labels_once(
         row for row in report.get("out_of_sample", [])
         if isinstance(row, dict)
         and row.get("status") == "CHRONOLOGICAL_HOLDOUT"
+        and int(row.get("n_train_after_purge", 0) or 0) > 0
         and int(row.get("n_holdout", 0) or 0) > 0
     ]
     adequately_sampled = []
@@ -587,7 +628,9 @@ async def evaluate_decision_outcome_labels_once(
         for row in usable
     ]
     plan_json = json.dumps(
-        {"version": HOLDOUT_REGISTRY_VERSION, "groups": plan},
+        {"version": HOLDOUT_REGISTRY_VERSION,
+         "cutoff_method": "GLOBAL_UNION_OF_ELIGIBLE_UTC_DECISION_TIMESTAMPS",
+         "groups": plan},
         sort_keys=True, separators=(",", ":"), allow_nan=False,
     )
     try:
