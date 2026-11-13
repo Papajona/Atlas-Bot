@@ -13,9 +13,10 @@ permissions:
 
 concurrency:
   group: atlas-paper-only-staging-deploy
-  # A newer main push supersedes any older in-flight staging deployment. The
-  # surviving run still checks exact main SHA immediately before Cloud Run mutation.
-  cancel-in-progress: true
+  # Keep the parent run alive so any uniquely dispatched staging preflight or
+  # acceptance drill can finish. The active run polls main and exits stale before
+  # deployment; GitHub retains only the newest pending run in this concurrency group.
+  cancel-in-progress: false
 
 jobs:
   deploy-paper-staging:
