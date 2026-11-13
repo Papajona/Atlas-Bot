@@ -56,8 +56,18 @@ def paired_return_lead(
             "significant_lead": False,
             "reason": "paired_return_streams_not_aligned",
         }
-    valid = np.isfinite(challenger) & np.isfinite(incumbent)
-    difference = challenger[valid] - incumbent[valid]
+    finite_pairs = np.isfinite(challenger) & np.isfinite(incumbent)
+    if not bool(finite_pairs.all()):
+        return {
+            "status": "INVALID_DATA",
+            "significant_lead": False,
+            "reason": "nonfinite_paired_return_observation",
+            "observations": int(len(challenger)),
+            "invalid_pair_count": int((~finite_pairs).sum()),
+        }
+    # Keep every timestamp in the HAC stream. Removing a missing pair would
+    # compress time and falsely treat separated bars as adjacent observations.
+    difference = challenger - incumbent
     if len(difference) < max(30, int(min_observations)):
         return {
             "status": "INSUFFICIENT_DATA",
