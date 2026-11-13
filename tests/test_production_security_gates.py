@@ -491,6 +491,10 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert 'timeout-minutes: 300' in deploy
     assert 'gh run view "$acceptance_run_id"' in deploy
     assert "PASS: customer-paper acceptance run" in deploy
+    acceptance_dispatch = deploy.split(
+        "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
+    )[1]
+    assert not any(line.endswith(chr(92) * 2) for line in acceptance_dispatch.splitlines())
     assert "select(.displayTitle == $expected)" in deploy
     assert "uniquely correlated staging preflight run was not observed" in deploy
     assert "main advanced during staging preflight" in deploy
