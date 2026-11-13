@@ -7827,7 +7827,20 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                 w2.status = "FAILED"
                 w2.provider = provider_name
                 w2.provider_error = str(e)[:1000]
-                await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=_withdrawal_release_ref(w2.request_id))
+                try:
+                    await ledger_release_withdrawal(db2, w2.customer_id, w2.amount, reference_id=_withdrawal_release_ref(w2.request_id))
+                except ValueError as mismatch:
+                    # The provider definitively rejected the payout. Preserve that
+                    # external outcome even though the ledger replay is quarantined.
+                    await db2.commit()
+                    await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
+                        "id": withdrawal_id, "status": w2.status,
+                        "action": "release", "reason": str(mismatch),
+                    })
+                    raise HTTPException(
+                        409,
+                        "Provider failure was recorded; withdrawal ledger mismatch requires reconciliation",
+                    ) from mismatch
                 await sync_wallet_from_ledger(db2, w2.customer_id, "USDT")
                 await db2.commit()
             await _audit("WITHDRAWAL_FAILED", {"id": withdrawal_id, "provider": provider_name, "error": str(e)})
@@ -7858,12 +7871,26 @@ async def release_withdrawal(withdrawal_id: int, req: WithdrawalExecuteRequest, 
                 w3.provider_id = result.provider_id
                 w3.provider_status = result.raw_status or result.status
                 w3.provider_error = ""
-                if result.status == "COMPLETED":
-                    await settle_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id)
-                    await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
-                elif result.status == "FAILED":
-                    await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=_withdrawal_release_ref(w3.request_id))
-                    await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
+                try:
+                    if result.status == "COMPLETED":
+                        await settle_withdrawal(db3, w3.customer_id, w3.amount, reference_id=w3.request_id)
+                        await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
+                    elif result.status == "FAILED":
+                        await ledger_release_withdrawal(db3, w3.customer_id, w3.amount, reference_id=_withdrawal_release_ref(w3.request_id))
+                        await sync_wallet_from_ledger(db3, w3.customer_id, "USDT")
+                except ValueError as mismatch:
+                    # Provider outcome is definitive; preserve the status and
+                    # provider reference while the ledger incident is investigated.
+                    await db3.commit()
+                    await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
+                        "id": withdrawal_id, "status": w3.status,
+                        "provider_id": w3.provider_id, "action": result.status,
+                        "reason": str(mismatch),
+                    })
+                    raise HTTPException(
+                        409,
+                        "Provider outcome was recorded; withdrawal ledger mismatch requires reconciliation",
+                    ) from mismatch
                 await db3.commit()
         except HTTPException:
             raise
@@ -7959,13 +7986,24 @@ async def reconcile_withdrawal(withdrawal_id: int, req: WithdrawalReconcileReque
             raise _safe_http_error(502, e, "Provider reconciliation failed; retry reconciliation") from e
         w.provider_status = result.raw_status or result.status
         w.status = "RELEASED" if result.status == "COMPLETED" else ("FAILED" if result.status == "FAILED" else "SUBMITTED")
-        if result.status == "COMPLETED":
-            w.reconciled_at = datetime.now(timezone.utc)
-            await settle_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id)
-            await sync_wallet_from_ledger(db, w.customer_id, "USDT")
-        elif result.status == "FAILED":
-            await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
-            await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+        try:
+            if result.status == "COMPLETED":
+                w.reconciled_at = datetime.now(timezone.utc)
+                await settle_withdrawal(db, w.customer_id, w.amount, reference_id=w.request_id)
+                await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+            elif result.status == "FAILED":
+                await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
+                await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+        except ValueError as mismatch:
+            await db.commit()
+            await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
+                "id": w.id, "status": w.status, "provider_id": w.provider_id,
+                "action": result.status, "reason": str(mismatch),
+            })
+            raise HTTPException(
+                409,
+                "Provider outcome was recorded; withdrawal ledger mismatch requires reconciliation",
+            ) from mismatch
         await db.commit()
     await _audit("WITHDRAWAL_RECONCILED", {"id": withdrawal_id, "provider_id": w.provider_id, "status": w.status, "operator_id": req.operator_id})
     return {"ok": True, "id": withdrawal_id, "status": w.status, "provider_status": w.provider_status, "provider_id": w.provider_id}
