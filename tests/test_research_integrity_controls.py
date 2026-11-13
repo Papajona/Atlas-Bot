@@ -558,6 +558,104 @@ def test_complete_label_history_uses_one_repeatable_read_snapshot(monkeypatch):
     assert statements[1].startswith("SELECT")
 
 
+def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_rows(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from sqlalchemy import Integer, String, Text, func, select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+    from app import db as db_module
+    from app.decision_outcome_research import load_all_decision_outcome_labels
+
+    class _TestBase(DeclarativeBase):
+        pass
+
+    class _TestAuditLog(_TestBase):
+        __tablename__ = "holdout_snapshot_audit_log"
+        id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+        event: Mapped[str] = mapped_column(String(80), nullable=False)
+        detail: Mapped[str] = mapped_column(Text, nullable=False)
+
+    async def run():
+        database_url = f"sqlite+aiosqlite:///{tmp_path / 'holdout-snapshot.db'}"
+        engine = create_async_engine(database_url, connect_args={"timeout": 0.25})
+        assert db_module._configure_sqlite_wal(engine, database_url) is True
+        writer_sessions = async_sessionmaker(engine, expire_on_commit=False)
+        first_page_read = asyncio.Event()
+        writer_committed = asyncio.Event()
+        writer_errors = []
+
+        class _PausingReaderSession(AsyncSession):
+            _paused_after_first_page = False
+
+            async def execute(self, statement, *args, **kwargs):
+                result = await super().execute(statement, *args, **kwargs)
+                sql = str(statement).lstrip().upper()
+                if (
+                    sql.startswith("SELECT")
+                    and "_HOLDOUT_SNAPSHOT_AUDIT_LOG" in sql
+                    and not self._paused_after_first_page
+                ):
+                    self._paused_after_first_page = True
+                    first_page_read.set()
+                    await writer_committed.wait()
+                return result
+
+        reader_sessions = async_sessionmaker(
+            engine, class_=_PausingReaderSession, expire_on_commit=False,
+        )
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(_TestBase.metadata.create_all)
+            async with writer_sessions() as db:
+                db.add_all([
+                    _TestAuditLog(
+                        event="ADAPTIVE_DECISION_OUTCOME_LABEL",
+                        detail=json.dumps(_outcome_label(i)),
+                    )
+                    for i in range(100)
+                ])
+                await db.commit()
+
+            monkeypatch.setattr(db_module, "AuditLog", _TestAuditLog)
+            monkeypatch.setattr(db_module, "SessionLocal", reader_sessions)
+
+            async def concurrent_writer():
+                await first_page_read.wait()
+                try:
+                    async with writer_sessions() as db:
+                        db.add(_TestAuditLog(
+                            event="ADAPTIVE_DECISION_OUTCOME_LABEL",
+                            detail=json.dumps(_outcome_label(100)),
+                        ))
+                        await db.commit()
+                except Exception as exc:
+                    writer_errors.append(exc)
+                finally:
+                    writer_committed.set()
+
+            loaded, _ = await asyncio.wait_for(
+                asyncio.gather(
+                    load_all_decision_outcome_labels(batch_size=100),
+                    concurrent_writer(),
+                ),
+                timeout=10,
+            )
+            assert writer_errors == []
+            assert len(loaded) == 100
+            async with writer_sessions() as db:
+                total = await db.scalar(select(func.count(_TestAuditLog.id)))
+            assert total == 101
+
+            async with engine.connect() as connection:
+                mode = await connection.exec_driver_sql("PRAGMA journal_mode")
+                assert str(mode.scalar_one()).casefold() == "wal"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
 def test_holdout_route_checks_consumption_before_loading_history():
     from pathlib import Path
 
