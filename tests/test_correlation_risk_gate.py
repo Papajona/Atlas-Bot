@@ -3,7 +3,7 @@ was imported in main.py but never called -- confirmed dead code during review. T
 cover the function itself (previously untested) and verify it is now actually wired into the
 live per-symbol decision pipeline in the correct position."""
 
-from app.correlation_risk import adjusted_group_exposure, risk_group
+from app.correlation_risk import adjusted_group_exposure, risk_group, shares_risk_budget
 
 
 class _Pos:
@@ -137,7 +137,7 @@ def test_customer_paper_buy_filters_unrelated_markets_before_valuation():
 
     assert "target_group = risk_group(req.symbol)" in helper
     assert "relevant_positions = [" in helper
-    assert 'risk_group(str(row.get("symbol") or "")) == target_group' in helper
+    assert 'shares_risk_budget(req.symbol, str(row.get("symbol") or ""))' in helper
     assert helper.index("relevant_positions = [") < helper.index("market_data, mark_req")
     assert '"stage": "paper_exposure_mark_unavailable"' in helper
 
@@ -323,10 +323,11 @@ def test_customer_paper_buy_uses_effective_price_and_atomic_fill_cap():
 
     # The actual database transaction serializes group fills, rereads current positions,
     # and sizes the fill against its actual price before inserting the fill row.
-    assert 'paper-correlation-group:{customer_id}:{target_group}' in lifecycle_source
+    assert 'paper-risk-budget:{customer_id}' in lifecycle_source
+    assert "shares_risk_budget(symbol, current_symbol)" in lifecycle_source
     assert "existing_group_notional + amount * fill_price" in lifecycle_source
     assert "NO_CORRELATION_GROUP_HEADROOM" in lifecycle_source
-    assert lifecycle_source.index("paper-correlation-group:") < lifecycle_source.index(
+    assert lifecycle_source.index("paper-risk-budget:") < lifecycle_source.index(
         "INSERT INTO customer_paper.fills"
     )
 
@@ -362,3 +363,54 @@ def test_reducing_position_requires_matching_exchange_for_reduce_only():
     requested_exchange = "binance"
     position = SimpleNamespace(exchange="kraken", symbol="BTC/USDT", quantity=2)
     assert str(position.exchange).strip().lower() != requested_exchange
+
+def test_unclassified_symbols_share_every_known_risk_budget_conservatively():
+    assert shares_risk_budget("BTC/USDT:USDT", "UNLISTED_TOKEN") is True
+    assert shares_risk_budget("XAU_USD", "UNLISTED_TOKEN") is True
+    assert shares_risk_budget("UNLISTED_TOKEN", "BTC/USDT:USDT") is True
+    assert shares_risk_budget("UNLISTED_TOKEN", "EUR_USD") is True
+    assert shares_risk_budget("BTC/USDT:USDT", "ETH/USDT:USDT") is False
+
+
+def test_unclassified_proposal_counts_all_existing_positions():
+    positions = [
+        _Pos("BTC/USDT:USDT", 1.0, 50000.0),
+        _Pos("ETH/USDT:USDT", 2.0, 2000.0),
+        _Pos("EUR_USD", 10000.0, 1.10),
+    ]
+    check = adjusted_group_exposure(
+        positions, proposed_symbol="UNLISTED_TOKEN", proposed_notional=1000.0,
+        cap_usd=70000.0,
+    )
+    assert check["group"] == "OTHER"
+    assert check["existing_notional"] == 111000.0
+    assert check["projected_notional"] == 112000.0
+    assert check["allowed"] is False
+    assert len(check["members"]) == 3
+
+
+def test_known_proposal_counts_unclassified_existing_exposure():
+    positions = [
+        _Pos("BTC/USDT:USDT", 1.0, 30000.0),
+        _Pos("UNLISTED_TOKEN", 2.0, 1000.0),
+    ]
+    check = adjusted_group_exposure(
+        positions, proposed_symbol="BTC/USDT:USDT", proposed_notional=8000.0,
+        cap_usd=40000.0,
+    )
+    assert check["group"] == "BTC_BETA"
+    assert check["existing_notional"] == 32000.0
+    assert check["projected_notional"] == 40000.0
+    assert check["allowed"] is True
+    assert check["members"] == [("BTC/USDT:USDT", 30000.0), ("UNLISTED_TOKEN", 2000.0)]
+
+
+def test_unvalued_unclassified_position_blocks_known_group_increase():
+    positions = [_Pos("UNLISTED_TOKEN", 1.0, None)]
+    positions[0].average_entry_price = None
+    check = adjusted_group_exposure(
+        positions, proposed_symbol="BTC/USDT:USDT", proposed_notional=1.0,
+        cap_usd=100000.0,
+    )
+    assert check["valuation_complete"] is False
+    assert check["allowed"] is False
