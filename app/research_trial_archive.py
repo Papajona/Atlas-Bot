@@ -106,8 +106,14 @@ def _trial_specs(report: Mapping[str, Any]) -> list[tuple[str, dict[str, Any], s
             for variant in variants:
                 if not isinstance(variant, Mapping):
                     continue
-                prefix = f"variant:{variant.get('multiplier')}@"
-                if label.startswith(prefix):
+                try:
+                    expected_label = (
+                        f"variant:t{float(variant['threshold_multiplier']):.2f}:"
+                        f"r{float(variant['risk_multiplier']):.2f}@{variant['config_sha256']}"
+                    )
+                except (KeyError, TypeError, ValueError, OverflowError):
+                    continue
+                if label == expected_label:
                     matched = dict(variant)
                     break
             output.append((label, matched or {}, "variant"))
