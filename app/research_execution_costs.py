@@ -471,12 +471,16 @@ def execution_cost_series_for_positions(
     values = np.full(len(positions), fallback, dtype=float)
     reasons: dict[str, int] = {}
     complete = isinstance(context, Mapping)
+    complete_by_bar = [bool(complete)] * len(positions)
+    reasons_by_bar: list[dict[str, int]] = [{} for _ in range(len(positions))]
     previous = 0.0
     for i, current_value in enumerate(positions.to_numpy(dtype=float)):
         current = float(current_value)
         if not math.isfinite(current):
             complete = False
+            complete_by_bar[i] = False
             reasons["NONFINITE_POSITION"] = reasons.get("NONFINITE_POSITION", 0) + 1
+            reasons_by_bar[i]["NONFINITE_POSITION"] = 1
             previous = 0.0
             continue
         turnover = abs(current - previous)
@@ -509,6 +513,7 @@ def execution_cost_series_for_positions(
                 event_failed = True
                 key = reason or "EXECUTION_EVENT_UNAVAILABLE"
                 reasons[key] = reasons.get(key, 0) + 1
+                reasons_by_bar[i][key] = reasons_by_bar[i].get(key, 0) + 1
             else:
                 event_rates.append((close_quantity, cost))
         if open_quantity > 0.0:
@@ -524,6 +529,7 @@ def execution_cost_series_for_positions(
                 event_failed = True
                 key = reason or "EXECUTION_EVENT_UNAVAILABLE"
                 reasons[key] = reasons.get(key, 0) + 1
+                reasons_by_bar[i][key] = reasons_by_bar[i].get(key, 0) + 1
             else:
                 event_rates.append((open_quantity, cost))
 
@@ -532,6 +538,7 @@ def execution_cost_series_for_positions(
             rel_tol=1e-10, abs_tol=1e-12,
         ):
             complete = False
+            complete_by_bar[i] = False
         else:
             values[i] = sum(quantity * rate for quantity, rate in event_rates) / turnover
         previous = current
@@ -549,4 +556,8 @@ def execution_cost_series_for_positions(
             str(context.get("context_sha256") or "") if isinstance(context, Mapping) else None
         ),
         "execution_cost_failure_reasons": reasons,
+        # Internal causal audit vectors allow walk-forward prefixes to reuse one
+        # precomputed cost series without inheriting failures from future bars.
+        "_execution_cost_model_complete_by_bar": complete_by_bar,
+        "_execution_cost_failure_reasons_by_bar": reasons_by_bar,
     }
