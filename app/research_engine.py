@@ -222,6 +222,26 @@ def _apply_protective_halts(
     }
 
 
+def _benchmark_execution_inputs(
+    execution_cost_context: dict[str, object] | None,
+    execution_audit: dict,
+    session_costs_bps: dict[str, float] | None,
+) -> tuple[dict[str, object] | None, dict[str, float] | None]:
+    """Keep benchmark controls on the candidate's actual fallback cost model.
+
+    A candidate that hit a participation rejection is re-run with static/session
+    costs. Its independent benchmark controls must not retry the rejected signed
+    per-bar context, or the benchmark report disappears instead of staying
+    diagnostic-only.
+    """
+    if execution_audit.get("per_bar_execution_cost_model_status") == "FALLBACK_AFTER_EVENT_REJECTION":
+        return None, session_costs_bps
+    return (
+        execution_cost_context,
+        None if execution_cost_context is not None else session_costs_bps,
+    )
+
+
 def _protected_component_position(
     df: pd.DataFrame,
     component: str,
@@ -593,6 +613,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         for size in bootstrap_block_sizes
     }
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
+    benchmark_execution_context, benchmark_session_costs = _benchmark_execution_inputs(
+        execution_cost_context, ensemble_audit, session_costs_bps
+    )
     oos = fixed_signal_walk_forward_oos(
         df, ensemble_pos, costs_bps=taker_bps + slippage_bps,
         folds=folds, min_train=min_train,
@@ -609,15 +632,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
         benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
         benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
-        session_costs_bps=(
-            None if execution_cost_context is not None else session_costs_bps
-        ),
+        session_costs_bps=benchmark_session_costs,
         transaction_cost_bps_per_bar=(
             ensemble_cost_bps
             if execution_cost_context is not None or session_costs_bps is not None
             else None
         ),
-        execution_cost_context=execution_cost_context,
+        execution_cost_context=benchmark_execution_context,
         benchmark_execution_cost_namespace="research:ensemble",
     )
     oos["execution_cost_model_complete"] = (
@@ -650,6 +671,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
             execution_cost_context, f"research:{component}",
         )
+        benchmark_execution_context, benchmark_session_costs = _benchmark_execution_inputs(
+            execution_cost_context, component_audit, session_costs_bps
+        )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
             df, component_position, costs_bps=taker_bps + slippage_bps,
             folds=folds, min_train=min_train,
@@ -668,15 +692,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
             benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
             benchmark_random_trials=25,
-            session_costs_bps=(
-                None if execution_cost_context is not None else session_costs_bps
-            ),
+            session_costs_bps=benchmark_session_costs,
             transaction_cost_bps_per_bar=(
                 component_cost_bps
                 if execution_cost_context is not None or session_costs_bps is not None
                 else None
             ),
-            execution_cost_context=execution_cost_context,
+            execution_cost_context=benchmark_execution_context,
             benchmark_execution_cost_namespace=f"research:{component}",
         )
         per_strategy_oos[component]["execution_cost_model_complete"] = (
@@ -719,6 +741,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
             session_costs_bps, execution_cost_context, variant_namespace,
         )
+        variant_benchmark_context, variant_benchmark_session_costs = _benchmark_execution_inputs(
+            execution_cost_context, variant_audit, session_costs_bps
+        )
         is_baseline = (
             math.isclose(threshold_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
             and math.isclose(risk_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
@@ -742,15 +767,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
                 benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
                 benchmark_random_trials=25,
-                session_costs_bps=(
-                    None if execution_cost_context is not None else session_costs_bps
-                ),
+                session_costs_bps=variant_benchmark_session_costs,
                 transaction_cost_bps_per_bar=(
                     variant_cost_bps
                     if execution_cost_context is not None or session_costs_bps is not None
                     else None
                 ),
-                execution_cost_context=execution_cost_context,
+                execution_cost_context=variant_benchmark_context,
                 benchmark_execution_cost_namespace=variant_namespace,
             )
         variant_oos["execution_cost_model_complete"] = (
