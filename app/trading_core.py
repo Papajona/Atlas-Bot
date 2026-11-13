@@ -505,6 +505,10 @@ def ai_walk_forward_backtest(
     )
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
+    # The OOS fold indices now address the filtered label matrix. Keep the
+    # execution ATR series on that exact same index so no fold can silently
+    # reuse a pre-filter bar (or pass a warm-up NaN to a non-zero position).
+    entry_atr_for_label = entry_atr_for_label.loc[valid]
     # Use an explicitly expanding chronological split with a full label-horizon purge
     # between every train/test boundary. sklearn.TimeSeriesSplit makes early training
     # folds shorter than min_train, silently skipping them (for example, 1,799 bars
