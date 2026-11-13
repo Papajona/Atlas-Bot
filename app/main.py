@@ -2461,10 +2461,6 @@ async def _run_persisted_adaptive_bot_cycle(
                     getattr(position, "average_entry_price", 0),
                 )
                 if not math.isfinite(mark) or mark <= 0:
-                        mark = float(getattr(position, "average_entry_price", 0) or 0)
-                except (TypeError, ValueError, OverflowError):
-                    mark = 0.0
-                if not math.isfinite(mark) or mark <= 0:
                     reduction_valuation_complete = False
                     break
                 reducing_notional += close_quantity * mark
