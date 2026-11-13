@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -34,6 +35,8 @@ _CURRENCY_RE = re.compile(r"^[A-Z0-9]{2,12}$")
 _SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9/_:.-]{0,79}$")
 _VENUE_RE = re.compile(r"^[a-z0-9_-]{1,40}$")
 _MARKET_TYPES = {"spot"}
+
+logger = logging.getLogger(__name__)
 
 
 class CustomerPaperOrderConflict(CustomerPaperLedgerBlocked):
@@ -1419,10 +1422,21 @@ async def record_customer_paper_fill(
                                 )
                         await conn.commit()
                     except Exception:
-                        # Do not return a pooled connection that may still own a
-                        # session lock; invalidation forces PostgreSQL to release it.
-                        await conn.invalidate()
-                        raise
+                        # A cleanup failure must never turn a committed fill into a
+                        # reported failure or replace the original domain exception.
+                        logger.exception(
+                            "customer_paper_risk_lock_release_failed customer_id=%s",
+                            customer_id,
+                        )
+                        # Invalidation drops any session locks that PostgreSQL may
+                        # still associate with this physical connection.
+                        try:
+                            await conn.invalidate()
+                        except Exception:
+                            logger.exception(
+                                "customer_paper_risk_lock_connection_invalidation_failed customer_id=%s",
+                                customer_id,
+                            )
     finally:
         await engine.dispose()
 
