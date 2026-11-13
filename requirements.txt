@@ -22,6 +22,7 @@ certifi==2026.10.19
 # soupsieve 3.0.3 is affected by CVE-2026-126190; pin the fixed release.
 soupsieve==4.0.0
 google-cloud-secret-manager>=2.24.0,<3
+opentelemetry-api==1.45.2
 prometheus-client==0.22.1
 cryptography==50.0.1
 PyJWT==2.15.0

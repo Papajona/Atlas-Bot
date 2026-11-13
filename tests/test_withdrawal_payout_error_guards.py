@@ -123,3 +123,53 @@ def test_sweep_and_withdrawal_terminal_states_are_explicit():
     assert '"UNKNOWN"' in custody
     sweep = (ROOT / "app" / "tron_sweep.py").read_text(encoding="utf-8")
     assert 'return "UNKNOWN"' in sweep
+
+def test_confirmed_provider_outcomes_survive_ledger_replay_mismatches():
+    release = ast.unparse(_fn("release_withdrawal"))
+    assert "except WithdrawalReplayMismatch as mismatch" in release
+    assert "await db2.commit()" in release
+    assert "persist_withdrawal_replay_mismatch(db2, mismatch)" in release
+    assert "await db3.commit()" in release
+    assert "persist_withdrawal_replay_mismatch(db3, mismatch)" in release
+    assert "WITHDRAWAL_LEDGER_REPLAY_MISMATCH" in release
+
+    reconcile = ast.unparse(_fn("reconcile_withdrawal"))
+    assert "except WithdrawalReplayMismatch as mismatch" in reconcile
+    assert "await db.commit()" in reconcile
+    assert "persist_withdrawal_replay_mismatch(db, mismatch)" in reconcile
+
+    mark_not_sent = ast.unparse(_fn("mark_withdrawal_not_sent"))
+    assert "except WithdrawalReplayMismatch as mismatch" in mark_not_sent
+    assert "w.provider_status = 'NOT_SENT'" in mark_not_sent
+    assert "await db.commit()" in mark_not_sent
+    assert "persist_withdrawal_replay_mismatch(db, mismatch)" in mark_not_sent
+
+    reject = ast.unparse(_fn("reject_withdrawal"))
+    assert "except WithdrawalReplayMismatch as mismatch" in reject
+    assert "w.rejected_by = req.admin_id" in reject
+    assert "w.rejection_reason = req.reason.strip()" in reject
+    assert "await db.commit()" in reject
+    assert "persist_withdrawal_replay_mismatch(db, mismatch)" in reject
+
+
+def test_terminal_withdrawal_ledger_repair_is_authorized_and_never_sends():
+    repair = ast.unparse(_fn("repair_withdrawal_ledger"))
+    for required in (
+        "require_role(claims, 'TREASURY')",
+        "authenticated_operator",
+        "approver_auth(req.admin_id",
+        "verify_release_operator(req.operator_id",
+        "release_separation_violation",
+        "{'FAILED', 'RELEASED', 'REJECTED'}",
+        "provider.status(",
+        "recover(",
+        "PayoutNotFound",
+        "WITHDRAWAL_REPLAY_MISMATCH:",
+        "persist_withdrawal_replay_mismatch(db, mismatch)",
+        "incident.status = 'RESOLVED'",
+        "'provider_send_attempted': False",
+    ):
+        assert required in repair, required
+    assert "provider.send(" not in repair
+    assert ".send(" not in repair
+
