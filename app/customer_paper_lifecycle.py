@@ -941,27 +941,17 @@ async def record_customer_paper_fill(
                     raise CustomerPaperOrderConflict("customer paper order does not exist for this tenant")
 
                 if str(preflight_order["side"] or "").upper() == "BUY":
-                    # The customer-wide key serializes workers on this version. Also
-                    # acquire every legacy per-group key so old workers still using
-                    # paper-correlation-group:{customer_id}:{group} cannot race this
-                    # rollout. Every version acquires these legacy keys in sorted order.
-                    risk_lock_keys = [
-                        f"paper-risk-budget:{customer_id}",
-                        *[
-                            f"paper-correlation-group:{customer_id}:{group}"
-                            for group in RISK_GROUPS
-                        ],
-                    ]
-                    for risk_lock_key in risk_lock_keys:
-                        # Track before awaiting the command: if the server acquired the
-                        # lock but COMMIT/response fails, finally still unlocks or
-                        # invalidates the physical connection.
-                        risk_budget_lock_keys.append(risk_lock_key)
-                        await conn.execute(
-                            text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
-                            {"lock_key": risk_lock_key},
-                        )
-                        risk_budget_lock_acquired = True
+                    # New workers serialize all customer BUY budgets while current
+                    # marks are fetched. Keep the legacy per-group locks out of this
+                    # preflight phase: old workers acquire order/bar locks before their
+                    # group lock, so taking group locks here would invert lock order.
+                    risk_lock_key = f"paper-risk-budget:{customer_id}"
+                    risk_budget_lock_keys.append(risk_lock_key)
+                    await conn.execute(
+                        text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": risk_lock_key},
+                    )
+                    risk_budget_lock_acquired = True
                     # Session-level locks survive COMMIT. End the implicit transaction
                     # before any provider/network call.
                     await conn.commit()
@@ -1005,6 +995,16 @@ async def record_customer_paper_fill(
                             text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                             {"lock_key": f"paper-market-bar:{normalized_bar_key}"},
                         )
+                    if str(preflight_order["side"] or "").upper() == "BUY":
+                        # Preserve compatibility with older workers that still use
+                        # per-group xact locks. Acquire them only after order and bar
+                        # locks, matching the legacy lock order and avoiding roll-deploy
+                        # deadlocks. Sorted acquisition is deterministic across workers.
+                        for group in RISK_GROUPS:
+                            await conn.execute(
+                                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                                {"lock_key": f"paper-correlation-group:{customer_id}:{group}"},
+                            )
                     currency = str(order["currency"])
                     payload = {
                         "customer_id": customer_id, "order_id": order_id, "idempotency_key": fill_key,
