@@ -639,11 +639,6 @@ async def verify_customer_ledger_balances_match_journals(
         _customer_account(customer_id, bucket, currency): field
         for bucket, field in buckets.items()
     }
-    ledger_lines = select(LedgerJournalLine).where(
-        LedgerJournalLine.customer_id == customer_id,
-        LedgerJournalLine.currency == currency,
-        LedgerJournalLine.account_code.in_(tuple(account_codes)),
-    )
     if db.bind.dialect.name == "sqlite":
         # SQLite stores NUMERIC values as binary floating point and its SUM()
         # accumulator can discard micro-unit remainders after large turnover.
