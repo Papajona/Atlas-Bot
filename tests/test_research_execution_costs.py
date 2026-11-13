@@ -34,9 +34,9 @@ PARAMETERS = {
 
 
 def _signed(document):
-    private_key = Ed25519PrivateKey.generate()
-    signature = private_key.sign(canonical_json_bytes(document))
-    public_key = private_key.public_key().public_bytes(
+    signer = Ed25519PrivateKey.generate()
+    signature = signer.sign(canonical_json_bytes(document))
+    public_key = signer.public_key().public_bytes(
         encoding=serialization.Encoding.Raw,
         format=serialization.PublicFormat.Raw,
     )
