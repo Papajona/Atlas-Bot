@@ -318,3 +318,84 @@ def test_ai_archive_rows_are_counted_but_excluded_from_fixed_sample_dsr():
     assert result["trial_count"] == 2
     assert result["trial_sharpes_annual"] == [0.3, 0.4]
     assert 9.5 not in result["trial_sharpes_annual"]
+
+
+
+def test_session_cost_rates_must_match_signed_training_and_heldout_venue_observations():
+    start, end = _window()
+    schedule = {
+        "LONDON": 5.0,
+        "NEW_YORK": 6.0,
+        "NEW_YORK_LATE": 7.0,
+        "OTHER": 8.0,
+    }
+
+    def session_row(rate):
+        return {
+            "status": "PASS",
+            "observed_order_count": 40,
+            "observed_fill_count": 35,
+            "observed_cost_bps": rate,
+            "validation_start": start,
+            "validation_end": end,
+            "heldout_validation": {
+                "status": "PASS",
+                "sample_count": 35,
+                "mean_absolute_spread_error_bps": 0.1,
+                "mean_absolute_slippage_error_bps": 0.1,
+                "observed_cost_bps": rate,
+                "estimated_cost_bps": rate,
+                "accepted_cost_error_bps": 0.2,
+            },
+        }
+
+    doc = {
+        "evidence_type": "venue_execution_cost_calibration",
+        "evidence_id": "cost-session-v1",
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "model_fingerprint": "a" * 64,
+        "synthetic_only": False,
+        "testnet_only": False,
+        "sources": [_source(k) for k in ("observed_fills", "order_book", "fee_schedule")],
+        "observed_order_count": 50,
+        "observed_fill_count": 40,
+        "validation_start": start,
+        "validation_end": end,
+        "heldout_validation": {
+            "status": "PASS",
+            "sample_count": 40,
+            "mean_absolute_spread_error_bps": 0.2,
+            "mean_absolute_slippage_error_bps": 0.4,
+        },
+        "session_cost_basis": "per_side_turnover_bps",
+        "session_costs_source": "venue_observed",
+        "session_costs_bps": schedule,
+        "session_cost_validation": {
+            session: session_row(rate) for session, rate in schedule.items()
+        },
+    }
+    args = {
+        "venue": "binance",
+        "market_type": "spot",
+        "symbol": "BTC/USDT",
+        "model_fingerprint": "a" * 64,
+        "max_spread_error_bps": 1.0,
+        "max_slippage_error_bps": 1.0,
+    }
+    signed, keys = _sign(doc)
+    result = validate_execution_cost_calibration(signed, keys, **args)
+    assert result["calibration_verified"] is True
+    assert result["session_costs_verified"] is True
+    assert result["session_costs_bps"] == schedule
+
+    forged = {
+        **doc,
+        "session_costs_bps": {**schedule, "LONDON": 99.0},
+    }
+    forged_signed, forged_keys = _sign(forged)
+    rejected = validate_execution_cost_calibration(forged_signed, forged_keys, **args)
+    assert rejected["calibration_verified"] is True
+    assert rejected["session_costs_verified"] is False
+    assert rejected["session_costs_bps"] is None
