@@ -101,51 +101,64 @@ async def _run_lifecycle(operations):
 
     funded = Decimal("1000")
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
     try:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-        async with async_sessionmaker(engine, expire_on_commit=False)() as db:
-            ledger = await get_or_create_ledger(db, 1, USDT)
-            await post_journal(db, currency=USDT, entry_type="DEPOSIT", reference_type="DEPOSIT", reference_id="d1",
+        async with sessions() as seed_db:
+            ledger = await get_or_create_ledger(seed_db, 1, USDT)
+            await post_journal(seed_db, currency=USDT, entry_type="DEPOSIT", reference_type="DEPOSIT", reference_id="d1",
                                idempotency_key="dep:1", description="seed",
                                lines=[{"account_code": "ASSET:CUSTODY:USDT", "debit": 1000, "credit": 0},
                                       {"account_code": _customer_account(1, "AVAILABLE"), "customer_id": 1, "debit": 0, "credit": 1000}])
             ledger.available = funded
-            await db.commit()
+            await seed_db.commit()
 
-            async def snapshot():
-                row = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+        async def snapshot():
+            async with sessions() as read_db:
+                row = (await read_db.execute(select(CustomerLedgerAccount))).scalar_one()
                 return Decimal(str(row.available)), Decimal(str(row.withdrawal_reserved))
 
-            settled = Decimal("0")
-            for index, (amt, outcome, replays) in enumerate(operations):
-                ref, amt_d = f"w{index}", Decimal(amt)
-                before = await snapshot()
-                try:
-                    for _ in range(replays):                      # client retries
-                        await reserve_withdrawal(db, 1, amt, reference_id=ref)
-                    await db.commit()
-                except ValueError:
-                    await db.rollback()
-                    assert await snapshot() == before, "a rejected reserve must change nothing"
-                    continue
-                if outcome == "release":
-                    for _ in range(replays):
-                        await release_withdrawal(db, 1, amt, reference_id=ref)
-                elif outcome == "settle":
-                    for _ in range(replays):
-                        await settle_withdrawal(db, 1, amt, reference_id=ref)
-                    settled += amt_d
-                await db.commit()
-                available, reserved = await snapshot()
-                assert available >= 0 and reserved >= 0
-                assert available + reserved + settled == funded, "funds must be conserved"
-                assert (await ledger_invariant_report(db))["ok"] is True
+        settled = Decimal("0")
+        for index, (amt, outcome, replays) in enumerate(operations):
+            ref, amt_d = f"w{index}", Decimal(amt)
+            before = await snapshot()
+            try:
+                for _ in range(replays):
+                    async with sessions() as reserve_db:
+                        await reserve_withdrawal(reserve_db, 1, amt_d, reference_id=ref)
+                        await reserve_db.commit()
+            except ValueError:
+                assert await snapshot() == before, "a rejected reserve must change nothing"
+                continue
+
+            if outcome == "release":
+                for _ in range(replays):
+                    async with sessions() as release_db:
+                        await release_withdrawal(release_db, 1, amt_d, reference_id=ref)
+                        await release_db.commit()
+            elif outcome == "settle":
+                for _ in range(replays):
+                    async with sessions() as settle_db:
+                        await settle_withdrawal(settle_db, 1, amt_d, reference_id=ref)
+                        await settle_db.commit()
+                settled += amt_d
+
+            available, reserved = await snapshot()
+            assert available >= 0 and reserved >= 0
+            assert available + reserved + settled == funded, "funds must be conserved"
+            async with sessions() as audit_db:
+                assert (await ledger_invariant_report(audit_db))["ok"] is True
     finally:
         await engine.dispose()
 
 
-operation = st.tuples(st.integers(1, 600), st.sampled_from(["pending", "release", "settle"]), st.integers(1, 3))
+
+operation = st.tuples(
+    st.decimals(min_value=Decimal("0.000001"), max_value=Decimal("600"), places=6, allow_nan=False, allow_infinity=False),
+    st.sampled_from(["pending", "release", "settle"]),
+    st.integers(1, 3),
+)
 
 
 @hyp_settings(max_examples=25, deadline=None, suppress_health_check=[HealthCheck.too_slow])
@@ -156,3 +169,16 @@ def test_withdrawal_lifecycle_conserves_funds_under_retries(operations):
             mock.patch.object(settings, "app_encryption_keys_json", ""), \
             mock.patch.object(settings, "app_encryption_active_key_id", "v1"):
         asyncio.run(_run_lifecycle(operations))
+
+@hyp_settings(max_examples=100, deadline=None)
+@given(secret=st.text(
+    alphabet="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+    min_size=1,
+    max_size=32,
+))
+def test_release_credential_can_never_reuse_any_approver_credential(secret):
+    with mock.patch.object(settings, "withdrawal_approver_tokens", f"approver:{secret},backup:{secret[::-1]}"):
+        assert release_separation_violation(
+            "independent-operator", secret, ["approver", "backup"]
+        ) is not None
+
