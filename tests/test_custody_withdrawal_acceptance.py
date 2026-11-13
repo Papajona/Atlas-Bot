@@ -438,14 +438,16 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
     asyncio.run(run())
 
 @pytest.mark.parametrize(
-    "reserved_debit,deficit_debit,metadata_reserved,metadata_shortfall",
+    "reserved_debit,deficit_debit,metadata_reserved,metadata_shortfall,expect_rejection",
     [
-        (Decimal("20"), Decimal("10"), Decimal("20"), Decimal("10")),
-        (Decimal("-5"), Decimal("35"), Decimal("-5"), Decimal("35")),
+        (Decimal("20"), Decimal("10"), Decimal("20"), Decimal("10"), False),
+        (Decimal("-5"), Decimal("35"), Decimal("-5"), Decimal("35"), True),
+        (Decimal("20"), Decimal("10"), Decimal("19"), Decimal("11"), True),
+        (Decimal("0"), Decimal("30"), Decimal("0"), Decimal("30"), True),
     ],
 )
-def test_settlement_replay_rejects_invalid_debit_components_and_persists_incident(
-    reserved_debit, deficit_debit, metadata_reserved, metadata_shortfall
+def test_settlement_replay_validates_debit_components_and_persists_incident(
+    reserved_debit, deficit_debit, metadata_reserved, metadata_shortfall, expect_rejection
 ):
     async def run():
         sqlite_path = os.path.join(tempfile.gettempdir(), f"atlas-corrupt-settlement-{uuid.uuid4().hex}.db")
@@ -542,10 +544,16 @@ def test_settlement_replay_rejects_invalid_debit_components_and_persists_inciden
                 await db.commit()
 
                 with mock.patch("app.customer_funds.SessionLocal", sessions):
-                    with pytest.raises(ValueError, match="different or inconsistent operation"):
-                        await settle_withdrawal(
+                    if expect_rejection:
+                        with pytest.raises(ValueError, match="different or inconsistent operation"):
+                            await settle_withdrawal(
+                                db, customer_id, 30, reference_id=reference_id
+                            )
+                    else:
+                        replayed = await settle_withdrawal(
                             db, customer_id, 30, reference_id=reference_id
                         )
+                        assert replayed.customer_id == customer_id
                 await db.rollback()
 
                 incident = (
@@ -555,11 +563,15 @@ def test_settlement_replay_rejects_invalid_debit_components_and_persists_inciden
                             == f"WITHDRAWAL_REPLAY_MISMATCH:{idem}"
                         )
                     )
-                ).scalar_one()
-                assert incident.severity == "HIGH"
-                assert incident.status == "OPEN"
-                detail = json.loads(incident.detail_json)
-                assert "settlement journal lines" in detail["problems"]
+                ).scalar_one_or_none()
+                if expect_rejection:
+                    assert incident is not None
+                    assert incident.severity == "HIGH"
+                    assert incident.status == "OPEN"
+                    detail = json.loads(incident.detail_json)
+                    assert "settlement journal lines" in detail["problems"]
+                else:
+                    assert incident is None
         finally:
             await engine.dispose()
             for suffix in ("", "-wal", "-shm"):
