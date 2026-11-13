@@ -567,7 +567,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
     ensemble_signals, _, ensemble_requested, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits, ensemble_cost_bps = _protected_component_position(
-        df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
+        execution_cost_context, "research:ensemble",
     )
     gross = ensemble_pos * bar_returns
     turnover = execution_turnover(ensemble_pos, ensemble_exits)
@@ -608,9 +609,18 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
         session_costs_bps=session_costs_bps,
         transaction_cost_bps_per_bar=(
-            ensemble_cost_bps if session_costs_bps is not None else None
+            ensemble_cost_bps
+            if execution_cost_context is not None or session_costs_bps is not None
+            else None
         ),
     )
+    oos["execution_cost_model_complete"] = (
+        ensemble_audit.get("per_bar_execution_cost_model_complete") is True
+    )
+    oos["execution_cost_model_status"] = ensemble_audit.get("per_bar_execution_cost_model_status")
+    oos["execution_cost_model_fingerprint"] = ensemble_audit.get("execution_cost_model_fingerprint")
+    oos["per_bar_execution_context_sha256"] = ensemble_audit.get("per_bar_execution_context_sha256")
+    oos["per_bar_execution_cost_failure"] = ensemble_audit.get("per_bar_execution_cost_failure")
     ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
     oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
     oos["trade_boundary_overlap_by_fold"] = ensemble_overlap["by_fold"]
@@ -618,13 +628,16 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         fold_row["boundary_overlap_bars"] = overlap_bars
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
+    per_strategy_execution_audits = {"ensemble": ensemble_audit}
     for component in components:
         if component == "ensemble":
             per_strategy_oos[component] = oos
             continue
-        component_signals, _, component_requested, component_returns, component_position, _, _, component_exits, component_cost_bps = _protected_component_position(
-            df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        component_signals, _, component_requested, component_returns, component_position, _, component_audit, component_exits, component_cost_bps = _protected_component_position(
+            df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
+            execution_cost_context, f"research:{component}",
         )
+        per_strategy_execution_audits[component] = component_audit
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
             df, component_position, costs_bps=taker_bps + slippage_bps,
             folds=folds, min_train=min_train,
@@ -645,9 +658,18 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             benchmark_random_trials=25,
             session_costs_bps=session_costs_bps,
             transaction_cost_bps_per_bar=(
-                component_cost_bps if session_costs_bps is not None else None
+                component_cost_bps
+                if execution_cost_context is not None or session_costs_bps is not None
+                else None
             ),
         )
+        per_strategy_oos[component]["execution_cost_model_complete"] = (
+            component_audit.get("per_bar_execution_cost_model_complete") is True
+        )
+        per_strategy_oos[component]["execution_cost_model_status"] = component_audit.get("per_bar_execution_cost_model_status")
+        per_strategy_oos[component]["execution_cost_model_fingerprint"] = component_audit.get("execution_cost_model_fingerprint")
+        per_strategy_oos[component]["per_bar_execution_context_sha256"] = component_audit.get("per_bar_execution_context_sha256")
+        per_strategy_oos[component]["per_bar_execution_cost_failure"] = component_audit.get("per_bar_execution_cost_failure")
         component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
         per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
         per_strategy_oos[component]["trade_boundary_overlap_by_fold"] = component_overlap["by_fold"]
@@ -673,10 +695,13 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "take_profit_atr": float(cfg.take_profit_atr * risk_mult),
         })
         vr = _component_backtest(
-            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
+            session_costs_bps, execution_cost_context,
         )
-        variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits, variant_cost_bps = _protected_component_position(
-            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        variant_signals, _, variant_requested, variant_returns, variant_position, _, variant_audit, variant_exits, variant_cost_bps = _protected_component_position(
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
+            session_costs_bps, execution_cost_context,
+            f"research:variant:{threshold_mult:.2f}:{risk_mult:.2f}",
         )
         is_baseline = (
             math.isclose(threshold_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
@@ -703,9 +728,18 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 benchmark_random_trials=25,
                 session_costs_bps=session_costs_bps,
                 transaction_cost_bps_per_bar=(
-                    variant_cost_bps if session_costs_bps is not None else None
+                    variant_cost_bps
+                    if execution_cost_context is not None or session_costs_bps is not None
+                    else None
                 ),
             )
+        variant_oos["execution_cost_model_complete"] = (
+            variant_audit.get("per_bar_execution_cost_model_complete") is True
+        )
+        variant_oos["execution_cost_model_status"] = variant_audit.get("per_bar_execution_cost_model_status")
+        variant_oos["execution_cost_model_fingerprint"] = variant_audit.get("execution_cost_model_fingerprint")
+        variant_oos["per_bar_execution_context_sha256"] = variant_audit.get("per_bar_execution_context_sha256")
+        variant_oos["per_bar_execution_cost_failure"] = variant_audit.get("per_bar_execution_cost_failure")
         variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
         variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
         variant_oos["trade_boundary_overlap_by_fold"] = variant_overlap["by_fold"]
