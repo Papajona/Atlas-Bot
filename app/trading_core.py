@@ -425,12 +425,12 @@ def ai_walk_forward_backtest(
         scores.extend(score.tolist())
         # The model decision and ATR are shifted to use only the prior completed bar.
         fold_position = np.r_[0, sig[:-1]].astype(float)
-        tr = pd.concat([
+        true_range = pd.concat([
             (aligned["high"] - aligned["low"]).abs(),
             (aligned["high"] - aligned["close"].shift(1)).abs(),
             (aligned["low"] - aligned["close"].shift(1)).abs(),
         ], axis=1).max(axis=1)
-        entry_atr = tr.rolling(14, min_periods=14).mean().shift(1)
+        entry_atr = true_range.rolling(14, min_periods=14).mean().shift(1)
         fold_frame = aligned.iloc[te]
         fold_targets = pd.Series(fold_position, index=fold_frame.index, dtype=float)
         execution = simulate_execution_aware_strategy(

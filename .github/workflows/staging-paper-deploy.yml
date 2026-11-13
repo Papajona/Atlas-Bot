@@ -389,7 +389,6 @@ jobs:
                 --repo "$GITHUB_REPOSITORY" \
                 --workflow "customer-paper-staging-acceptance.yml" \
                 --event workflow_dispatch \
-                --commit "$GITHUB_SHA" \
                 --limit 100 \
                 --json databaseId,headSha,headBranch,displayTitle)"
               run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
