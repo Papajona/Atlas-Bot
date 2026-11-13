@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from collections import defaultdict
 from statistics import mean, median
@@ -442,6 +445,10 @@ async def load_decision_outcome_labels(*, limit: int = 10_000) -> list[dict]:
 
 
 HOLDOUT_REGISTRY_VERSION = "decision-outcome-one-time-holdout-v1"
+_HOLDOUT_EVALUATION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="atlas-decision-holdout"
+)
+_HOLDOUT_EVALUATION_GATE = threading.BoundedSemaphore(1)
 
 
 async def evaluate_decision_outcome_labels_once(
@@ -476,15 +483,31 @@ async def evaluate_decision_outcome_labels_once(
                 "reason": "one_time_holdout_is_global_and_cannot_be_reopened",
             }
 
-    import asyncio
-    report = await asyncio.to_thread(
-        evaluate_decision_outcome_labels,
-        records,
-        holdout_fraction=holdout_fraction,
-        min_group_samples=min_group_samples,
-        min_unique_timestamps=min_unique_timestamps,
-        redact_holdout=False,
-    )
+    if not _HOLDOUT_EVALUATION_GATE.acquire(blocking=False):
+        return {
+            "status": "HOLDOUT_EVALUATION_BUSY",
+            "holdout_version": HOLDOUT_REGISTRY_VERSION,
+            "metrics_released": False,
+            "consumed": False,
+            "report": None,
+            "reason": "bounded_holdout_worker_is_already_processing_a_request",
+        }
+    try:
+        from functools import partial
+        loop = asyncio.get_running_loop()
+        report = await loop.run_in_executor(
+            _HOLDOUT_EVALUATION_EXECUTOR,
+            partial(
+                evaluate_decision_outcome_labels,
+                records,
+                holdout_fraction=holdout_fraction,
+                min_group_samples=min_group_samples,
+                min_unique_timestamps=min_unique_timestamps,
+                redact_holdout=False,
+            ),
+        )
+    finally:
+        _HOLDOUT_EVALUATION_GATE.release()
     usable = [
         row for row in report.get("out_of_sample", [])
         if isinstance(row, dict)
@@ -639,6 +662,7 @@ async def load_all_decision_outcome_labels(
     *,
     batch_size: int = 2000,
     max_records: int = 100_000,
+    max_decoded_bytes: int = 128 * 1024 * 1024,
 ) -> list[dict]:
     """Read all labels in bounded scalar batches; fail closed instead of truncating.
 
@@ -651,7 +675,9 @@ async def load_all_decision_outcome_labels(
 
     batch_size = max(100, min(5000, int(batch_size)))
     max_records = max(1, min(250_000, int(max_records)))
+    max_decoded_bytes = max(1_048_576, min(256 * 1024 * 1024, int(max_decoded_bytes)))
     result: list[dict] = []
+    decoded_bytes = 0
     before_id = None
     async with SessionLocal() as db:
         while True:
@@ -678,12 +704,23 @@ async def load_all_decision_outcome_labels(
                 else:
                     continue
                 if isinstance(record, dict):
-                    result.append(record)
-                    if len(result) > max_records:
+                    try:
+                        record_bytes = len(json.dumps(
+                            record, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                        ).encode("utf-8"))
+                    except (TypeError, ValueError, OverflowError):
                         raise DecisionOutcomeHistoryResourceLimit(
-                            f"complete decision label history exceeds {max_records} records; "
+                            "decision label contains non-serializable or non-finite data; "
                             "holdout was not consumed"
                         )
+                    decoded_bytes += record_bytes
+                    if len(result) + 1 > max_records or decoded_bytes > max_decoded_bytes:
+                        raise DecisionOutcomeHistoryResourceLimit(
+                            "complete decision label history exceeds the bounded "
+                            f"resource budget ({max_records} records / {max_decoded_bytes} bytes); "
+                            "holdout was not consumed"
+                        )
+                    result.append(record)
             if len(batch) < batch_size:
                 break
     return result
