@@ -43,3 +43,29 @@ def test_misaligned_return_streams_are_rejected():
     result = paired_return_lead([0.1, 0.2, 0.3], [0.1, 0.2])
     assert result["status"] == "INVALID_DATA"
     assert result["significant_lead"] is False
+
+
+def test_nonfinite_pairs_fail_closed_even_when_remaining_pairs_are_significant():
+    rng = np.random.default_rng(91)
+    incumbent = rng.normal(0.0, 0.001, 600)
+    challenger = incumbent + 0.001
+    challenger[275] = np.nan
+
+    result = paired_return_lead(challenger, incumbent, candidate_count=5)
+
+    assert result["status"] == "INVALID_DATA"
+    assert result["significant_lead"] is False
+    assert result["reason"] == "nonfinite_paired_return_observation"
+    assert result["invalid_pair_count"] == 1
+
+
+def test_infinite_pairs_also_fail_closed():
+    rng = np.random.default_rng(92)
+    incumbent = rng.normal(0.0, 0.001, 600)
+    challenger = incumbent + 0.001
+    incumbent[100] = np.inf
+
+    result = paired_return_lead(challenger, incumbent, candidate_count=5)
+
+    assert result["status"] == "INVALID_DATA"
+    assert result["significant_lead"] is False
