@@ -189,6 +189,9 @@ class Settings(BaseSettings):
     paper_execution_evidence_source: str = ""
     paper_execution_evidence_path: str = ""
     paper_execution_evidence_id: str = ""
+    # Fixed USD order size used to translate research exposure into spot base units.
+    # Required before per-bar participation costs can be verified; deliberately no default.
+    research_order_notional_usd: float | None = None
     # No default: calibration must meet independently configured, venue-reviewed error bounds.
     research_cost_max_spread_mae_bps: float | None = None
     research_cost_max_slippage_mae_bps: float | None = None
