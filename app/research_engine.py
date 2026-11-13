@@ -1153,6 +1153,15 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos["trial_registry_complete"] = trial_registry_complete
     oos["deflated_sharpe_detail"] = dsr
 
+    fixed_signal_execution_costs_complete = bool(
+        oos.get("execution_cost_model_complete") is True
+        and all(
+            per_strategy_oos.get(component, {}).get("execution_cost_model_complete") is True
+            for component in components
+        )
+        and all(row.get("execution_cost_model_complete") is True for row in results)
+    )
+
     for component in components:
         component_returns = per_strategy_oos[component].get("oos_return_sample") or []
         if not archive_sharpes_valid:
@@ -1219,11 +1228,28 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "carry_evidence_source": carry_evidence_source or None,
                         "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": False,
-                        "execution_cost_model_complete": False,
+                        "execution_cost_model_complete": fixed_signal_execution_costs_complete,
+                        "execution_cost_model_status": (
+                            "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+                            if fixed_signal_execution_costs_complete
+                            else "STATIC_OR_SESSION_COST_FALLBACK"
+                        ),
                         "execution_cost_calibration_status": calibration_status,
                         "execution_cost_calibration_evidence_id": calibration_evidence_id,
                         "execution_cost_calibration": cost_validation,
                         "execution_cost_model_fingerprint": model_fingerprint,
+                        "per_bar_execution_context_sha256": execution_context_audit.get(
+                            "per_bar_execution_context_sha256"
+                        ),
+                        "per_bar_execution_context_status": execution_context_audit.get("status"),
+                        "per_bar_execution_context_reason": execution_context_audit.get("reason"),
+                        "per_bar_execution_context": {
+                            "venue": execution_context_audit.get("venue"),
+                            "market_type": execution_context_audit.get("market_type"),
+                            "symbol": execution_context_audit.get("symbol"),
+                            "timeframe": execution_context_audit.get("timeframe"),
+                            "dataset_sha256": execution_context_audit.get("dataset_sha256"),
+                        },
                         "crypto_universe_validation": universe_validation,
                         "comparable_trial_archive": archive_validation,
                         "oos_sample_sha256": sample_sha256 or None,
