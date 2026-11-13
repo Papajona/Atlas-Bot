@@ -301,7 +301,10 @@ def compute_trial_ledger_integrity(
     mode = assurance_mode or (
         "HMAC_SIGNED" if key is not None else "HASH_CHAIN_UNSIGNED"
     )
-    key_id = str(signing_key_id or "").strip() if mode == "HMAC_SIGNED" else ""
+    key_id = (
+        str(signing_key_id or ("legacy" if key is not None else "")).strip()
+        if mode == "HMAC_SIGNED" else ""
+    )
     if mode not in {"HMAC_SIGNED", "HASH_CHAIN_UNSIGNED"}:
         raise ValueError("unknown trial-ledger assurance mode")
     if mode == "HMAC_SIGNED":
@@ -550,12 +553,11 @@ def _same_immutable_row(existing: ResearchTrialArchive, payload: Mapping[str, An
 
 
 async def archive_research_trials(report: Mapping[str, Any], request: Any) -> dict[str, Any]:
-    """Append/replay prospective trials under a serialized, tamper-evident ledger head.
+    """Append/replay prospective trials with a locked constant-time ledger-head check.
 
-    Legacy rows from before migration 0059 remain LEGACY_UNCHAINED. New records are
-    SHA-256 chained; HMAC authenticity is asserted only when an external >=32-byte
-    ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY is configured in the backend environment.
-    This prospective ledger never replaces the signed comparable archive used for DSR.
+    PostgreSQL serializes through SELECT FOR UPDATE. SQLite uses BEGIN IMMEDIATE
+    before reading the singleton head so concurrent local writers queue behind the
+    database write lock instead of racing on the same sequence.
     """
     if not isinstance(report, Mapping):
         return {"status": "FAILED", "reason": "RESEARCH_REPORT_INVALID", "inserted": 0, "replayed": 0}
@@ -565,14 +567,18 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
     context = _report_context(report, request)
     inserted = replayed = unverified = 0
     evaluation_id = uuid.uuid4().hex
-    signing_key = os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY") or None
-    if signing_key is not None and len(signing_key.encode("utf-8")) < 32:
-        return {
-            "status": "FAILED", "reason": "TRIAL_LEDGER_HMAC_KEY_TOO_SHORT",
-            "inserted": 0, "replayed": 0,
-        }
+    try:
+        keyring, active_key_id = _load_trial_ledger_keyring()
+    except ValueError as exc:
+        return {"status": "FAILED", "reason": str(exc), "inserted": 0, "replayed": 0}
+    signing_key = keyring.get(active_key_id) if active_key_id else None
+
     try:
         async with SessionLocal() as db:
+            if db.get_bind().dialect.name == "sqlite":
+                # Must be the first statement in this transaction: SQLite has no
+                # row-level FOR UPDATE lock, so reserve the write transaction first.
+                await db.execute(text("BEGIN IMMEDIATE"))
             head = (
                 await db.execute(
                     select(ResearchTrialLedgerHead)
@@ -585,7 +591,7 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
                     "status": "FAILED", "reason": "TRIAL_LEDGER_HEAD_MISSING",
                     "inserted": 0, "replayed": 0,
                 }
-            integrity_before = await _verify_trial_ledger_in_session(db, signing_key)
+            integrity_before = await _verify_trial_ledger_head_in_session(db, head, keyring)
             if integrity_before.get("status") == "BROKEN":
                 return {
                     "status": "FAILED", "reason": "TRIAL_LEDGER_INTEGRITY_FAILURE",
@@ -593,16 +599,19 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
                 }
             if integrity_before.get("status") == "HMAC_KEY_MISSING":
                 return {
-                    "status": "FAILED", "reason": "TRIAL_LEDGER_HMAC_KEY_REQUIRED_TO_CONTINUE",
+                    "status": "FAILED", "reason": "TRIAL_LEDGER_HISTORICAL_KEY_REQUIRED",
                     "integrity": integrity_before, "inserted": 0, "replayed": 0,
                 }
+
             for label, metrics, category in specs:
                 payload = _row_payload(report, context, label, metrics, category, evaluation_id)
                 existing = await db.get(ResearchTrialArchive, payload["trial_key"])
                 if existing is not None:
                     if not _same_immutable_row(existing, payload):
-                        return {"status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
-                                "trial_label": label, "inserted": 0, "replayed": 0}
+                        return {
+                            "status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
+                            "trial_label": label, "inserted": 0, "replayed": 0,
+                        }
                     replayed += 1
                     unverified += existing.archive_status != "VERIFIED"
                     continue
@@ -610,36 +619,37 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
                 sequence = int(head.last_sequence or 0) + 1
                 previous_hash = str(head.last_entry_sha256 or "")
                 entry_hash, signature, ledger_status = compute_trial_ledger_integrity(
-                    payload, sequence=sequence, previous_entry_sha256=previous_hash,
+                    payload,
+                    sequence=sequence,
+                    previous_entry_sha256=previous_hash,
                     signing_key=signing_key,
+                    signing_key_id=active_key_id if signing_key is not None else None,
                 )
-                try:
-                    # The singleton head row is locked for this transaction. Insert
-                    # and head advance share one savepoint to keep sequence/hash atomic.
-                    async with db.begin_nested():
-                        db.add(ResearchTrialArchive(
-                            **payload,
-                            ledger_sequence=sequence,
-                            ledger_previous_sha256=previous_hash,
-                            ledger_entry_sha256=entry_hash,
-                            ledger_hmac_sha256=signature,
-                            ledger_status=ledger_status,
-                        ))
-                        head.last_sequence = sequence
-                        head.last_entry_sha256 = entry_hash
-                        head.updated_at = datetime.now(timezone.utc)
-                        await db.flush()
-                    inserted += 1
-                except IntegrityError:
-                    existing = await db.get(ResearchTrialArchive, payload["trial_key"])
-                    if existing is None or not _same_immutable_row(existing, payload):
-                        return {"status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
-                                "trial_label": label, "inserted": 0, "replayed": 0}
-                    replayed += 1
-                    unverified += existing.archive_status != "VERIFIED"
+                async with db.begin_nested():
+                    db.add(ResearchTrialArchive(
+                        **payload,
+                        ledger_sequence=sequence,
+                        ledger_previous_sha256=previous_hash,
+                        ledger_entry_sha256=entry_hash,
+                        ledger_hmac_sha256=signature,
+                        ledger_hmac_key_id=active_key_id if signing_key is not None else None,
+                        ledger_status=ledger_status,
+                    ))
+                    head.last_sequence = sequence
+                    head.last_entry_sha256 = entry_hash
+                    head.updated_at = datetime.now(timezone.utc)
+                    await db.flush()
+                inserted += 1
             await db.commit()
+    except IntegrityError:
+        return {
+            "status": "FAILED",
+            "reason": "TRIAL_LEDGER_CONCURRENT_WRITE_CONFLICT",
+            "inserted": 0,
+            "attempted_inserts": inserted,
+            "replayed": 0,
+        }
     except Exception as exc:
-        # The surrounding transaction rolled back; only persisted inserts may be reported.
         return {
             "status": "FAILED",
             "reason": type(exc).__name__,
@@ -647,15 +657,19 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
             "attempted_inserts": inserted,
             "replayed": 0,
         }
-    integrity = await verify_research_trial_ledger()
     unverified += inserted
     return {
         "status": "APPENDED" if inserted else "REPLAYED",
-        "inserted": inserted, "replayed": replayed,
+        "inserted": inserted,
+        "replayed": replayed,
         "unverified_records": unverified,
         "prospective_archive_only": True,
         "promotion_evidence_complete": False,
-        "ledger_integrity": integrity,
-        "ledger_hmac_configured": bool(signing_key),
+        # This is a bounded head check, not a claim that the full historic chain
+        # was re-audited. Full verification remains available to the admin route.
+        "ledger_integrity": "HEAD_LINK_VALID" if integrity_before.get("status") != "EMPTY" else "EMPTY",
+        "last_sequence": int(head.last_sequence or 0),
+        "active_hmac_key_id": active_key_id,
+        "ledger_hmac_configured": signing_key is not None,
         "legacy_unchained_rows_excluded": True,
     }
