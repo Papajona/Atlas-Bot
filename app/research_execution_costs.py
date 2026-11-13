@@ -16,6 +16,7 @@ from .execution_costs import (
     latency_from_quantiles,
 )
 from .paper_execution_model import calibrated_model_available
+from .market_sessions import SESSION_COST_MODEL_VERSION
 from .research_evidence import canonical_sha256, validate_execution_cost_calibration
 
 PER_BAR_CONTEXT_SCHEMA = "atlas-per-bar-execution-context-v1"
@@ -76,6 +77,7 @@ def research_execution_model_fingerprint(
     return canonical_sha256({
         "model": "atlas-research-per-bar-execution-v1",
         "shared_execution_cost_model_version": EXECUTION_COST_MODEL_VERSION,
+        "session_cost_model": SESSION_COST_MODEL_VERSION,
         "spread_source": "SIGNED_PER_BAR_ORDER_BOOK_OBSERVATIONS",
         "volume_source": "PRIOR_20_COMPLETED_CCXT_SPOT_BASE_VOLUME_MEDIAN",
         "volatility_source": "PRIOR_20_COMPLETED_CLOSE_RETURN_STD_DDOF1_BPS",
@@ -232,7 +234,8 @@ def build_research_execution_cost_context(
     sources = document.get("sources")
     fee_schedule_sources = [
         row for row in sources or []
-        if isinstance(row, Mapping) and row.get("source_type") == "fee_schedule"
+        if isinstance(row, Mapping)
+        and str(row.get("source_type") or "").strip().lower() == "fee_schedule"
     ]
     if len(fee_schedule_sources) != 1:
         return blocked("EXACTLY_ONE_FEE_SCHEDULE_SOURCE_REQUIRED", calibration)
@@ -242,7 +245,8 @@ def build_research_execution_cost_context(
 
     order_book_sources = [
         row for row in sources or []
-        if isinstance(row, Mapping) and row.get("source_type") == "order_book"
+        if isinstance(row, Mapping)
+        and str(row.get("source_type") or "").strip().lower() == "order_book"
     ]
     if len(order_book_sources) != 1:
         return blocked("EXACTLY_ONE_ORDER_BOOK_SOURCE_REQUIRED", calibration)
