@@ -479,6 +479,12 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "gh workflow run staging-identity-preflight.yml" in deploy
     assert '-f "request_id=$request_id"' in deploy
     assert 'gh run view "$preflight_run_id"' in deploy
+    assert "Dispatch and require customer-paper acceptance on this exact deployment" in deploy
+    assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
+    assert '-f "target_sha=$GITHUB_SHA"' in deploy
+    assert '-f "deployment_run_id=$GITHUB_RUN_ID"' in deploy
+    assert 'gh run view "$acceptance_run_id"' in deploy
+    assert "PASS: customer-paper acceptance run" in deploy
     assert "select(.displayTitle == $expected)" in deploy
     assert "uniquely correlated staging preflight run was not observed" in deploy
     assert "main advanced during staging preflight" in deploy
