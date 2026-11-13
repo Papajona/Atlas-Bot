@@ -49,27 +49,181 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
     return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
-def test_customer_paper_fill_fetches_marks_under_session_lock_without_open_transaction():
-    from pathlib import Path
+def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without_open_transaction(monkeypatch):
+    from app.correlation_risk import RISK_GROUPS
 
-    source = Path("app/customer_paper_lifecycle.py").read_text(encoding="utf-8")
-    function_start = source.index("async def record_customer_paper_fill(")
-    function_end = source.index("\nasync def ", function_start + 1)
-    function = source[function_start:function_end]
+    events = []
 
-    preflight = function.index("await _assert_customer_paper_ready()")
-    first_read_transaction = function.index("async with conn.begin():", preflight)
-    session_lock = function.index("pg_advisory_lock(hashtextextended(:lock_key, 0))", first_read_transaction)
-    commit_lock_transaction = function.index("await conn.commit()", session_lock)
-    fetch_marks = function.index("group_mark_prices = await group_mark_prices_loader()", commit_lock_transaction)
-    write_transaction = function.index("async with conn.begin():", fetch_marks)
-    position_reread = function.index("latest_positions =", write_transaction)
+    class StopBeforeFill(RuntimeError):
+        pass
 
-    assert preflight < first_read_transaction < session_lock
-    assert session_lock < commit_lock_transaction < fetch_marks < write_transaction < position_reread
-    assert "async with engine.connect() as conn:" in function
-    assert "await conn.invalidate()" in function
+    class FakeResult:
+        def __init__(self, *, row=None, scalar=True):
+            self.row = row
+            self.scalar = scalar
 
+        def mappings(self):
+            return self
+
+        def first(self):
+            return self.row
+
+        def scalar_one(self):
+            return self.scalar
+
+    class FakeConnection:
+        def __init__(self):
+            self._in_transaction = False
+            self.session_locks = set()
+            self.invalidated = False
+            self.fail_next_commit = False
+
+        def in_transaction(self):
+            return self._in_transaction
+
+        def begin(self):
+            return FakeTransaction(self)
+
+        async def execute(self, statement, params=None):
+            query = str(statement)
+            params = params or {}
+            if not self._in_transaction:
+                self._in_transaction = True
+                events.append("implicit_begin")
+
+            if "SELECT side FROM customer_paper.orders" in query:
+                events.append(("preflight_order", self._in_transaction))
+                return FakeResult(row={"side": "BUY"})
+
+            if "pg_advisory_unlock(" in query:
+                lock_key = params["lock_key"]
+                released = lock_key in self.session_locks
+                self.session_locks.discard(lock_key)
+                events.append(("unlock", lock_key, released))
+                return FakeResult(scalar=released)
+
+            if "pg_advisory_lock(" in query:
+                lock_key = params["lock_key"]
+                self.session_locks.add(lock_key)
+                events.append(("lock", lock_key, self._in_transaction))
+                return FakeResult()
+
+            if "SELECT id, venue, market_type, symbol, side" in query:
+                events.append(("write_order_read", self._in_transaction))
+                raise StopBeforeFill("stop after proving marks were fetched outside a transaction")
+
+            return FakeResult()
+
+        async def commit(self):
+            events.append(("commit", self._in_transaction))
+            if self.fail_next_commit:
+                self.fail_next_commit = False
+                raise RuntimeError("simulated commit failure after session lock acquisition")
+            self._in_transaction = False
+
+        async def rollback(self):
+            events.append(("rollback", self._in_transaction))
+            self._in_transaction = False
+
+        async def invalidate(self):
+            events.append("invalidate")
+            self.invalidated = True
+            self._in_transaction = False
+            self.session_locks.clear()
+
+    class FakeTransaction:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            assert not self.connection.in_transaction()
+            self.connection._in_transaction = True
+            events.append("transaction_begin")
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            if exc_type is None:
+                await self.connection.commit()
+            else:
+                await self.connection.rollback()
+            return False
+
+    class FakeConnectionContext:
+        def __init__(self, connection):
+            self.connection = connection
+
+        async def __aenter__(self):
+            events.append("connection_open")
+            return self.connection
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            events.append("connection_close")
+            return False
+
+    class FakeEngine:
+        def __init__(self):
+            self.connection = FakeConnection()
+            self.disposed = False
+
+        def connect(self):
+            return FakeConnectionContext(self.connection)
+
+        async def dispose(self):
+            self.disposed = True
+            events.append("engine_dispose")
+
+    engine = FakeEngine()
+    conn = engine.connection
+
+    async def readiness_preflight():
+        events.append("readiness_preflight")
+
+    async def set_tenant(_connection, customer_id):
+        events.append(("set_tenant", customer_id))
+
+    async def load_group_marks():
+        expected_locks = {
+            f"paper-risk-budget:92001",
+            *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
+        }
+        events.append(("marks", conn.in_transaction(), set(conn.session_locks)))
+        assert not conn.in_transaction()
+        assert conn.session_locks == expected_locks
+        return {("binance", "spot", "BTC/USDT"): _fresh_group_mark("100")}
+
+    monkeypatch.setattr(paper_lifecycle, "_assert_customer_paper_ready", readiness_preflight)
+    monkeypatch.setattr(paper_lifecycle, "_set_tenant", set_tenant)
+    monkeypatch.setattr(paper_lifecycle, "_paper_engine", lambda: engine)
+
+    with pytest.raises(StopBeforeFill, match="outside a transaction"):
+        asyncio.run(record_customer_paper_fill(
+            customer_id=92001,
+            client_order_id="session-lock-order",
+            idempotency_key="session-lock-fill",
+            bar_key="session-lock-bar",
+            quantity="1",
+            price="100",
+            group_mark_prices_loader=load_group_marks,
+        ))
+
+    mark_event = next(item for item in events if isinstance(item, tuple) and item[0] == "marks")
+    write_event_index = next(
+        index for index, item in enumerate(events)
+        if isinstance(item, tuple) and item[0] == "write_order_read"
+    )
+    unlock_events = [item for item in events if isinstance(item, tuple) and item[0] == "unlock"]
+
+    assert mark_event[1] is False
+    assert mark_event[2] == {
+        f"paper-risk-budget:92001",
+        *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
+    }
+    assert events.index(mark_event) < write_event_index
+    assert len(unlock_events) == len(RISK_GROUPS) + 1
+    assert all(item[2] is True for item in unlock_events)
+    assert conn.session_locks == set()
+    assert conn.invalidated is False
+    assert engine.disposed is True
 
 def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
     valid = _seed_lines("10")
