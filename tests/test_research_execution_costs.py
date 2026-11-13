@@ -315,3 +315,81 @@ def test_execution_simulator_prices_entry_and_terminal_exit_separately():
     assert result["effective_transaction_cost_bps"].tolist() == pytest.approx([10.0, 20.0])
     assert result["net_returns"].tolist() == pytest.approx([-0.0005, -0.001])
     assert result["audit"]["per_bar_execution_cost_model_complete"] is True
+
+
+def test_strategy_router_return_stream_uses_per_event_research_costs(monkeypatch):
+    from app import strategy_router
+
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h")
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 101.0],
+            "high": [101.0, 102.0, 103.0],
+            "low": [99.0, 99.0, 100.0],
+            "close": [100.0, 101.0, 102.0],
+        },
+        index=index,
+    )
+    signals = pd.DataFrame(
+        {
+            "momentum": [0.05, 0.05, 0.05],
+            "realized_vol": [0.2, 0.2, 0.2],
+        },
+        index=index,
+    )
+    positions = pd.Series([0.05, 0.05, 0.05], index=index)
+    next_prices = pd.Series([1.0, 1.01, 1.02], index=index)
+    monkeypatch.setattr(
+        strategy_router,
+        "strategy_signals",
+        lambda *_args, **_kwargs: signals,
+    )
+    monkeypatch.setattr(
+        strategy_router,
+        "target_positions",
+        lambda *_args, **_kwargs: positions,
+    )
+    monkeypatch.setattr(
+        strategy_router,
+        "next_open_returns",
+        lambda _frame: next_prices,
+    )
+    context = {
+        "index": index,
+        "spread_bps": np.array([4.0, 4.0, 4.0]),
+        "volume_units": np.array([1_000.0, 1_000.0, 1_000.0]),
+        "volatility_bps": np.array([200.0, 200.0, 200.0]),
+        "bar_duration_ms": 3_600_000.0,
+        "taker_bps": 5.5,
+        **PARAMETERS,
+        "order_notional_usd": 10_000.0,
+        "dataset_sha256": "a" * 64,
+        "context_sha256": "b" * 64,
+        "model_fingerprint": "c" * 64,
+    }
+
+    result = strategy_router._strategy_returns(
+        frame,
+        object(),
+        "momentum",
+        costs_bps=7.5,
+        asset="crypto",
+        execution_cost_context=context,
+    )
+    expected_cost, reason = execution_cost_for_event(
+        context,
+        bar_position=1,
+        turnover=0.05,
+        reference_price=100.0,
+        side="buy",
+        namespace="strategy-router:momentum",
+    )
+
+    assert reason is None
+    assert expected_cost is not None
+    assert result.attrs["execution_cost_model_complete"] is True
+    assert result.attrs["execution_cost_model_fingerprint"] == "c" * 64
+    assert result.iloc[1] == pytest.approx(
+        0.05 * 0.01 - 0.05 * expected_cost / 10_000.0
+    )
+    assert result.iloc[1] < 0.05 * 0.01 - 0.05 * 7.5 / 10_000.0
