@@ -520,3 +520,36 @@ def test_group_exposure_uses_higher_of_mark_and_booked_entry_price():
         ("BTC/USDT:USDT", 1100.0),
         ("ETH/USDT:USDT", 1200.0),
     ]
+
+
+def test_incomplete_exposure_valuation_allows_only_verified_reduction():
+    from app.correlation_risk import limit_increase_when_valuation_incomplete
+
+    # Five requested units include two units that close an existing opposing position.
+    # An unpriced related holding means the remaining three units cannot be authorized.
+    assert limit_increase_when_valuation_incomplete(
+        5, 2, valuation_complete=False,
+    ) == 2
+
+    # Without a proven opposing position, incomplete valuation blocks the entire increase.
+    assert limit_increase_when_valuation_incomplete(
+        5, 0, valuation_complete=False,
+    ) == 0
+
+    # Complete valuation preserves the ordinary sizing path.
+    assert limit_increase_when_valuation_incomplete(
+        5, 2, valuation_complete=True,
+    ) == 5
+
+
+def test_live_correlation_gate_clamps_increase_after_reduction_sizing():
+    from pathlib import Path
+
+    source = Path("app/main.py").read_text(encoding="utf-8")
+    start = source.index("reducing_quantity = min(max(0.0, quantity), opposing_quantity)")
+    clamp = source.index("quantity = limit_increase_when_valuation_incomplete(", start)
+    headroom = source.index('if not group_check["allowed"] and not group_reduce_only:', start)
+    assert start < clamp < headroom
+    block = source[clamp:headroom]
+    assert 'valuation_complete=bool(group_check.get("valuation_complete", False))' in block
+    assert "reducing_quantity" in block
