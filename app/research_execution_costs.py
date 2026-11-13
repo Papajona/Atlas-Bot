@@ -60,6 +60,8 @@ def _execution_parameters(settings: Any, *, taker_bps: float, base_slippage_bps:
         "latency_impact_coefficient": _setting(settings, "paper_latency_impact_coefficient"),
         "taker_bps": taker_bps,
         "research_order_notional_usd": _setting(settings, "research_order_notional_usd"),
+        "research_fee_source": str(_setting(settings, "research_fee_source", "") or "").strip(),
+        "research_fee_evidence_id": str(_setting(settings, "research_fee_evidence_id", "") or "").strip(),
         "paper_execution_evidence_source": str(_setting(settings, "paper_execution_evidence_source", "") or "").strip(),
         "paper_execution_evidence_id": str(_setting(settings, "paper_execution_evidence_id", "") or "").strip(),
     }
@@ -193,7 +195,30 @@ def build_research_execution_cost_context(
         return blocked("PER_BAR_DATASET_HASH_MISMATCH", calibration)
     if per_bar.get("bar_index_sha256") != canonical_sha256(utc_index):
         return blocked("PER_BAR_INDEX_FINGERPRINT_MISMATCH", calibration)
+    fee_source = str(_setting(settings, "research_fee_source", "") or "").strip()
+    fee_evidence_id = str(_setting(settings, "research_fee_evidence_id", "") or "").strip()
+    if not fee_source or not fee_evidence_id:
+        return blocked("RESEARCH_TAKER_FEE_EVIDENCE_NOT_CONFIGURED", calibration)
+    reported_fee = _number(document.get("taker_fee_bps"))
+    if (
+        reported_fee is None
+        or not math.isclose(reported_fee, taker_bps, rel_tol=0.0, abs_tol=1e-9)
+        or str(document.get("fee_source") or "").strip() != fee_source
+        or str(document.get("fee_evidence_id") or "").strip() != fee_evidence_id
+    ):
+        return blocked("SIGNED_TAKER_FEE_DOES_NOT_MATCH_RESEARCH_FEE_POLICY", calibration)
+
     sources = document.get("sources")
+    fee_schedule_sources = [
+        row for row in sources or []
+        if isinstance(row, Mapping) and row.get("source_type") == "fee_schedule"
+    ]
+    if len(fee_schedule_sources) != 1:
+        return blocked("EXACTLY_ONE_FEE_SCHEDULE_SOURCE_REQUIRED", calibration)
+    fee_schedule_sha256 = str(fee_schedule_sources[0].get("sha256") or "").lower()
+    if str(document.get("fee_schedule_source_sha256") or "").lower() != fee_schedule_sha256:
+        return blocked("TAKER_FEE_SCHEDULE_SOURCE_HASH_MISMATCH", calibration)
+
     order_book_sources = [
         row for row in sources or []
         if isinstance(row, Mapping) and row.get("source_type") == "order_book"
