@@ -61,7 +61,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, risk_group, shares_risk_budget
+from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, shares_risk_budget
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
