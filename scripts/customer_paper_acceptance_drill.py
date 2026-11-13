@@ -476,7 +476,6 @@ async def _phase_two(
         price="100",
         fee_amount="0.01",
         enforce_market_bar_budget=True,
-        group_mark_prices=group_marks,
     )
     _require(reversal_fill.get("status") == "APPENDED", "reversal-test fill was not appended")
 
