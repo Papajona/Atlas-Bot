@@ -36,6 +36,7 @@ jobs:
       SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
     steps:
       - name: Wait for required CI gates to pass on this exact commit
+        id: wait-required-gates
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -53,6 +54,13 @@ jobs:
           # The required CI jobs have 20-45 minute limits; allow two hours for
           # queue delay and completion before this paper-only deployment is blocked.
           while true; do
+            current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+            if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+              echo "stale=true" >> "$GITHUB_OUTPUT"
+              echo "SKIP: main advanced to $current_main_sha while this staging run waited for CI; releasing the staging concurrency slot without deploying stale commit $GITHUB_SHA."
+              exit 0
+            fi
+
             all_passed=true
             for index in "${!workflows[@]}"; do
               workflow="${workflows[$index]}"
@@ -128,6 +136,7 @@ jobs:
           exit 1
 
       - name: Validate staging inputs
+        if: steps.wait-required-gates.outputs.stale != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -148,21 +157,25 @@ jobs:
           [[ "$DATABASE_SECRET" != "$SUPABASE_ANON_KEY_SECRET" && "$PAPER_DATABASE_SECRET" != "$SUPABASE_ANON_KEY_SECRET" ]] || { echo "BLOCKED: Supabase key and DB URLs must use distinct secrets"; exit 1; }
 
       - name: Checkout exact main commit
+        if: steps.wait-required-gates.outputs.stale != 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Authenticate to Google Cloud with main-only workload identity
+        if: steps.wait-required-gates.outputs.stale != 'true'
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up Google Cloud SDK
+        if: steps.wait-required-gates.outputs.stale != 'true'
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Build and push exact commit image to Artifact Registry
+        if: steps.wait-required-gates.outputs.stale != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -174,6 +187,7 @@ jobs:
           echo "Built and pushed image for ${GITHUB_SHA}"
 
       - name: Deploy restricted paper-only Cloud Run service
+        if: steps.wait-required-gates.outputs.stale != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -216,7 +230,7 @@ jobs:
           PY
 
       - name: Capture Cloud Run startup diagnostics after deployment failure
-        if: failure()
+        if: failure() && steps.wait-required-gates.outputs.stale != 'true'
         shell: bash
         run: |
           set +e
@@ -243,6 +257,7 @@ jobs:
           exit 0
 
       - name: Dispatch and require read-only staging identity preflight on this exact commit
+        if: steps.wait-required-gates.outputs.stale != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -335,6 +350,7 @@ jobs:
           exit 1
 
       - name: Dispatch and require customer-paper acceptance on this exact deployment
+        if: steps.wait-required-gates.outputs.stale != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
