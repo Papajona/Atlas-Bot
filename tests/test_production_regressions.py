@@ -166,7 +166,8 @@ def test_customer_paper_group_marks_are_filtered_before_fetching():
     # The current helper filters by the target risk group before it fetches any marks.
     assert "relevant_positions = [" in source
     assert 'if shares_risk_budget(req.symbol, str(row.get("symbol") or ""))' in source
-    assert source.index("relevant_positions = [") < source.index("for row in relevant_positions:")
+    gather = "loaded = await asyncio.gather(*(load_one_position(row) for row in relevant_positions))"
+    assert source.index("relevant_positions = [") < source.index(gather)
     assert "if not group_check[\"allowed\"] and not group_reduce_only:" in source
 
 
