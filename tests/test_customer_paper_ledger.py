@@ -1564,3 +1564,125 @@ def test_customer_paper_policy_validator_accepts_exact_statement_constant_subque
     )
     assert _tenant_policy_expression_is_exact(wrong_guc_with_uppercase) is False
 
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the isolated disposable PostgreSQL customer paper databases provisioned by CI",
+)
+def test_reversing_sell_cannot_restore_exposure_above_shared_risk_budget(monkeypatch):
+    import asyncio
+
+    customer_id = 92002
+    monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_database_url", os.environ["ATLAS_PAPER_TEST_DATABASE_URL"])
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "discipline_enabled", False)
+    monkeypatch.setattr(settings, "correlation_group_cap_usd", 250.0)
+
+    async def submit_order(client_order_id, symbol, side, quantity, price):
+        return await submit_customer_paper_order(
+            customer_id=customer_id,
+            client_order_id=client_order_id,
+            venue="binance",
+            market_type="spot",
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            currency="USDT",
+            order_type="LIMIT",
+            limit_price=price,
+        )
+
+    async def run():
+        await post_customer_paper_journal(
+            customer_id=customer_id,
+            idempotency_key="sell-reversal-risk-seed-92002",
+            event_type="PAPER_SEED",
+            currency="USDT",
+            lines=_seed_lines("1000"),
+            reference="sell-reversal-risk-seed",
+            metadata={"environment": "disposable-ci"},
+        )
+
+        # Start with an unclassified holding, reduce it through a SELL, then use
+        # the apparent headroom for a known-group BUY. Reversing the SELL would
+        # restore the unclassified exposure and exceed the shared cap.
+        await submit_order("risk-unknown-buy-92002", "ZZZ/USDT", "BUY", "2", "100")
+        unknown_buy = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="risk-unknown-buy-92002",
+            idempotency_key="risk-unknown-buy-fill-92002",
+            bar_key="risk-unknown-buy-bar-92002",
+            quantity="2",
+            price="100",
+        )
+        assert unknown_buy["status"] == "APPENDED"
+
+        await submit_order("risk-unknown-sell-92002", "ZZZ/USDT", "SELL", "1", "100")
+        unknown_sell = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="risk-unknown-sell-92002",
+            idempotency_key="risk-unknown-sell-fill-92002",
+            bar_key="risk-unknown-sell-bar-92002",
+            quantity="1",
+            price="100",
+        )
+        assert unknown_sell["status"] == "APPENDED"
+
+        await submit_order("risk-btc-buy-92002", "BTC/USDT", "BUY", "1", "100")
+        btc_buy = await record_customer_paper_fill(
+            customer_id=customer_id,
+            client_order_id="risk-btc-buy-92002",
+            idempotency_key="risk-btc-buy-fill-92002",
+            bar_key="risk-btc-buy-bar-92002",
+            quantity="1",
+            price="100",
+            group_mark_prices={
+                ("binance", "spot", "ZZZ/USDT"): _fresh_group_mark("100"),
+            },
+        )
+        assert btc_buy["status"] == "APPENDED"
+
+        fresh_marks = {
+            ("binance", "spot", "ZZZ/USDT"): _fresh_group_mark("100"),
+            ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
+        }
+        with pytest.raises(
+            CustomerPaperOrderConflict,
+            match="shared correlation-group exposure cap",
+        ):
+            await reverse_customer_paper_fill(
+                customer_id=customer_id,
+                fill_id=unknown_sell["fill_id"],
+                idempotency_key="risk-unknown-sell-reversal-92002",
+                group_mark_prices=fresh_marks,
+            )
+
+        unchanged = await get_customer_paper_positions(customer_id=customer_id)
+        quantities = {row["symbol"]: Decimal(row["quantity"]) for row in unchanged}
+        assert quantities["ZZZ/USDT"] == Decimal("1.000000000000000000")
+        assert quantities["BTC/USDT"] == Decimal("1.000000000000000000")
+
+        # At exactly the cap the same immutable reversal is permitted and remains
+        # idempotent; the rejected attempt above wrote no journal or position event.
+        monkeypatch.setattr(settings, "correlation_group_cap_usd", 300.0)
+        allowed = await reverse_customer_paper_fill(
+            customer_id=customer_id,
+            fill_id=unknown_sell["fill_id"],
+            idempotency_key="risk-unknown-sell-reversal-92002",
+            group_mark_prices=fresh_marks,
+        )
+        assert allowed["status"] == "APPENDED"
+        replay = await reverse_customer_paper_fill(
+            customer_id=customer_id,
+            fill_id=unknown_sell["fill_id"],
+            idempotency_key="risk-unknown-sell-reversal-92002",
+        )
+        assert replay["status"] == "REPLAYED"
+
+        restored = await get_customer_paper_positions(customer_id=customer_id)
+        restored_quantities = {row["symbol"]: Decimal(row["quantity"]) for row in restored}
+        assert restored_quantities["ZZZ/USDT"] == Decimal("2.000000000000000000")
+        assert restored_quantities["BTC/USDT"] == Decimal("1.000000000000000000")
+
+    asyncio.run(run())
