@@ -1,7 +1,35 @@
 from __future__ import annotations
 from datetime import time
 from zoneinfo import ZoneInfo
+import math
+from collections.abc import Mapping
 import pandas as pd
+
+SESSION_COST_KEYS = frozenset({"LONDON", "NEW_YORK", "NEW_YORK_LATE", "OTHER"})
+
+
+def normalize_session_costs_bps(schedule: Mapping[str, object] | None) -> dict[str, float]:
+    """Validate a complete per-side transaction-cost schedule for all modeled sessions."""
+    if not isinstance(schedule, Mapping) or set(schedule.keys()) != SESSION_COST_KEYS:
+        raise ValueError("session cost schedule must define exactly LONDON, NEW_YORK, NEW_YORK_LATE, OTHER")
+    normalized: dict[str, float] = {}
+    for name in sorted(SESSION_COST_KEYS):
+        try:
+            value = float(schedule[name])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError(f"session cost for {name} must be finite and non-negative") from exc
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"session cost for {name} must be finite and non-negative")
+        normalized[name] = value
+    return normalized
+
+
+def session_cost_series(index: pd.DatetimeIndex, schedule: Mapping[str, object]) -> pd.Series:
+    """Map verified per-session per-side costs (bps per unit turnover) onto UTC bars."""
+    costs = normalize_session_costs_bps(schedule)
+    state = session_state(pd.DatetimeIndex(index))
+    values = [costs[str(session)] for session in state["session"].tolist()]
+    return pd.Series(values, index=state.index, dtype="float64")
 
 LONDON = ZoneInfo("Europe/London")
 NEW_YORK = ZoneInfo("America/New_York")
