@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import tempfile
 import uuid
+from unittest import mock
 from decimal import Decimal
 
 import pytest
@@ -89,12 +91,13 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
         # The mandatory ledger workflow sets both URLs to the isolated PostgreSQL
         # service after applying the repository's migrations. SQLite is only the
         # fallback for the ordinary developer test suite.
-        database_url = os.environ.get("ATLAS_POSTGRES_URL") or "sqlite+aiosqlite:///:memory:"
+        run_token = uuid.uuid4().hex
+        sqlite_path = os.path.join(tempfile.gettempdir(), f"atlas-custody-acceptance-{run_token}.db")
+        database_url = os.environ.get("ATLAS_POSTGRES_URL") or f"sqlite+aiosqlite:///{sqlite_path}"
         is_sqlite = database_url.startswith("sqlite")
         engine = create_async_engine(database_url, pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         customer_id: int | None = None
-        run_token = uuid.uuid4().hex
         wallet_id = 7001
         deposit_ref = f"acceptance-deposit-{run_token}"
         reserve_one_ref = f"acceptance-reserve-one-{run_token}"
@@ -109,6 +112,9 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
         ]
         try:
             if is_sqlite:
+                async with engine.connect() as conn:
+                    await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                    await conn.commit()
                 async with engine.begin() as conn:
                     await conn.run_sync(Base.metadata.create_all)
 
@@ -183,10 +189,11 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         db, customer_id, 25, reference_id=release_ref
                     )
                     await db.commit()
-                    with pytest.raises(ValueError, match="different or inconsistent operation"):
-                        await release_withdrawal(
-                            db, customer_id, 26, reference_id=release_ref
-                        )
+                    with mock.patch("app.customer_funds.SessionLocal", sessions):
+                        with pytest.raises(ValueError, match="different or inconsistent operation"):
+                            await release_withdrawal(
+                                db, customer_id, 26, reference_id=release_ref
+                            )
                     # The validator rolls back the rejected action, commits its
                     # incident in a fresh transaction, then raises. An additional
                     # caller rollback must not erase that incident.
@@ -220,10 +227,11 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         db, customer_id, 30, reference_id=reserve_two_ref
                     )
                     await db.commit()
-                    with pytest.raises(ValueError, match="different or inconsistent operation"):
-                        await settle_withdrawal(
-                            db, customer_id, 31, reference_id=reserve_two_ref
-                        )
+                    with mock.patch("app.customer_funds.SessionLocal", sessions):
+                        with pytest.raises(ValueError, match="different or inconsistent operation"):
+                            await settle_withdrawal(
+                                db, customer_id, 31, reference_id=reserve_two_ref
+                            )
                     await db.rollback()
                     settlement_incident = (
                         await db.execute(
@@ -330,6 +338,12 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                     await db.rollback()
         finally:
             await engine.dispose()
+            if is_sqlite:
+                for suffix in ("", "-wal", "-shm"):
+                    try:
+                        os.remove(sqlite_path + suffix)
+                    except FileNotFoundError:
+                        pass
 
     asyncio.run(run())
 
