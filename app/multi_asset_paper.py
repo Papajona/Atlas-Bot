@@ -5,6 +5,8 @@ from decimal import Decimal
 from typing import Sequence
 from zoneinfo import ZoneInfo
 
+from .execution_costs import market_impact_bps
+
 class PaperModelInputError(ValueError):
     pass
 
@@ -192,7 +194,16 @@ def estimate_execution_price(x: SlippageInputs, *, side: str, volatility_horizon
     mid=_pos(x.mid_price,"mid"); qty=_pos(x.order_quantity,"quantity"); depth=_pos(x.visible_depth_quantity,"depth")
     spread=_pos(x.half_spread_bps,"spread",True); vol=_pos(x.volatility_bps,"volatility",True); coeff=_pos(x.impact_coefficient,"impact coefficient",True); gap=_pos(x.adverse_gap_bps,"gap",True); horizon=_pos(volatility_horizon_fraction,"horizon",True)
     if side not in ("buy","sell"): raise PaperModelInputError("side must be buy or sell")
-    impact=coeff*vol*horizon.sqrt()*min(Decimal(1),(qty/depth).sqrt())
+    participation = min(Decimal(1), qty / depth)
+    try:
+        impact = Decimal(str(market_impact_bps(
+            volatility_bps=float(vol),
+            participation_rate=float(participation),
+            impact_coefficient=float(coeff),
+            volatility_horizon_fraction=float(horizon),
+        )))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise PaperModelInputError("invalid shared execution impact inputs") from exc
     bps=spread+impact+gap
     price=mid*(1+bps/Decimal(10000)*(1 if side=="buy" else -1))
     if price<=0: raise PaperModelInputError("non-positive execution price")

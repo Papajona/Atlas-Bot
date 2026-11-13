@@ -18,6 +18,7 @@ from .customer_binance_execution import build_customer_binance_broker, CustomerB
 from .risk_governor import evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
+from .execution_costs import market_impact_bps
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
                   PaperOrderState, PaperBarState, PaperFillEvent, LiveExecutionLease, utcnow)
 from .trading_core import PROFILES
@@ -1299,7 +1300,9 @@ async def advance_platform_paper_orders(
     min_latency = max(1, int(settings.paper_fill_latency_bars))
     ttl_bars = max(1, int(settings.paper_order_ttl_bars))
     max_impact_bps = max(0.0, float(settings.paper_max_market_impact_bps))
-    impact_coefficient = max(0.0, float(settings.paper_market_impact_coefficient))
+    # Preserve invalid runtime values so the shared kernel can reject them;
+    # clamping NaN to zero would silently turn a bad cost context into a fill.
+    impact_coefficient = float(settings.paper_market_impact_coefficient)
 
     counts = {"attempts": 0, "fills": 0, "partial_fills": 0, "queue_misses": 0,
               "rejected": 0, "expired": 0, "waiting_for_liquidity": 0,
@@ -1506,10 +1509,22 @@ async def advance_platform_paper_orders(
                         counts["waiting_for_liquidity"] += 1
                     else:
                         profile = PROFILES.get(str(asset).lower(), PROFILES["crypto"])
-                        impact = impact_coefficient * volatility * math.sqrt(
-                            max(0.0, float(fill_quantity) / max(bar_volume, 1e-18))
-                        ) * 10_000.0
-                        impact = min(max_impact_bps, max(0.0, impact))
+                        participation_rate = min(
+                            1.0,
+                            max(0.0, float(fill_quantity) / max(bar_volume, 1e-18)),
+                        )
+                        try:
+                            impact = market_impact_bps(
+                                volatility_bps=volatility * 10_000.0,
+                                participation_rate=participation_rate,
+                                impact_coefficient=impact_coefficient,
+                                max_market_impact_bps=max_impact_bps,
+                            )
+                        except ValueError as exc:
+                            outcome = "INVALID_EXECUTION_COST_CONTEXT"
+                            reason = str(exc)[:200]
+                            fill_quantity = Decimal("0")
+                            impact = 0.0
                         slippage_bps = max(0.0, float(profile.slippage_bps) + impact)
                         reference_price = close_price
                         if is_triggered_exit:
@@ -1537,10 +1552,16 @@ async def advance_platform_paper_orders(
                             if trade.side == "buy" else 1.0 - slippage_bps / 10_000.0
                         )
                         fill_price = (
-                            Decimal("0") if outcome == "INVALID_EXIT_CONTEXT"
+                            Decimal("0") if outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT"}
                             else Decimal(str(reference_price * price_multiplier))
                         )
-                        if fill_price <= 0:
+                        if outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT"}:
+                            # Preserve the original diagnostic outcome and reason. A
+                            # deliberately zero price must not be reclassified as a
+                            # generic invalid-fill-price event.
+                            fill_price = Decimal("0")
+                            fill_quantity = Decimal("0")
+                        elif fill_price <= 0:
                             outcome = "INVALID_FILL_PRICE"
                             reason = "adverse cost model produced a non-positive fill price"
                             fill_quantity = Decimal("0")

@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .execution_costs import net_returns_after_costs
+
 
 def _finite_nonnegative(value: object, name: str) -> float:
     try:
@@ -76,10 +78,26 @@ def costed_execution_returns(
     if not np.isfinite(pos.to_numpy()).all() or not np.isfinite(returns.to_numpy()).all():
         raise ValueError("position and market-return streams must be finite")
     turnover = execution_turnover(pos, exit_mask)
-    net = pos * returns - turnover * (cost_values * multiplier / 10_000.0)
-    if carry is not None:
-        net = net - pos.abs() * (carry * multiplier / 10_000.0)
-    return net.clip(lower=-1.0).astype(float)
+    per_bar_costs = (
+        cost_values
+        if isinstance(cost_values, np.ndarray)
+        else np.full(len(pos), float(cost_values), dtype=float)
+    )
+    carry_bps = 0.0 if carry is None else carry
+    net_values = net_returns_after_costs(
+        pos.to_numpy(dtype=float) * returns.to_numpy(dtype=float),
+        turnover=turnover.to_numpy(dtype=float),
+        execution_cost_bps=per_bar_costs,
+        exposure=pos.to_numpy(dtype=float),
+        financing_cost_bps_per_bar=carry_bps,
+        cost_multiplier=multiplier,
+    )
+    return pd.Series(
+        np.maximum(net_values, -1.0),
+        index=pos.index,
+        dtype=float,
+        name="net_return",
+    )
 
 
 def simulate_execution_aware_strategy(

@@ -21,6 +21,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field, model_validator
 
 from .config import settings
+from .execution_costs import market_impact_bps
 from .db import AppState, SessionLocal
 from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
@@ -992,17 +993,22 @@ def build_customer_paper_router(
                     # Volatility was validated before immutable budget registration.
                     if volatility is None:
                         raise HTTPException(409, "Paper fill volatility preflight is incomplete")
-                    participation_for_impact = max(
-                        0.0,
-                        float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
+                    participation_for_impact = min(
+                        1.0,
+                        max(
+                            0.0,
+                            float(fill_quantity / max(values["volume"], Decimal("1e-18"))),
+                        ),
                     )
-                    impact = (
-                        float(settings.paper_market_impact_coefficient)
-                        * volatility
-                        * math.sqrt(participation_for_impact)
-                        * 10000.0
-                    )
-                    impact = min(max(0.0, float(settings.paper_max_market_impact_bps)), max(0.0, impact))
+                    try:
+                        impact = market_impact_bps(
+                            volatility_bps=volatility * 10000.0,
+                            participation_rate=participation_for_impact,
+                            impact_coefficient=settings.paper_market_impact_coefficient,
+                            max_market_impact_bps=settings.paper_max_market_impact_bps,
+                        )
+                    except ValueError as exc:
+                        raise HTTPException(409, "Paper execution impact inputs are invalid") from exc
                     slippage_bps = max(0.0, float(execution_profile.slippage_bps) + impact)
                     # A limit fill cannot be priced worse than its limit; market orders absorb adverse slippage.
                     final_price = reference_price

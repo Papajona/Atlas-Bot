@@ -15,6 +15,12 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any
 
+from .execution_costs import (
+    EXECUTION_COST_MODEL_VERSION,
+    adverse_fill_price,
+    execution_cost_components,
+)
+
 
 class PaperExecutionModelError(ValueError):
     """Paper execution context is incomplete or invalid."""
@@ -369,6 +375,7 @@ def estimate_paper_fill(
 
     common = {
         "model": "VOLUME_PARTICIPATION_VOLATILITY_LATENCY_REJECTION_V2",
+        "execution_cost_model_version": EXECUTION_COST_MODEL_VERSION,
         "evidence_source": source,
         "evidence_id": evidence,
         "order_key_sha256": hashlib.sha256(key.encode("utf-8")).hexdigest(),
@@ -416,16 +423,23 @@ def estimate_paper_fill(
 
     filled = planned_fill
     participation = filled / volume
-    impact_bps = coefficient * volatility_bps * math.sqrt(participation)
-    latency_impact_bps = latency_coefficient * volatility_bps * math.sqrt(simulated_latency_ms / bar_duration_ms)
-    total_slippage_bps = base_bps + spread_bps / 2.0 + impact_bps + latency_impact_bps
-    if not all(
-        math.isfinite(value) and value >= 0
-        for value in (impact_bps, latency_impact_bps, total_slippage_bps)
-    ):
-        raise PaperExecutionModelError("calculated slippage is invalid")
-
-    fill_price = price * (1.0 + total_slippage_bps / 10_000.0) if side == "buy" else price * (1.0 - total_slippage_bps / 10_000.0)
+    try:
+        cost_components = execution_cost_components(
+            base_slippage_bps=base_bps,
+            spread_bps=spread_bps,
+            volatility_bps=volatility_bps,
+            participation_rate=participation,
+            impact_coefficient=coefficient,
+            latency_ms=simulated_latency_ms,
+            bar_duration_ms=bar_duration_ms,
+            latency_impact_coefficient=latency_coefficient,
+        )
+        impact_bps = float(cost_components["market_impact_bps"])
+        latency_impact_bps = float(cost_components["latency_impact_bps"])
+        total_slippage_bps = float(cost_components["total_slippage_bps"])
+        fill_price = adverse_fill_price(price, side, total_slippage_bps)
+    except ValueError as exc:
+        raise PaperExecutionModelError("calculated slippage is invalid") from exc
     if not math.isfinite(fill_price) or fill_price <= 0:
         raise PaperExecutionModelError("calculated fill price is invalid")
     unfilled_cancelled = max(0.0, quantity - filled)
