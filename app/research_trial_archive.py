@@ -140,9 +140,15 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
     else:
         config = report.get("config")
         config = config if isinstance(config, Mapping) else {}
-    config_sha = hashlib.sha256(
-        json.dumps(config, default=str, sort_keys=True).encode("utf-8")
-    ).hexdigest() if config else ""
+    if str(category).strip().lower() == "variant":
+        # Each plateau point has its own fully evaluated config. The base report
+        # configuration is not the identity of a threshold/risk-scaled variant.
+        variant_sha = str(metrics.get("config_sha256") or "").strip().lower()
+        config_sha = variant_sha if _sha(variant_sha) else ""
+    else:
+        config_sha = hashlib.sha256(
+            json.dumps(config, default=str, sort_keys=True).encode("utf-8")
+        ).hexdigest() if config else ""
     # ATLAS_CODE_SHA256 must be a digest of the source bundle/release artifact, not
     # merely a git commit label. GITHUB_SHA is a commit identifier, not this hash.
     code_sha = str(os.getenv("ATLAS_CODE_SHA256") or report.get("code_sha256") or "").strip().lower()
