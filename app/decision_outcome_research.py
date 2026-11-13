@@ -582,3 +582,46 @@ async def evaluate_decision_outcome_labels_once(
         "report": report,
         "warning": "This global holdout is permanently consumed. Subsequent calls return no held-out metrics.",
     }
+
+
+
+async def load_all_decision_outcome_labels(*, batch_size: int = 5000) -> list[dict]:
+    """Read the complete append-only label history using bounded ID-keyset batches."""
+    from .db import AuditLog, SessionLocal
+
+    batch_size = max(100, min(20_000, int(batch_size)))
+    rows = []
+    before_id = None
+    async with SessionLocal() as db:
+        while True:
+            query = (
+                select(AuditLog)
+                .where(AuditLog.event == "ADAPTIVE_DECISION_OUTCOME_LABEL")
+                .order_by(AuditLog.id.desc())
+                .limit(batch_size)
+            )
+            if before_id is not None:
+                query = query.where(AuditLog.id < before_id)
+            batch = (await db.execute(query)).scalars().all()
+            if not batch:
+                break
+            rows.extend(batch)
+            before_id = int(batch[-1].id)
+            if len(batch) < batch_size:
+                break
+
+    result = []
+    for row in reversed(rows):
+        detail = row.detail
+        if isinstance(detail, dict):
+            record = detail
+        elif isinstance(detail, str):
+            try:
+                record = json.loads(detail)
+            except (TypeError, ValueError):
+                continue
+        else:
+            continue
+        if isinstance(record, dict):
+            result.append(record)
+    return result
