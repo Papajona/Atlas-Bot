@@ -1181,20 +1181,29 @@ def parameter_plateau_score(
     """Score plateau stability using held-out values; invalid variants remain in the denominator."""
     rows = results.get("variants") if isinstance(results, dict) else None
     if not isinstance(rows, list) or not rows:
-        return {"status": "INSUFFICIENT_DATA", "reason": "parameter_variants_missing"}
+        return {
+            "status": "INSUFFICIENT_DATA", "reason": "parameter_variants_missing",
+            "robust": False, "tested_variants": 0, "valid_variants": 0,
+        }
     try:
         tol = float(tolerance)
         min_ratio = float(minimum_plateau_ratio)
         min_valid = int(minimum_valid_variants)
     except (TypeError, ValueError, OverflowError):
-        return {"status": "INVALID_CONFIG"}
+        return {
+            "status": "INVALID_CONFIG", "robust": False,
+            "tested_variants": len(rows), "valid_variants": 0,
+        }
     if (
         not math.isfinite(tol) or not 0.0 < tol < 1.0
         or not math.isfinite(min_ratio) or not 0.0 < min_ratio <= 1.0
         or isinstance(minimum_valid_variants, bool) or min_valid != minimum_valid_variants
         or min_valid < 2
     ):
-        return {"status": "INVALID_CONFIG"}
+        return {
+            "status": "INVALID_CONFIG", "robust": False,
+            "tested_variants": len(rows), "valid_variants": 0,
+        }
     tested = len(rows)
     values = []
     for row in rows:
@@ -1212,8 +1221,10 @@ def parameter_plateau_score(
             "status": "INSUFFICIENT_DATA",
             "metric": metric,
             "tested_variants": tested,
+            "variants": tested,
             "valid_variants": len(values),
             "minimum_valid_variants": min_valid,
+            "robust": False,
         }
     best = max(values)
     if best <= 0.0:
@@ -1238,6 +1249,7 @@ def parameter_plateau_score(
         "plateau_ratio": plateau_ratio,
         "robust": plateau_ratio >= min_ratio and len(values) == tested,
         "variants": tested,
+        "tested_variants": tested,
         "valid_variants": len(values),
         "minimum_valid_variants": min_valid,
         "minimum_plateau_ratio": min_ratio,
