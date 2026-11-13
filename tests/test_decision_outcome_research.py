@@ -192,3 +192,47 @@ def test_holdout_metrics_are_redacted_by_default():
     assert report["holdout_metrics_withheld"] is True
     assert report["out_of_sample"] == []
     assert report["research_only"] is True
+
+def test_all_market_groups_share_one_global_chronological_holdout_cutoff():
+    # Deliberately offset the groups and give them different sample-window lengths.
+    # A per-group percentile would choose different holdout dates (17h vs 24h).
+    bybit = [
+        {
+            **_label(i),
+            "decision_id": f"bybit-{i}",
+            "symbol": "BTC/USDT",
+            "exchange": "bybit",
+        }
+        for i in range(25)
+    ]
+    binance = [
+        {
+            **_label(i + 10),
+            "decision_id": f"binance-{i}",
+            "symbol": "BTC/USDT",
+            "exchange": "binance",
+        }
+        for i in range(20)
+    ]
+
+    report = evaluate_decision_outcome_labels(
+        bybit + binance,
+        holdout_fraction=0.30,
+        min_group_samples=1,
+        min_unique_timestamps=10,
+        redact_holdout=False,
+    )
+
+    splits = {row["exchange"]: row for row in report["out_of_sample"]}
+    assert set(splits) == {"bybit", "binance"}
+    expected_cutoff = "2026-01-01T21:00:00+00:00"
+    assert report["coverage"]["global_holdout_start"] == expected_cutoff
+    assert splits["bybit"]["holdout_start"] == expected_cutoff
+    assert splits["binance"]["holdout_start"] == expected_cutoff
+    assert splits["bybit"]["n_holdout"] == 4
+    assert splits["binance"]["n_holdout"] == 9
+    assert all(
+        row["global_holdout_start"] == expected_cutoff
+        for row in splits.values()
+    )
+
