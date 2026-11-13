@@ -575,9 +575,18 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
     # The pre-lock idempotency check is only a fast path. A concurrent settlement can
     # commit while this transaction waits on the customer ledger row. Re-check after
     # acquiring the authoritative row lock or a retry could create a second payout journal.
-    if (await db.execute(select(LedgerJournal).where(
-        LedgerJournal.idempotency_key == idem
-    ).with_for_update())).scalar_one_or_none():
+    existing = (
+        await db.execute(
+            select(LedgerJournal)
+            .where(LedgerJournal.idempotency_key == idem)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _validate_withdrawal_action_replay(
+            db, existing, customer_id=customer_id, amount_d=amount_d,
+            reference_id=reference_id, action="settle",
+        )
         return fresh_ledger
     reserved_now = D(str(fresh_ledger.withdrawal_reserved))
     settle = min(amount_d, reserved_now)
