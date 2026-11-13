@@ -8,12 +8,18 @@ from unittest.mock import AsyncMock
 from cryptography.fernet import Fernet
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
+import app.customer_funds as customer_funds
 import app.main as main
 from app.config import settings
-from app.db import Base, CustomerLedgerAccount, CustomerProfile, Incident, Withdrawal
+from app.customer_funds import WithdrawalReplayMismatch, persist_withdrawal_replay_mismatch
+from app.db import (
+    Base, CustomerLedgerAccount, CustomerProfile, Incident, LedgerEntry,
+    LedgerJournal, LedgerJournalLine, Withdrawal,
+)
 from app.payout import PayoutNotFound
 
 
@@ -50,6 +56,71 @@ def _incident(*, customer_id: int, request_id: str, amount: str = "25.000000") -
             "problems": ["release journal lines"],
         }),
     )
+
+
+async def _seed_release_journal(
+    db, *, customer_id: int, request_id: str, amount: str = "25.000000",
+    corrupt: bool = False,
+) -> None:
+    """Seed the pre-existing journal as it would appear after manual repair.
+
+    With corrupt=True, the original journal exists but its line amounts disagree
+    with the immutable LedgerEntry, reproducing the real replay-conflict state.
+    """
+    reference_id = f"{request_id}:release"
+    idempotency_key = f"withdrawal-release:{reference_id}"
+    requested = Decimal(amount)
+    posted = Decimal("24.000000") if corrupt else requested
+    journal = LedgerJournal(
+        currency="USDT",
+        entry_type="WITHDRAWAL_RELEASE",
+        reference_type="WITHDRAWAL",
+        reference_id=reference_id,
+        idempotency_key=idempotency_key,
+        description="Operator-reviewed withdrawal ledger repair fixture",
+    )
+    db.add(journal)
+    await db.flush()
+    db.add_all([
+        LedgerJournalLine(
+            journal_id=journal.id, line_no=1,
+            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
+            customer_id=customer_id, currency="USDT", debit=posted, credit=0,
+        ),
+        LedgerJournalLine(
+            journal_id=journal.id, line_no=2,
+            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE",
+            customer_id=customer_id, currency="USDT", debit=0, credit=posted,
+        ),
+        LedgerEntry(
+            customer_id=customer_id, currency="USDT",
+            entry_type="WITHDRAWAL_RELEASE", debit=0, credit=requested,
+            amount=requested, reference_type="WITHDRAWAL",
+            reference_id=reference_id, idempotency_key=idempotency_key,
+            metadata_json=json.dumps({
+                "requested_amount": format(requested, "f"),
+                "effective_amount": format(requested, "f"),
+            }),
+        ),
+    ])
+
+
+def _replay_mismatch(customer_id: int, request_id: str) -> WithdrawalReplayMismatch:
+    reference_id = f"{request_id}:release"
+    return WithdrawalReplayMismatch({
+        "key": f"WITHDRAWAL_REPLAY_MISMATCH:withdrawal-release:{reference_id}",
+        "summary": "Withdrawal idempotency key replayed with a different or inconsistent operation",
+        "detail": {
+            "action": "release",
+            "customer_id": customer_id,
+            "reference_id": reference_id,
+            "requested_amount": "25.000000",
+            "idempotency_key": f"withdrawal-release:{reference_id}",
+            "problems": ["release journal lines"],
+        },
+        "customer_id": customer_id,
+        "severity": "HIGH",
+    })
 
 
 async def _call_repair(sessions, withdrawal, monkeypatch, *, provider=None):
@@ -102,8 +173,8 @@ def test_rejected_terminal_withdrawal_has_authorized_ledger_repair(monkeypatch):
                 request_id = "terminal-repair-rejected"
                 db.add(CustomerLedgerAccount(
                     customer_id=customer_id, currency="USDT",
-                    available=Decimal("0"), trading_reserved=Decimal("0"),
-                    withdrawal_reserved=Decimal("25"),
+                    available=Decimal("25"), trading_reserved=Decimal("0"),
+                    withdrawal_reserved=Decimal("0"),
                 ))
                 withdrawal = Withdrawal(
                     customer_id=customer_id, wallet_id=None, request_id=request_id,
@@ -114,6 +185,9 @@ def test_rejected_terminal_withdrawal_has_authorized_ledger_repair(monkeypatch):
                 )
                 db.add(withdrawal)
                 db.add(_incident(customer_id=customer_id, request_id=request_id))
+                await _seed_release_journal(
+                    db, customer_id=customer_id, request_id=request_id
+                )
                 await db.commit()
                 await db.refresh(withdrawal)
 
@@ -218,6 +292,219 @@ def test_failed_terminal_repair_requires_provider_recovery_and_never_sends(monke
                 assert saved.provider_status == "NOT_SENT"
                 assert ledger.withdrawal_reserved == Decimal("0.000000")
                 assert ledger.available == Decimal("25.000000")
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_repair_refuses_a_real_unfixed_replay_journal(monkeypatch):
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="terminal-repair-real-conflict-customer",
+                    email="",
+                    display_name="Terminal repair conflict test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                request_id = "terminal-repair-real-conflict"
+                db.add(CustomerLedgerAccount(
+                    customer_id=customer_id, currency="USDT",
+                    available=Decimal("0"), trading_reserved=Decimal("0"),
+                    withdrawal_reserved=Decimal("25"),
+                ))
+                withdrawal = Withdrawal(
+                    customer_id=customer_id, wallet_id=None, request_id=request_id,
+                    amount=Decimal("25"), currency="USDT", provider="external_signer",
+                    provider_id="", status="FAILED",
+                    execution_started_at=datetime.now(timezone.utc),
+                    provider_error="Provider definitively failed before assigning an ID.",
+                )
+                db.add(withdrawal)
+                db.add(_incident(customer_id=customer_id, request_id=request_id))
+                await _seed_release_journal(
+                    db, customer_id=customer_id, request_id=request_id, corrupt=True
+                )
+                await db.commit()
+                await db.refresh(withdrawal)
+
+            class Provider:
+                send = AsyncMock(side_effect=AssertionError("repair must never send a payout"))
+
+                async def recover(self, *_args, **_kwargs):
+                    raise PayoutNotFound("Provider confirms no payout exists.")
+
+            with pytest.raises(main.HTTPException) as blocked:
+                await _call_repair(
+                    sessions, withdrawal, monkeypatch, provider=Provider()
+                )
+            assert blocked.value.status_code == 409
+
+            async with sessions() as db:
+                saved = await db.get(Withdrawal, withdrawal.id)
+                ledger = (
+                    await db.execute(
+                        select(CustomerLedgerAccount).where(
+                            CustomerLedgerAccount.customer_id == customer_id,
+                            CustomerLedgerAccount.currency == "USDT",
+                        )
+                    )
+                ).scalar_one()
+                incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key == (
+                                f"WITHDRAWAL_REPLAY_MISMATCH:withdrawal-release:{request_id}:release"
+                            )
+                        )
+                    )
+                ).scalar_one()
+                assert saved.status == "FAILED"
+                assert ledger.available == Decimal("0.000000")
+                assert ledger.withdrawal_reserved == Decimal("25.000000")
+                assert incident.status == "OPEN"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_replay_incident_write_failure_rolls_back_terminal_withdrawal_too(monkeypatch):
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="atomic-replay-incident-customer",
+                    email="",
+                    display_name="Atomic replay incident test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                withdrawal = Withdrawal(
+                    customer_id=customer_id, wallet_id=None,
+                    request_id="atomic-replay-incident",
+                    amount=Decimal("25"), currency="USDT", status="SUBMITTING",
+                )
+                db.add(withdrawal)
+                await db.commit()
+                withdrawal_id = withdrawal.id
+
+            async def fail_incident_write(*_args, **_kwargs):
+                raise RuntimeError("simulated incident-store outage")
+
+            monkeypatch.setattr(
+                customer_funds, "record_ledger_incident", fail_incident_write
+            )
+            async with sessions() as db:
+                withdrawal = await db.get(Withdrawal, withdrawal_id)
+                withdrawal.status = "FAILED"
+                with pytest.raises(RuntimeError, match="incident-store outage"):
+                    await persist_withdrawal_replay_mismatch(
+                        db, _replay_mismatch(customer_id, "atomic-replay-incident")
+                    )
+                await db.rollback()
+
+            async with sessions() as db:
+                saved = await db.get(Withdrawal, withdrawal_id)
+                incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key == (
+                                "WITHDRAWAL_REPLAY_MISMATCH:"
+                                "withdrawal-release:atomic-replay-incident:release"
+                            )
+                        )
+                    )
+                ).scalar_one_or_none()
+                assert saved.status == "SUBMITTING"
+                assert incident is None
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
+
+def test_duplicate_replay_incident_race_preserves_async_session_objects(monkeypatch):
+    async def run():
+        engine = _db()
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            request_id = "duplicate-replay-incident"
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="duplicate-replay-incident-customer",
+                    email="",
+                    display_name="Duplicate replay incident test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                withdrawal = Withdrawal(
+                    customer_id=customer_id, wallet_id=None, request_id=request_id,
+                    amount=Decimal("25"), currency="USDT", status="SUBMITTING",
+                )
+                db.add(withdrawal)
+                # A competing request has already won the unique incident-key race.
+                db.add(_incident(customer_id=customer_id, request_id=request_id))
+                await db.commit()
+                withdrawal_id = withdrawal.id
+
+            original_record = customer_funds.record_ledger_incident
+            calls = 0
+
+            async def simulate_unique_key_race(db, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise IntegrityError(
+                        "INSERT INTO incident", {}, RuntimeError("duplicate incident key")
+                    )
+                return await original_record(db, **kwargs)
+
+            monkeypatch.setattr(
+                customer_funds, "record_ledger_incident", simulate_unique_key_race
+            )
+            async with sessions() as db:
+                withdrawal = await db.get(Withdrawal, withdrawal_id)
+                withdrawal.status = "FAILED"
+                await persist_withdrawal_replay_mismatch(
+                    db, _replay_mismatch(customer_id, request_id)
+                )
+                # This access must not trigger an implicit async lazy load.
+                assert withdrawal.status == "FAILED"
+                assert withdrawal.id == withdrawal_id
+                await db.commit()
+            assert calls == 2
+
+            async with sessions() as db:
+                saved = await db.get(Withdrawal, withdrawal_id)
+                incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key == (
+                                f"WITHDRAWAL_REPLAY_MISMATCH:"
+                                f"withdrawal-release:{request_id}:release"
+                            )
+                        )
+                    )
+                ).scalar_one()
+                assert saved.status == "FAILED"
+                assert incident.status == "OPEN"
+                assert incident.severity == "HIGH"
         finally:
             await engine.dispose()
 
