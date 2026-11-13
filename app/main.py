@@ -8308,6 +8308,21 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         raise _safe_http_error(400, e, "Invalid request") from e
 
 
+@app.post("/api/research/decision-outcomes/holdout-once")
+async def research_decision_outcomes_holdout_once(
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Consume the single global decision-outcome chronological holdout exactly once."""
+    await auth(x_admin_token, authorization)
+    from .decision_outcome_research import (
+        evaluate_decision_outcome_labels_once,
+        load_decision_outcome_labels,
+    )
+    records = await load_decision_outcome_labels(limit=100_000)
+    return await evaluate_decision_outcome_labels_once(records)
+
+
 @app.post("/api/research/backtest-all")
 async def research_backtest_all(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)
