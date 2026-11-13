@@ -28,6 +28,7 @@ from .customer_paper_ledger import (
     get_customer_paper_balances,
 )
 from .customer_paper_lifecycle import (
+    CustomerPaperMarkVerificationError,
     CustomerPaperOrderConflict,
     cancel_customer_paper_order,
     expire_customer_paper_order,
@@ -929,6 +930,7 @@ def build_customer_paper_router(
                         raise HTTPException(503, "Crypto paper execution profile is not configured")
 
                     group_mark_prices = None
+                    group_mark_prices_loader = None
                     if str(side or "").upper() == "BUY" and group_mark_price_loader is not None:
                         timeframe_seconds = _TIMEFRAME_SECONDS.get(str(timeframe))
                         if not timeframe_seconds:
@@ -941,16 +943,21 @@ def build_customer_paper_router(
                             timeframe=timeframe,
                             days=mark_days,
                         )
-                        try:
-                            # Candle-only order state is not a current market mark. Fetch fresh
-                            # validated quotes for every open holding in the candidate's group.
-                            group_mark_prices = await group_mark_price_loader(
-                                profile.id, mark_req, None
-                            )
-                        except Exception as mark_exc:
-                            raise HTTPException(
-                                409, "Current paper correlation-group marks could not be verified"
-                            ) from mark_exc
+
+                        async def load_group_marks_after_preflight():
+                            try:
+                                # record_customer_paper_fill runs its isolated-ledger readiness
+                                # preflight before invoking this loader, keeping the quote fresh
+                                # when the transaction evaluates the correlation-group cap.
+                                return await group_mark_price_loader(
+                                    profile.id, mark_req, None
+                                )
+                            except Exception as mark_exc:
+                                raise CustomerPaperMarkVerificationError(
+                                    "Current paper correlation-group marks could not be verified"
+                                ) from mark_exc
+
+                        group_mark_prices_loader = load_group_marks_after_preflight
 
                     remaining_quantity = Decimal(str(order.get("remaining_quantity") or order["quantity"]))
                     fill_quantity = min(remaining_quantity, max(Decimal("0"), Decimal(str(budget["available"]))))
@@ -1057,6 +1064,7 @@ def build_customer_paper_router(
                                 fee_amount=_decimal_text(fee),
                                 enforce_market_bar_budget=True,
                                 group_mark_prices=group_mark_prices,
+                                group_mark_prices_loader=group_mark_prices_loader,
                             )
                         except CustomerPaperOrderConflict as exc:
                             # A concurrent fill can invalidate the earlier cash pre-read.
@@ -1108,6 +1116,7 @@ def build_customer_paper_router(
                                         fee_amount=_decimal_text(retry_fee),
                                         enforce_market_bar_budget=True,
                                         group_mark_prices=group_mark_prices,
+                                        group_mark_prices_loader=group_mark_prices_loader,
                                     )
                                     fill_quantity = retry_quantity
                                 except CustomerPaperOrderConflict as retry_exc:

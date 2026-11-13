@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any
@@ -42,6 +42,10 @@ class CustomerPaperOrderConflict(CustomerPaperLedgerBlocked):
 
 class CustomerPaperCashShortfall(CustomerPaperOrderConflict):
     """A fill cannot be applied because concurrent paper cash consumption won the race."""
+
+
+class CustomerPaperMarkVerificationError(CustomerPaperOrderConflict):
+    """A fresh correlation-group quote could not be obtained or validated."""
 
 
 def _customer_id(value: int) -> int:
@@ -886,6 +890,9 @@ async def record_customer_paper_fill(
     fee_amount: str | int | Decimal = "0",
     enforce_market_bar_budget: bool = False,
     group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
+    group_mark_prices_loader: Callable[
+        [], Awaitable[Mapping[tuple[str, str, str], object]]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
 
@@ -903,7 +910,27 @@ async def record_customer_paper_fill(
     fill_price = _input_decimal(price, "price", positive=True)
     requested_fee = _input_decimal(fee_amount, "fee_amount", non_negative=True)
     fee = requested_fee
+    # Obtain a validated group mark only after the full ledger readiness
+    # preflight. A mark fetched before preflight can age beyond the five-second
+    # limit while database identity and RLS checks run.
     await _assert_customer_paper_ready()
+    if group_mark_prices_loader is not None:
+        if group_mark_prices is not None:
+            raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
+        try:
+            group_mark_prices = await group_mark_prices_loader()
+        except CustomerPaperMarkVerificationError:
+            raise
+        except CustomerPaperLedgerBlocked:
+            raise
+        except Exception as exc:
+            raise CustomerPaperMarkVerificationError(
+                "current correlation-group marks could not be verified"
+            ) from exc
+        if not isinstance(group_mark_prices, Mapping):
+            raise CustomerPaperMarkVerificationError(
+                "current correlation-group mark loader returned invalid data"
+            )
     engine = _paper_engine()
     try:
         async with engine.begin() as conn:

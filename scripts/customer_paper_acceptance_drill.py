@@ -411,12 +411,17 @@ async def _phase_two(
         bar_at=bar_two_at,
         run_key=run_key,
     )
-    group_marks = {
-        ("binance", "spot", symbol): {
-            "price": "100",
-            "quote_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    async def load_current_group_marks():
+        # Called by record_customer_paper_fill after its isolated-ledger readiness
+        # preflight, so this synthetic quote starts its five-second freshness window
+        # immediately before the fill transaction.
+        return {
+            ("binance", "spot", symbol): {
+                "price": "100",
+                "quote_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
         }
-    }
+
     _set_operation("phase_two.complete_primary_order_after_restart")
     second_fill = await record_customer_paper_fill(
         customer_id=customer_id,
@@ -427,7 +432,7 @@ async def _phase_two(
         price="100",
         fee_amount="0.01",
         enforce_market_bar_budget=True,
-        group_mark_prices=group_marks,
+        group_mark_prices_loader=load_current_group_marks,
     )
     _require(second_fill.get("status") == "APPENDED" and second_fill.get("order_status") == "FILLED", "partial order did not complete after restart")
 
@@ -471,7 +476,6 @@ async def _phase_two(
         price="100",
         fee_amount="0.01",
         enforce_market_bar_budget=True,
-        group_mark_prices=group_marks,
     )
     _require(reversal_fill.get("status") == "APPENDED", "reversal-test fill was not appended")
 

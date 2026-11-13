@@ -637,6 +637,91 @@ def test_protective_exit_recovers_terminal_order_identity_when_concurrent_worker
     }
 
 
+def test_recovered_buy_refetches_same_symbol_mark_after_readiness(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    request = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market["market_context"] = {
+        "bid": 99.9,
+        "ask": 100.1,
+        "quote_timestamp_utc": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+    }
+    events = []
+    captured = {}
+
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    # Model a same-symbol holding that must be revalued for the correlation-group cap.
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "0.25",
+        "average_entry_price": "95",
+    }]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-delayed-mark",
+        "bar_at": market["bar_timestamp"],
+        "capacity": "10",
+        "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "100000",
+    }]))
+    monkeypatch.setattr(
+        flow,
+        "_fill_price_and_fee",
+        lambda side, quantity, context: (
+            "120", "0", {
+                "fee_bps_assumption": "0",
+                "slippage_bps_assumption": "0",
+                "cost_model_status": "TEST_FIXTURE",
+            },
+        ),
+    )
+
+    async def fetch_fresh_group_marks(customer_id, mark_request, market_context):
+        events.append("fresh-mark")
+        assert customer_id == 1004
+        assert mark_request.symbol == "BTC/USDT"
+        # Never reuse the candidate context captured before the fill readiness check.
+        assert market_context is None
+        return {
+            ("binance", "spot", "BTC/USDT"): {
+                "price": "120",
+                "quote_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+
+    async def append_after_readiness(**kwargs):
+        events.append("readiness-complete")
+        assert kwargs["group_mark_prices"] is None
+        assert kwargs["group_mark_prices_loader"] is not None
+        marks = await kwargs["group_mark_prices_loader"]()
+        captured["mark"] = marks[("binance", "spot", "BTC/USDT")]
+        events.append("fill-transaction")
+        return {
+            "status": "APPENDED",
+            "fill_id": "delayed-mark-fill",
+            "filled_quantity": kwargs["quantity"],
+        }
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_after_readiness)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1004,
+        order=order,
+        market=market,
+        df=pd.DataFrame(),
+        group_mark_price_loader=fetch_fresh_group_marks,
+        request=request,
+    ))
+
+    assert result["fill"]["status"] == "APPENDED"
+    assert captured["mark"]["price"] == "120"
+    assert events == ["readiness-complete", "fresh-mark", "fill-transaction"]
+
+
+
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
     import app.customer_paper_flow as flow
 
@@ -1719,6 +1804,31 @@ def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkey
     ))
     assert result_without_owner["decision"] == "NO_TRADE"
     assert result_without_owner["reason"] == "manual_position_requires_manual_execution"
+
+
+def test_mark_verification_failure_keeps_its_worker_log_classification(caplog):
+    import logging
+    import app.customer_paper_flow as flow
+    from app.customer_paper_lifecycle import CustomerPaperMarkVerificationError
+
+    caplog.set_level(logging.ERROR)
+
+    async def fail_mark_verification():
+        raise CustomerPaperMarkVerificationError(
+            "Current paper correlation-group marks could not be verified"
+        )
+
+    with pytest.raises(
+        CustomerPaperFlowBlocked,
+        match="Current paper correlation-group marks could not be verified",
+    ):
+        asyncio.run(flow._paper_call(
+            fail_mark_verification(),
+            "append isolated paper fill",
+        ))
+
+    assert "customer_paper_mark_verification_failed" in caplog.text
+    assert "customer_paper_ledger_operation_failed" not in caplog.text
 
 
 def test_customer_paper_overdraw_conflict_keeps_safe_recovery_signal():
