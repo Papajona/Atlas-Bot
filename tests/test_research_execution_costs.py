@@ -116,7 +116,7 @@ def _research_frame():
         index=index,
     )
     canonical = frame.reset_index().to_csv(
-        index=False, float_format="%.17g", lineterminator="\\n"
+        index=False, float_format="%.17g", lineterminator="\n"
     )
     frame.attrs["data_provenance"] = {
         "source": "ccxt_ohlcv",
