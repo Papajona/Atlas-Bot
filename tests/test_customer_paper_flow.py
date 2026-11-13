@@ -637,6 +637,98 @@ def test_protective_exit_recovers_terminal_order_identity_when_concurrent_worker
     }
 
 
+def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, order, market = _paper_fill_test_context()
+    request = SimpleNamespace(exchange="binance", symbol="BTC/USDT", timeframe="1h")
+    market["market_context"] = {
+        "bid": 99.9,
+        "ask": 100.1,
+        "quote_timestamp_utc": (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat(),
+    }
+    events = []
+    captured = {}
+
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    # Model the same-symbol holding that is being revalued for the group cap.
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance",
+        "symbol": "BTC/USDT",
+        "quantity": "0.25",
+        "average_entry_price": "95",
+    }]))
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "bar-key-delayed-mark",
+        "bar_at": market["bar_timestamp"],
+        "capacity": "10",
+        "available": "10",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+    monkeypatch.setattr(flow, "get_customer_paper_balances", _async_value([{
+        "account_code": "PAPER_CASH", "currency": "USDT", "balance": "100000",
+    }]))
+    monkeypatch.setattr(
+        flow,
+        "_fill_price_and_fee",
+        lambda side, quantity, context: (
+            "120", "0", {
+                "fee_bps_assumption": "0",
+                "slippage_bps_assumption": "0",
+                "cost_model_status": "TEST_FIXTURE",
+            },
+        ),
+    )
+
+    async def fetch_fresh_group_marks(customer_id, mark_request, market_context):
+        events.append("fresh-mark")
+        assert customer_id == 1004
+        assert mark_request.symbol == "BTC/USDT"
+        # Never reuse the candidate context captured before the readiness preflight.
+        assert market_context is None
+        return {
+            ("binance", "spot", "BTC/USDT"): {
+                "price": "120",
+                "quote_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+
+    async def append_after_slow_preflight(**kwargs):
+        events.append("readiness-preflight")
+        # Reproduce a readiness check longer than the ledger's five-second mark age.
+        await asyncio.sleep(5.1)
+        assert kwargs["group_mark_prices"] is None
+        assert kwargs["group_mark_prices_loader"] is not None
+        marks = await kwargs["group_mark_prices_loader"]()
+        mark = marks[("binance", "spot", "BTC/USDT")]
+        mark_timestamp = datetime.fromisoformat(
+            mark["quote_timestamp_utc"].replace("Z", "+00:00")
+        ).astimezone(timezone.utc)
+        age_seconds = (datetime.now(timezone.utc) - mark_timestamp).total_seconds()
+        assert 0 <= age_seconds <= 5
+        captured["mark"] = mark
+        events.append("fill-transaction")
+        return {
+            "status": "APPENDED",
+            "fill_id": "delayed-mark-fill",
+            "filled_quantity": kwargs["quantity"],
+        }
+
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_after_slow_preflight)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1004,
+        order=order,
+        market=market,
+        df=pd.DataFrame(),
+        group_mark_price_loader=fetch_fresh_group_marks,
+        request=request,
+    ))
+
+    assert result["fill"]["status"] == "APPENDED"
+    assert captured["mark"]["price"] == "120"
+    assert events == ["readiness-preflight", "fresh-mark", "fill-transaction"]
+
+
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
     import app.customer_paper_flow as flow
 
