@@ -289,11 +289,21 @@ def _protected_component_position(
         execution["effective_transaction_cost_bps"],
     )
 
-def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto", carry_bps_per_bar: float | None = None, session_costs_bps: dict[str, float] | None = None) -> dict:
+def _component_backtest(
+    df: pd.DataFrame,
+    component: str,
+    cfg: StrategyConfig,
+    taker_bps: float,
+    slippage_bps: float,
+    asset: str = "crypto",
+    carry_bps_per_bar: float | None = None,
+    session_costs_bps: dict[str, float] | None = None,
+    execution_cost_context: dict[str, object] | None = None,
+) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
     s, _, _, _, protected, protected_net, protection_audit, _, _ = _protected_component_position(
         df, component, cfg, taker_bps, slippage_bps, asset, carry_bps_per_bar,
-        session_costs_bps,
+        session_costs_bps, execution_cost_context, f"research:{component}",
     )
     ann = float(s.attrs.get("annualization_factor", 252.0))
     active = protected != 0
@@ -331,6 +341,11 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             and bool(str(settings.research_carry_evidence_id or "").strip())
         ),
         "intrabar_stop_target_model_complete": protection_audit["intrabar_stop_target_model_complete"],
+        "execution_cost_model_complete": protection_audit.get("per_bar_execution_cost_model_complete") is True,
+        "execution_cost_model_status": protection_audit.get("per_bar_execution_cost_model_status"),
+        "execution_cost_model_fingerprint": protection_audit.get("execution_cost_model_fingerprint"),
+        "per_bar_execution_context_sha256": protection_audit.get("per_bar_execution_context_sha256"),
+        "per_bar_execution_cost_failure": protection_audit.get("per_bar_execution_cost_failure"),
         "transaction_cost_bps": float(taker_bps + slippage_bps),
         "annualization_factor": ann,
         "risk_protections": {
