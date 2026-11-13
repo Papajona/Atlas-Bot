@@ -11,6 +11,10 @@ _GROUPS={
  "XAU_USD":"METALS","XAG_USD":"METALS","WTICO_USD":"ENERGY","BCO_USD":"ENERGY","NATGAS_USD":"ENERGY",
 }
 
+# All legacy correlation buckets, including OTHER, remain locked during the
+# rolling deployment so workers on the previous per-group lock scheme serialize.
+RISK_GROUPS = tuple(sorted(set(_GROUPS.values()) | {"OTHER"}))
+
 def risk_group(symbol: str) -> str:
     raw=str(symbol or "").upper().replace("/","_").replace(":USDT","")
     # Crypto keys in _GROUPS are base-asset tickers ("BTC"); FX/metals/energy keys are the
