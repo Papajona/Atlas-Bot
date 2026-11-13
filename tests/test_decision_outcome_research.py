@@ -86,7 +86,7 @@ def test_labels_without_candidate_side_are_counted_but_not_given_invented_return
         [_label(0, side=None, value=None)],
         holdout_fraction=0.30,
         min_group_samples=1,
-        min_unique_timestamps=3,,
+        min_unique_timestamps=3,
         redact_holdout=False,
     )
     assert report["coverage"]["valid_labels_without_candidate_side"] == 1
@@ -100,7 +100,7 @@ def test_small_groups_are_explicitly_marked_insufficient_for_holdout():
         [_label(i) for i in range(5)],
         holdout_fraction=0.30,
         min_group_samples=3,
-        min_unique_timestamps=10,,
+        min_unique_timestamps=10,
         redact_holdout=False,
     )
     assert report["out_of_sample"][0]["status"] == "INSUFFICIENT_UNIQUE_TIMESTAMPS"
