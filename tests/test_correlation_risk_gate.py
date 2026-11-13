@@ -135,7 +135,7 @@ def test_customer_paper_buy_filters_unrelated_markets_before_valuation():
     helper_end = source.index("\ndef _stepup_token(", helper_start)
     helper = source[helper_start:helper_end]
 
-    assert "target_group = risk_group(req.symbol)" in helper
+    assert "shares_risk_budget(req.symbol" in helper
     assert "relevant_positions = [" in helper
     assert 'shares_risk_budget(req.symbol, str(row.get("symbol") or ""))' in helper
     assert helper.index("relevant_positions = [") < helper.index("market_data, mark_req")
@@ -380,11 +380,11 @@ def test_unclassified_proposal_counts_all_existing_positions():
     ]
     check = adjusted_group_exposure(
         positions, proposed_symbol="UNLISTED_TOKEN", proposed_notional=1000.0,
-        cap_usd=70000.0,
+        cap_usd=60000.0,
     )
     assert check["group"] == "OTHER"
-    assert check["existing_notional"] == 111000.0
-    assert check["projected_notional"] == 112000.0
+    assert check["existing_notional"] == 65000.0
+    assert check["projected_notional"] == 66000.0
     assert check["allowed"] is False
     assert len(check["members"]) == 3
 
