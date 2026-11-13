@@ -16,6 +16,24 @@ depends_on = None
 
 
 def _secure_service_tables(bind) -> None:
+    if bind.dialect.name == "sqlite":
+        # SQLite is used for local/test workflows. Protect one-time consumption
+        # against row mutation there too; SQLite has no TRUNCATE statement/event.
+        op.execute(sa.text("""
+            CREATE TRIGGER IF NOT EXISTS trg_research_holdout_registry_no_update
+            BEFORE UPDATE ON research_holdout_registry
+            BEGIN
+                SELECT RAISE(ABORT, 'research_holdout_registry is write-once');
+            END;
+        """))
+        op.execute(sa.text("""
+            CREATE TRIGGER IF NOT EXISTS trg_research_holdout_registry_no_delete
+            BEFORE DELETE ON research_holdout_registry
+            BEGIN
+                SELECT RAISE(ABORT, 'research_holdout_registry is write-once');
+            END;
+        """))
+        return
     if bind.dialect.name != "postgresql":
         return
     for table in ("research_trial_ledger_head", "research_holdout_registry"):
