@@ -96,7 +96,7 @@ def test_triple_barrier_uses_next_open_as_entry_not_signal_bar_close():
 
 def test_triple_barrier_costs_widen_barriers_and_timeout_dead_zone():
     idx = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    close = pd.Series([120.0, 100.0, 102.0, 103.0], index=idx)
+    close = pd.Series([120.0, 100.0, 101.9, 103.0], index=idx)
     vol = pd.Series([0.01] * 4, index=idx)
     high = pd.Series([121.0, 101.5, 102.9, 104.0], index=idx)
     low = pd.Series([119.0, 99.0, 100.0, 101.0], index=idx)
@@ -178,6 +178,7 @@ def _outcome_label(position: int) -> dict:
         "exchange": "bybit",
         "timeframe": "1h",
         "market_timestamp": timestamp.isoformat(),
+        "horizons_bars": ["1"],
         "candidate_side": "buy",
         "strategy": "trend",
         "decision_stage": "adaptive_model_confirmation",
