@@ -138,7 +138,11 @@ def build_research_execution_cost_context(
                 "VERIFIED" if calibration and calibration.get("calibration_verified") is True
                 else str((calibration or {}).get("reason") or "MISSING_VENUE_CALIBRATION_EVIDENCE")
             ),
-            "execution_cost_calibration_evidence_id": evidence_id or None,
+            "execution_cost_calibration_evidence_id": (
+                evidence_id or None
+                if calibration and calibration.get("calibration_verified") is True
+                else None
+            ),
             "execution_cost_model_fingerprint": fingerprint,
             "venue": venue or None, "market_type": market_type or None,
             "symbol": symbol or None, "timeframe": timeframe or None,
@@ -233,6 +237,11 @@ def build_research_execution_cost_context(
         return blocked("PER_BAR_SPREAD_SERIES_LENGTH_MISMATCH", calibration)
     if per_bar.get("spread_observation_count") != len(raw_spreads):
         return blocked("PER_BAR_SPREAD_OBSERVATION_COUNT_MISMATCH", calibration)
+    if any(
+        isinstance(value, bool) or not isinstance(value, (int, float))
+        for value in raw_spreads
+    ):
+        return blocked("PER_BAR_SPREAD_SERIES_INVALID", calibration)
     try:
         spreads = np.asarray(raw_spreads, dtype=float)
     except (TypeError, ValueError, OverflowError):
