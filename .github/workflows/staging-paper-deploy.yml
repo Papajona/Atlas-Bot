@@ -317,3 +317,75 @@ jobs:
 
           echo "BLOCKED: correlated staging preflight run $preflight_run_id did not complete within the allowed polling window."
           exit 1
+
+      - name: Dispatch and require customer-paper acceptance on this exact deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "BLOCKED: main advanced before customer-paper acceptance dispatch."
+            exit 1
+          fi
+
+          expected_run_name="Customer Paper Acceptance $GITHUB_SHA deploy $GITHUB_RUN_ID"
+          gh workflow run customer-paper-staging-acceptance.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "target_sha=$GITHUB_SHA" \
+            -f "deployment_run_id=$GITHUB_RUN_ID"
+
+          acceptance_run_id=0
+          for attempt in $(seq 1 90); do
+            run_list="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "customer-paper-staging-acceptance.yml" \
+              --event workflow_dispatch \
+              --commit "$GITHUB_SHA" \
+              --limit 100 \
+              --json databaseId,headSha,headBranch,displayTitle)"
+            run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
+            candidate_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+            candidate_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            if [[ "$candidate_id" -gt 0 ]]; then
+              if [[ "$candidate_sha" != "$GITHUB_SHA" ]]; then
+                echo "BLOCKED: acceptance run did not use exact deployed commit $GITHUB_SHA."
+                exit 1
+              fi
+              acceptance_run_id="$candidate_id"
+              break
+            fi
+            sleep 10
+          done
+
+          if [[ "$acceptance_run_id" -eq 0 ]]; then
+            echo "BLOCKED: uniquely correlated customer-paper acceptance run was not observed after dispatch."
+            exit 1
+          fi
+
+          for attempt in $(seq 1 90); do
+            run_json="$(gh run view "$acceptance_run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,headBranch,status,conclusion,displayTitle)"
+            run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+            run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+            run_name="$(jq -r '.displayTitle // ""' <<< "$run_json")"
+            run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
+            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+            if [[ "$run_id" != "$acceptance_run_id" || "$run_sha" != "$GITHUB_SHA" || "$run_branch" != "main" || "$run_name" != "$expected_run_name" ]]; then
+              echo "BLOCKED: tracked customer-paper acceptance run identity changed unexpectedly."
+              exit 1
+            fi
+            if [[ "$run_status" == "completed" ]]; then
+              if [[ "$run_conclusion" != "success" ]]; then
+                echo "BLOCKED: customer-paper acceptance run $acceptance_run_id completed with conclusion '${run_conclusion:-missing}'."
+                exit 1
+              fi
+              echo "PASS: customer-paper acceptance run $acceptance_run_id succeeded on exact deployed commit $GITHUB_SHA"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "BLOCKED: customer-paper acceptance run $acceptance_run_id did not complete within the allowed polling window."
+          exit 1
