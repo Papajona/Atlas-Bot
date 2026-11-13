@@ -143,8 +143,6 @@ def triple_barrier(
         raise ValueError("barriers and round-trip costs must be finite and positive/non-negative")
     if not (len(v) == len(h) == len(l) == len(opens) == len(c)):
         raise ValueError("triple-barrier inputs must align to close index")
-    cost_fraction = cost_bps / 10_000.0
-
     for i in range(len(c) - hold):
         entry_i = i + 1
         entry_price = opens[entry_i]
