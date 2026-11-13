@@ -1702,12 +1702,24 @@ async def get_customer_paper_positions(*, customer_id: int) -> list[dict[str, st
 
 
 async def reverse_customer_paper_fill(
-    *, customer_id: int, fill_id: str, idempotency_key: str
+    *,
+    customer_id: int,
+    fill_id: str,
+    idempotency_key: str,
+    group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
+    group_mark_prices_loader: Callable[
+        [], Awaitable[Mapping[tuple[str, str, str], object]]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Append a compensating reversal only when the fill is the position's latest event.
 
     Reversing an older fill after later fills would require a full restatement of those
     later trades and realized P&L. It is rejected instead of silently corrupting history.
+
+    Reversing a SELL restores exposure, so it participates in the same customer-scoped
+    risk lock as BUY fills. The resulting correlated portfolio is valued from fresh,
+    verified marks before the reversal is appended. A missing mark or cap breach fails
+    closed; reversing a BUY only reduces exposure and does not need market marks.
     """
     customer_id = _customer_id(customer_id)
     key = _key(idempotency_key, "idempotency_key", 120)
@@ -1715,113 +1727,375 @@ async def reverse_customer_paper_fill(
         canonical_fill_id = str(uuid.UUID(str(fill_id)))
     except (ValueError, TypeError, AttributeError) as exc:
         raise ValueError("fill_id must be a valid UUID") from exc
+    if group_mark_prices_loader is not None and group_mark_prices is not None:
+        raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
+
     await _assert_customer_paper_ready()
     engine = _paper_engine()
     try:
-        async with engine.begin() as conn:
-            await _set_tenant(conn, customer_id)
-            reversal_key = f"reverse:{key}"
-            previous = (await conn.execute(text(
-                """
-                SELECT reversal_of_fill_id, event_type FROM customer_paper.position_events
-                WHERE customer_id=:customer_id AND idempotency_key=:idempotency_key
-                """
-            ), {"customer_id": customer_id, "idempotency_key": reversal_key})).first()
-            if previous is not None:
-                if str(previous[0]) != canonical_fill_id or str(previous[1]) != "REVERSAL":
-                    raise CustomerPaperIdempotencyConflict("reversal idempotency key conflicts with another event")
-                return {"status": "REPLAYED", "fill_id": canonical_fill_id, "idempotency_key": key}
-            fill = (await conn.execute(text(
-                """
-                SELECT id, order_id, idempotency_key, venue, market_type, symbol, side, quantity, price,
-                       fee_amount, currency, realized_pnl, cash_delta, position_delta, pnl_delta,
-                       quantity_before, average_entry_before, cost_basis_before,
-                       quantity_after, average_entry_after, cost_basis_after,
-                       realized_pnl_before, realized_pnl_after
-                FROM customer_paper.fills
-                WHERE customer_id=:customer_id AND id=:fill_id
-                """
-            ), {"customer_id": customer_id, "fill_id": canonical_fill_id})).mappings().first()
-            if fill is None:
-                raise CustomerPaperOrderConflict("fill is not present in this customer's paper ledger")
-            venue, market_type, symbol = str(fill["venue"]), str(fill["market_type"]), str(fill["symbol"])
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": f"paper-position:{customer_id}:{venue}:{market_type}:{symbol}"},
-            )
-            already_reversed = (await conn.execute(text(
-                "SELECT id FROM customer_paper.position_events WHERE customer_id=:customer_id AND reversal_of_fill_id=:fill_id"
-            ), {"customer_id": customer_id, "fill_id": canonical_fill_id})).first()
-            if already_reversed is not None:
-                raise CustomerPaperOrderConflict("a fill can be reversed only once")
-            latest = (await conn.execute(text(
-                """
-                SELECT fill_id, event_type, quantity_after, average_entry_after, cost_basis_after, realized_pnl_after
-                FROM customer_paper.position_events
-                WHERE customer_id=:customer_id AND venue=:venue AND market_type=:market_type AND symbol=:symbol
-                ORDER BY id DESC LIMIT 1
-                """
-            ), {"customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol})).first()
-            if latest is None or str(latest[0]) != canonical_fill_id or str(latest[1]) != "FILL":
-                raise CustomerPaperOrderConflict("only the latest non-reversed fill for this position can be reversed safely")
+        async with engine.connect() as conn:
+            risk_lock_key = f"paper-risk-budget:{customer_id}"
+            risk_lock_attempted = False
+            risk_lock_acquired = False
+            try:
+                # Determine whether this reversal restores exposure before acquiring
+                # locks. This read is closed before the customer-wide session lock.
+                async with conn.begin():
+                    await _set_tenant(conn, customer_id)
+                    reversal_key = f"reverse:{key}"
+                    previous = (await conn.execute(text(
+                        """
+                        SELECT reversal_of_fill_id, event_type
+                        FROM customer_paper.position_events
+                        WHERE customer_id=:customer_id AND idempotency_key=:idempotency_key
+                        """
+                    ), {"customer_id": customer_id, "idempotency_key": reversal_key})).first()
+                    if previous is not None:
+                        if str(previous[0]) != canonical_fill_id or str(previous[1]) != "REVERSAL":
+                            raise CustomerPaperIdempotencyConflict(
+                                "reversal idempotency key conflicts with another event"
+                            )
+                        return {
+                            "status": "REPLAYED",
+                            "fill_id": canonical_fill_id,
+                            "idempotency_key": key,
+                        }
+                    identity = (await conn.execute(text(
+                        """
+                        SELECT side FROM customer_paper.fills
+                        WHERE customer_id=:customer_id AND id=:fill_id
+                        """
+                    ), {"customer_id": customer_id, "fill_id": canonical_fill_id})).mappings().first()
+                    if identity is None:
+                        raise CustomerPaperOrderConflict(
+                            "fill is not present in this customer's paper ledger"
+                        )
 
-            reversal_cash_delta = -Decimal(fill["cash_delta"])
-            fill_currency = str(fill["currency"])
-            await conn.execute(
-                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                {"lock_key": "paper-cash:" + str(customer_id) + ":" + fill_currency},
-            )
-            cash_before = Decimal((await conn.execute(text(
-                """
-                SELECT COALESCE(SUM(l.signed_amount), 0)
-                FROM customer_paper.accounts a
-                LEFT JOIN customer_paper.journal_lines l
-                  ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
-                WHERE a.customer_id=:customer_id AND a.currency=:currency AND a.account_code='PAPER_CASH'
-                """
-            ), {"customer_id": customer_id, "currency": fill_currency})).scalar_one())
-            if cash_before + reversal_cash_delta < 0:
-                raise CustomerPaperOrderConflict(
-                    "reversing this fill would overdraw paper cash after subsequent activity"
-                )
-            reversal_lines: list[dict[str, Any]] = [
-                {"account_code": "PAPER_CASH", "signed_amount": reversal_cash_delta},
-                {"account_code": "PAPER_POSITION", "signed_amount": -Decimal(fill["position_delta"])},
-            ]
-            if Decimal(fill["pnl_delta"]) != 0:
-                reversal_lines.append({"account_code": "PAPER_PNL", "signed_amount": -Decimal(fill["pnl_delta"])})
-            if Decimal(fill["fee_amount"]) != 0:
-                reversal_lines.append({"account_code": "PAPER_FEES", "signed_amount": -Decimal(fill["fee_amount"])})
-            journal_id = await _append_journal_on_connection(
-                conn, customer_id=customer_id, idempotency_key=f"reversal:{key}",
-                event_type="REVERSAL", currency=str(fill["currency"]), lines=reversal_lines,
-                reference=canonical_fill_id,
-                metadata={"reversal_of_fill_id": canonical_fill_id, "reversal_idempotency_key": key},
-            )
-            signed_original = Decimal(fill["quantity"]) if str(fill["side"]) == "BUY" else -Decimal(fill["quantity"])
-            await conn.execute(text(
-                """
-                INSERT INTO customer_paper.position_events
-                    (customer_id, venue, market_type, symbol, fill_id, reversal_of_fill_id, event_type,
-                     idempotency_key, signed_quantity, fill_price, quantity_before, average_entry_before,
-                     cost_basis_before, quantity_after, average_entry_after, cost_basis_after,
-                     realized_pnl_delta, realized_pnl_after)
-                VALUES
-                    (:customer_id, :venue, :market_type, :symbol, :fill_id, :reversal_of_fill_id, 'REVERSAL',
-                     :idempotency_key, :signed_quantity, :fill_price, :quantity_before, :average_entry_before,
-                     :cost_basis_before, :quantity_after, :average_entry_after, :cost_basis_after,
-                     :realized_pnl_delta, :realized_pnl_after)
-                """
-            ), {
-                "customer_id": customer_id, "venue": venue, "market_type": market_type, "symbol": symbol,
-                "fill_id": canonical_fill_id, "reversal_of_fill_id": canonical_fill_id,
-                "idempotency_key": reversal_key, "signed_quantity": -signed_original, "fill_price": Decimal(fill["price"]),
-                "quantity_before": Decimal(latest[2]), "average_entry_before": Decimal(latest[3]), "cost_basis_before": Decimal(latest[4]),
-                "quantity_after": Decimal(fill["quantity_before"]), "average_entry_after": Decimal(fill["average_entry_before"]),
-                "cost_basis_after": Decimal(fill["cost_basis_before"]),
-                "realized_pnl_delta": -Decimal(fill["realized_pnl"]),
-                "realized_pnl_after": Decimal(fill["realized_pnl_before"]),
-            })
-        return {"status": "APPENDED", "fill_id": canonical_fill_id, "journal_id": journal_id, "idempotency_key": key}
+                exposure_restoring = str(identity["side"] or "").upper() == "SELL"
+                if exposure_restoring:
+                    # BUY fills take this same session-level lock before obtaining
+                    # fresh marks. This serializes SELL reversals with every new BUY
+                    # budget decision for the customer.
+                    risk_lock_attempted = True
+                    try:
+                        await conn.execute(
+                            text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
+                            {"lock_key": risk_lock_key},
+                        )
+                    except Exception:
+                        # The server may have granted the lock even if its response
+                        # was lost. Never return this connection to the pool uncertain.
+                        await conn.invalidate()
+                        raise
+                    risk_lock_acquired = True
+                    await conn.commit()
+
+                    if group_mark_prices_loader is not None:
+                        try:
+                            group_mark_prices = await group_mark_prices_loader()
+                        except CustomerPaperMarkVerificationError:
+                            raise
+                        except CustomerPaperLedgerBlocked:
+                            raise
+                        except Exception as exc:
+                            raise CustomerPaperMarkVerificationError(
+                                "current correlation-group marks could not be verified for reversal"
+                            ) from exc
+                    if not isinstance(group_mark_prices, Mapping):
+                        raise CustomerPaperMarkVerificationError(
+                            "reversing a SELL requires fresh verified marks for every open correlation-group position"
+                        )
+
+                async with conn.begin():
+                    await _set_tenant(conn, customer_id)
+                    reversal_key = f"reverse:{key}"
+                    previous = (await conn.execute(text(
+                        """
+                        SELECT reversal_of_fill_id, event_type
+                        FROM customer_paper.position_events
+                        WHERE customer_id=:customer_id AND idempotency_key=:idempotency_key
+                        """
+                    ), {"customer_id": customer_id, "idempotency_key": reversal_key})).first()
+                    if previous is not None:
+                        if str(previous[0]) != canonical_fill_id or str(previous[1]) != "REVERSAL":
+                            raise CustomerPaperIdempotencyConflict(
+                                "reversal idempotency key conflicts with another event"
+                            )
+                        return {
+                            "status": "REPLAYED",
+                            "fill_id": canonical_fill_id,
+                            "idempotency_key": key,
+                        }
+
+                    fill = (await conn.execute(text(
+                        """
+                        SELECT id, order_id, idempotency_key, venue, market_type, symbol, side, quantity, price,
+                               fee_amount, currency, realized_pnl, cash_delta, position_delta, pnl_delta,
+                               quantity_before, average_entry_before, cost_basis_before,
+                               quantity_after, average_entry_after, cost_basis_after,
+                               realized_pnl_before, realized_pnl_after
+                        FROM customer_paper.fills
+                        WHERE customer_id=:customer_id AND id=:fill_id
+                        """
+                    ), {"customer_id": customer_id, "fill_id": canonical_fill_id})).mappings().first()
+                    if fill is None:
+                        raise CustomerPaperOrderConflict(
+                            "fill is not present in this customer's paper ledger"
+                        )
+                    venue = str(fill["venue"])
+                    market_type = str(fill["market_type"])
+                    symbol = str(fill["symbol"])
+                    restoring_sell = str(fill["side"] or "").upper() == "SELL"
+
+                    if restoring_sell:
+                        # Match record_customer_paper_fill's legacy lock ordering so
+                        # older workers and reversals serialize on the same group keys.
+                        for group in RISK_GROUPS:
+                            await conn.execute(
+                                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                                {"lock_key": f"paper-correlation-group:{customer_id}:{group}"},
+                            )
+
+                    await conn.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": f"paper-position:{customer_id}:{venue}:{market_type}:{symbol}"},
+                    )
+                    already_reversed = (await conn.execute(text(
+                        """
+                        SELECT id FROM customer_paper.position_events
+                        WHERE customer_id=:customer_id AND reversal_of_fill_id=:fill_id
+                        """
+                    ), {"customer_id": customer_id, "fill_id": canonical_fill_id})).first()
+                    if already_reversed is not None:
+                        raise CustomerPaperOrderConflict("a fill can be reversed only once")
+                    latest = (await conn.execute(text(
+                        """
+                        SELECT fill_id, event_type, quantity_after, average_entry_after,
+                               cost_basis_after, realized_pnl_after
+                        FROM customer_paper.position_events
+                        WHERE customer_id=:customer_id AND venue=:venue
+                          AND market_type=:market_type AND symbol=:symbol
+                        ORDER BY id DESC LIMIT 1
+                        """
+                    ), {
+                        "customer_id": customer_id,
+                        "venue": venue,
+                        "market_type": market_type,
+                        "symbol": symbol,
+                    })).first()
+                    if latest is None or str(latest[0]) != canonical_fill_id or str(latest[1]) != "FILL":
+                        raise CustomerPaperOrderConflict(
+                            "only the latest non-reversed fill for this position can be reversed safely"
+                        )
+
+                    if restoring_sell:
+                        cap = Decimal(str(settings.correlation_group_cap_usd))
+                        if not cap.is_finite() or cap < 0:
+                            raise CustomerPaperLedgerBlocked(
+                                "correlation-group cap is not a finite non-negative amount"
+                            )
+                        latest_positions = (await conn.execute(text("""
+                            SELECT DISTINCT ON (venue, market_type, symbol)
+                                   venue, market_type, symbol, quantity_after, average_entry_after
+                            FROM customer_paper.position_events
+                            WHERE customer_id=:customer_id
+                            ORDER BY venue, market_type, symbol, id DESC
+                        """), {"customer_id": customer_id})).mappings().all()
+
+                        projected_group_notional = Decimal("0")
+                        restored_position_seen = False
+                        for current_position in latest_positions:
+                            current_symbol = str(current_position["symbol"] or "")
+                            if not shares_risk_budget(symbol, current_symbol):
+                                continue
+                            current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
+                            average_entry = Decimal(str(current_position["average_entry_after"] or "0"))
+                            same_position = (
+                                str(current_position["venue"]) == venue
+                                and str(current_position["market_type"]) == market_type
+                                and current_symbol == symbol
+                            )
+                            if same_position:
+                                # The reversal restores the pre-SELL quantity and cost
+                                # basis, not the post-SELL snapshot in the current row.
+                                current_quantity = Decimal(str(fill["quantity_before"]))
+                                average_entry = Decimal(str(fill["average_entry_before"]))
+                                restored_position_seen = True
+                            if not current_quantity.is_finite():
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position quantity is not finite"
+                                )
+                            if current_quantity == 0:
+                                continue
+                            if not average_entry.is_finite() or average_entry <= 0:
+                                raise CustomerPaperLedgerBlocked(
+                                    "current correlation-group position has no valid entry valuation"
+                                )
+                            mark_key = (
+                                str(current_position["venue"] or "").strip().lower(),
+                                str(current_position["market_type"] or "").strip().lower(),
+                                current_symbol.strip().upper(),
+                            )
+                            raw_mark = group_mark_prices.get(mark_key)
+                            if not isinstance(raw_mark, Mapping):
+                                raise CustomerPaperMarkVerificationError(
+                                    "current mark is missing or invalid for an open correlation-group position"
+                                )
+                            try:
+                                mark_price = Decimal(str(raw_mark.get("price")))
+                                raw_quote_timestamp = str(
+                                    raw_mark.get("quote_timestamp_utc") or ""
+                                ).strip()
+                                mark_timestamp = datetime.fromisoformat(
+                                    raw_quote_timestamp.replace("Z", "+00:00")
+                                )
+                            except (InvalidOperation, TypeError, ValueError) as exc:
+                                raise CustomerPaperMarkVerificationError(
+                                    "current correlation-group position mark or timestamp is invalid"
+                                ) from exc
+                            if mark_timestamp.tzinfo is None or mark_timestamp.utcoffset() is None:
+                                raise CustomerPaperMarkVerificationError(
+                                    "current correlation-group position mark timestamp must be timezone-aware"
+                                )
+                            mark_age_seconds = (
+                                datetime.now(timezone.utc)
+                                - mark_timestamp.astimezone(timezone.utc)
+                            ).total_seconds()
+                            if mark_age_seconds < -1.0 or mark_age_seconds > 5.0:
+                                raise CustomerPaperMarkVerificationError(
+                                    "current correlation-group position mark is stale or from the future"
+                                )
+                            if not mark_price.is_finite() or mark_price <= 0:
+                                raise CustomerPaperMarkVerificationError(
+                                    "current correlation-group position mark is not finite and positive"
+                                )
+                            # Never let a market-price dip manufacture cap headroom.
+                            projected_group_notional += abs(current_quantity) * max(
+                                average_entry, mark_price
+                            )
+                        if not restored_position_seen:
+                            raise CustomerPaperLedgerBlocked(
+                                "the SELL position disappeared before its reversal risk check"
+                            )
+                        if projected_group_notional > cap:
+                            raise CustomerPaperOrderConflict(
+                                "reversing this SELL would exceed the shared correlation-group exposure cap"
+                            )
+
+                    reversal_cash_delta = -Decimal(fill["cash_delta"])
+                    fill_currency = str(fill["currency"])
+                    await conn.execute(
+                        text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                        {"lock_key": "paper-cash:" + str(customer_id) + ":" + fill_currency},
+                    )
+                    cash_before = Decimal((await conn.execute(text(
+                        """
+                        SELECT COALESCE(SUM(l.signed_amount), 0)
+                        FROM customer_paper.accounts a
+                        LEFT JOIN customer_paper.journal_lines l
+                          ON l.account_id=a.id AND l.customer_id=a.customer_id AND l.currency=a.currency
+                        WHERE a.customer_id=:customer_id AND a.currency=:currency
+                          AND a.account_code='PAPER_CASH'
+                        """
+                    ), {"customer_id": customer_id, "currency": fill_currency})).scalar_one())
+                    if cash_before + reversal_cash_delta < 0:
+                        raise CustomerPaperOrderConflict(
+                            "reversing this fill would overdraw paper cash after subsequent activity"
+                        )
+                    reversal_lines: list[dict[str, Any]] = [
+                        {"account_code": "PAPER_CASH", "signed_amount": reversal_cash_delta},
+                        {"account_code": "PAPER_POSITION", "signed_amount": -Decimal(fill["position_delta"])},
+                    ]
+                    if Decimal(fill["pnl_delta"]) != 0:
+                        reversal_lines.append({
+                            "account_code": "PAPER_PNL",
+                            "signed_amount": -Decimal(fill["pnl_delta"]),
+                        })
+                    if Decimal(fill["fee_amount"]) != 0:
+                        reversal_lines.append({
+                            "account_code": "PAPER_FEES",
+                            "signed_amount": -Decimal(fill["fee_amount"]),
+                        })
+                    journal_id = await _append_journal_on_connection(
+                        conn,
+                        customer_id=customer_id,
+                        idempotency_key=f"reversal:{key}",
+                        event_type="REVERSAL",
+                        currency=str(fill["currency"]),
+                        lines=reversal_lines,
+                        reference=canonical_fill_id,
+                        metadata={
+                            "reversal_of_fill_id": canonical_fill_id,
+                            "reversal_idempotency_key": key,
+                        },
+                    )
+                    signed_original = (
+                        Decimal(fill["quantity"])
+                        if str(fill["side"]) == "BUY"
+                        else -Decimal(fill["quantity"])
+                    )
+                    await conn.execute(text(
+                        """
+                        INSERT INTO customer_paper.position_events
+                            (customer_id, venue, market_type, symbol, fill_id, reversal_of_fill_id,
+                             event_type, idempotency_key, signed_quantity, fill_price, quantity_before,
+                             average_entry_before, cost_basis_before, quantity_after, average_entry_after,
+                             cost_basis_after, realized_pnl_delta, realized_pnl_after)
+                        VALUES
+                            (:customer_id, :venue, :market_type, :symbol, :fill_id, :reversal_of_fill_id,
+                             'REVERSAL', :idempotency_key, :signed_quantity, :fill_price, :quantity_before,
+                             :average_entry_before, :cost_basis_before, :quantity_after, :average_entry_after,
+                             :cost_basis_after, :realized_pnl_delta, :realized_pnl_after)
+                        """
+                    ), {
+                        "customer_id": customer_id,
+                        "venue": venue,
+                        "market_type": market_type,
+                        "symbol": symbol,
+                        "fill_id": canonical_fill_id,
+                        "reversal_of_fill_id": canonical_fill_id,
+                        "idempotency_key": reversal_key,
+                        "signed_quantity": -signed_original,
+                        "fill_price": Decimal(fill["price"]),
+                        "quantity_before": Decimal(latest[2]),
+                        "average_entry_before": Decimal(latest[3]),
+                        "cost_basis_before": Decimal(latest[4]),
+                        "quantity_after": Decimal(fill["quantity_before"]),
+                        "average_entry_after": Decimal(fill["average_entry_before"]),
+                        "cost_basis_after": Decimal(fill["cost_basis_before"]),
+                        "realized_pnl_delta": -Decimal(fill["realized_pnl"]),
+                        "realized_pnl_after": Decimal(fill["realized_pnl_before"]),
+                    })
+                return {
+                    "status": "APPENDED",
+                    "fill_id": canonical_fill_id,
+                    "journal_id": journal_id,
+                    "idempotency_key": key,
+                }
+            finally:
+                if risk_lock_acquired:
+                    try:
+                        unlocked = await conn.execute(
+                            text("SELECT pg_advisory_unlock(hashtextextended(:lock_key, 0))"),
+                            {"lock_key": risk_lock_key},
+                        )
+                        did_unlock = bool(unlocked.scalar_one())
+                        await conn.commit()
+                        if not did_unlock:
+                            logger.error(
+                                "customer_paper_risk_lock_release_failed",
+                                extra={"customer_id": customer_id, "operation": "reverse_customer_paper_fill"},
+                            )
+                            await conn.invalidate()
+                    except Exception:
+                        logger.exception(
+                            "customer_paper_risk_lock_release_failed",
+                            extra={"customer_id": customer_id, "operation": "reverse_customer_paper_fill"},
+                        )
+                        await conn.invalidate()
+                elif risk_lock_attempted:
+                    # Unknown lock-acquisition outcome: close the connection so a
+                    # server-side session lock cannot leak back into the pool.
+                    await conn.invalidate()
     finally:
         await engine.dispose()
