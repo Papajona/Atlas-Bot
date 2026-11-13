@@ -5,7 +5,7 @@ import logging
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from .config import settings
-from .db import AppState, CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, utcnow
+from .db import AppState, CustomerLedgerAccount, Incident, LedgerEntry, LedgerJournal, LedgerJournalLine, SessionLocal, Wallet, Withdrawal, utcnow
 
 USDT = "USDT"
 D = Decimal
@@ -415,9 +415,35 @@ async def _validate_withdrawal_action_replay(
         except (TypeError, ValueError):
             metadata = {}
             problems.append("invalid replay metadata")
-        # Older journals did not persist the caller's requested amount separately.
-        # Their recorded amount is used conservatively; a mismatch fails closed.
+        # New releases persist the requested amount. For a legacy release
+        # journal, recover it from the original withdrawal row rather than
+        # mistaking a partial effective release for the requested payout amount.
         recorded_request = metadata.get("requested_amount", entry.amount)
+        source_withdrawal = None
+        if action == "release" and reference_id.endswith(":release"):
+            source_request_id = reference_id[:-len(":release")]
+            source_withdrawal = (
+                await db.execute(
+                    select(Withdrawal)
+                    .where(
+                        Withdrawal.request_id == source_request_id,
+                        Withdrawal.customer_id == customer_id,
+                        Withdrawal.currency == USDT,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if source_withdrawal is None:
+                problems.append("missing source withdrawal request")
+            else:
+                try:
+                    source_amount = _q(source_withdrawal.amount)
+                    if "requested_amount" in metadata:
+                        if _q(metadata["requested_amount"]) != source_amount:
+                            problems.append("stored request differs from withdrawal record")
+                    recorded_request = source_amount
+                except (TypeError, ValueError, ArithmeticError):
+                    problems.append("invalid source withdrawal amount")
         try:
             if _q(recorded_request) != amount_d:
                 problems.append("requested amount")
