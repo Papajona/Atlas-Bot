@@ -284,6 +284,7 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     assert "preflight_outcome=" in workflow
     assert "ref: ${{ inputs.target_sha }}" in workflow
     assert "actions: read" in workflow
+    assert 'ADAPTIVE_AI_ENABLED: "false"' in workflow
     assert "git ls-remote" not in workflow
     assert "[atlas-paper-acceptance-drill]" not in workflow
 
