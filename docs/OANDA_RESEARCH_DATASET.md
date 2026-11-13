@@ -28,6 +28,6 @@ Before any replay:
 - verify the raw-response and normalized-CSV SHA-256 values against the manifest;
 - verify completed-row count, duplicate-free ascending timestamps (including sub-second precision), instrument, granularity, and fixed request window;
 - compare the request window and instrument with the original experiment record;
-- verify that model probability columns are decoded using the estimator's actual `classes_` values, including sparse or reordered class sets. Training explicitly encodes triple-barrier labels as `-1/0/1 → 0/1/2`, and the regression suite checks prediction decoding when a class is absent and probability columns are reordered.
+- run `pytest -q tests/test_core.py::test_predict_latest_maps_sparse_reordered_class_probabilities` against the exact code commit being evaluated and require it to pass. This verifies that probabilities are decoded using the estimator's actual `classes_` values, including sparse or reordered class sets. Training explicitly encodes triple-barrier labels as `-1/0/1 → 0/1/2`; the test's presence is not a substitute for its successful execution.
 
 A new capture is a new dataset unless its provenance and exact content match the original. Matching 1,799 rows alone does not prove equivalence. Do not run performance calculations or report replay metrics until this gate passes.
