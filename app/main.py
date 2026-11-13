@@ -8328,9 +8328,9 @@ async def research_decision_outcomes_holdout_once(
     await auth(x_admin_token, authorization)
     from .decision_outcome_research import (
         evaluate_decision_outcome_labels_once,
-        load_decision_outcome_labels,
+        load_all_decision_outcome_labels,
     )
-    records = await load_decision_outcome_labels(limit=100_000)
+    records = await load_all_decision_outcome_labels(batch_size=5000)
     return await evaluate_decision_outcome_labels_once(records)
 
 
