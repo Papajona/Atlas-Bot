@@ -237,7 +237,7 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
         mark_event = mark_events[0]
         assert mark_event[1] is False
         assert mark_event[2] == {
-            f"paper-risk-budget:92001",
+            "paper-risk-budget:92001",
             *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
         }
         assert write_event_indexes
