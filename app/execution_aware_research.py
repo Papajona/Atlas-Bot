@@ -50,13 +50,20 @@ def costed_execution_returns(
     position: pd.Series,
     market_returns: pd.Series,
     *,
-    transaction_cost_bps: float,
+    transaction_cost_bps: float | pd.Series,
     carry_bps_per_bar: float | None,
     exit_mask: pd.Series | None = None,
     cost_multiplier: float = 1.0,
 ) -> pd.Series:
     """Compute net returns using transaction turnover and per-bar financing costs."""
-    cost_bps = _finite_nonnegative(transaction_cost_bps, "transaction_cost_bps")
+    if isinstance(transaction_cost_bps, pd.Series):
+        if not transaction_cost_bps.index.equals(pd.Series(position).index):
+            raise ValueError("session transaction-cost series must align exactly with positions")
+        cost_values = transaction_cost_bps.to_numpy(dtype=float)
+        if not np.isfinite(cost_values).all() or np.any(cost_values < 0):
+            raise ValueError("session transaction costs must be finite and non-negative")
+    else:
+        cost_values = _finite_nonnegative(transaction_cost_bps, "transaction_cost_bps")
     multiplier = _finite_nonnegative(cost_multiplier, "cost_multiplier")
     if multiplier <= 0:
         raise ValueError("cost_multiplier must be greater than zero")
@@ -69,7 +76,7 @@ def costed_execution_returns(
     if not np.isfinite(pos.to_numpy()).all() or not np.isfinite(returns.to_numpy()).all():
         raise ValueError("position and market-return streams must be finite")
     turnover = execution_turnover(pos, exit_mask)
-    net = pos * returns - turnover * (cost_bps * multiplier / 10_000.0)
+    net = pos * returns - turnover * (cost_values * multiplier / 10_000.0)
     if carry is not None:
         net = net - pos.abs() * (carry * multiplier / 10_000.0)
     return net.clip(lower=-1.0).astype(float)
