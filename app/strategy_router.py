@@ -447,63 +447,135 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
     }
 
 
-def router_walk_forward_backtest(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
-                                 asset: str = "crypto", costs_bps: float = 7.5,
-                                 folds: int = 5, min_train: int = 800,
-                                 min_trades: int = 20, switch_min_advantage: float = 0.15,
-                                 min_regime_bars: int = 3) -> dict:
-    """Evaluate the entire regime→strategy selection process on unseen folds.
-
-    Each test fold chooses the strategy using only bars strictly before that fold;
-    the test bars then measure the selected strategy. This is the anti-lookahead gate
-    for the router itself, not merely for the individual strategies.
-    """
-    splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
+def router_walk_forward_backtest(
+    df: pd.DataFrame,
+    cfg: StrategyConfig | None = None,
+    *,
+    asset: str = "crypto",
+    costs_bps: float = 7.5,
+    folds: int = 5,
+    min_train: int = 800,
+    min_trades: int = 20,
+    switch_min_advantage: float = 0.15,
+    min_regime_bars: int = 3,
+    execution_cost_context: dict[str, object] | None = None,
+) -> dict:
+    """Evaluate regime-conditioned selection on unseen folds and evidence-backed costs."""
+    splits = purged_walk_forward_splits(
+        len(df), folds=folds, min_train=min_train, purge=1, embargo=1
+    )
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
-    signals = strategy_signals(df, cfg or StrategyConfig(), asset=asset)
+    cfg = cfg or StrategyConfig()
+    if execution_cost_context is None:
+        execution_cost_context, context_audit = build_research_execution_cost_context(
+            df,
+            settings=settings,
+            taker_bps=float(settings.research_taker_bps),
+            base_slippage_bps=float(settings.research_slippage_bps),
+            cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
+            asset=asset,
+        )
+    else:
+        context_audit = {
+            "execution_cost_model_complete": True,
+            "execution_cost_model_fingerprint": execution_cost_context.get("model_fingerprint"),
+            "per_bar_execution_context_sha256": execution_cost_context.get("context_sha256"),
+        }
+
+    signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
     rows = []
     all_net = []
+    execution_audits = []
+    ranking_audits = []
     for fold in splits:
         train = df.iloc[:fold.test_start]
         if len(train) < min_train:
             continue
-        perf = regime_conditioned_strategy_performance(train, cfg, costs_bps=costs_bps, asset=asset)
+        train_context = slice_research_execution_context(execution_cost_context, train.index)
+        perf = regime_conditioned_strategy_performance(
+            train, cfg, costs_bps=costs_bps, asset=asset,
+            execution_cost_context=train_context,
+        )
+        ranking_complete = all(
+            perf.get(strategy, {}).get(regime, {}).get("execution_cost_model_complete") is True
+            for strategy in STRATEGIES
+            for regime in perf.get(strategy, {})
+        )
+        ranking_audits.append(ranking_complete)
         chosen_by_regime = {}
         for regime in REGIMES:
             ranked = []
             for name in STRATEGIES:
-                m = perf.get(name, {}).get(regime, {})
-                ranked.append((name, _score_metrics(m, min_trades=min_trades)))
-            ranked.sort(key=lambda x: x[1], reverse=True)
+                metrics = perf.get(name, {}).get(regime, {})
+                ranked.append((name, _score_metrics(metrics, min_trades=min_trades)))
+            ranked.sort(key=lambda row: row[1], reverse=True)
             chosen_by_regime[regime] = ranked[0][0] if ranked else "ensemble"
+
         test = df.iloc[fold.test_start:fold.test_end]
+        test_context = slice_research_execution_context(execution_cost_context, test.index)
         test_regimes = regimes.iloc[fold.test_start:fold.test_end]
-        # Keep the next-open return for the fold's final test bar. Slicing first
-        # makes that return look missing and silently replaces it with zero.
+        # Keep the executable open-to-open return for the fold's final test bar.
         test_ret = (next_open_returns(df) - 1.0).iloc[fold.test_start:fold.test_end]
-        selected = []
-        for idx in test.index:
-            regime = str(test_regimes.loc[idx])
-            selected.append(chosen_by_regime.get(regime, "ensemble"))
+        selected = [
+            chosen_by_regime.get(str(test_regimes.loc[index]), "ensemble")
+            for index in test.index
+        ]
         selected_series = pd.Series(selected, index=test.index)
         raw = pd.Series(0.0, index=test.index)
         for name in STRATEGIES:
             mask = selected_series == name
             if mask.any():
                 raw.loc[mask] = signals.loc[test.index, name].loc[mask]
-        pos = raw.shift(1).fillna(0.0)
-        turnover = pos.diff().abs().fillna(pos.abs())
-        net = pos * test_ret - turnover * costs_bps / 10000.0
+        position = raw.shift(1).fillna(0.0)
+        turnover = position.diff().abs().fillna(position.abs())
+        per_bar_costs, cost_audit = execution_cost_series_for_positions(
+            test_context,
+            position,
+            test["open"].astype(float),
+            namespace=f"router-walk-forward:fold:{len(rows)}",
+            fallback_cost_bps=costs_bps,
+        )
+        net = position * test_ret - turnover * per_bar_costs / 10_000.0
         all_net.append(net)
-        rows.append({"test_start": test.index[0].isoformat(), "test_end": test.index[-1].isoformat(),
-                     "bars": int(len(test)), "strategies_used": selected_series.value_counts().to_dict(),
-                     "total_return": float((1.0 + net).prod() - 1.0)})
+        execution_audits.append(cost_audit)
+        rows.append({
+            "test_start": test.index[0].isoformat(),
+            "test_end": test.index[-1].isoformat(),
+            "bars": int(len(test)),
+            "strategies_used": selected_series.value_counts().to_dict(),
+            "total_return": float((1.0 + net).prod() - 1.0),
+            "execution_cost_model_complete": cost_audit.get("execution_cost_model_complete") is True,
+        })
+
     joined = pd.concat(all_net) if all_net else pd.Series(dtype=float)
-    m = _metrics(joined, asset=asset)
-    m.update({"status": "OK", "folds": rows, "router": "REGIME_CONDITIONED_WALK_FORWARD"})
-    return m
+    metrics = _metrics(joined, asset=asset)
+    all_costs_complete = bool(execution_audits) and all(
+        audit.get("execution_cost_model_complete") is True for audit in execution_audits
+    )
+    metrics.update({
+        "status": "OK" if rows else "INSUFFICIENT_DATA",
+        "folds": rows,
+        "router": "REGIME_CONDITIONED_WALK_FORWARD",
+        "execution_cost_model_complete": (
+            all_costs_complete and all(ranking_audits)
+        ),
+        "execution_cost_calibration_status": context_audit.get(
+            "execution_cost_calibration_status"
+        ),
+        "execution_cost_model_fingerprint": context_audit.get(
+            "execution_cost_model_fingerprint"
+        ),
+        "per_bar_execution_context_sha256": context_audit.get(
+            "per_bar_execution_context_sha256"
+        ),
+        "execution_cost_model_reason": context_audit.get("reason"),
+        "execution_cost_failure_reasons": [
+            audit.get("execution_cost_failure_reasons", {}) for audit in execution_audits
+        ],
+    })
+    return metrics
 
 
 def policy_walk_forward_backtest(
