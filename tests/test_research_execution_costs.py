@@ -237,6 +237,93 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
     assert blocked_reason == "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
 
 
+def test_signed_source_types_are_normalized_case_insensitively(tmp_path):
+    frame = _research_frame()
+    settings = _settings(tmp_path)
+    _research_cost_evidence(frame, settings)
+
+    document = dict(frame.attrs["execution_cost_calibration_evidence"])
+    document.pop("attestation")
+    document["sources"] = [
+        {
+            **source,
+            "source_type": str(source.get("source_type") or "").upper(),
+        }
+        if source.get("source_type") in {"fee_schedule", "order_book"}
+        else source
+        for source in document["sources"]
+    ]
+    signed, public_keys = _signed(document)
+    settings.research_evidence_public_keys_json = public_keys
+    frame.attrs["execution_cost_calibration_evidence"] = signed
+
+    context, audit = build_research_execution_cost_context(
+        frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+    )
+
+    assert context is not None
+    assert audit["status"] == "READY"
+    assert audit["execution_cost_model_complete"] is True
+
+
+def test_research_execution_fingerprint_binds_session_cost_algorithm(tmp_path, monkeypatch):
+    from app import research_execution_costs as costs_module
+
+    settings = _settings(tmp_path)
+    baseline = research_execution_model_fingerprint(
+        settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+    )
+    monkeypatch.setattr(
+        costs_module,
+        "SESSION_COST_MODEL_VERSION",
+        "market-sessions-test-next-version",
+    )
+    changed = research_execution_model_fingerprint(
+        settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+    )
+
+    assert changed != baseline
+
+
+def test_benchmark_cost_context_is_disabled_after_candidate_event_rejection():
+    from app.research_engine import _benchmark_execution_inputs
+
+    context = {"model_fingerprint": "a" * 64}
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    fallback_context, fallback_sessions = _benchmark_execution_inputs(
+        context,
+        {"per_bar_execution_cost_model_status": "FALLBACK_AFTER_EVENT_REJECTION"},
+        session_schedule,
+    )
+    verified_context, verified_sessions = _benchmark_execution_inputs(
+        context,
+        {"per_bar_execution_cost_model_status": "VERIFIED_PER_BAR_EXECUTION_COSTS"},
+        session_schedule,
+    )
+
+    assert fallback_context is None
+    assert fallback_sessions is session_schedule
+    assert verified_context is context
+    assert verified_sessions is None
+
+
 def test_rejects_ohlcv_mutation_after_provenance_was_attached(tmp_path):
     frame = _research_frame()
     settings = _settings(tmp_path)
