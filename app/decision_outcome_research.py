@@ -162,6 +162,7 @@ def evaluate_decision_outcome_labels(
     holdout_fraction: float = 0.30,
     min_group_samples: int = 30,
     min_unique_timestamps: int = 10,
+    redact_holdout: bool = True,
 ) -> dict:
     """Summarize rejected-signal outcomes and create a purged chronological holdout.
 
@@ -401,7 +402,10 @@ def evaluate_decision_outcome_labels(
         },
         "by_market_and_decision": by_market,
         "rejected_by_reason": rejected_by_reason,
-        "out_of_sample": out_of_sample,
+        # The holdout is withheld by default. Only the atomic one-use evaluator
+        # opts in to computing and releasing it after registry consumption.
+        "out_of_sample": [] if redact_holdout else out_of_sample,
+        "holdout_metrics_withheld": bool(redact_holdout),
     }
 
 
@@ -472,11 +476,14 @@ async def evaluate_decision_outcome_labels_once(
                 "reason": "one_time_holdout_is_global_and_cannot_be_reopened",
             }
 
-    report = evaluate_decision_outcome_labels(
+    import asyncio
+    report = await asyncio.to_thread(
+        evaluate_decision_outcome_labels,
         records,
         holdout_fraction=holdout_fraction,
         min_group_samples=min_group_samples,
         min_unique_timestamps=min_unique_timestamps,
+        redact_holdout=False,
     )
     usable = [
         row for row in report.get("out_of_sample", [])
@@ -484,10 +491,25 @@ async def evaluate_decision_outcome_labels_once(
         and row.get("status") == "CHRONOLOGICAL_HOLDOUT"
         and int(row.get("n_holdout", 0) or 0) > 0
     ]
-    adequately_sampled = [
-        row for row in usable
-        if int(row.get("n_holdout", 0) or 0) >= max(1, int(min_group_samples))
-    ]
+    adequately_sampled = []
+    for row in usable:
+        by_decision = row.get("holdout_by_decision")
+        if not isinstance(by_decision, dict):
+            continue
+        trade = by_decision.get("TRADE")
+        no_trade = by_decision.get("NO_TRADE")
+        # Both sides of the decision must meet the sample floor independently.
+        # A large majority class may not consume the one-time holdout for a thin arm.
+        if not isinstance(trade, dict) or not isinstance(no_trade, dict):
+            continue
+        minimum = max(1, int(min_group_samples))
+        if (
+            int(trade.get("n", 0) or 0) >= minimum
+            and int(no_trade.get("n", 0) or 0) >= minimum
+            and trade.get("sample_sufficient") is True
+            and no_trade.get("sample_sufficient") is True
+        ):
+            adequately_sampled.append(row)
     if not adequately_sampled:
         return {
             "status": "INSUFFICIENT_HOLDOUT",
@@ -500,6 +522,8 @@ async def evaluate_decision_outcome_labels_once(
             "reason": "no_chronological_holdout_group_meets_the_minimum_sample_floor",
         }
 
+    # Release only independently sufficient groups, never the thin-arm groups.
+    report["out_of_sample"] = adequately_sampled
     normalized, _coverage = _normalise_labels(records)
     # Bind all normalized metadata and every horizon outcome, not merely label IDs.
     # This makes a changed return, execution cost, timestamp, or decision field a new
@@ -585,43 +609,81 @@ async def evaluate_decision_outcome_labels_once(
 
 
 
-async def load_all_decision_outcome_labels(*, batch_size: int = 5000) -> list[dict]:
-    """Read the complete append-only label history using bounded ID-keyset batches."""
+async def decision_outcome_holdout_status() -> dict[str, Any]:
+    """Constant-size consumed-state check so repeat requests do not reload label history."""
+    from .db import ResearchHoldoutRegistry, SessionLocal
+    from .research_evidence import canonical_sha256
+
+    scope_sha = canonical_sha256({
+        "registry": "atlas-global-decision-outcome-holdout",
+        "version": HOLDOUT_REGISTRY_VERSION,
+    })
+    async with SessionLocal() as db:
+        existing = await db.get(ResearchHoldoutRegistry, scope_sha)
+    if existing is None:
+        return {"status": "AVAILABLE", "consumed": False}
+    return {
+        "status": "HOLDOUT_ALREADY_CONSUMED",
+        "consumed": True,
+        "holdout_version": existing.holdout_version,
+        "consumed_at": existing.consumed_at.isoformat() if existing.consumed_at else None,
+        "metrics_released": False,
+    }
+
+
+class DecisionOutcomeHistoryResourceLimit(RuntimeError):
+    """The complete audit history exceeds the configured in-memory research budget."""
+
+
+async def load_all_decision_outcome_labels(
+    *,
+    batch_size: int = 2000,
+    max_records: int = 100_000,
+) -> list[dict]:
+    """Read all labels in bounded scalar batches; fail closed instead of truncating.
+
+    The query never retains ORM rows or a whole-table result. Decoded JSON remains
+    in memory for the current evaluator, so a hard record ceiling prevents an
+    unexpectedly large history from exhausting the API process. The caller must
+    leave the holdout unconsumed when this limit is reached.
+    """
     from .db import AuditLog, SessionLocal
 
-    batch_size = max(100, min(20_000, int(batch_size)))
-    rows = []
+    batch_size = max(100, min(5000, int(batch_size)))
+    max_records = max(1, min(250_000, int(max_records)))
+    result: list[dict] = []
     before_id = None
     async with SessionLocal() as db:
         while True:
             query = (
-                select(AuditLog)
+                select(AuditLog.id, AuditLog.detail)
                 .where(AuditLog.event == "ADAPTIVE_DECISION_OUTCOME_LABEL")
                 .order_by(AuditLog.id.desc())
                 .limit(batch_size)
             )
             if before_id is not None:
                 query = query.where(AuditLog.id < before_id)
-            batch = (await db.execute(query)).scalars().all()
+            batch = (await db.execute(query)).all()
             if not batch:
                 break
-            rows.extend(batch)
-            before_id = int(batch[-1].id)
+            before_id = int(batch[-1][0])
+            for _row_id, detail in reversed(batch):
+                if isinstance(detail, dict):
+                    record = detail
+                elif isinstance(detail, str):
+                    try:
+                        record = json.loads(detail)
+                    except (TypeError, ValueError):
+                        continue
+                else:
+                    continue
+                if isinstance(record, dict):
+                    result.append(record)
+                    if len(result) > max_records:
+                        raise DecisionOutcomeHistoryResourceLimit(
+                            f"complete decision label history exceeds {max_records} records; "
+                            "holdout was not consumed"
+                        )
             if len(batch) < batch_size:
                 break
-
-    result = []
-    for row in reversed(rows):
-        detail = row.detail
-        if isinstance(detail, dict):
-            record = detail
-        elif isinstance(detail, str):
-            try:
-                record = json.loads(detail)
-            except (TypeError, ValueError):
-                continue
-        else:
-            continue
-        if isinstance(record, dict):
-            result.append(record)
     return result
