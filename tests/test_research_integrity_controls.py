@@ -327,3 +327,114 @@ def test_research_integrity_models_and_migration_are_present_and_write_once():
     assert "atlas_research_holdout_registry_immutable" in migration
     assert "ENABLE ROW LEVEL SECURITY" in migration
     assert "REVOKE ALL PRIVILEGES" in migration
+
+
+
+def test_trial_ledger_assurance_mode_and_key_id_are_authenticated_and_rotation_works():
+    from types import SimpleNamespace
+    from app.research_trial_archive import (
+        _LEDGER_PAYLOAD_FIELDS,
+        _verify_row_integrity,
+    )
+
+    payload = {field: None for field in _LEDGER_PAYLOAD_FIELDS}
+    payload.update({
+        "trial_key": "a" * 64,
+        "trial_label": "variant:t1.20:r0.80@config",
+        "config_sha256": "b" * 64,
+        "results_sha256": "c" * 64,
+        "archive_status": "RECORDED_UNVERIFIED",
+    })
+    old_key = b"o" * 32
+    new_key = b"n" * 32
+    entry_hash, signature, mode = compute_trial_ledger_integrity(
+        payload, sequence=1, previous_entry_sha256="",
+        signing_key=old_key, signing_key_id="key-2026-01",
+    )
+    row = SimpleNamespace(
+        **payload,
+        ledger_sequence=1,
+        ledger_previous_sha256="",
+        ledger_entry_sha256=entry_hash,
+        ledger_hmac_sha256=signature,
+        ledger_hmac_key_id="key-2026-01",
+        ledger_status=mode,
+    )
+    valid, verifiable, reason = _verify_row_integrity(
+        row, keyring={"key-2026-01": old_key, "key-2026-11": new_key},
+    )
+    assert (valid, verifiable, reason) == (True, True, "OK")
+
+    # New rows use the rotated active key; old and new entries verify together.
+    rotated_hash, rotated_sig, rotated_mode = compute_trial_ledger_integrity(
+        {**payload, "trial_key": "d" * 64}, sequence=2,
+        previous_entry_sha256=entry_hash, signing_key=new_key,
+        signing_key_id="key-2026-11",
+    )
+    rotated_row = SimpleNamespace(
+        **{**payload, "trial_key": "d" * 64},
+        ledger_sequence=2,
+        ledger_previous_sha256=entry_hash,
+        ledger_entry_sha256=rotated_hash,
+        ledger_hmac_sha256=rotated_sig,
+        ledger_hmac_key_id="key-2026-11",
+        ledger_status=rotated_mode,
+    )
+    assert _verify_row_integrity(
+        rotated_row, keyring={"key-2026-01": old_key, "key-2026-11": new_key},
+    ) == (True, True, "OK")
+
+    # Clearing HMAC metadata and changing the status cannot downgrade a signed row:
+    # assurance mode and key identity are already bound into the entry SHA.
+    downgraded = SimpleNamespace(
+        **payload,
+        ledger_sequence=1,
+        ledger_previous_sha256="",
+        ledger_entry_sha256=entry_hash,
+        ledger_hmac_sha256=None,
+        ledger_hmac_key_id=None,
+        ledger_status="HASH_CHAIN_UNSIGNED",
+    )
+    assert _verify_row_integrity(downgraded, keyring={})[0] is False
+
+
+def test_unsigned_entry_cannot_be_relabelled_as_hmac_signed():
+    from types import SimpleNamespace
+    from app.research_trial_archive import _LEDGER_PAYLOAD_FIELDS, _verify_row_integrity
+
+    payload = {field: None for field in _LEDGER_PAYLOAD_FIELDS}
+    payload.update({"trial_key": "e" * 64, "trial_label": "trend"})
+    entry, signature, mode = compute_trial_ledger_integrity(
+        payload, sequence=1, previous_entry_sha256="",
+    )
+    row = SimpleNamespace(
+        **payload,
+        ledger_sequence=1,
+        ledger_previous_sha256="",
+        ledger_entry_sha256=entry,
+        ledger_hmac_sha256=signature,
+        ledger_hmac_key_id=None,
+        ledger_status="HMAC_SIGNED",
+    )
+    assert _verify_row_integrity(row, keyring={"k": b"k" * 32})[0] is False
+
+
+def test_sqlite_trial_archive_uses_serialized_write_transaction():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    archive = (root / "app" / "research_trial_archive.py").read_text(encoding="utf-8")
+    db_source = (root / "app" / "db.py").read_text(encoding="utf-8")
+    assert 'BEGIN IMMEDIATE' in archive
+    assert '"timeout": 30' in db_source
+    assert '.with_for_update()' in archive
+
+
+def test_trial_archive_append_uses_bounded_head_check_not_full_history_scan():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "app" / "research_trial_archive.py"
+    ).read_text(encoding="utf-8")
+    append = source[source.index("async def archive_research_trials("):]
+    assert "_verify_trial_ledger_head_in_session" in append
+    assert "verify_research_trial_ledger()" not in append
