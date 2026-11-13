@@ -50,7 +50,7 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
 
 
 @pytest.mark.parametrize(("fail_lock_commit", "fail_unlock"), [(False, False), (True, False), (False, True)])
-def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without_open_transaction(
+def test_customer_paper_fill_fetches_marks_before_write_and_legacy_locks_after_order_bar(
     monkeypatch, fail_lock_commit, fail_unlock,
 ):
     from app.correlation_risk import RISK_GROUPS
@@ -81,6 +81,7 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
             self.invalidated = False
             self.fail_next_commit = False
             self.fail_unlock_consumed = False
+            self.legacy_group_locks = []
 
         def in_transaction(self):
             return self._in_transaction
@@ -113,16 +114,41 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
             if "pg_advisory_lock(" in query:
                 lock_key = params["lock_key"]
                 self.session_locks.add(lock_key)
-                events.append(("lock", lock_key, self._in_transaction))
-                if fail_lock_commit and len(self.session_locks) == len(RISK_GROUPS) + 1:
-                    # Simulate a live connection failing COMMIT immediately after all
-                    # session locks were acquired; the finally block must still unlock.
+                events.append(("session_lock", lock_key, self._in_transaction))
+                if fail_lock_commit:
+                    # Simulate COMMIT failing after the session lock was acquired.
                     self.fail_next_commit = True
                 return FakeResult()
 
             if "SELECT id, venue, market_type, symbol, side" in query:
                 events.append(("write_order_read", self._in_transaction))
-                raise StopBeforeFill("stop after proving marks were fetched outside a transaction")
+                return FakeResult(row={
+                    "id": "test-order-id",
+                    "venue": "binance",
+                    "market_type": "spot",
+                    "symbol": "BTC/USDT",
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "quantity": Decimal("1"),
+                    "limit_price": None,
+                    "currency": "USDT",
+                    "metadata_json": {},
+                })
+
+            if "pg_advisory_xact_lock(" in query:
+                lock_key = params["lock_key"]
+                if lock_key.startswith("paper-order-fill:"):
+                    events.append(("order_xact_lock", lock_key))
+                elif lock_key.startswith("paper-market-bar:"):
+                    events.append(("bar_xact_lock", lock_key))
+                elif lock_key.startswith("paper-correlation-group:"):
+                    self.legacy_group_locks.append(lock_key)
+                    events.append(("legacy_group_xact_lock", lock_key))
+                    if len(self.legacy_group_locks) == len(RISK_GROUPS):
+                        raise StopBeforeFill(
+                            "stop after verifying legacy locks follow order and bar locks"
+                        )
+                return FakeResult()
 
             return FakeResult()
 
@@ -194,13 +220,10 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
         events.append(("set_tenant", customer_id))
 
     async def load_group_marks():
-        expected_locks = {
-            "paper-risk-budget:92001",
-            *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
-        }
         events.append(("marks", conn.in_transaction(), set(conn.session_locks)))
         assert not conn.in_transaction()
-        assert conn.session_locks == expected_locks
+        assert conn.session_locks == {"paper-risk-budget:92001"}
+        assert conn.legacy_group_locks == []
         return {("binance", "spot", "BTC/USDT"): _fresh_group_mark("100")}
 
     monkeypatch.setattr(paper_lifecycle, "_assert_customer_paper_ready", readiness_preflight)
@@ -209,7 +232,9 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
 
     expected_exception = RuntimeError if fail_lock_commit else StopBeforeFill
     expected_message = (
-        "simulated commit failure" if fail_lock_commit else "outside a transaction"
+        "simulated commit failure"
+        if fail_lock_commit
+        else "legacy locks follow order and bar locks"
     )
     with pytest.raises(expected_exception, match=expected_message):
         asyncio.run(record_customer_paper_fill(
@@ -220,6 +245,7 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
             quantity="1",
             price="100",
             group_mark_prices_loader=load_group_marks,
+            enforce_market_bar_budget=True,
         ))
 
     mark_events = [item for item in events if isinstance(item, tuple) and item[0] == "marks"]
@@ -227,32 +253,49 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
         index for index, item in enumerate(events)
         if isinstance(item, tuple) and item[0] == "write_order_read"
     ]
+    order_lock_indexes = [
+        index for index, item in enumerate(events)
+        if isinstance(item, tuple) and item[0] == "order_xact_lock"
+    ]
+    bar_lock_indexes = [
+        index for index, item in enumerate(events)
+        if isinstance(item, tuple) and item[0] == "bar_xact_lock"
+    ]
+    legacy_lock_indexes = [
+        index for index, item in enumerate(events)
+        if isinstance(item, tuple) and item[0] == "legacy_group_xact_lock"
+    ]
     unlock_events = [item for item in events if isinstance(item, tuple) and item[0] == "unlock"]
 
     if fail_lock_commit:
         assert not mark_events
         assert not write_event_indexes
+        assert not legacy_lock_indexes
     else:
         assert len(mark_events) == 1
-        mark_event = mark_events[0]
-        assert mark_event[1] is False
-        assert mark_event[2] == {
-            "paper-risk-budget:92001",
-            *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
-        }
-        assert write_event_indexes
-        assert events.index(mark_event) < write_event_indexes[0]
+        assert mark_events[0][1] is False
+        assert mark_events[0][2] == {"paper-risk-budget:92001"}
+        assert len(write_event_indexes) == 1
+        assert len(order_lock_indexes) == 1
+        assert len(bar_lock_indexes) == 1
+        assert len(legacy_lock_indexes) == len(RISK_GROUPS)
+        assert write_event_indexes[0] < order_lock_indexes[0] < bar_lock_indexes[0]
+        assert bar_lock_indexes[0] < legacy_lock_indexes[0]
+        assert [events[index][1] for index in legacy_lock_indexes] == [
+            f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS
+        ]
+        assert events.index(mark_events[0]) < write_event_indexes[0]
 
+    assert len(unlock_events) == 1
     if fail_unlock:
-        assert len(unlock_events) == 1
         assert unlock_events[0][2] is False
         assert conn.invalidated is True
     else:
-        assert len(unlock_events) == len(RISK_GROUPS) + 1
-        assert all(item[2] is True for item in unlock_events)
+        assert unlock_events[0][2] is True
         assert conn.invalidated is False
     assert conn.session_locks == set()
     assert engine.disposed is True
+
 
 def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
     valid = _seed_lines("10")
