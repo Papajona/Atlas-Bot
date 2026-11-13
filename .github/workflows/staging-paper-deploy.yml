@@ -13,7 +13,9 @@ permissions:
 
 concurrency:
   group: atlas-paper-only-staging-deploy
-  cancel-in-progress: false
+  # A newer main push supersedes any older in-flight staging deployment. The
+  # surviving run still checks exact main SHA immediately before Cloud Run mutation.
+  cancel-in-progress: true
 
 jobs:
   deploy-paper-staging:
