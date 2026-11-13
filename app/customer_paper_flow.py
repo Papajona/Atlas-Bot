@@ -23,6 +23,7 @@ from .customer_paper_ledger import (
 )
 from .customer_paper_lifecycle import (
     CustomerPaperCashShortfall,
+    CustomerPaperMarkVerificationError,
     CustomerPaperOrderConflict,
     get_customer_paper_fill_for_bar,
     get_customer_paper_order,
@@ -77,6 +78,11 @@ async def _paper_call(awaitable, action: str):
         return await awaitable
     except CustomerPaperFlowBlocked:
         raise
+    except CustomerPaperMarkVerificationError as exc:
+        _log_paper_failure("customer_paper_mark_verification_failed", action, exc)
+        raise CustomerPaperFlowBlocked(
+            "Current paper correlation-group marks could not be verified"
+        ) from exc
     except CustomerPaperOrderConflict as exc:
         _log_paper_failure("customer_paper_order_conflict", action, exc)
         if "overdraw" in str(exc).lower():
@@ -678,8 +684,11 @@ async def _fill_open_order(
 
         async def load_group_marks_after_preflight():
             try:
+                # The candidate context was fetched before ledger readiness and
+                # can be older than the five-second mark limit by recovery time.
+                # Passing None forces a fresh server quote for every open holding.
                 return await group_mark_price_loader(
-                    customer_id, request, market["market_context"]
+                    customer_id, request, None
                 )
             except CustomerPaperFlowBlocked:
                 raise
