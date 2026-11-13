@@ -320,14 +320,22 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         action = "HOLD" if current_strategy else "ABSTAIN"
 
     blend = []
+    blend_scope = "RANKED_POSITIVE_STRATEGIES"
     if blend_enabled and action != "ABSTAIN":
-        # HOLD is an explicit decision to keep the incumbent. Do not let a rejected
-        # challenger leak back into execution through the independently-ranked blend.
-        if action == "HOLD" and current_strategy in STRATEGIES:
+        # Restrict the blend only when HOLD rejected a different top-ranked
+        # challenger. If the incumbent is already best, preserve its configured
+        # ranked ensemble blend instead of silently collapsing to one strategy.
+        rejected_challenger = (
+            action == "HOLD"
+            and current_strategy in STRATEGIES
+            and best["strategy"] != current_strategy
+        )
+        if rejected_challenger:
             eligible = [
                 row for row in ranked
                 if row["strategy"] == current_strategy and row["score"] > 0
             ]
+            blend_scope = "INCUMBENT_ONLY"
         else:
             eligible = [
                 row for row in ranked if row["score"] > 0
@@ -356,10 +364,7 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         "blend": blend, "selection_history_bars": int(len(history)),
         "switch_inference": switch_inference,
         "switch_hold_reason": switch_hold_reason,
-        "blend_scope": (
-            "INCUMBENT_ONLY" if action == "HOLD" and current_strategy in STRATEGIES
-            else "RANKED_POSITIVE_STRATEGIES"
-        ),
+        "blend_scope": blend_scope,
         "policy": {"switch_min_advantage": float(switch_min_advantage),
                    "switch_test": "PAIRED_NEWEY_WEST_HAC",
                    "switch_significance_alpha": 0.05,
