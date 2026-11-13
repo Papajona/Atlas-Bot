@@ -72,12 +72,16 @@ async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMisma
     """
     try:
         await record_ledger_incident(db, **mismatch.incident_args)
+        # Force the unique-key insert here so an IntegrityError is handled before
+        # the caller's final commit. Otherwise the race would escape this helper.
+        await db.flush()
     except IntegrityError:
         # Two independently verified duplicate replays can race to create the
         # same unique incident key. The caller's confirmed withdrawal state was
         # already committed, so retry the upsert after clearing this transaction.
         await db.rollback()
         await record_ledger_incident(db, **mismatch.incident_args)
+        await db.flush()
 
 
 async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> CustomerLedgerAccount:
