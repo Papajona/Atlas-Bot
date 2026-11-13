@@ -313,6 +313,7 @@ async def release_trading(
         )
     ).scalar_one_or_none()
     if existing:
+        # Trading-release journals are not withdrawal settlements; an exact retry is a no-op.
         return fresh_ledger
     release = min(amount_d, fresh_ledger.trading_reserved)
     if release <= 0:
@@ -482,21 +483,25 @@ async def _validate_withdrawal_action_replay(
             problems.append("settlement journal lines")
 
     if problems:
-        await record_ledger_incident(
-            db,
-            key=f"WITHDRAWAL_REPLAY_MISMATCH:{journal.idempotency_key}",
-            summary="Withdrawal idempotency key replayed with a different or inconsistent operation",
-            detail={
-                "action": action,
-                "customer_id": customer_id,
-                "reference_id": reference_id,
-                "requested_amount": str(amount_d),
-                "idempotency_key": journal.idempotency_key,
-                "problems": problems,
-            },
-            customer_id=customer_id,
-            severity="HIGH",
-        )
+        # The caller's transaction is rolled back when this raises, so the incident is
+        # committed in its own session to survive the rejection.
+        async with SessionLocal() as incident_db:
+            await record_ledger_incident(
+                incident_db,
+                key=f"WITHDRAWAL_REPLAY_MISMATCH:{journal.idempotency_key}",
+                summary="Withdrawal idempotency key replayed with a different or inconsistent operation",
+                detail={
+                    "action": action,
+                    "customer_id": customer_id,
+                    "reference_id": reference_id,
+                    "requested_amount": str(amount_d),
+                    "idempotency_key": journal.idempotency_key,
+                    "problems": problems,
+                },
+                customer_id=customer_id,
+                severity="HIGH",
+            )
+            await incident_db.commit()
         raise ValueError(
             "withdrawal idempotency key already used with a different or inconsistent operation"
         )
@@ -1095,6 +1100,12 @@ async def ledger_invariant_report(
                 "customer_account_mismatches": customer_account_mismatches[:10],
             },
             customer_id=int(customer_id) if customer_id is not None else None,
+        )
+    return report
+
+
+_record_ledger_incident = record_ledger_incident  # backward-compatible alias
+not None else None,
         )
     return report
 
