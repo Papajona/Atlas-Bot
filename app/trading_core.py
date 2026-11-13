@@ -123,9 +123,10 @@ def triple_barrier(
         if has_executable_open else c.copy()
     )
     y = np.full(len(c), np.nan, dtype=float)
+    session_cost_schedule = isinstance(round_trip_cost_bps, pd.Series)
     try:
         hold = int(max_hold)
-        if isinstance(round_trip_cost_bps, pd.Series):
+        if session_cost_schedule:
             if not round_trip_cost_bps.index.equals(close.index):
                 raise ValueError("round-trip session costs must align exactly to close index")
             cost_bps = round_trip_cost_bps.to_numpy(dtype=float)
@@ -154,11 +155,17 @@ def triple_barrier(
             or not np.isfinite(entry_price) or entry_price <= 0
         ):
             continue
-        entry_cost_fraction = float(cost_bps[entry_i]) / 10_000.0
-        upper = entry_price * (1.0 + pt_mult * v[i] + entry_cost_fraction)
-        lower = entry_price * (1.0 - sl_mult * v[i] - entry_cost_fraction)
         end = min(len(c), entry_i + hold)
         for j in range(entry_i, end):
+            # For a session schedule, charge the entry-side rate at entry and the
+            # exit-side rate at this bar. Static profile inputs are already round-trip.
+            exit_cost_bps = (
+                float(cost_bps[entry_i]) + float(cost_bps[j])
+                if session_cost_schedule else float(cost_bps[entry_i])
+            )
+            cost_fraction = exit_cost_bps / 10_000.0
+            upper = entry_price * (1.0 + pt_mult * v[i] + cost_fraction)
+            lower = entry_price * (1.0 - sl_mult * v[i] - cost_fraction)
             # Price gaps are executable at the observed open, not at a stale barrier.
             if has_executable_open and j > entry_i and opens[j] >= upper:
                 y[i] = 1
@@ -169,7 +176,8 @@ def triple_barrier(
             up_hit = np.isfinite(h[j]) and h[j] >= upper
             down_hit = np.isfinite(l[j]) and l[j] <= lower
             if up_hit and down_hit:
-                y[i] = 0
+                # Match the OHLC execution simulator's conservative stop-first rule.
+                y[i] = -1
                 break
             if up_hit:
                 y[i] = 1
