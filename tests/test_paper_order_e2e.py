@@ -66,6 +66,9 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     monkeypatch.setattr(settings, "max_consecutive_losses", 0)
     monkeypatch.setattr(settings, "max_order_latency_ms_p95", 0)
     monkeypatch.setattr(settings, "max_order_error_rate_5m", 0.0)
+    # This regression targets cost-context rejection, not the separate trading-
+    # discipline rule that requires a protective stop for every new position.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
 
     async def run():
         await init_db()
@@ -78,8 +81,13 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         # CI startup or DB contention must not age provenance before execution.
         now = pd.Timestamp.now(tz="UTC")
         current_floor = now.floor("5min")
-        submit_bar = current_floor - pd.Timedelta(minutes=10)
-        process_bar = current_floor - pd.Timedelta(minutes=5)
+        # Freeze the simulator at this UTC boundary so the fixture's final
+        # candle is completed without aging the submission/provenance beyond
+        # the production staleness limit.
+        fixed_now = current_floor.to_pydatetime()
+        monkeypatch.setattr(execution, "utcnow", lambda: fixed_now)
+        submit_bar = current_floor - pd.Timedelta(minutes=15)
+        process_bar = current_floor - pd.Timedelta(minutes=10)
         df0 = pd.DataFrame(
             {"open":[99.0, 99.5, 100.0], "high":[100.0,100.0,101.0],
              "low":[98.0,99.0,99.5], "close":[99.0,99.5,100.0], "volume":[1.0,1.0,1.0]},
@@ -88,7 +96,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         )
         provenance0 = {
             "source":"ccxt_ohlcv", "symbol":symbol, "exchange":"binance", "timeframe":"5m",
-            "fetched_at_utc":now.isoformat(), "row_count":len(df0), "sha256":"a"*64,
+            "fetched_at_utc":current_floor.isoformat(), "row_count":len(df0), "sha256":"a"*64,
             "asset_class":"crypto", "market_type":"spot",
             "volume_unit":"base_asset", "volume_unit_verified":True,
         }
@@ -111,8 +119,9 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
             trade = (await db.execute(select(Trade).where(
                 Trade.symbol == symbol, Trade.mode == "PAPER"
             ))).scalar_one()
+            trade_id = trade.id
             order_state = (await db.execute(select(PaperOrderState).where(
-                PaperOrderState.trade_id == trade.id
+                PaperOrderState.trade_id == trade_id
             ))).scalar_one()
             assert trade.status == "OPEN"
             assert trade.filled_quantity == 0.0
@@ -125,7 +134,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
             index=pd.DatetimeIndex([submit_bar-pd.Timedelta(minutes=10),
                                     submit_bar-pd.Timedelta(minutes=5), submit_bar, process_bar]),
         )
-        provenance1 = dict(provenance0, fetched_at_utc=pd.Timestamp.now(tz="UTC").isoformat(),
+        provenance1 = dict(provenance0, fetched_at_utc=current_floor.isoformat(),
                            row_count=len(df1), sha256="b"*64)
         df1.attrs["data_provenance"] = provenance1
         result = await execution.advance_platform_paper_orders(
@@ -140,9 +149,8 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         assert result["protective_exit_orders_created"] == 0
 
         async with SessionLocal() as db:
-            trade = (await db.execute(select(Trade).where(
-                Trade.symbol == symbol, Trade.mode == "PAPER"
-            ))).scalar_one()
+            trade = await db.get(Trade, trade_id)
+            assert trade is not None
             position = (await db.execute(select(Position).where(
                 Position.symbol == symbol, Position.exchange == "binance",
                 Position.customer_id.is_(None),
@@ -166,6 +174,138 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
     asyncio.run(run())
 
+
+
+
+def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatch):
+    import pandas as pd
+    from sqlalchemy import select
+    from app import execution
+    from app.config import settings
+    from app.db import init_db, SessionLocal, Trade, PaperFillEvent
+
+    symbol = f"PAPER-COST-{uuid.uuid4().hex[:10]}"
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
+    monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
+    monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 24)
+    monkeypatch.setattr(settings, "max_consecutive_losses", 0)
+    monkeypatch.setattr(settings, "max_order_latency_ms_p95", 0)
+    monkeypatch.setattr(settings, "max_order_error_rate_5m", 0.0)
+    # Isolate the test from unrelated open positions left in the shared CI database.
+    monkeypatch.setattr(settings, "max_open_positions", 10_000)
+    # This test exercises invalid cost context, not the independent protective-stop gate.
+    monkeypatch.setattr(settings, "discipline_enabled", False)
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            state = await execution._get_state_locked(db)
+            state.kill_switch = False
+            await db.commit()
+
+        current_floor = pd.Timestamp.now(tz="UTC").floor("5min")
+        fixed_now = current_floor.to_pydatetime()
+        monkeypatch.setattr(execution, "utcnow", lambda: fixed_now)
+        submit_bar = current_floor - pd.Timedelta(minutes=10)
+        process_bar = current_floor - pd.Timedelta(minutes=5)
+
+        df0 = pd.DataFrame(
+            {
+                "open": [99.0, 100.0],
+                "high": [100.0, 101.0],
+                "low": [98.0, 99.5],
+                "close": [99.0, 100.0],
+                "volume": [1.0, 1.0],
+            },
+            index=pd.DatetimeIndex([submit_bar - pd.Timedelta(minutes=5), submit_bar]),
+        )
+        provenance0 = {
+            "source": "ccxt_ohlcv",
+            "symbol": symbol,
+            "exchange": "binance",
+            "timeframe": "5m",
+            "fetched_at_utc": current_floor.isoformat(),
+            "row_count": len(df0),
+            "sha256": "d" * 64,
+            "asset_class": "crypto",
+            "market_type": "spot",
+            "volume_unit": "base_asset",
+            "volume_unit_verified": True,
+        }
+        df0.attrs["data_provenance"] = provenance0
+        context = {
+            "bar_timestamp": submit_bar.isoformat(),
+            "data_provenance": provenance0,
+            "asset": "crypto",
+            "symbol": symbol,
+            "exchange": "binance",
+            "timeframe": "5m",
+        }
+        submitted = await execution.execute_signal(
+            symbol,
+            "buy",
+            0.3,
+            100.0,
+            {"score": 0.9, "_paper_execution_context": context},
+            "binance",
+            "5m",
+            submit_bar.isoformat(),
+            force_paper=True,
+        )
+        assert submitted["status"] == "OPEN"
+        assert submitted["filled_quantity"] == 0.0
+        assert submitted["remaining_quantity"] == pytest.approx(0.3)
+
+        df1 = pd.DataFrame(
+            {
+                "open": [99.0, 100.0, 100.5],
+                "high": [100.0, 101.0, 101.5],
+                "low": [98.0, 99.5, 100.0],
+                "close": [99.0, 100.0, 101.0],
+                "volume": [1.0, 1.0, 1.0],
+            },
+            index=pd.DatetimeIndex([
+                submit_bar - pd.Timedelta(minutes=5),
+                submit_bar,
+                process_bar,
+            ]),
+        )
+        df1.attrs["data_provenance"] = dict(
+            provenance0,
+            row_count=len(df1),
+            sha256="e" * 64,
+        )
+        monkeypatch.setattr(
+            execution,
+            "market_impact_bps",
+            lambda **_kwargs: (_ for _ in ()).throw(ValueError("test impact context invalid")),
+        )
+        rejected = await execution.advance_platform_paper_orders(
+            df1, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
+        )
+        assert rejected["status"] == "PROCESSED"
+        assert rejected["attempts"] >= 1
+        assert rejected["fills"] == 0
+
+        async with SessionLocal() as db:
+            trade = (await db.execute(
+                select(Trade).where(Trade.symbol == symbol, Trade.mode == "PAPER")
+            )).scalar_one()
+            events = (await db.execute(
+                select(PaperFillEvent)
+                .where(PaperFillEvent.trade_id == trade.id)
+                .order_by(PaperFillEvent.id)
+            )).scalars().all()
+            assert trade.filled_quantity == 0.0
+            assert trade.remaining_quantity == pytest.approx(0.3)
+            assert events[-1].outcome == "INVALID_EXECUTION_COST_CONTEXT"
+            assert events[-1].reason == "test impact context invalid"
+            assert events[-1].filled_quantity == 0.0
+            assert events[-1].fill_price == 0.0
+
+    asyncio.run(run())
 
 def test_platform_paper_submission_rejects_fx_and_unverified_derivatives():
     import pandas as pd

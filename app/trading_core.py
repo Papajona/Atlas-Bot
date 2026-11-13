@@ -10,6 +10,7 @@ from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import balanced_accuracy_score, f1_score, log_loss
 from lightgbm import LGBMClassifier
 from .config import settings
+from .execution_costs import net_return_after_costs
 from .research_validation import (
     deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits,
     newey_west_mean_inference, oos_benchmark_comparison,
@@ -186,7 +187,6 @@ def triple_barrier(
                 float(cost_bps[entry_i]) + float(cost_bps[j])
                 if session_cost_schedule else float(cost_bps[entry_i])
             )
-            cost_fraction = exit_cost_bps / 10_000.0
             if has_execution_atr:
                 # Match simulate_execution_aware_strategy exactly: its stop/target
                 # prices are fixed from next-open and the prior completed ATR.
@@ -200,12 +200,12 @@ def triple_barrier(
             # Price gaps are executable at the observed open, not at a stale barrier.
             if has_executable_open and j > entry_i and opens[j] >= upper:
                 gross_return = opens[j] / entry_price - 1.0
-                long_net_return = gross_return - cost_fraction
+                long_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
                 y[i] = 1 if long_net_return > directional_dead_zone else 0
                 break
             if has_executable_open and j > entry_i and opens[j] <= lower:
                 gross_return = (entry_price - opens[j]) / entry_price
-                short_net_return = gross_return - cost_fraction
+                short_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
                 y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
             up_hit = np.isfinite(h[j]) and h[j] >= upper
@@ -217,13 +217,13 @@ def triple_barrier(
                 if has_executable_open and j > entry_i and opens[j] < lower:
                     fill = opens[j]
                 gross_return = (entry_price - fill) / entry_price
-                short_net_return = gross_return - cost_fraction
+                short_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
                 y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
             if up_hit:
                 fill = opens[j] if has_executable_open and j > entry_i and opens[j] > upper else upper
                 gross_return = fill / entry_price - 1.0
-                long_net_return = gross_return - cost_fraction
+                long_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
                 y[i] = 1 if long_net_return > directional_dead_zone else 0
                 break
             if down_hit:
@@ -231,11 +231,15 @@ def triple_barrier(
                 if has_executable_open and j > entry_i and opens[j] < lower:
                     fill = opens[j]
                 gross_return = (entry_price - fill) / entry_price
-                short_net_return = gross_return - cost_fraction
+                short_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
                 y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
         else:
             terminal_return = c[end - 1] / entry_price - 1.0
+            # Missing terminal observations remain unlabeled. Do not let one
+            # incomplete future window abort the remaining label batch.
+            if not np.isfinite(terminal_return):
+                continue
             timeout_cost_bps = (
                 float(cost_bps[entry_i]) + float(cost_bps[end - 1])
                 if session_cost_schedule else float(cost_bps[entry_i])
@@ -243,9 +247,12 @@ def triple_barrier(
             # Evaluate each direction after its own entry+exit costs. A flat or
             # adverse-to-both trade cannot be mislabeled as a short just because
             # long net return is negative.
-            cost_fraction = timeout_cost_bps / 10_000.0
-            long_net_return = terminal_return - cost_fraction
-            short_net_return = -terminal_return - cost_fraction
+            long_net_return = net_return_after_costs(
+                terminal_return, turnover=1.0, execution_cost_bps=timeout_cost_bps
+            )
+            short_net_return = net_return_after_costs(
+                -terminal_return, turnover=1.0, execution_cost_bps=timeout_cost_bps
+            )
             if np.isfinite(long_net_return) and np.isfinite(short_net_return):
                 y[i] = (
                     1 if long_net_return > directional_dead_zone

@@ -20,6 +20,7 @@ import pandas as pd
 from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns, _annualization_factor, target_positions
 from .research_validation import purged_walk_forward_splits
 from .strategy_selection import paired_return_lead
+from .execution_costs import EXECUTION_COST_MODEL_VERSION, net_returns_after_costs
 
 STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
@@ -58,7 +59,13 @@ def _strategy_returns(df: pd.DataFrame, cfg: StrategyConfig, strategy: str,
     pos = target_positions(s[strategy], s["realized_vol"], cfg).shift(1).fillna(0.0)
     ret = next_open_returns(df) - 1.0
     turnover = pos.diff().abs().fillna(pos.abs())
-    return pos * ret - turnover * float(costs_bps) / 10000.0
+    net_values = net_returns_after_costs(
+        pos.to_numpy(dtype=float) * ret.to_numpy(dtype=float),
+        turnover=turnover.to_numpy(dtype=float),
+        execution_cost_bps=float(costs_bps),
+        exposure=pos.to_numpy(dtype=float),
+    )
+    return pd.Series(net_values, index=pos.index, dtype=float, name="net_return")
 
 
 def _metrics(
@@ -367,6 +374,7 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         "blend_scope": blend_scope,
         "policy": {"switch_min_advantage": float(switch_min_advantage),
                    "switch_test": "PAIRED_NEWEY_WEST_HAC",
+                   "execution_cost_model_version": EXECUTION_COST_MODEL_VERSION,
                    "switch_significance_alpha": 0.05,
                    "switch_min_observations": 60,
                    "switch_min_effective_observations": 30,
