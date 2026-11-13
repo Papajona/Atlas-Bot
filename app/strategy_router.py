@@ -672,6 +672,11 @@ def policy_walk_forward_backtest(
                 blend_enabled=blend_enabled, blend_top_n=blend_top_n,
                 execution_cost_context=history_context,
             )
+            if (
+                decision.get("status") == "OK"
+                and decision.get("execution_cost_model_complete") is not True
+            ):
+                fold_cost_complete = False
             if decision.get("status") != "OK" or decision.get("strategy") in {None, "none"}:
                 target_position = 0.0
             else:
