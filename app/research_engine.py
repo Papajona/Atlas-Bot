@@ -607,7 +607,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
         benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
         benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
-        session_costs_bps=session_costs_bps,
+        session_costs_bps=(
+            None if execution_cost_context is not None else session_costs_bps
+        ),
         transaction_cost_bps_per_bar=(
             ensemble_cost_bps
             if execution_cost_context is not None or session_costs_bps is not None
@@ -656,7 +658,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
             benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
             benchmark_random_trials=25,
-            session_costs_bps=session_costs_bps,
+            session_costs_bps=(
+                None if execution_cost_context is not None else session_costs_bps
+            ),
             transaction_cost_bps_per_bar=(
                 component_cost_bps
                 if execution_cost_context is not None or session_costs_bps is not None
@@ -726,7 +730,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
                 benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
                 benchmark_random_trials=25,
-                session_costs_bps=session_costs_bps,
+                session_costs_bps=(
+                    None if execution_cost_context is not None else session_costs_bps
+                ),
                 transaction_cost_bps_per_bar=(
                     variant_cost_bps
                     if execution_cost_context is not None or session_costs_bps is not None
@@ -764,6 +770,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "oos_trades": variant_oos.get("trades"),
             "oos_return_sample": variant_oos.get("oos_return_sample", []),
             "full_sample_statistics": variant_oos.get("full_sample_statistics", {}),
+            "execution_cost_model_complete": (
+                variant_oos.get("execution_cost_model_complete") is True
+            ),
+            "execution_cost_model_fingerprint": variant_oos.get("execution_cost_model_fingerprint"),
+            "per_bar_execution_context_sha256": variant_oos.get("per_bar_execution_context_sha256"),
         })
     robustness={
         "monte_carlo": monte_carlo_bootstrap(
@@ -1160,6 +1171,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             for component in components
         )
         and all(row.get("execution_cost_model_complete") is True for row in results)
+        and all(row.get("execution_cost_model_complete") is True for row in variants)
     )
 
     for component in components:
