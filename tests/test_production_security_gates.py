@@ -456,9 +456,12 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
 
 
 
-def test_staging_deployment_cancels_superseded_runs_and_rechecks_sha_before_deploy():
+def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_deploy():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
-    assert "cancel-in-progress: true" in deploy
+    # Do not cancel a parent run while its dispatched identity/acceptance children
+    # are still working. The parent polls main and exits stale before any mutation.
+    assert "cancel-in-progress: false" in deploy
+    assert "Keep the parent run alive" in deploy
     assert "gate_wait_seconds=7200" in deploy
 
     deploy_step = deploy.split(
