@@ -11,7 +11,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_EVEN, localcontext
 from typing import Any
@@ -375,7 +375,25 @@ async def submit_customer_paper_order(
         "currency": normalized_currency, "metadata": safe_metadata,
     }
     digest = _canonical_sha(payload)
+    # Run the costly isolated-ledger preflight before obtaining a fresh risk mark.
+    # A quote fetched by the caller before this preflight can age past the five-second
+    # ledger limit before the transaction reaches the correlation-group check.
     await _assert_customer_paper_ready()
+    if group_mark_prices_loader is not None:
+        if group_mark_prices is not None:
+            raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
+        try:
+            group_mark_prices = await group_mark_prices_loader()
+        except CustomerPaperLedgerBlocked:
+            raise
+        except Exception as exc:
+            raise CustomerPaperLedgerBlocked(
+                "current correlation-group marks could not be verified"
+            ) from exc
+        if not isinstance(group_mark_prices, Mapping):
+            raise CustomerPaperLedgerBlocked(
+                "current correlation-group mark loader returned invalid data"
+            )
     engine = _paper_engine()
     try:
         async with engine.begin() as conn:
@@ -886,6 +904,9 @@ async def record_customer_paper_fill(
     fee_amount: str | int | Decimal = "0",
     enforce_market_bar_budget: bool = False,
     group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
+    group_mark_prices_loader: Callable[
+        [], Awaitable[Mapping[tuple[str, str, str], object]]
+    ] | None = None,
 ) -> dict[str, Any]:
     """Atomically append one simulated fill, fee, position event and balanced journal.
 
