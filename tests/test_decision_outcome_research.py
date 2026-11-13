@@ -172,3 +172,16 @@ def test_aggregation_does_not_mix_label_versions_or_cost_profiles():
         ("decision-outcome-v1", "configured_asset_profile", 3.5, 0.25),
         ("decision-outcome-v2", "venue_calibration", 7.0, 1.0),
     }
+
+
+
+def test_holdout_metrics_are_redacted_by_default():
+    report = evaluate_decision_outcome_labels(
+        [_label(i) for i in range(20)],
+        holdout_fraction=0.30,
+        min_group_samples=3,
+        min_unique_timestamps=10,
+    )
+    assert report["holdout_metrics_withheld"] is True
+    assert report["out_of_sample"] == []
+    assert report["research_only"] is True
