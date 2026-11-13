@@ -440,7 +440,7 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
 @pytest.mark.parametrize(
     "reserved_debit,deficit_debit,metadata_reserved,metadata_shortfall",
     [
-        (Decimal("20"), Decimal("10"), Decimal("20"), Decimal("10")),
+        (Decimal("20"), Decimal("10"), Decimal("30"), Decimal("0")),
         (Decimal("-5"), Decimal("35"), Decimal("-5"), Decimal("35")),
     ],
 )
