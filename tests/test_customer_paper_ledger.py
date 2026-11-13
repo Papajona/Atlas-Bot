@@ -49,20 +49,26 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
     return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
-def test_customer_paper_fill_fetches_group_marks_after_customer_budget_lock():
+def test_customer_paper_fill_fetches_marks_under_session_lock_without_open_transaction():
     from pathlib import Path
 
     source = Path("app/customer_paper_lifecycle.py").read_text(encoding="utf-8")
     function_start = source.index("async def record_customer_paper_fill(")
-    function = source[function_start:]
+    function_end = source.index("\nasync def ", function_start + 1)
+    function = source[function_start:function_end]
 
     preflight = function.index("await _assert_customer_paper_ready()")
-    engine = function.index("engine = _paper_engine()", preflight)
-    lock = function.index('"paper-risk-budget:{customer_id}"', engine)
-    fetch = function.index("group_mark_prices = await group_mark_prices_loader()", lock)
-    reread = function.index("latest_positions =", fetch)
+    first_read_transaction = function.index("async with conn.begin():", preflight)
+    session_lock = function.index("pg_advisory_lock(hashtextextended(:lock_key, 0))", first_read_transaction)
+    commit_lock_transaction = function.index("await conn.commit()", session_lock)
+    fetch_marks = function.index("group_mark_prices = await group_mark_prices_loader()", commit_lock_transaction)
+    write_transaction = function.index("async with conn.begin():", fetch_marks)
+    position_reread = function.index("latest_positions =", write_transaction)
 
-    assert preflight < engine < lock < fetch < reread
+    assert preflight < first_read_transaction < session_lock
+    assert session_lock < commit_lock_transaction < fetch_marks < write_transaction < position_reread
+    assert "async with engine.connect() as conn:" in function
+    assert "await conn.invalidate()" in function
 
 
 def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
