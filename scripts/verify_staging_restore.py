@@ -32,7 +32,7 @@ SELECT jsonb_build_object(
     SELECT coalesce(jsonb_agg(required.table_name ORDER BY required.table_name), '[]'::jsonb)
     FROM unnest(ARRAY[
       'paper_order_states', 'paper_bar_states', 'paper_fill_events',
-      'research_trial_archive'
+      'research_trial_archive', 'research_trial_ledger_head', 'research_holdout_registry'
     ]::text[]) AS required(table_name)
     WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
   ),
@@ -235,6 +235,20 @@ def audit(args: argparse.Namespace) -> dict:
     if int(observed.get("public_table_count", 0)) < 1:
         failures.append("public schema has no tables")
     failures.extend(required_table_failures(observed.get("required_tables_missing")))
+    try:
+        head_rows = int(observed.get("research_trial_ledger_head_rows", -1))
+    except (TypeError, ValueError):
+        head_rows = -1
+    if head_rows != 1:
+        failures.append(f"research trial ledger head must contain exactly one singleton row, observed {head_rows}")
+    if not truthy(observed.get("research_trial_ledger_head_valid")):
+        failures.append("research trial ledger head does not match its last chained archive entry")
+    try:
+        invalid_holdout_rows = int(observed.get("research_holdout_registry_invalid_rows", -1))
+    except (TypeError, ValueError):
+        invalid_holdout_rows = -1
+    if invalid_holdout_rows != 0:
+        failures.append(f"research holdout registry contains invalid retained consumption rows: {invalid_holdout_rows}")
     for key in ("tables_without_rls", "negative_customer_ledger_buckets", "unbalanced_or_empty_journals",
                 "invalid_journal_lines", "orphan_journal_lines", "duplicate_journal_idempotency_keys",
                 "negative_ledger_entries"):
