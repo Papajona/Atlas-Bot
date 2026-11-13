@@ -43,9 +43,16 @@ def _configure_sqlite_wal(async_engine, database_url: str) -> bool:
     if url.get_backend_name() != "sqlite":
         return False
     database = url.database
+    uri_enabled = str(url.query.get("uri", "")).casefold() in {"true", "1", "yes"}
+    shared_memory_uri = bool(
+        uri_enabled
+        and isinstance(database, str)
+        and database.casefold().startswith("file::memory:")
+    )
     if (
         database in (None, "", ":memory:")
         or str(url.query.get("mode", "")).casefold() == "memory"
+        or shared_memory_uri
     ):
         return False
 
