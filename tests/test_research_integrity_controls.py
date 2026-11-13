@@ -6,8 +6,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# SQLAlchemy resolves postponed Mapped annotations from module globals.
-from sqlalchemy.orm import Mapped
 
 from app.decision_outcome_research import evaluate_decision_outcome_labels_once
 from app.execution_aware_research import (
@@ -584,7 +582,7 @@ def test_sqlite_shared_memory_uri_skips_wal_and_connects():
 def test_sqlite_holdout_snapshot_allows_concurrent_writer_and_keeps_original_rows(tmp_path, monkeypatch):
     import asyncio
     import json
-    from sqlalchemy import Column, Integer, MetaData, String, Table, Text, func, select
+    from sqlalchemy import Column, Integer, String, Table, Text, func, select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
     from sqlalchemy.orm import registry
     from app import db as db_module
