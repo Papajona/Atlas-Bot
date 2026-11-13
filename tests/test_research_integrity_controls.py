@@ -488,7 +488,13 @@ def test_holdout_route_checks_consumption_before_loading_history():
 
 def test_session_cost_series_preserves_naive_utc_index_for_oos_alignment():
     index = pd.date_range("2026-01-05T08:00:00", periods=3, freq="h")
-    series = session_cost_series(index, _schedule())
+    schedule = {
+        "LONDON": 10.0,
+        "NEW_YORK": 20.0,
+        "NEW_YORK_LATE": 25.0,
+        "OTHER": 30.0,
+    }
+    series = session_cost_series(index, schedule)
     assert series.index.equals(index)
     positions = pd.Series([1.0, 1.0, 0.0], index=index)
     returns = pd.Series([0.0, 0.0, 0.0], index=index)
