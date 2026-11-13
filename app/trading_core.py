@@ -591,9 +591,8 @@ def ai_walk_forward_backtest(
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
         if session_costs_bps is not None:
-            from .market_sessions import session_cost_series
             oos_session_cost_blocks.append(
-                session_cost_series(fold_frame.index, session_costs_bps).to_numpy(dtype=float)
+                execution["effective_transaction_cost_bps"].to_numpy(dtype=float)
             )
         # Preserve raw OHLC and the requested entry stream before stops or risk halts
         # condition realized positions and returns. Benchmark controls resimulate both.
