@@ -417,7 +417,7 @@ def test_strategy_router_return_stream_uses_per_event_research_costs(monkeypatch
         turnover=0.05,
         reference_price=100.0,
         side="buy",
-        namespace="strategy-router:momentum",
+        namespace="strategy-router:momentum:OPEN",
     )
 
     assert reason is None
