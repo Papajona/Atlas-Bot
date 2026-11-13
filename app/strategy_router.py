@@ -716,21 +716,58 @@ def policy_walk_forward_backtest(
             turnover = abs(target_position - previous_position)
             cost_rate = float(costs_bps)
             if turnover > 0.0:
-                side = "buy" if target_position - previous_position > 0.0 else "sell"
-                calibrated_cost, reason = execution_cost_for_event(
-                    execution_cost_context,
-                    bar_position=entry_i,
-                    turnover=turnover,
-                    reference_price=entry_open,
-                    side=side,
-                    namespace=f"policy-router:fold:{len(fold_rows)}:event:{entry_i}",
+                reversal = (
+                    previous_position != 0.0
+                    and target_position != 0.0
+                    and math.copysign(1.0, previous_position) != math.copysign(1.0, target_position)
                 )
-                if calibrated_cost is None:
-                    fold_cost_complete = False
-                    key = reason or "EXECUTION_EVENT_UNAVAILABLE"
-                    failure_reasons[key] = failure_reasons.get(key, 0) + 1
+                event_namespace = f"policy-router:fold:{len(fold_rows)}:event:{entry_i}"
+                if reversal:
+                    close_quantity = abs(previous_position)
+                    open_quantity = abs(target_position)
+                    close_side = "sell" if previous_position > 0.0 else "buy"
+                    open_side = "buy" if target_position > 0.0 else "sell"
+                    close_cost, close_reason = execution_cost_for_event(
+                        execution_cost_context,
+                        bar_position=entry_i,
+                        turnover=close_quantity,
+                        reference_price=entry_open,
+                        side=close_side,
+                        namespace=f"{event_namespace}:CLOSE",
+                    )
+                    open_cost, open_reason = execution_cost_for_event(
+                        execution_cost_context,
+                        bar_position=entry_i,
+                        turnover=open_quantity,
+                        reference_price=entry_open,
+                        side=open_side,
+                        namespace=f"{event_namespace}:OPEN",
+                    )
+                    if close_cost is None or open_cost is None:
+                        fold_cost_complete = False
+                        for reason in (close_reason, open_reason):
+                            if reason:
+                                failure_reasons[reason] = failure_reasons.get(reason, 0) + 1
+                    else:
+                        cost_rate = (
+                            close_quantity * close_cost + open_quantity * open_cost
+                        ) / turnover
                 else:
-                    cost_rate = calibrated_cost
+                    side = "buy" if target_position - previous_position > 0.0 else "sell"
+                    calibrated_cost, reason = execution_cost_for_event(
+                        execution_cost_context,
+                        bar_position=entry_i,
+                        turnover=turnover,
+                        reference_price=entry_open,
+                        side=side,
+                        namespace=event_namespace,
+                    )
+                    if calibrated_cost is None:
+                        fold_cost_complete = False
+                        key = reason or "EXECUTION_EVENT_UNAVAILABLE"
+                        failure_reasons[key] = failure_reasons.get(key, 0) + 1
+                    else:
+                        cost_rate = calibrated_cost
             net = target_position * next_return - turnover * cost_rate / 10_000.0
             net_rows.append(net)
             net_index.append(df.index[exit_i])
