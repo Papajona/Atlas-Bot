@@ -125,13 +125,21 @@ def test_triple_barrier_uses_entry_session_costs_for_each_label():
     low = pd.Series([119.0, 99.0, 100.0, 101.0], index=idx)
     opens = pd.Series([120.0, 100.0, 102.0, 103.0], index=idx)
     round_trip = pd.Series([0.0, 200.0, 0.0, 0.0], index=idx)
+    zero_costs = pd.Series([0.0, 0.0, 0.0, 0.0], index=idx)
 
     labels = triple_barrier(
         close, vol, high, low, pt=1.0, sl=1.0, max_hold=2,
         entry_open=opens, round_trip_cost_bps=round_trip,
     )
+    no_cost_labels = triple_barrier(
+        close, vol, high, low, pt=1.0, sl=1.0, max_hold=2,
+        entry_open=opens, round_trip_cost_bps=zero_costs,
+    )
     # Both barriers are touched on the entry bar; the executor resolves stop-first.
-    assert labels.iloc[0] == -1.0
+    # The 200 bps entry and exit side-rates erase the 1% short return, so it is
+    # neutral after costs. Without fees the same stop-first bar remains short.
+    assert labels.iloc[0] == 0.0
+    assert no_cost_labels.iloc[0] == -1.0
 
 
 def test_verified_session_schedule_is_applied_per_bar_in_the_execution_simulator():
