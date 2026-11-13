@@ -17,7 +17,10 @@ def _frame(n=700):
     }, index=index)
 
 
-def _select_with_paired_streams(monkeypatch, *, regime_bars=300, challenger_edge=0.00002, seed=11):
+def _select_with_paired_streams(
+    monkeypatch, *, regime_bars=300, challenger_edge=0.00002, seed=11,
+    blend_enabled=False, cooldown_active=False, switch_min_advantage=0.0,
+):
     df = _frame()
     history_index = df.index[:-1]
     regime_values = np.array(["TREND_UP"] * (len(df) - regime_bars) + ["RANGE"] * regime_bars)
@@ -46,17 +49,25 @@ def _select_with_paired_streams(monkeypatch, *, regime_bars=300, challenger_edge
     monkeypatch.setattr(
         router, "strategy_signals",
         lambda frame, cfg, asset="crypto": pd.DataFrame(
-            {name: np.zeros(len(frame)) for name in router.STRATEGIES}, index=frame.index
+            {
+                "trend": np.ones(len(frame)),
+                "momentum": np.full(len(frame), 0.25),
+                "breakout": np.zeros(len(frame)),
+                "mean_reversion": np.zeros(len(frame)),
+                "ensemble": np.zeros(len(frame)),
+            },
+            index=frame.index,
         ),
     )
     return router.select_strategy(
         df,
         StrategyConfig(),
         current_strategy="momentum",
+        cooldown_active=cooldown_active,
         min_regime_bars=3,
         min_trades=0,
-        switch_min_advantage=0.0,
-        blend_enabled=False,
+        switch_min_advantage=switch_min_advantage,
+        blend_enabled=blend_enabled,
         online_weight=0.0,
     )
 
@@ -83,3 +94,61 @@ def test_router_holds_when_the_current_regime_slice_is_underpowered(monkeypatch)
     assert result["strategy"] == "momentum"
     assert result["action"] == "HOLD"
     assert result["switch_inference"]["reason"] == "insufficient_paired_observations"
+
+
+
+def test_failed_switch_inference_cannot_leak_rejected_challenger_into_blend(monkeypatch):
+    result = _select_with_paired_streams(
+        monkeypatch,
+        challenger_edge=0.00002,
+        blend_enabled=True,
+    )
+
+    assert result["status"] == "OK"
+    assert result["strategy"] == "momentum"
+    assert result["action"] == "HOLD"
+    assert result["switch_inference"]["significant_lead"] is False
+    assert result["blend_scope"] == "INCUMBENT_ONLY"
+    assert result["blend"] == [
+        {"strategy": "momentum", "weight": 1.0, "score": 0.25}
+    ]
+    # The rejected trend challenger has a stronger raw score and signal; it must
+    # not contribute to the actual HOLD composite.
+    assert result["signal"] == 0.25
+
+
+def test_cooldown_skips_expensive_paired_return_calculation(monkeypatch):
+    def unexpected_calculation(*args, **kwargs):
+        raise AssertionError("paired stream calculations must be skipped during cooldown")
+
+    monkeypatch.setattr(router, "_strategy_returns", unexpected_calculation)
+    result = _select_with_paired_streams(
+        monkeypatch,
+        challenger_edge=0.0009,
+        cooldown_active=True,
+    )
+
+    assert result["status"] == "OK"
+    assert result["strategy"] == "momentum"
+    assert result["action"] == "HOLD"
+    assert result["switch_inference"]["status"] == "SKIPPED"
+    assert result["switch_inference"]["reason"] == "cooldown_active"
+    assert result["switch_hold_reason"] == "cooldown_active"
+
+
+def test_small_score_advantage_skips_paired_return_calculation(monkeypatch):
+    def unexpected_calculation(*args, **kwargs):
+        raise AssertionError("paired stream calculations must be skipped below switch threshold")
+
+    monkeypatch.setattr(router, "_strategy_returns", unexpected_calculation)
+    result = _select_with_paired_streams(
+        monkeypatch,
+        challenger_edge=0.0009,
+        switch_min_advantage=5.0,
+    )
+
+    assert result["status"] == "OK"
+    assert result["strategy"] == "momentum"
+    assert result["action"] == "HOLD"
+    assert result["switch_inference"]["status"] == "SKIPPED"
+    assert result["switch_inference"]["reason"] == "score_advantage_below_minimum"
