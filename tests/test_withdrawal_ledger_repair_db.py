@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 from cryptography.fernet import Fernet
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
@@ -719,23 +719,27 @@ def test_sqlite_bucket_balance_reconciliation_uses_exact_decimal_accumulation():
                 db.add_all(lines)
                 await db.flush()
 
-                naive_sqlite_sum = (
+                # SQLite releases differ in whether SUM() uses compensated
+                # accumulation. Model ordinary binary-float accumulation over the
+                # exact rows returned by SQLite instead of asserting engine internals.
+                journal_amounts = (
                     await db.execute(
                         select(
-                            func.coalesce(
-                                func.sum(
-                                    LedgerJournalLine.credit - LedgerJournalLine.debit
-                                ),
-                                0,
-                            )
-                        ).where(
+                            LedgerJournalLine.debit,
+                            LedgerJournalLine.credit,
+                        )
+                        .where(
                             LedgerJournalLine.customer_id == customer_id,
                             LedgerJournalLine.currency == "USDT",
                             LedgerJournalLine.account_code == account_code,
                         )
+                        .order_by(LedgerJournalLine.line_no)
                     )
-                ).scalar_one()
-                assert customer_funds._q(naive_sqlite_sum) == Decimal("0.000000")
+                ).all()
+                naive_float_sum = 0.0
+                for debit, credit in journal_amounts:
+                    naive_float_sum += float(credit) - float(debit)
+                assert customer_funds._q(naive_float_sum) == Decimal("0.000000")
 
                 ledger = await customer_funds.verify_customer_ledger_balances_match_journals(
                     db, customer_id, "USDT"
