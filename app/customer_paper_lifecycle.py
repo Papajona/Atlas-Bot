@@ -922,7 +922,7 @@ async def record_customer_paper_fill(
     engine = _paper_engine()
     try:
         async with engine.connect() as conn:
-            risk_budget_lock_acquired = False
+            risk_lock_acquisition_attempted = False
             risk_budget_lock_keys: list[str] = []
             try:
                 # Read the immutable order side, then finish the read transaction
@@ -946,12 +946,17 @@ async def record_customer_paper_fill(
                     # preflight phase: old workers acquire order/bar locks before their
                     # group lock, so taking group locks here would invert lock order.
                     risk_lock_key = f"paper-risk-budget:{customer_id}"
-                    risk_budget_lock_keys.append(risk_lock_key)
+                    # Mark the attempt before awaiting PostgreSQL. If the
+                    # response is lost after the server grants the session lock,
+                    # the connection must be invalidated rather than returned pooled.
+                    risk_lock_acquisition_attempted = True
                     await conn.execute(
                         text("SELECT pg_advisory_lock(hashtextextended(:lock_key, 0))"),
                         {"lock_key": risk_lock_key},
                     )
-                    risk_budget_lock_acquired = True
+                    # Only confirmed acquisitions are eligible for unlock. A lock
+                    # wait failure must not be mislabeled as a release failure.
+                    risk_budget_lock_keys.append(risk_lock_key)
                     # Session-level locks survive COMMIT. End the implicit transaction
                     # before any provider/network call.
                     await conn.commit()
@@ -1437,6 +1442,18 @@ async def record_customer_paper_fill(
                                 "customer_paper_risk_lock_connection_invalidation_failed customer_id=%s",
                                 customer_id,
                             )
+                elif risk_lock_acquisition_attempted:
+                    # Acquisition did not return a confirmed lock result. It may
+                    # nevertheless have succeeded server-side before a connection
+                    # failure, so drop the physical connection without attempting
+                    # an unlock or emitting a false release-failure event.
+                    try:
+                        await conn.invalidate()
+                    except Exception:
+                        logger.exception(
+                            "customer_paper_risk_lock_connection_invalidation_failed customer_id=%s",
+                            customer_id,
+                        )
     finally:
         await engine.dispose()
 
