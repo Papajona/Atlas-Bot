@@ -295,9 +295,9 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
             row_count=len(df1),
             sha256="e" * 64,
         )
-        # Exercise the real shared kernel: infinity survives the caller's
-        # non-negative clamp and must be rejected by its finite-value validator.
-        monkeypatch.setattr(settings, "paper_market_impact_coefficient", float("inf"))
+        # NaN must reach the shared kernel unchanged. Clamping it with
+        # max(0.0, value) would silently convert invalid cost context to zero.
+        monkeypatch.setattr(settings, "paper_market_impact_coefficient", float("nan"))
         rejected = await execution.advance_platform_paper_orders(
             df1, exchange="binance", symbol=symbol, timeframe="5m", asset="crypto"
         )
