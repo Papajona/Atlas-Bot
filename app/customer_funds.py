@@ -305,9 +305,18 @@ async def release_trading(
     ).with_for_update())).scalar_one()
     # Re-check idempotency after acquiring the authoritative ledger row lock.
     # A concurrent caller may have committed the journal while this transaction waited.
-    if (await db.execute(select(LedgerJournal).where(
-        LedgerJournal.idempotency_key == idem
-    ).with_for_update())).scalar_one_or_none():
+    existing = (
+        await db.execute(
+            select(LedgerJournal)
+            .where(LedgerJournal.idempotency_key == idem)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _validate_withdrawal_action_replay(
+            db, existing, customer_id=customer_id, amount_d=amount_d,
+            reference_id=reference_id, action="settle",
+        )
         return fresh_ledger
     release = min(amount_d, fresh_ledger.trading_reserved)
     if release <= 0:
@@ -358,6 +367,145 @@ async def reserve_withdrawal(db, customer_id: int, amount: float, *, reference_i
                        reference_id=reference_id, idempotency_key=idem))
     return fresh_ledger
 
+async def _validate_withdrawal_action_replay(
+    db,
+    journal: LedgerJournal,
+    *,
+    customer_id: int,
+    amount_d: Decimal,
+    reference_id: str,
+    action: str,
+) -> None:
+    """Reject a reused withdrawal idempotency key whose original operation differs.
+
+    Journal uniqueness prevents duplicate postings, but a duplicate key alone is
+    not proof that the retry describes the same customer, withdrawal or amount.
+    """
+    expected_entry_type = (
+        "WITHDRAWAL_RELEASE" if action == "release" else "WITHDRAWAL_SETTLEMENT"
+    )
+    problems = []
+    if (
+        journal.entry_type != expected_entry_type
+        or str(journal.currency or "").upper() != USDT
+        or journal.reference_type != "WITHDRAWAL"
+        or journal.reference_id != reference_id
+    ):
+        problems.append("journal identity")
+
+    entry = (
+        await db.execute(
+            select(LedgerEntry)
+            .where(LedgerEntry.idempotency_key == journal.idempotency_key)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if entry is None:
+        problems.append("missing ledger entry")
+        metadata = {}
+    else:
+        if (
+            entry.customer_id != customer_id
+            or str(entry.currency or "").upper() != USDT
+            or entry.entry_type != expected_entry_type
+            or entry.reference_type != "WITHDRAWAL"
+            or entry.reference_id != reference_id
+        ):
+            problems.append("ledger entry identity")
+        try:
+            metadata = json.loads(entry.metadata_json or "{}")
+            if not isinstance(metadata, dict):
+                metadata = {}
+        except (TypeError, ValueError):
+            metadata = {}
+            problems.append("invalid replay metadata")
+        # Older journals did not persist the caller's requested amount separately.
+        # Their recorded amount is used conservatively; a mismatch fails closed.
+        recorded_request = metadata.get("requested_amount", entry.amount)
+        try:
+            if _q(recorded_request) != amount_d:
+                problems.append("requested amount")
+        except (TypeError, ValueError, ArithmeticError):
+            problems.append("invalid recorded amount")
+
+    lines = (
+        await db.execute(
+            select(LedgerJournalLine).where(
+                LedgerJournalLine.journal_id == journal.id
+            )
+        )
+    ).scalars().all()
+    if action == "release":
+        reserved_debit = sum(
+            (
+                D(str(line.debit))
+                for line in lines
+                if line.account_code == _customer_account(customer_id, "WITHDRAWAL_RESERVED")
+            ),
+            D("0"),
+        )
+        available_credit = sum(
+            (
+                D(str(line.credit))
+                for line in lines
+                if line.account_code == _customer_account(customer_id, "AVAILABLE")
+            ),
+            D("0"),
+        )
+        if (
+            entry is None
+            or reserved_debit != D(str(entry.amount))
+            or available_credit != D(str(entry.amount))
+            or reserved_debit <= 0
+        ):
+            problems.append("release journal lines")
+    else:
+        custody_credit = sum(
+            (
+                D(str(line.credit))
+                for line in lines
+                if line.account_code == "ASSET:TRON:WITHDRAWAL"
+            ),
+            D("0"),
+        )
+        customer_line_present = any(
+            line.customer_id == customer_id
+            and line.account_code
+            in {
+                _customer_account(customer_id, "WITHDRAWAL_RESERVED"),
+                DEFICIT_ACCOUNT,
+            }
+            for line in lines
+        )
+        if (
+            entry is None
+            or custody_credit != amount_d
+            or D(str(entry.amount)) != amount_d
+            or not customer_line_present
+        ):
+            problems.append("settlement journal lines")
+
+    if problems:
+        await record_ledger_incident(
+            db,
+            key=f"WITHDRAWAL_REPLAY_MISMATCH:{journal.idempotency_key}",
+            summary="Withdrawal idempotency key replayed with a different or inconsistent operation",
+            detail={
+                "action": action,
+                "customer_id": customer_id,
+                "reference_id": reference_id,
+                "requested_amount": str(amount_d),
+                "idempotency_key": journal.idempotency_key,
+                "problems": problems,
+            },
+            customer_id=customer_id,
+            severity="HIGH",
+        )
+        raise ValueError(
+            "withdrawal idempotency key already used with a different or inconsistent operation"
+        )
+
+
 async def release_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
     amount_d = _q(amount)
     if amount_d <= 0:
@@ -368,7 +516,18 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
         CustomerLedgerAccount.customer_id == customer_id,
         CustomerLedgerAccount.currency == USDT,
     ).with_for_update())).scalar_one()
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem).with_for_update())).scalar_one_or_none():
+    existing = (
+        await db.execute(
+            select(LedgerJournal)
+            .where(LedgerJournal.idempotency_key == idem)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _validate_withdrawal_action_replay(
+            db, existing, customer_id=customer_id, amount_d=amount_d,
+            reference_id=reference_id, action="release",
+        )
         return fresh_ledger
     release = min(amount_d, D(str(fresh_ledger.withdrawal_reserved)))
     if release <= 0:
@@ -381,9 +540,15 @@ async def release_withdrawal(db, customer_id: int, amount: float, *, reference_i
                            {"account_code": _customer_account(customer_id, "WITHDRAWAL_RESERVED"), "customer_id": customer_id, "debit": release, "credit": 0},
                            {"account_code": _customer_account(customer_id, "AVAILABLE"), "customer_id": customer_id, "debit": 0, "credit": release},
                        ], description="Release failed or rejected customer withdrawal reserve")
-    db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_RELEASE",
-                       debit=0, credit=release, amount=release, reference_type="WITHDRAWAL",
-                       reference_id=reference_id, idempotency_key=idem))
+    db.add(LedgerEntry(
+        customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_RELEASE",
+        debit=0, credit=release, amount=release, reference_type="WITHDRAWAL",
+        reference_id=reference_id, idempotency_key=idem,
+        metadata_json=json.dumps(
+            {"requested_amount": format(amount_d, "f"), "effective_amount": format(release, "f")},
+            separators=(",", ":"),
+        ),
+    ))
     return fresh_ledger
 
 async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:
@@ -392,7 +557,16 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
         raise ValueError("withdrawal settlement amount must be positive")
     ledger = await get_or_create_ledger(db, customer_id, USDT)
     idem = f"withdrawal-settlement:{reference_id}"
-    if (await db.execute(select(LedgerJournal).where(LedgerJournal.idempotency_key == idem))).scalar_one_or_none():
+    existing = (
+        await db.execute(
+            select(LedgerJournal).where(LedgerJournal.idempotency_key == idem)
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _validate_withdrawal_action_replay(
+            db, existing, customer_id=customer_id, amount_d=amount_d,
+            reference_id=reference_id, action="settle",
+        )
         return ledger
     fresh_ledger = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
@@ -435,9 +609,19 @@ async def settle_withdrawal(db, customer_id: int, amount: float, *, reference_id
     await post_journal(db, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT", reference_type="WITHDRAWAL",
                        reference_id=reference_id, idempotency_key=idem, lines=lines,
                        description="Settle completed customer withdrawal")
-    db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT",
-                       debit=amount_d, credit=0, amount=amount_d, reference_type="WITHDRAWAL",
-                       reference_id=reference_id, idempotency_key=idem))
+    db.add(LedgerEntry(
+        customer_id=customer_id, currency=USDT, entry_type="WITHDRAWAL_SETTLEMENT",
+        debit=amount_d, credit=0, amount=amount_d, reference_type="WITHDRAWAL",
+        reference_id=reference_id, idempotency_key=idem,
+        metadata_json=json.dumps(
+            {
+                "requested_amount": format(amount_d, "f"),
+                "settled_from_reserve": format(settle, "f"),
+                "shortfall": format(shortfall, "f"),
+            },
+            separators=(",", ":"),
+        ),
+    ))
     return fresh_ledger
 
 async def customer_balance(db, customer_id: int, currency: str = USDT, *, lock: bool = False) -> dict:
