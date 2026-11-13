@@ -172,9 +172,12 @@ def _configured_postgres_dsn() -> str | None:
     return None
 
 
+_RESEARCH_INTEGRITY_POSTGRES_DSN = _configured_postgres_dsn()
+
+
 @pytest.mark.postgres
 @pytest.mark.skipif(
-    _configured_postgres_dsn() is None,
+    _RESEARCH_INTEGRITY_POSTGRES_DSN is None,
     reason="requires the migrated disposable PostgreSQL database provisioned by CI",
 )
 def test_research_integrity_query_executes_against_postgres():
@@ -183,9 +186,7 @@ def test_research_integrity_query_executes_against_postgres():
     import asyncpg
     from scripts.verify_staging_restore import RESEARCH_INTEGRITY_QUERY
 
-    dsn = _configured_postgres_dsn()
-    if dsn is None:
-        pytest.skip("requires an explicitly configured PostgreSQL DSN")
+    dsn = _RESEARCH_INTEGRITY_POSTGRES_DSN
 
     async def execute_query():
         connection = await asyncpg.connect(dsn)
