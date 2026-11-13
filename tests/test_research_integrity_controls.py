@@ -181,6 +181,48 @@ def _outcome_label(position: int) -> dict:
     }
 
 
+def test_cost_breakeven_report_uses_per_bar_session_costs_and_validates_inputs():
+    from app.research_validation import cost_breakeven_report
+
+    gross = np.full(30, 0.01, dtype=float)
+    turnover = np.ones(30, dtype=float)
+    session_costs = np.full(30, 10.0, dtype=float)
+    report = cost_breakeven_report(
+        gross,
+        turnover,
+        taker_bps=5.0,
+        slippage_bps=5.0,
+        bars_per_year=252,
+        variable_cost_bps_per_bar=session_costs,
+    )
+    assert report["status"] == "OK"
+    assert report["session_variable_costs_applied"] is True
+    assert report["assumed_cost_bps"] == pytest.approx(10.0)
+    assert report["annual_variable_cost_drag"] == pytest.approx(0.001 * 252)
+
+    invalid = cost_breakeven_report(
+        gross,
+        turnover,
+        taker_bps="not-a-number",
+        slippage_bps=5.0,
+        bars_per_year=252,
+    )
+    assert invalid["status"] == "INVALID_COST_INPUT"
+
+
+def test_session_cost_schedule_rejects_missing_or_nonfinite_sessions():
+    valid = {
+        "LONDON": 10.0,
+        "NEW_YORK": 20.0,
+        "NEW_YORK_LATE": 30.0,
+        "OTHER": 40.0,
+    }
+    with pytest.raises(ValueError):
+        normalize_session_costs_bps({**valid, "OTHER": float("nan")})
+    with pytest.raises(ValueError):
+        normalize_session_costs_bps({"LONDON": 1.0})
+
+
 def test_decision_outcome_holdout_is_consumed_once_across_subsequent_calls(monkeypatch):
     from app import db as db_module
 
