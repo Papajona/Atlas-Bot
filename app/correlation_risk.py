@@ -51,15 +51,22 @@ def adjusted_group_exposure(positions, *, proposed_symbol: str, proposed_notiona
             members.append((getattr(p, "symbol", ""), 0.0))
             continue
         raw_price = getattr(p, "mark_price", 0)
+        raw_entry = getattr(p, "average_entry_price", 0)
         try:
-            price = float(raw_price or 0)
+            mark_price = float(raw_price or 0)
         except (TypeError, ValueError):
-            price = 0.0
-        if not math.isfinite(price) or price <= 0:
-            try:
-                price = float(getattr(p, "average_entry_price", 0) or 0)
-            except (TypeError, ValueError):
-                price = 0.0
+            mark_price = 0.0
+        try:
+            entry_price = float(raw_entry or 0)
+        except (TypeError, ValueError):
+            entry_price = 0.0
+        # Do not let a market-price drop release concentration headroom below
+        # the booked entry cost; the atomic customer-paper fill uses this same rule.
+        valid_prices = [
+            price for price in (mark_price, entry_price)
+            if math.isfinite(price) and price > 0
+        ]
+        price = max(valid_prices, default=0.0)
         if not math.isfinite(quantity) or not math.isfinite(price) or price <= 0:
             # Unknown exposure cannot safely be treated as zero.
             valuation_complete = False
