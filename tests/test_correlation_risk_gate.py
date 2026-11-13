@@ -593,3 +593,69 @@ def test_live_correlation_gate_clamps_increase_after_reduction_sizing():
     block = source[clamp:headroom]
     assert 'valuation_complete=bool(group_check.get("valuation_complete", False))' in block
     assert "reducing_quantity" in block
+
+def test_customer_paper_fetches_multiple_unclassified_marks_concurrently(monkeypatch):
+    """A multi-holding portfolio should not age early quotes through serial requests."""
+    import asyncio
+    import threading
+    import time
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from app import main
+    import app.customer_paper_lifecycle as lifecycle
+
+    async def positions(**_kwargs):
+        return [
+            {
+                "symbol": symbol,
+                "venue": "binance",
+                "quantity": "1",
+                "average_entry_price": "100",
+            }
+            for symbol in ("UNKNOWN_A", "UNKNOWN_B", "UNKNOWN_C")
+        ]
+
+    class Request:
+        symbol = "BTC/USDT:USDT"
+        exchange = "binance"
+
+        def model_copy(self, update):
+            return SimpleNamespace(**{**vars(self), **update})
+
+    lock = threading.Lock()
+    active = 0
+    maximum_active = 0
+
+    def delayed_market_data(_req):
+        nonlocal active, maximum_active
+        with lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            time.sleep(0.15)
+            return object()
+        finally:
+            with lock:
+                active -= 1
+
+    def fresh_context(_req, _data):
+        return {
+            "bid": 100.0,
+            "quote_age_seconds": 0.0,
+            "quote_timestamp_utc": datetime.now(timezone.utc).isoformat(),
+        }
+
+    monkeypatch.setattr(lifecycle, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(main, "market_data", delayed_market_data)
+    monkeypatch.setattr(main, "_server_paper_market_context", fresh_context)
+
+    result = asyncio.run(main._customer_paper_positions_for_exposure(
+        customer_id=883, req=Request(), market_context=None,
+    ))
+
+    assert result["ok"] is True
+    assert {row.symbol for row in result["positions"]} == {
+        "UNKNOWN_A", "UNKNOWN_B", "UNKNOWN_C",
+    }
+    assert maximum_active >= 2
+    assert maximum_active <= 8
