@@ -61,7 +61,7 @@ from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
 from .model_registry import verify_model_file, rollback_champion
-from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, shares_risk_budget
+from .correlation_risk import adjusted_group_exposure, cap_quantity_preserving_reduction, limit_increase_when_valuation_incomplete, shares_risk_budget
 from .custody_signer import validate_signer_config
 from .custody_reconciliation import reconcile_usdt_custody
 from .meta_labeling import meta_label_gate, meta_label_walk_forward
@@ -2521,6 +2521,15 @@ async def _run_persisted_adaptive_bot_cycle(
                 # the notional released by that close cannot be established.
                 quantity = reducing_quantity
             group_reduce_only = True
+
+    # An unvalued correlated holding cannot supply guessed headroom for an
+    # increasing remainder. Retain only the portion that offsets a verified
+    # opposing position; block the rest until every relevant holding is valued.
+    quantity = limit_increase_when_valuation_incomplete(
+        quantity,
+        reducing_quantity,
+        valuation_complete=bool(group_check.get("valuation_complete", False)),
+    )
     if not group_check["allowed"] and not group_reduce_only:
         headroom = max(0.0, settings.correlation_group_cap_usd - group_check["existing_notional"])
         quantity = min(quantity, headroom / max(exposure_price, 1e-12))
