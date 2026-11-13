@@ -7,6 +7,7 @@ per-bar rate is supplied; missing carry is exposed as incomplete research eviden
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -110,6 +111,7 @@ def simulate_execution_aware_strategy(
     transaction_cost_bps: float,
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
+    transaction_cost_provider: Callable[[int, float, float, str, str], float] | None = None,
     drawdown_limit: float | None = None,
     daily_loss_limit: float | None = None,
     loss_event_threshold: int = 0,
@@ -149,6 +151,8 @@ def simulate_execution_aware_strategy(
     if not math.isfinite(stop_mult) or stop_mult <= 0 or not math.isfinite(target_mult) or target_mult <= 0:
         raise ValueError("stop and target ATR multipliers must be finite and positive")
     transaction_bps = _finite_nonnegative(transaction_cost_bps, "transaction_cost_bps")
+    if transaction_cost_provider is not None and session_costs_bps is not None:
+        raise ValueError("event-level transaction costs cannot be combined with session schedules")
     session_schedule = None
     per_bar_transaction_bps = np.full(len(df), transaction_bps, dtype=float)
     if session_costs_bps is not None:
@@ -282,6 +286,7 @@ def simulate_execution_aware_strategy(
         bar_return = 0.0
         exited = False
         gap_exit_fill = False
+        exit_fill_price: float | None = None
         if actual != 0.0:
             if actual > 0:
                 stop_hit = lows[i] <= float(stop_price)
@@ -298,6 +303,7 @@ def simulate_execution_aware_strategy(
                     or (actual < 0 and opens[i] > float(stop_price))
                 ) else float(stop_price)
                 bar_return = fill / opens[i] - 1.0
+                exit_fill_price = float(fill)
                 stop_exits += 1
                 exited = True
             elif take_hit:
@@ -306,6 +312,7 @@ def simulate_execution_aware_strategy(
                     or (actual < 0 and opens[i] < float(target_price))
                 ) else float(target_price)
                 bar_return = fill / opens[i] - 1.0
+                exit_fill_price = float(fill)
                 take_exits += 1
                 exited = True
             elif i + 1 < n:
@@ -320,6 +327,7 @@ def simulate_execution_aware_strategy(
                 )
                 if gap_stop or gap_target:
                     bar_return = next_open / opens[i] - 1.0
+                    exit_fill_price = float(next_open)
                     exited = True
                     gap_exit_fill = True
                     if gap_stop:
@@ -333,6 +341,7 @@ def simulate_execution_aware_strategy(
                 # The end of an evaluated window is a liquidation boundary. Use
                 # its observed close rather than zero or a made-up future open.
                 bar_return = closes[i] / opens[i] - 1.0
+                exit_fill_price = float(closes[i])
                 exited = True
                 terminal_close_exits += 1
 
@@ -343,8 +352,34 @@ def simulate_execution_aware_strategy(
         exit_turnover = abs(actual) if exited and actual != 0.0 else 0.0
         turnover[i] = entry_turnover + exit_turnover
         exit_cost_index = i + 1 if gap_exit_fill and i + 1 < n else i
-        entry_cost_drag = entry_turnover * per_bar_transaction_bps[i] / 10_000.0
-        exit_cost_drag = exit_turnover * per_bar_transaction_bps[exit_cost_index] / 10_000.0
+        if transaction_cost_provider is None:
+            entry_cost_bps = float(per_bar_transaction_bps[i])
+            exit_cost_bps = float(per_bar_transaction_bps[exit_cost_index])
+        else:
+            entry_cost_bps = 0.0
+            exit_cost_bps = 0.0
+            if entry_turnover > 0.0:
+                entry_side = "buy" if actual - previous_position > 0.0 else "sell"
+                entry_cost_bps = float(transaction_cost_provider(
+                    i, entry_turnover, float(opens[i]), entry_side, "ENTRY"
+                ))
+            if exit_turnover > 0.0:
+                if exit_fill_price is None:
+                    raise RuntimeError("execution exit was flagged without a verified fill price")
+                exit_side = "sell" if actual > 0.0 else "buy"
+                exit_reference_price = float(opens[exit_cost_index]) if gap_exit_fill else exit_fill_price
+                exit_cost_bps = float(transaction_cost_provider(
+                    exit_cost_index, exit_turnover, exit_reference_price, exit_side, "EXIT"
+                ))
+            if (
+                not math.isfinite(entry_cost_bps)
+                or entry_cost_bps < 0.0
+                or not math.isfinite(exit_cost_bps)
+                or exit_cost_bps < 0.0
+            ):
+                raise ValueError("event-level transaction cost provider returned an invalid rate")
+        entry_cost_drag = entry_turnover * entry_cost_bps / 10_000.0
+        exit_cost_drag = exit_turnover * exit_cost_bps / 10_000.0
         transaction_cost_drag[i] = entry_cost_drag + exit_cost_drag
         if turnover[i] > 0.0:
             effective_transaction_cost_bps[i] = (
@@ -415,6 +450,12 @@ def simulate_execution_aware_strategy(
         "gap_exit_fee_uses_fill_session": True,
         "session_cost_model_complete": session_schedule is not None,
         "session_costs_bps": session_schedule,
+        "per_bar_execution_cost_model_complete": transaction_cost_provider is not None,
+        "per_bar_execution_cost_model_status": (
+            "EVENT_LEVEL_PROVIDER_APPLIED"
+            if transaction_cost_provider is not None
+            else "STATIC_OR_SESSION_COSTS"
+        ),
         "session_cost_observations": int(len(per_bar_transaction_bps)) if session_schedule is not None else 0,
         "risk_halted_bars": halted_bars,
         "risk_hard_halt": hard_halt,
