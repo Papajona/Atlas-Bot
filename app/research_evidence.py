@@ -270,11 +270,35 @@ def validate_execution_cost_calibration(document, trusted_public_keys, *, venue:
                 "reason": "COST_CALIBRATION_ERROR_EXCEEDS_ACCEPTANCE_THRESHOLDS",
                 "spread_error_bps": spread_error, "spread_limit_bps": spread_limit,
                 "slippage_error_bps": slippage_error, "slippage_limit_bps": slippage_limit}
+    # Session costs are a separate signed schedule because spreads/slippage vary materially
+    # across liquidity windows. The base calibration may still be valid for diagnostics,
+    # but the research result cannot claim session-aware costs unless all named sessions exist.
+    session_schedule = doc.get("session_costs_bps")
+    session_costs_verified = False
+    normalized_session_costs = None
+    session_costs_reason = "SESSION_COST_SCHEDULE_MISSING"
+    if session_schedule is not None:
+        try:
+            from .market_sessions import normalize_session_costs_bps
+            normalized_session_costs = normalize_session_costs_bps(session_schedule)
+            session_costs_verified = (
+                doc.get("session_cost_basis") == "per_side_turnover_bps"
+                and doc.get("session_costs_source") == "venue_observed"
+            )
+            session_costs_reason = (
+                "SESSION_COST_SCHEDULE_VERIFIED"
+                if session_costs_verified else "SESSION_COST_SCHEDULE_BASIS_OR_SOURCE_INVALID"
+            )
+        except (TypeError, ValueError):
+            session_costs_reason = "SESSION_COST_SCHEDULE_INVALID"
     return {**signed, "calibration_verified": True, "reason": "VENUE_CALIBRATION_VERIFIED",
             "observed_order_count": orders, "observed_fill_count": fills,
             "heldout_sample_count": count, "model_fingerprint": model_fingerprint,
             "heldout_spread_error_bps": spread_error, "heldout_slippage_error_bps": slippage_error,
-            "accepted_spread_error_bps": spread_limit, "accepted_slippage_error_bps": slippage_limit}
+            "accepted_spread_error_bps": spread_limit, "accepted_slippage_error_bps": slippage_limit,
+            "session_costs_verified": session_costs_verified,
+            "session_costs_reason": session_costs_reason,
+            "session_costs_bps": normalized_session_costs if session_costs_verified else None}
 
 
 def validate_comparable_trial_archive(document, trusted_public_keys, *, candidate_labels: set[str],
