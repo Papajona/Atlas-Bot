@@ -403,7 +403,7 @@ def test_acceptance_restart_mark_is_created_after_readiness_preflight():
         / "customer_paper_acceptance_drill.py"
     ).read_text(encoding="utf-8")
     phase_two_start = source.index("async def _phase_two(")
-    phase_two_end = source.index("\\n\\ndef _run(", phase_two_start)
+    phase_two_end = source.index("\n\ndef _run(", phase_two_start)
     phase_two = source[phase_two_start:phase_two_end]
     loader_start = phase_two.index("async def load_current_group_marks():")
     loader_end = phase_two.index(
