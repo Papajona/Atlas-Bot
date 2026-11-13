@@ -479,10 +479,58 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "gh workflow run staging-identity-preflight.yml" in deploy
     assert '-f "request_id=$request_id"' in deploy
     assert 'gh run view "$preflight_run_id"' in deploy
+    assert "Dispatch and require customer-paper acceptance on this exact deployment" in deploy
+    assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
+    assert '-f "target_sha=$GITHUB_SHA"' in deploy
+    assert '-f "deployment_run_id=$GITHUB_RUN_ID"' in deploy
+    assert '-f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT"' in deploy
+    assert '-f "dispatch_id=$dispatch_id"' in deploy
+    assert 'secrets.token_hex(16)' in deploy
+    assert 'acceptance_wait_seconds=5400' in deploy
+    assert 'acceptance_poll_interval_seconds=30' in deploy
+    assert 'timeout-minutes: 300' in deploy
+    assert 'gh run view "$acceptance_run_id"' in deploy
+    assert "PASS: customer-paper acceptance run" in deploy
+    acceptance_dispatch = deploy.split(
+        "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
+    )[1]
+    assert not any(line.endswith(chr(92) * 2) for line in acceptance_dispatch.splitlines())
     assert "select(.displayTitle == $expected)" in deploy
     assert "uniquely correlated staging preflight run was not observed" in deploy
     assert "main advanced during staging preflight" in deploy
-    assert "timeout-minutes: 60" in deploy
+    gate_wait = deploy.split(
+        "      - name: Wait for required CI gates to pass on this exact commit", 1
+    )[1].split("      - name: Validate staging inputs", 1)[0]
+    assert "gate_wait_seconds=7200" in gate_wait
+    assert "gate_poll_interval_seconds=30" in gate_wait
+    assert "while true; do" in gate_wait
+    assert 'sleep "$gate_poll_interval_seconds"' in gate_wait
+    assert "id: wait-required-gates" in deploy
+    assert 'if [[ "$current_main_sha" != "$GITHUB_SHA" ]]' in gate_wait
+    assert 'echo "stale=true" >> "$GITHUB_OUTPUT"' in gate_wait
+    assert gate_wait.index("current_main_sha=") < gate_wait.index("run_json=")
+    for downstream_step in (
+        "Validate staging inputs",
+        "Checkout exact main commit",
+        "Authenticate to Google Cloud with main-only workload identity",
+        "Set up Google Cloud SDK",
+        "Build and push exact commit image to Artifact Registry",
+        "Deploy restricted paper-only Cloud Run service",
+        "Dispatch and require read-only staging identity preflight on this exact commit",
+        "Dispatch and require customer-paper acceptance on this exact deployment",
+    ):
+        step = deploy.split(f"      - name: {downstream_step}", 1)[1].split("\n      - name:", 1)[0]
+        assert "steps.wait-required-gates.outputs.stale != 'true'" in step, downstream_step
+    diagnostic_step = deploy.split(
+        "      - name: Capture Cloud Run startup diagnostics after deployment failure", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert "failure() && steps.wait-required-gates.outputs.stale != 'true'" in diagnostic_step
+    deploy_step = deploy.index("      - name: Deploy restricted paper-only Cloud Run service")
+    freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
+    cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
+    assert freshness_guard < cloud_run_change
+    assert 'GH_TOKEN: ${{ github.token }}' in deploy[deploy_step:cloud_run_change]
+    assert "timeout-minutes: 300" in deploy
     assert "actions: write" in deploy
 
 
@@ -491,14 +539,17 @@ def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
 require "yaml"
 deploy = YAML.load_file(ARGV.fetch(0))
 preflight = YAML.load_file(ARGV.fetch(1))
+acceptance = YAML.load_file(ARGV.fetch(2))
 abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
 abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
+abort("customer paper acceptance job missing") unless acceptance.fetch("jobs").key?("customer-paper-acceptance")
 """
     result = subprocess.run(
         [
             "ruby", "-e", ruby,
             str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
             str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
+            str(ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml"),
         ],
         capture_output=True,
         text=True,

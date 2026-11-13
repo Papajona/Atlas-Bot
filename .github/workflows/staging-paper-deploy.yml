@@ -21,7 +21,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 300
     environment: staging
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
@@ -36,6 +36,7 @@ jobs:
       SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
     steps:
       - name: Wait for required CI gates to pass on this exact commit
+        id: wait-required-gates
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -46,8 +47,20 @@ jobs:
           workflows=("ci.yml" "ledger-concurrency-check.yml" "production-verification.yml")
           labels=("Atlas CI" "PostgreSQL ledger concurrency" "Production Verification Gate")
           declare -A passed=()
+          gate_wait_seconds=7200
+          gate_poll_interval_seconds=30
+          gate_started_at="$(date +%s)"
 
-          for attempt in $(seq 1 90); do
+          # The required CI jobs have 20-45 minute limits; allow two hours for
+          # queue delay and completion before this paper-only deployment is blocked.
+          while true; do
+            current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+            if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+              echo "stale=true" >> "$GITHUB_OUTPUT"
+              echo "SKIP: main advanced to $current_main_sha while this staging run waited for CI; releasing the staging concurrency slot without deploying stale commit $GITHUB_SHA."
+              exit 0
+            fi
+
             all_passed=true
             for index in "${!workflows[@]}"; do
               workflow="${workflows[$index]}"
@@ -112,13 +125,18 @@ jobs:
               echo "PASS: all required exact-commit CI gates passed; staging deployment may proceed."
               exit 0
             fi
-            sleep 10
+            now="$(date +%s)"
+            if (( now - gate_started_at >= gate_wait_seconds )); then
+              break
+            fi
+            sleep "$gate_poll_interval_seconds"
           done
 
-          echo "BLOCKED: timed out waiting for Atlas CI, PostgreSQL concurrency, and Production Verification to finish successfully on exact commit $GITHUB_SHA"
+          echo "BLOCKED: timed out after ${gate_wait_seconds}s waiting for Atlas CI, PostgreSQL concurrency, and Production Verification to finish successfully on exact commit $GITHUB_SHA"
           exit 1
 
       - name: Validate staging inputs
+        if: steps.wait-required-gates.outputs.stale != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -139,21 +157,25 @@ jobs:
           [[ "$DATABASE_SECRET" != "$SUPABASE_ANON_KEY_SECRET" && "$PAPER_DATABASE_SECRET" != "$SUPABASE_ANON_KEY_SECRET" ]] || { echo "BLOCKED: Supabase key and DB URLs must use distinct secrets"; exit 1; }
 
       - name: Checkout exact main commit
+        if: steps.wait-required-gates.outputs.stale != 'true'
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
 
       - name: Authenticate to Google Cloud with main-only workload identity
+        if: steps.wait-required-gates.outputs.stale != 'true'
         uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.DEPLOY_SERVICE_ACCOUNT }}
 
       - name: Set up Google Cloud SDK
+        if: steps.wait-required-gates.outputs.stale != 'true'
         uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Build and push exact commit image to Artifact Registry
+        if: steps.wait-required-gates.outputs.stale != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -165,9 +187,17 @@ jobs:
           echo "Built and pushed image for ${GITHUB_SHA}"
 
       - name: Deploy restricted paper-only Cloud Run service
+        if: steps.wait-required-gates.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "BLOCKED: main advanced before Cloud Run deployment; refusing to replace staging with stale commit $GITHUB_SHA."
+            exit 1
+          fi
           IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")"
           gcloud run deploy "$STAGING_SERVICE" \
             --project="$GCP_PROJECT_ID" \
@@ -200,7 +230,7 @@ jobs:
           PY
 
       - name: Capture Cloud Run startup diagnostics after deployment failure
-        if: failure()
+        if: failure() && steps.wait-required-gates.outputs.stale != 'true'
         shell: bash
         run: |
           set +e
@@ -227,6 +257,7 @@ jobs:
           exit 0
 
       - name: Dispatch and require read-only staging identity preflight on this exact commit
+        if: steps.wait-required-gates.outputs.stale != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -316,4 +347,85 @@ jobs:
           done
 
           echo "BLOCKED: correlated staging preflight run $preflight_run_id did not complete within the allowed polling window."
+          exit 1
+
+      - name: Dispatch and require customer-paper acceptance on this exact deployment
+        if: steps.wait-required-gates.outputs.stale != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "BLOCKED: main advanced before customer-paper acceptance dispatch."
+            exit 1
+          fi
+
+          # A workflow rerun reuses GITHUB_RUN_ID but increments GITHUB_RUN_ATTEMPT.
+          # Add a per-dispatch nonce so an earlier acceptance run can never satisfy this attempt.
+          dispatch_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+          expected_run_name="Customer Paper Acceptance $GITHUB_SHA deploy $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT correlation $dispatch_id"
+          acceptance_dispatch_started_at="$(date +%s)"
+          gh workflow run customer-paper-staging-acceptance.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f "target_sha=$GITHUB_SHA" \
+            -f "deployment_run_id=$GITHUB_RUN_ID" \
+            -f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT" \
+            -f "dispatch_id=$dispatch_id"
+
+          acceptance_run_id=0
+          acceptance_wait_seconds=5400
+          acceptance_poll_interval_seconds=30
+          while true; do
+            now="$(date +%s)"
+            if (( now - acceptance_dispatch_started_at >= acceptance_wait_seconds )); then
+              break
+            fi
+
+            if [[ "$acceptance_run_id" -eq 0 ]]; then
+              run_list="$(gh run list \
+                --repo "$GITHUB_REPOSITORY" \
+                --workflow "customer-paper-staging-acceptance.yml" \
+                --event workflow_dispatch \
+                --commit "$GITHUB_SHA" \
+                --limit 100 \
+                --json databaseId,headSha,headBranch,displayTitle)"
+              run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
+              candidate_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+              candidate_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+              candidate_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+              if [[ "$candidate_id" -gt 0 ]]; then
+                if [[ "$candidate_sha" != "$GITHUB_SHA" || "$candidate_branch" != "main" ]]; then
+                  echo "BLOCKED: uniquely correlated acceptance run is not on exact main commit $GITHUB_SHA."
+                  exit 1
+                fi
+                acceptance_run_id="$candidate_id"
+              fi
+            else
+              run_json="$(gh run view "$acceptance_run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,headBranch,status,conclusion,displayTitle)"
+              run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
+              run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
+              run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
+              run_name="$(jq -r '.displayTitle // ""' <<< "$run_json")"
+              run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
+              run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
+              if [[ "$run_id" != "$acceptance_run_id" || "$run_sha" != "$GITHUB_SHA" || "$run_branch" != "main" || "$run_name" != "$expected_run_name" ]]; then
+                echo "BLOCKED: tracked customer-paper acceptance run identity changed unexpectedly."
+                exit 1
+              fi
+              if [[ "$run_status" == "completed" ]]; then
+                if [[ "$run_conclusion" != "success" ]]; then
+                  echo "BLOCKED: customer-paper acceptance run $acceptance_run_id completed with conclusion '${run_conclusion:-missing}'."
+                  exit 1
+                fi
+                echo "PASS: customer-paper acceptance run $acceptance_run_id succeeded on exact deployed commit $GITHUB_SHA (deployment attempt $GITHUB_RUN_ATTEMPT; unique correlation verified)"
+                exit 0
+              fi
+            fi
+            sleep "$acceptance_poll_interval_seconds"
+          done
+
+          echo "BLOCKED: uniquely correlated customer-paper acceptance run '${acceptance_run_id:-not-observed}' did not complete successfully within ${acceptance_wait_seconds}s; deployment remains paper-only."
           exit 1

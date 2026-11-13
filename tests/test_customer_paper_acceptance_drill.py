@@ -247,7 +247,7 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
     asyncio.run(run())
 
 
-def test_acceptance_workflow_is_pinned_to_the_triggering_deployment_sha():
+def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     from pathlib import Path
 
     workflow = (
@@ -256,12 +256,65 @@ def test_acceptance_workflow_is_pinned_to_the_triggering_deployment_sha():
         / "workflows"
         / "customer-paper-staging-acceptance.yml"
     ).read_text(encoding="utf-8")
-    assert "github.event.workflow_run.head_sha || github.sha" in workflow
-    assert 'test "$TARGET_SHA" = "${{ github.event.workflow_run.head_sha }}"' in workflow
-    assert 'ref: ${{ github.event.workflow_run.head_sha || github.sha }}' in workflow
-    assert 'test "$TARGET_SHA" = "$GITHUB_SHA"' in workflow
+    trigger_header = workflow.split("\npermissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger_header
+    assert "workflow_run:" not in trigger_header
+    assert "target_sha:" in trigger_header
+    assert "deployment_run_id:" in trigger_header
+    assert "deployment_run_attempt:" in trigger_header
+    assert "dispatch_id:" in trigger_header
+    assert "run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }} attempt ${{ inputs.deployment_run_attempt }} correlation ${{ inputs.dispatch_id }}" in workflow
+    assert "TARGET_SHA: ${{ inputs.target_sha }}" in workflow
+    assert "DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}" in workflow
+    assert "DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}" in workflow
+    assert "DISPATCH_ID: ${{ inputs.dispatch_id }}" in workflow
+    assert '[[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]' in workflow
+    assert '[[ "$DISPATCH_ID" =~ ^[a-f0-9]{32}$ ]]' in workflow
+    assert "--jq '.run_attempt'" in workflow
+    assert 'test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
+    assert 'test "$deployment_attempt_after" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
+    assert 'test "$deployment_name" = "Deploy Paper-Only Atlas Staging"' in workflow
+    assert 'test "$deployment_sha" = "$TARGET_SHA"' in workflow
+    assert '[[ "$deployment_status" == "in_progress" || "$deployment_status" == "completed" ]]' in workflow
+    assert 'test "$deployment_conclusion" = "success"' in workflow
+    assert 'test "$image_outcome" = "success"' in workflow
+    assert 'test "$deploy_outcome" = "success"' in workflow
+    assert 'test "$preflight_outcome" = "success"' in workflow
+    assert "preflight_outcome=" in workflow
+    assert "ref: ${{ inputs.target_sha }}" in workflow
+    assert "actions: read" in workflow
+    assert 'ADAPTIVE_AI_ENABLED: "false"' in workflow
     assert "git ls-remote" not in workflow
     assert "[atlas-paper-acceptance-drill]" not in workflow
+
+
+def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_preflight():
+    from pathlib import Path
+
+    deploy = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "staging-paper-deploy.yml"
+    ).read_text(encoding="utf-8")
+    preflight = deploy.index("Dispatch and require read-only staging identity preflight on this exact commit")
+    acceptance = deploy.index("Dispatch and require customer-paper acceptance on this exact deployment")
+    assert preflight < acceptance
+    assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
+    assert '-f "target_sha=$GITHUB_SHA"' in deploy
+    assert '-f "deployment_run_id=$GITHUB_RUN_ID"' in deploy
+    assert '-f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT"' in deploy
+    assert '-f "dispatch_id=$dispatch_id"' in deploy
+    assert 'secrets.token_hex(16)' in deploy
+    assert '$GITHUB_RUN_ATTEMPT correlation $dispatch_id' in deploy
+    assert 'acceptance_wait_seconds=5400' in deploy
+    assert 'acceptance_poll_interval_seconds=30' in deploy
+    assert 'while true; do' in deploy
+    assert 'timeout-minutes: 300' in deploy
+    assert 'gh run view "$acceptance_run_id"' in deploy
+    assert "PASS: customer-paper acceptance run" in deploy
+    assert "BLOCKED: customer-paper acceptance run" in deploy
 
 
 def test_acceptance_workflow_checks_project_and_least_privilege_roles_before_drill():
