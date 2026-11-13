@@ -250,11 +250,12 @@ def _protected_component_position(
     return (
         signals, raw, requested, execution["market_returns"], execution["positions"],
         execution["net_returns"], execution["audit"], execution["intrabar_exit"],
+        execution["effective_transaction_cost_bps"],
     )
 
 def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto", carry_bps_per_bar: float | None = None, session_costs_bps: dict[str, float] | None = None) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
-    s, _, _, _, protected, protected_net, protection_audit, _ = _protected_component_position(
+    s, _, _, _, protected, protected_net, protection_audit, _, _ = _protected_component_position(
         df, component, cfg, taker_bps, slippage_bps, asset, carry_bps_per_bar,
         session_costs_bps,
     )
@@ -504,7 +505,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     )
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
-    ensemble_signals, _, ensemble_requested, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits = _protected_component_position(
+    ensemble_signals, _, ensemble_requested, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits, ensemble_cost_bps = _protected_component_position(
         df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
     )
     gross = ensemble_pos * bar_returns
@@ -545,6 +546,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
         benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
         session_costs_bps=session_costs_bps,
+        transaction_cost_bps_per_bar=(
+            ensemble_cost_bps if session_costs_bps is not None else None
+        ),
     )
     ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
     oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
@@ -557,7 +561,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         if component == "ensemble":
             per_strategy_oos[component] = oos
             continue
-        component_signals, _, component_requested, component_returns, component_position, _, _, component_exits = _protected_component_position(
+        component_signals, _, component_requested, component_returns, component_position, _, _, component_exits, component_cost_bps = _protected_component_position(
             df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
         )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
@@ -579,6 +583,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
             benchmark_random_trials=25,
             session_costs_bps=session_costs_bps,
+            transaction_cost_bps_per_bar=(
+                component_cost_bps if session_costs_bps is not None else None
+            ),
         )
         component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
         per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
@@ -607,7 +614,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         vr = _component_backtest(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
         )
-        variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
+        variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits, variant_cost_bps = _protected_component_position(
             df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
         )
         is_baseline = (
@@ -634,6 +641,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
                 benchmark_random_trials=25,
                 session_costs_bps=session_costs_bps,
+                transaction_cost_bps_per_bar=(
+                    variant_cost_bps if session_costs_bps is not None else None
+                ),
             )
         variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
         variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
@@ -768,7 +778,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         stress_multiplier=cost_mult,
         fixed_cost_drag=None if carry is None else (ensemble_pos.abs() * (float(carry) / 10000.0)).to_numpy(),
         variable_cost_bps_per_bar=(
-            applied_session_costs.to_numpy(dtype=float)
+            ensemble_cost_bps.to_numpy(dtype=float)
             if applied_session_costs is not None else None
         ),
     )
