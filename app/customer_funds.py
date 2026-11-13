@@ -597,9 +597,9 @@ async def _validate_withdrawal_action_replay(
             "customer_id": customer_id,
             "severity": "HIGH",
         }
-        # The workflow handler owns persistence order: it first commits any
-        # confirmed provider/rejection state, then writes this incident through
-        # the same session so SQLite never contends with its own writer.
+        # The workflow handler persists this mismatch through the caller's
+        # session and commits the confirmed withdrawal outcome with the incident.
+        # Keeping the write out of this validator avoids a separate SQLite writer.
         raise WithdrawalReplayMismatch(incident_args)
 
 
