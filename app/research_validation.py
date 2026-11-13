@@ -1209,6 +1209,8 @@ def parameter_plateau_score(
     for row in rows:
         if not isinstance(row, dict):
             continue
+        if metric == "oos_sharpe" and row.get("oos_status") != "OK":
+            continue
         raw = row.get(metric)
         try:
             value = float(raw)
