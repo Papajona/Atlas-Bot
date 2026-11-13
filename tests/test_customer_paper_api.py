@@ -1325,3 +1325,46 @@ def test_anchored_daily_replay_fetches_required_context_beyond_30_days(monkeypat
     assert len(requests) == 1
     # 12 days of order age + 19 pre-submission returns = 31 days.
     assert requests[0].days == 31
+
+def test_manual_paper_api_returns_conflict_for_failed_deferred_mark_loader(monkeypatch):
+    async def readiness_passes():
+        return {"status": "PASS"}
+
+    async def invalid_provider_mark():
+        raise RuntimeError("sensitive provider response must not reach the client")
+
+    monkeypatch.setattr(
+        paper_lifecycle, "_assert_customer_paper_ready", readiness_passes
+    )
+    api_app = FastAPI()
+
+    @api_app.post("/test/manual-paper-fill")
+    async def manual_paper_fill():
+        try:
+            return await paper_lifecycle.record_customer_paper_fill(
+                customer_id=99099,
+                client_order_id="manual-deferred-mark-error",
+                idempotency_key="manual-deferred-mark-error-fill",
+                bar_key="manual-deferred-mark-error-bar",
+                quantity="1",
+                price="100",
+                group_mark_prices_loader=invalid_provider_mark,
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise paper_api._handle_paper_error(exc) from exc
+
+    response = TestClient(api_app).post("/test/manual-paper-fill")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "current correlation-group marks could not be verified"
+    )
+    assert "sensitive provider response" not in response.text
+    # Database readiness failures are distinct and remain service-unavailable errors.
+    database_error = paper_api._handle_paper_error(
+        paper_lifecycle.CustomerPaperLedgerBlocked("paper readiness is blocked")
+    )
+    assert database_error.status_code == 503
+
