@@ -522,3 +522,27 @@ def test_strategy_router_return_stream_uses_per_event_research_costs(monkeypatch
         0.05 * 0.01 - 0.05 * expected_cost / 10_000.0
     )
     assert result.iloc[1] < 0.05 * 0.01 - 0.05 * 7.5 / 10_000.0
+
+
+def test_missing_execution_context_uses_static_cost_without_event_loop(monkeypatch):
+    from app import research_execution_costs
+
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=500, freq="h")
+    positions = pd.Series(np.linspace(0.0, 0.5, len(index)), index=index)
+    prices = pd.Series(100.0, index=index)
+
+    def unexpected_event_call(*_args, **_kwargs):
+        raise AssertionError("static fallback must not price individual events")
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", unexpected_event_call
+    )
+    costs, audit = execution_cost_series_for_positions(
+        None, positions, prices, namespace="router-static", fallback_cost_bps=12.0
+    )
+
+    assert costs.eq(12.0).all()
+    assert audit["execution_cost_model_complete"] is False
+    assert audit["execution_cost_model_status"] == "STATIC_FALLBACK_NO_EXECUTION_CONTEXT"
+    assert audit["_execution_cost_model_complete_by_bar"] == [False] * len(index)
+    assert len(audit["_execution_cost_failure_reasons_by_bar"]) == len(index)
