@@ -235,6 +235,7 @@ def oos_benchmark_comparison(
     loss_lookback_bars: int = 24,
     random_trials: int = 100,
     seed: int = 20261026,
+    session_costs_bps: dict[str, float] | None = None,
 ) -> dict:
     """Compare candidate returns with OHLC-derived buy-and-hold and fresh-entry controls.
 
@@ -366,6 +367,7 @@ def oos_benchmark_comparison(
                 stop_atr=float(stop_atr),
                 take_profit_atr=float(take_profit_atr),
                 transaction_cost_bps=float(transaction_cost_bps),
+                session_costs_bps=session_costs_bps,
                 carry_bps_per_bar=carry_bps_per_bar,
                 drawdown_limit=drawdown_limit,
                 daily_loss_limit=daily_loss_limit,
@@ -892,6 +894,7 @@ def fixed_signal_walk_forward_oos(
             loss_event_threshold=benchmark_loss_event_threshold,
             cooldown_bars=benchmark_cooldown_bars,
             random_trials=benchmark_random_trials,
+            session_costs_bps=session_costs_bps,
         )
     return {
         "status": "OK",
