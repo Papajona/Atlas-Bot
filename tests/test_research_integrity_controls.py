@@ -455,6 +455,7 @@ def test_trial_archive_append_uses_bounded_head_check_not_full_history_scan():
 
 def test_large_complete_label_history_fails_closed_without_truncation(monkeypatch):
     import json
+    from types import SimpleNamespace
     from app import db as db_module
     from app.decision_outcome_research import (
         DecisionOutcomeHistoryResourceLimit,
@@ -468,19 +469,90 @@ def test_large_complete_label_history_fails_closed_without_truncation(monkeypatc
                 (2, json.dumps(_outcome_label(2))),
             ]
 
-    class _Db:
+    class _Transaction:
         async def __aenter__(self):
             return self
 
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def execute(self, _query):
+    class _Db:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get_bind(self):
+            return self.bind
+
+        def begin(self):
+            return _Transaction()
+
+        async def execute(self, query):
+            if str(query).startswith("SET TRANSACTION"):
+                return _Rows([])
             return _Rows()
 
     monkeypatch.setattr(db_module, "SessionLocal", _Db)
     with pytest.raises(DecisionOutcomeHistoryResourceLimit, match="holdout was not consumed"):
         asyncio.run(load_all_decision_outcome_labels(batch_size=100, max_records=1))
+
+
+def test_complete_label_history_uses_one_repeatable_read_snapshot(monkeypatch):
+    import json
+    from types import SimpleNamespace
+    from app import db as db_module
+    from app.decision_outcome_research import load_all_decision_outcome_labels
+
+    statements = []
+
+    class _Rows:
+        def __init__(self, rows=()):
+            self._rows = list(rows)
+
+        def all(self):
+            return self._rows
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Db:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get_bind(self):
+            return self.bind
+
+        def begin(self):
+            return _Transaction()
+
+        async def execute(self, query):
+            sql = str(query).strip()
+            statements.append(sql)
+            if sql.startswith("SET TRANSACTION"):
+                return _Rows()
+            if not sql.startswith("SELECT"):
+                raise AssertionError(f"unexpected SQL before history scan: {sql}")
+            return _Rows([(1, json.dumps(_outcome_label(1)))])
+
+    monkeypatch.setattr(db_module, "SessionLocal", _Db)
+    loaded = asyncio.run(load_all_decision_outcome_labels(batch_size=100))
+    assert len(loaded) == 1
+    assert statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
+    assert len(statements) == 2
+    assert statements[1].startswith("SELECT")
 
 
 def test_holdout_route_checks_consumption_before_loading_history():
@@ -491,6 +563,7 @@ def test_holdout_route_checks_consumption_before_loading_history():
     route = route.split('@app.post("/api/research/backtest-all")', 1)[0]
     assert route.index("decision_outcome_holdout_status()") < route.index("load_all_decision_outcome_labels(")
     assert "DecisionOutcomeHistoryResourceLimit" in route
+    assert "DecisionOutcomeHistoryIntegrityError" in route
     assert "no holdout was consumed" in route
 
 
