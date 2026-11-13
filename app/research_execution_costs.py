@@ -1,6 +1,7 @@
 """Evidence-bound per-bar execution costs for quantitative research."""
 from __future__ import annotations
 
+import hashlib
 import math
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -170,8 +171,24 @@ def build_research_execution_cost_context(
         return blocked("TIMEZONE_AWARE_BAR_INDEX_REQUIRED")
     if not df.index.is_unique or not df.index.is_monotonic_increasing or len(df) < _VOLUME_WINDOW_BARS + 2:
         return blocked("UNIQUE_MONOTONIC_BAR_HISTORY_REQUIRED")
-    if not {"open", "close", "volume"}.issubset(set(df.columns)):
+    if not {"open", "high", "low", "close", "volume"}.issubset(set(df.columns)):
         return blocked("OHLCV_COLUMNS_REQUIRED")
+
+    # data.py hashes the cleaned OHLCV frame as CSV with this exact formatting.
+    # Recompute it from the current values so edits after provenance attachment
+    # cannot inherit the original signed execution evidence.
+    try:
+        canonical_ohlcv = df.loc[:, ["open", "high", "low", "close", "volume"]]
+        serialized_ohlcv = canonical_ohlcv.reset_index().to_csv(
+            index=False, float_format="%.17g", lineterminator="\\n"
+        )
+        current_dataset_sha256 = hashlib.sha256(
+            serialized_ohlcv.encode("utf-8")
+        ).hexdigest()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return blocked("MARKET_DATA_CONTENT_HASH_RECOMPUTE_FAILED")
+    if current_dataset_sha256 != dataset_sha256:
+        return blocked("MARKET_DATA_CONTENT_HASH_MISMATCH")
 
     index = pd.DatetimeIndex(df.index)
     utc_index = [pd.Timestamp(value).tz_convert("UTC").isoformat() for value in index]
