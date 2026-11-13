@@ -1381,6 +1381,7 @@ from .schemas import (
     WithdrawalExecuteRequest,
     WithdrawalReconcileRequest,
     WithdrawalNotSentRequest,
+    WithdrawalLedgerRepairRequest,
     ModelRollbackRequest,
     ReferralCodeRequest,
     CostEventRequest,
@@ -8142,7 +8143,7 @@ async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin
 @app.post("/api/admin/withdrawals/{withdrawal_id}/repair-ledger")
 async def repair_withdrawal_ledger(
     withdrawal_id: int,
-    req: WithdrawalNotSentRequest,
+    req: WithdrawalLedgerRepairRequest,
     x_admin_token: str | None = Header(default=None),
     x_approver_token: str | None = Header(default=None),
     x_release_token: str | None = Header(default=None),
@@ -8200,6 +8201,7 @@ async def repair_withdrawal_ledger(
                 or w.rejected_at is None
                 or not str(w.rejection_reason or "").strip()
                 or w.provider_id
+                or str(w.provider_status or "").strip()
                 or w.execution_started_at is not None
             ):
                 raise HTTPException(
@@ -8264,7 +8266,12 @@ async def repair_withdrawal_ledger(
                         raise HTTPException(
                             409, "Provider recovery did not prove a terminal outcome; reserve remains held"
                         )
-                    provider_result = await provider.status(recovered_id, currency=w.currency)
+                    try:
+                        provider_result = await provider.status(recovered_id, currency=w.currency)
+                    except PayoutUnknown as exc:
+                        raise _safe_http_error(409, exc, "Recovered provider outcome remains unresolved") from exc
+                    except PayoutError as exc:
+                        raise _safe_http_error(502, exc, "Recovered provider status verification failed") from exc
                     if provider_result.status != "FAILED":
                         raise HTTPException(
                             409, "Recovered provider transaction is not FAILED; ledger repair was not applied"
@@ -8293,16 +8300,18 @@ async def repair_withdrawal_ledger(
             incident_detail = json.loads(incident.detail_json or "{}")
         except (TypeError, ValueError):
             raise HTTPException(409, "Replay incident evidence is unreadable; manual investigation is required")
+        if not isinstance(incident_detail, dict):
+            raise HTTPException(409, "Replay incident evidence is not a valid identity record")
         expected_action = "settle" if action == "settle" else "release"
         try:
             incident_amount = Decimal(str(incident_detail.get("requested_amount")))
-        except Exception:
-            incident_amount = None
+            incident_customer_id = int(incident_detail.get("customer_id", -1))
+        except (TypeError, ValueError, ArithmeticError):
+            raise HTTPException(409, "Replay incident identity fields are invalid")
         if (
-            not isinstance(incident_detail, dict)
-            or incident_detail.get("action") != expected_action
+            incident_detail.get("action") != expected_action
             or incident_detail.get("reference_id") != reference_id
-            or int(incident_detail.get("customer_id", -1)) != int(w.customer_id)
+            or incident_customer_id != int(w.customer_id)
             or incident_amount != Decimal(str(w.amount))
         ):
             raise HTTPException(409, "Replay incident identity does not match this withdrawal")
