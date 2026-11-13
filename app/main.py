@@ -1176,7 +1176,6 @@ async def _customer_paper_positions_for_exposure(
             "reason": f"isolated paper positions could not be verified ({type(exc).__name__})",
         }
 
-    target_group = risk_group(req.symbol)
     # Filter BEFORE requesting marks. Unrelated known groups do not consume this
     # budget, but unclassified positions conservatively count against every group.
     relevant_positions = [
