@@ -7,15 +7,17 @@ archive consumed by the promotion gate.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
 import uuid
 from typing import Any, Mapping
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from .db import ResearchTrialArchive, SessionLocal
+from .db import ResearchTrialArchive, ResearchTrialLedgerHead, SessionLocal
 from .research_evidence import canonical_sha256
 
 
@@ -213,6 +215,149 @@ def _row_payload(report: Mapping[str, Any], context: Mapping[str, str],
     }
 
 
+_LEDGER_PAYLOAD_FIELDS = (
+    "trial_key", "trial_label", "asset_class", "venue", "market_type", "symbol",
+    "timeframe", "config_sha256", "code_sha256", "dataset_sha256", "oos_sample_sha256",
+    "protocol_version", "universe_evidence_sha256", "cost_evidence_id",
+    "annualized_sharpe", "oos_total_return", "max_drawdown", "trades", "results_sha256",
+    "archive_status",
+)
+_LEDGER_VERSION = "atlas-research-trial-ledger-v1"
+
+
+def _ledger_payload(value: Mapping[str, Any] | ResearchTrialArchive) -> dict[str, Any]:
+    if isinstance(value, Mapping):
+        return {field: value.get(field) for field in _LEDGER_PAYLOAD_FIELDS}
+    return {field: getattr(value, field) for field in _LEDGER_PAYLOAD_FIELDS}
+
+
+def compute_trial_ledger_integrity(
+    payload: Mapping[str, Any],
+    *,
+    sequence: int,
+    previous_entry_sha256: str,
+    signing_key: str | bytes | None = None,
+) -> tuple[str, str | None, str]:
+    """Return deterministic entry SHA, optional HMAC, and explicit assurance level."""
+    if isinstance(sequence, bool) or int(sequence) != sequence or int(sequence) < 1:
+        raise ValueError("ledger sequence must be a positive integer")
+    previous = str(previous_entry_sha256 or "")
+    if previous and not _sha(previous):
+        raise ValueError("previous ledger hash must be an empty value or SHA-256")
+    envelope = {
+        "ledger_version": _LEDGER_VERSION,
+        "sequence": int(sequence),
+        "previous_entry_sha256": previous,
+        "payload": _ledger_payload(payload),
+    }
+    canonical = json.dumps(
+        envelope, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+        allow_nan=False, default=str,
+    ).encode("utf-8")
+    entry_sha = hashlib.sha256(canonical).hexdigest()
+    key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
+    if key and len(key) >= 32:
+        signature = hmac.new(key, entry_sha.encode("ascii"), hashlib.sha256).hexdigest()
+        return entry_sha, signature, "HMAC_SIGNED"
+    return entry_sha, None, "HASH_CHAIN_UNSIGNED"
+
+
+async def _verify_trial_ledger_in_session(db, signing_key: str | bytes | None = None) -> dict[str, Any]:
+    """Verify the complete prospective chain and the database head under one session."""
+    rows = (
+        await db.execute(
+            select(ResearchTrialArchive)
+            .where(ResearchTrialArchive.ledger_sequence.is_not(None))
+            .order_by(ResearchTrialArchive.ledger_sequence.asc())
+        )
+    ).scalars().all()
+    head = await db.get(ResearchTrialLedgerHead, 1)
+    if head is None:
+        return {"status": "BROKEN", "reason": "LEDGER_HEAD_MISSING", "entries": len(rows)}
+    key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
+    previous = ""
+    expected_sequence = 1
+    signed_count = unsigned_count = 0
+    signature_unverifiable = False
+    for row in rows:
+        if row.ledger_sequence != expected_sequence:
+            return {
+                "status": "BROKEN", "reason": "LEDGER_SEQUENCE_GAP",
+                "expected_sequence": expected_sequence, "actual_sequence": row.ledger_sequence,
+                "entries": len(rows),
+            }
+        if str(row.ledger_previous_sha256 or "") != previous:
+            return {"status": "BROKEN", "reason": "LEDGER_PREVIOUS_HASH_MISMATCH",
+                    "sequence": expected_sequence, "entries": len(rows)}
+        try:
+            calculated, signature, assurance = compute_trial_ledger_integrity(
+                _ledger_payload(row),
+                sequence=expected_sequence,
+                previous_entry_sha256=previous,
+                signing_key=key if key and len(key) >= 32 else None,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return {"status": "BROKEN", "reason": "LEDGER_PAYLOAD_INVALID",
+                    "sequence": expected_sequence, "entries": len(rows)}
+        if not hmac.compare_digest(str(row.ledger_entry_sha256 or ""), calculated):
+            return {"status": "BROKEN", "reason": "LEDGER_ENTRY_HASH_MISMATCH",
+                    "sequence": expected_sequence, "entries": len(rows)}
+        if row.ledger_status == "HMAC_SIGNED":
+            signed_count += 1
+            if not key or len(key) < 32:
+                signature_unverifiable = True
+            elif not row.ledger_hmac_sha256 or not hmac.compare_digest(
+                str(row.ledger_hmac_sha256), hmac.new(
+                    key, calculated.encode("ascii"), hashlib.sha256
+                ).hexdigest()
+            ):
+                return {"status": "BROKEN", "reason": "LEDGER_HMAC_MISMATCH",
+                        "sequence": expected_sequence, "entries": len(rows)}
+        elif row.ledger_status == "HASH_CHAIN_UNSIGNED":
+            unsigned_count += 1
+            if row.ledger_hmac_sha256:
+                return {"status": "BROKEN", "reason": "UNEXPECTED_LEDGER_HMAC",
+                        "sequence": expected_sequence, "entries": len(rows)}
+        else:
+            return {"status": "BROKEN", "reason": "UNKNOWN_LEDGER_ASSURANCE",
+                    "sequence": expected_sequence, "entries": len(rows)}
+        previous = calculated
+        expected_sequence += 1
+    last_sequence = expected_sequence - 1
+    if int(head.last_sequence or 0) != last_sequence:
+        return {"status": "BROKEN", "reason": "LEDGER_HEAD_SEQUENCE_MISMATCH",
+                "head_sequence": head.last_sequence, "verified_sequence": last_sequence,
+                "entries": len(rows)}
+    if str(head.last_entry_sha256 or "") != previous:
+        return {"status": "BROKEN", "reason": "LEDGER_HEAD_HASH_MISMATCH", "entries": len(rows)}
+    if signature_unverifiable:
+        status = "HMAC_KEY_MISSING"
+    elif signed_count and unsigned_count:
+        status = "HASH_CHAIN_VALID_PARTIALLY_SIGNED"
+    elif signed_count:
+        status = "HMAC_CHAIN_VALID"
+    else:
+        status = "HASH_CHAIN_VALID_UNSIGNED" if rows else "EMPTY"
+    return {
+        "status": status,
+        "entries": len(rows),
+        "signed_entries": signed_count,
+        "unsigned_entries": unsigned_count,
+        "last_sequence": last_sequence,
+        "last_entry_sha256": previous or None,
+        "hmac_key_configured": bool(key and len(key) >= 32),
+        "legacy_unchained_rows_excluded": True,
+        "promotion_evidence_complete": False,
+    }
+
+
+async def verify_research_trial_ledger() -> dict[str, Any]:
+    """Verify the prospective append-only trial chain without certifying legacy rows."""
+    key = os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY") or None
+    async with SessionLocal() as db:
+        return await _verify_trial_ledger_in_session(db, key)
+
+
 def _same_immutable_row(existing: ResearchTrialArchive, payload: Mapping[str, Any]) -> bool:
     fields = (
         "trial_key", "trial_label", "asset_class", "venue", "market_type", "symbol",
@@ -225,7 +370,13 @@ def _same_immutable_row(existing: ResearchTrialArchive, payload: Mapping[str, An
 
 
 async def archive_research_trials(report: Mapping[str, Any], request: Any) -> dict[str, Any]:
-    """Append or idempotently replay each newly evaluated trial; never certify completeness."""
+    """Append/replay prospective trials under a serialized, tamper-evident ledger head.
+
+    Legacy rows from before migration 0059 remain LEGACY_UNCHAINED. New records are
+    SHA-256 chained; HMAC authenticity is asserted only when an external >=32-byte
+    ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY is configured in the backend environment.
+    This prospective ledger never replaces the signed comparable archive used for DSR.
+    """
     if not isinstance(report, Mapping):
         return {"status": "FAILED", "reason": "RESEARCH_REPORT_INVALID", "inserted": 0, "replayed": 0}
     specs = _trial_specs(report)
@@ -234,31 +385,73 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
     context = _report_context(report, request)
     inserted = replayed = unverified = 0
     evaluation_id = uuid.uuid4().hex
+    signing_key = os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY") or None
+    if signing_key is not None and len(signing_key.encode("utf-8")) < 32:
+        return {
+            "status": "FAILED", "reason": "TRIAL_LEDGER_HMAC_KEY_TOO_SHORT",
+            "inserted": 0, "replayed": 0,
+        }
     try:
         async with SessionLocal() as db:
+            head = (
+                await db.execute(
+                    select(ResearchTrialLedgerHead)
+                    .where(ResearchTrialLedgerHead.id == 1)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if head is None:
+                return {
+                    "status": "FAILED", "reason": "TRIAL_LEDGER_HEAD_MISSING",
+                    "inserted": 0, "replayed": 0,
+                }
+            integrity_before = await _verify_trial_ledger_in_session(db, signing_key)
+            if integrity_before.get("status") == "BROKEN":
+                return {
+                    "status": "FAILED", "reason": "TRIAL_LEDGER_INTEGRITY_FAILURE",
+                    "integrity": integrity_before, "inserted": 0, "replayed": 0,
+                }
+            if integrity_before.get("status") == "HMAC_KEY_MISSING":
+                return {
+                    "status": "FAILED", "reason": "TRIAL_LEDGER_HMAC_KEY_REQUIRED_TO_CONTINUE",
+                    "integrity": integrity_before, "inserted": 0, "replayed": 0,
+                }
             for label, metrics, category in specs:
                 payload = _row_payload(report, context, label, metrics, category, evaluation_id)
                 existing = await db.get(ResearchTrialArchive, payload["trial_key"])
                 if existing is not None:
                     if not _same_immutable_row(existing, payload):
-                        # The outer transaction has not committed any new trial rows.
                         return {"status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
                                 "trial_label": label, "inserted": 0, "replayed": 0}
                     replayed += 1
                     unverified += existing.archive_status != "VERIFIED"
                     continue
+
+                sequence = int(head.last_sequence or 0) + 1
+                previous_hash = str(head.last_entry_sha256 or "")
+                entry_hash, signature, ledger_status = compute_trial_ledger_integrity(
+                    payload, sequence=sequence, previous_entry_sha256=previous_hash,
+                    signing_key=signing_key,
+                )
                 try:
-                    # Isolate a uniqueness race to this row. Rolling back the whole
-                    # session here silently discards earlier trial rows in this batch.
+                    # The singleton head row is locked for this transaction. Insert
+                    # and head advance share one savepoint to keep sequence/hash atomic.
                     async with db.begin_nested():
-                        db.add(ResearchTrialArchive(**payload))
+                        db.add(ResearchTrialArchive(
+                            **payload,
+                            ledger_sequence=sequence,
+                            ledger_previous_sha256=previous_hash,
+                            ledger_entry_sha256=entry_hash,
+                            ledger_hmac_sha256=signature,
+                            ledger_status=ledger_status,
+                        ))
+                        head.last_sequence = sequence
+                        head.last_entry_sha256 = entry_hash
                         await db.flush()
                     inserted += 1
                 except IntegrityError:
                     existing = await db.get(ResearchTrialArchive, payload["trial_key"])
                     if existing is None or not _same_immutable_row(existing, payload):
-                        # The surrounding transaction is abandoned on return, so do not
-                        # claim prior flushes were committed.
                         return {"status": "FAILED", "reason": "TRIAL_IDEMPOTENCY_CONFLICT",
                                 "trial_label": label, "inserted": 0, "replayed": 0}
                     replayed += 1
@@ -266,6 +459,7 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
             await db.commit()
     except Exception as exc:
         return {"status": "FAILED", "reason": type(exc).__name__, "inserted": inserted, "replayed": replayed}
+    integrity = await verify_research_trial_ledger()
     unverified += inserted
     return {
         "status": "APPENDED" if inserted else "REPLAYED",
@@ -273,4 +467,7 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
         "unverified_records": unverified,
         "prospective_archive_only": True,
         "promotion_evidence_complete": False,
+        "ledger_integrity": integrity,
+        "ledger_hmac_configured": bool(signing_key),
+        "legacy_unchained_rows_excluded": True,
     }
