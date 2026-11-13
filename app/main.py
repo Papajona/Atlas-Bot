@@ -8066,8 +8066,21 @@ async def mark_withdrawal_not_sent(
         w.provider_status = "NOT_SENT"
         w.provider_error = req.evidence.strip()[:1000]
         w.reconciled_at = datetime.now(timezone.utc)
-        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
-        await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+        try:
+            await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
+            await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+        except ValueError as mismatch:
+            # The provider lookup proved no payout exists. Preserve that fact but
+            # leave the reserve untouched until the ledger conflict is resolved.
+            await db.commit()
+            await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
+                "id": w.id, "status": w.status, "provider_status": w.provider_status,
+                "action": "release", "reason": str(mismatch),
+            })
+            raise HTTPException(
+                409,
+                "No-send outcome was recorded; withdrawal ledger mismatch requires reconciliation",
+            ) from mismatch
         await db.commit()
         result = {"id": w.id, "request_id": w.request_id, "status": w.status, "provider_status": w.provider_status}
     await _audit("WITHDRAWAL_MARKED_NOT_SENT", {**result, "admin_id": req.admin_id, "operator_id": req.operator_id, "evidence": req.evidence.strip()})
@@ -8093,11 +8106,22 @@ async def reject_withdrawal(withdrawal_id: int, req: WithdrawalDecision, x_admin
         if w.status not in {"PENDING", "PARTIALLY_APPROVED", "APPROVED"}:
             raise HTTPException(409, f"Withdrawal is {w.status} and cannot be rejected")
         w.status = "REJECTED"
-        await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
-        await sync_wallet_from_ledger(db, w.customer_id, "USDT")
         w.rejected_by = req.admin_id
         w.rejected_at = datetime.now(timezone.utc)
         w.rejection_reason = req.reason.strip()
+        try:
+            await ledger_release_withdrawal(db, w.customer_id, w.amount, reference_id=_withdrawal_release_ref(w.request_id))
+            await sync_wallet_from_ledger(db, w.customer_id, "USDT")
+        except ValueError as mismatch:
+            await db.commit()
+            await _audit("WITHDRAWAL_LEDGER_REPLAY_MISMATCH", {
+                "id": w.id, "status": w.status, "action": "release",
+                "reason": str(mismatch),
+            })
+            raise HTTPException(
+                409,
+                "Rejection was recorded; withdrawal ledger mismatch requires reconciliation",
+            ) from mismatch
         await db.commit()
         result = {"id": w.id, "request_id": w.request_id, "status": w.status}
     await _audit("WITHDRAWAL_REJECTED", {**result, "admin_id": req.admin_id, "reason": req.reason.strip()})
