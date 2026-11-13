@@ -829,21 +829,23 @@ def fixed_signal_walk_forward_oos(
     full_sample_statistics = {
         "status": "INSUFFICIENT_DATA",
         "observations": int(len(values)),
-        "effective_observations": inference.get("effective_observations"),
+        "effective_observations": None,
         "annualized_sharpe": sharpe,
         "sample_sha256": None,
     }
-    if len(values) >= 30 and std_return > 0 and math.isfinite(std_return):
+    if (
+        len(values) >= 30
+        and std_return > 0
+        and math.isfinite(std_return)
+        and inference.get("status") == "OK"
+        and isinstance(inference.get("effective_observations"), int)
+    ):
         centred = (values - mean_return) / std_return
         import hashlib
         full_sample_statistics = {
             "status": "OK",
             "observations": int(len(values)),
-            "effective_observations": (
-                int(inference["effective_observations"])
-                if inference.get("status") == "OK"
-                else int(len(values))
-            ),
+            "effective_observations": int(inference["effective_observations"]),
             "per_period_sharpe": float(mean_return / std_return),
             "annualized_sharpe": sharpe,
             "skew": float(np.mean(centred ** 3)),
