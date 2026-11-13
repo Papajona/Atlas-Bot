@@ -263,29 +263,53 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
     chosen = best["strategy"]
     action = "SELECT"
     switch_inference = None
+    switch_hold_reason = None
     if current_row and current_strategy in STRATEGIES:
         advantage = best["score"] - current_row["score"]
         significant_lead = best["strategy"] == current_strategy
         if best["strategy"] != current_strategy:
-            # Compare net returns on identical bars in the regime being selected.
-            # This is a paired test, not a comparison of two noisy Sharpe estimates.
-            historical_regimes = classify_regime(history, asset=asset)
-            regime_mask = historical_regimes == current_regime
-            challenger_stream = _strategy_returns(
-                history, cfg, best["strategy"], costs_bps, asset
-            ).loc[regime_mask]
-            incumbent_stream = _strategy_returns(
-                history, cfg, current_strategy, costs_bps, asset
-            ).loc[regime_mask]
-            switch_inference = paired_return_lead(
-                challenger_stream.to_numpy(dtype=float),
-                incumbent_stream.to_numpy(dtype=float),
-                candidate_count=len(STRATEGIES),
-                alpha=0.05,
-                min_observations=60,
-                min_effective_observations=30,
-            )
-            significant_lead = switch_inference.get("significant_lead") is True
+            # Apply existing cheap switch controls before computing either expensive
+            # return stream. A cooldown or inadequate score advantage already means HOLD.
+            if cooldown_active:
+                switch_hold_reason = "cooldown_active"
+                switch_inference = {
+                    "status": "SKIPPED",
+                    "significant_lead": False,
+                    "reason": switch_hold_reason,
+                }
+            elif advantage < float(switch_min_advantage):
+                switch_hold_reason = "score_advantage_below_minimum"
+                switch_inference = {
+                    "status": "SKIPPED",
+                    "significant_lead": False,
+                    "reason": switch_hold_reason,
+                    "score_advantage": float(advantage),
+                    "minimum_score_advantage": float(switch_min_advantage),
+                }
+            else:
+                # Compare net returns on identical bars in the regime being selected.
+                # This is a paired test, not a comparison of two noisy Sharpe estimates.
+                historical_regimes = classify_regime(history, asset=asset)
+                regime_mask = historical_regimes == current_regime
+                challenger_stream = _strategy_returns(
+                    history, cfg, best["strategy"], costs_bps, asset
+                ).loc[regime_mask]
+                incumbent_stream = _strategy_returns(
+                    history, cfg, current_strategy, costs_bps, asset
+                ).loc[regime_mask]
+                switch_inference = paired_return_lead(
+                    challenger_stream.to_numpy(dtype=float),
+                    incumbent_stream.to_numpy(dtype=float),
+                    candidate_count=len(STRATEGIES),
+                    alpha=0.05,
+                    min_observations=60,
+                    min_effective_observations=30,
+                )
+                significant_lead = switch_inference.get("significant_lead") is True
+                if not significant_lead:
+                    switch_hold_reason = str(
+                        switch_inference.get("reason") or "paired_lead_not_significant"
+                    )
         if cooldown_active or advantage < float(switch_min_advantage) or not significant_lead:
             chosen = current_strategy
             action = "HOLD"
@@ -297,7 +321,17 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
 
     blend = []
     if blend_enabled and action != "ABSTAIN":
-        eligible = [x for x in ranked if x["score"] > 0][:max(1, int(blend_top_n))]
+        # HOLD is an explicit decision to keep the incumbent. Do not let a rejected
+        # challenger leak back into execution through the independently-ranked blend.
+        if action == "HOLD" and current_strategy in STRATEGIES:
+            eligible = [
+                row for row in ranked
+                if row["strategy"] == current_strategy and row["score"] > 0
+            ]
+        else:
+            eligible = [
+                row for row in ranked if row["score"] > 0
+            ][:max(1, int(blend_top_n))]
         if eligible:
             scores = np.asarray([x["score"] for x in eligible], dtype=float)
             # Stable softmax; never let one weak strategy dominate a strong one by noise.
@@ -321,6 +355,11 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
         "signal": float(composite), "strategy_signals": signals, "ranked": ranked,
         "blend": blend, "selection_history_bars": int(len(history)),
         "switch_inference": switch_inference,
+        "switch_hold_reason": switch_hold_reason,
+        "blend_scope": (
+            "INCUMBENT_ONLY" if action == "HOLD" and current_strategy in STRATEGIES
+            else "RANKED_POSITIVE_STRATEGIES"
+        ),
         "policy": {"switch_min_advantage": float(switch_min_advantage),
                    "switch_test": "PAIRED_NEWEY_WEST_HAC",
                    "switch_significance_alpha": 0.05,
