@@ -21,8 +21,20 @@ def _secure_service_tables(bind) -> None:
     for table in ("research_trial_ledger_head", "research_holdout_registry"):
         op.execute(sa.text(f"ALTER TABLE public.{table} ENABLE ROW LEVEL SECURITY"))
         op.execute(sa.text(f"REVOKE ALL PRIVILEGES ON TABLE public.{table} FROM PUBLIC"))
-        op.execute(sa.text(f"REVOKE ALL PRIVILEGES ON TABLE public.{table} FROM anon"))
-        op.execute(sa.text(f"REVOKE ALL PRIVILEGES ON TABLE public.{table} FROM authenticated"))
+    op.execute(sa.text("""
+        DO $atlas_research_integrity_public_acl$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+                REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM anon;
+                REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM anon;
+            END IF;
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+                REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM authenticated;
+                REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM authenticated;
+            END IF;
+        END
+        $atlas_research_integrity_public_acl$;
+    """))
     op.execute(sa.text("""
         DO $atlas_research_integrity_acl$
         DECLARE role_name text;
