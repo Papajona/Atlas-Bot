@@ -67,6 +67,7 @@ def _strategy_returns(
     *,
     execution_cost_context: dict[str, object] | None = None,
     execution_cost_namespace: str = "strategy-router",
+    precomputed_execution_costs: dict[str, tuple[pd.Series, dict[str, object]]] | None = None,
 ) -> pd.Series:
     """Return the executable strategy stream with evidence-backed event costs when available."""
     signal_frame = strategy_signals(df, cfg, asset=asset)
@@ -77,13 +78,25 @@ def _strategy_returns(
     market_returns = next_open_returns(df) - 1.0
     turnover = position.diff().abs().fillna(position.abs())
     reference_prices = df["open"].astype(float)
-    per_bar_costs, cost_audit = execution_cost_series_for_positions(
-        execution_cost_context,
-        position,
-        reference_prices,
-        namespace=f"{execution_cost_namespace}:{strategy}",
-        fallback_cost_bps=costs_bps,
+    cached_costs = (
+        precomputed_execution_costs.get(strategy)
+        if isinstance(precomputed_execution_costs, dict)
+        else None
     )
+    sliced_cached = (
+        _slice_precomputed_execution_costs(cached_costs, position.index)
+        if cached_costs is not None else None
+    )
+    if sliced_cached is not None:
+        per_bar_costs, cost_audit = sliced_cached
+    else:
+        per_bar_costs, cost_audit = execution_cost_series_for_positions(
+            execution_cost_context,
+            position,
+            reference_prices,
+            namespace=f"{execution_cost_namespace}:{strategy}",
+            fallback_cost_bps=costs_bps,
+        )
     net_values = net_returns_after_costs(
         position.to_numpy(dtype=float) * market_returns.to_numpy(dtype=float),
         turnover=turnover.to_numpy(dtype=float),
@@ -93,6 +106,82 @@ def _strategy_returns(
     result = pd.Series(net_values, index=position.index, dtype=float, name="net_return")
     result.attrs.update(cost_audit)
     return result
+
+def _slice_precomputed_execution_costs(
+    cached: tuple[pd.Series, dict[str, object]], index: pd.Index
+) -> tuple[pd.Series, dict[str, object]] | None:
+    """Slice one precomputed causal cost stream and its audit to an exact prefix."""
+    costs, full_audit = cached
+    if not isinstance(costs, pd.Series):
+        return None
+    positions = costs.index.get_indexer(index)
+    if len(positions) != len(index) or (positions < 0).any():
+        return None
+    sliced = pd.Series(
+        costs.to_numpy(dtype=float)[positions],
+        index=index,
+        dtype=float,
+        name=costs.name or "execution_cost_bps",
+    )
+    if not np.isfinite(sliced.to_numpy(dtype=float)).all():
+        return None
+    complete_by_bar = full_audit.get("_execution_cost_model_complete_by_bar")
+    reasons_by_bar = full_audit.get("_execution_cost_failure_reasons_by_bar")
+    if not isinstance(complete_by_bar, list) or len(complete_by_bar) != len(costs):
+        return None
+    if not isinstance(reasons_by_bar, list) or len(reasons_by_bar) != len(costs):
+        return None
+    complete = all(bool(complete_by_bar[position]) for position in positions)
+    reasons: dict[str, int] = {}
+    for position in positions:
+        row_reasons = reasons_by_bar[position]
+        if isinstance(row_reasons, dict):
+            for reason, count in row_reasons.items():
+                reasons[str(reason)] = reasons.get(str(reason), 0) + int(count)
+    audit: dict[str, object] = {
+        "execution_cost_model_complete": bool(complete),
+        "execution_cost_model_status": (
+            "VERIFIED_PER_BAR_EXECUTION_COSTS"
+            if complete else "STATIC_FALLBACK_OR_INCOMPLETE_PER_BAR_CONTEXT"
+        ),
+        "execution_cost_model_fingerprint": full_audit.get(
+            "execution_cost_model_fingerprint"
+        ),
+        "per_bar_execution_context_sha256": full_audit.get(
+            "per_bar_execution_context_sha256"
+        ),
+        "execution_cost_failure_reasons": reasons,
+    }
+    return sliced, audit
+
+
+def _precompute_router_execution_costs(
+    df: pd.DataFrame,
+    cfg: StrategyConfig,
+    execution_cost_context: dict[str, object] | None,
+    *,
+    costs_bps: float,
+    asset: str,
+) -> dict[str, tuple[pd.Series, dict[str, object]]]:
+    """Price every strategy's causal position stream once for walk-forward reuse."""
+    if execution_cost_context is None:
+        return {}
+    signals = strategy_signals(df, cfg, asset=asset)
+    reference_prices = df["open"].astype(float)
+    precomputed: dict[str, tuple[pd.Series, dict[str, object]]] = {}
+    for strategy in STRATEGIES:
+        positions = target_positions(
+            signals[strategy], signals["realized_vol"], cfg
+        ).shift(1).fillna(0.0)
+        precomputed[strategy] = execution_cost_series_for_positions(
+            execution_cost_context,
+            positions,
+            reference_prices,
+            namespace=f"strategy-router:{strategy}",
+            fallback_cost_bps=costs_bps,
+        )
+    return precomputed
+
 
 def _metrics(
     x: pd.Series, *, asset: str = "crypto", annualization_factor: float | None = None
@@ -130,6 +219,7 @@ def regime_conditioned_strategy_performance(
     costs_bps: float = 7.5,
     asset: str = "crypto",
     execution_cost_context: dict[str, object] | None = None,
+    precomputed_execution_costs: dict[str, tuple[pd.Series, dict[str, object]]] | None = None,
 ) -> dict:
     """Compute per-strategy performance separately inside each market regime."""
     cfg = cfg or StrategyConfig()
@@ -140,6 +230,7 @@ def regime_conditioned_strategy_performance(
         returns = _strategy_returns(
             df, cfg, strategy, costs_bps, asset,
             execution_cost_context=execution_cost_context,
+            precomputed_execution_costs=precomputed_execution_costs,
         )
         signal_frame = strategy_signals(df, cfg, asset=asset)
         positions = target_positions(
@@ -275,7 +366,8 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                     costs_bps: float = 7.5, online_scores: dict[str, float] | None = None,
                     online_weight: float = 0.25, blend_enabled: bool = True,
                     blend_top_n: int = 3,
-                    execution_cost_context: dict[str, object] | None = None) -> dict:
+                    execution_cost_context: dict[str, object] | None = None,
+                    precomputed_execution_costs: dict[str, tuple[pd.Series, dict[str, object]]] | None = None) -> dict:
     """Select/hold/blend using completed history and an uncertainty-aware switch test.
 
     The last bar is the decision bar. Strategy ranking uses prior history only.
@@ -301,6 +393,7 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
     perf = regime_conditioned_strategy_performance(
         history, cfg, costs_bps=costs_bps, asset=asset,
         execution_cost_context=history_execution_context,
+        precomputed_execution_costs=precomputed_execution_costs,
     )
     ranked = []
     for name in STRATEGIES:
@@ -355,10 +448,12 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                     challenger_stream = _strategy_returns(
                         history, cfg, best["strategy"], costs_bps, asset,
                         execution_cost_context=history_execution_context,
+                        precomputed_execution_costs=precomputed_execution_costs,
                     ).loc[regime_mask]
                     incumbent_stream = _strategy_returns(
                         history, cfg, current_strategy, costs_bps, asset,
                         execution_cost_context=history_execution_context,
+                        precomputed_execution_costs=precomputed_execution_costs,
                     ).loc[regime_mask]
                 switch_inference = paired_return_lead(
                     challenger_stream.to_numpy(dtype=float),
@@ -493,6 +588,9 @@ def router_walk_forward_backtest(
 
     signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
+    precomputed_router_costs = _precompute_router_execution_costs(
+        df, cfg, execution_cost_context, costs_bps=costs_bps, asset=asset
+    )
     rows = []
     all_net = []
     execution_audits = []
@@ -505,6 +603,7 @@ def router_walk_forward_backtest(
         perf = regime_conditioned_strategy_performance(
             train, cfg, costs_bps=costs_bps, asset=asset,
             execution_cost_context=train_context,
+            precomputed_execution_costs=precomputed_router_costs,
         )
         ranking_complete = all(
             perf.get(strategy, {}).get(regime, {}).get("execution_cost_model_complete") is True
@@ -627,6 +726,9 @@ def policy_walk_forward_backtest(
 
     signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
+    precomputed_router_costs = _precompute_router_execution_costs(
+        df, cfg, execution_cost_context, costs_bps=costs_bps, asset=asset
+    )
     fold_rows = []
     fold_series: list[pd.Series] = []
     cost_complete_by_fold = []
@@ -671,6 +773,7 @@ def policy_walk_forward_backtest(
                 costs_bps=costs_bps, online_scores=online, online_weight=online_weight,
                 blend_enabled=blend_enabled, blend_top_n=blend_top_n,
                 execution_cost_context=history_context,
+                precomputed_execution_costs=precomputed_router_costs,
             )
             if (
                 decision.get("status") == "OK"
