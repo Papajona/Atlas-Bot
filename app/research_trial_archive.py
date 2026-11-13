@@ -12,6 +12,7 @@ import json
 import math
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from sqlalchemy import select
@@ -447,6 +448,7 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
                         ))
                         head.last_sequence = sequence
                         head.last_entry_sha256 = entry_hash
+                        head.updated_at = datetime.now(timezone.utc)
                         await db.flush()
                     inserted += 1
                 except IntegrityError:
@@ -458,7 +460,14 @@ async def archive_research_trials(report: Mapping[str, Any], request: Any) -> di
                     unverified += existing.archive_status != "VERIFIED"
             await db.commit()
     except Exception as exc:
-        return {"status": "FAILED", "reason": type(exc).__name__, "inserted": inserted, "replayed": replayed}
+        # The surrounding transaction rolled back; only persisted inserts may be reported.
+        return {
+            "status": "FAILED",
+            "reason": type(exc).__name__,
+            "inserted": 0,
+            "attempted_inserts": inserted,
+            "replayed": 0,
+        }
     integrity = await verify_research_trial_ledger()
     unverified += inserted
     return {
