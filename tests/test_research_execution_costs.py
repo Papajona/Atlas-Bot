@@ -375,6 +375,77 @@ def test_execution_simulator_prices_entry_and_terminal_exit_separately():
     assert result["audit"]["per_bar_execution_cost_model_complete"] is True
 
 
+def test_execution_simulator_splits_position_reversals_into_close_and_open_events():
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h")
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 101.0],
+            "low": [99.0, 99.0, 99.0],
+            "close": [100.0, 100.0, 100.0],
+        },
+        index=index,
+    )
+    calls = []
+
+    def cost_provider(bar_position, turnover, reference_price, side, event_type):
+        calls.append((bar_position, turnover, reference_price, side, event_type))
+        return {
+            "ENTRY": 10.0,
+            "ENTRY_CLOSE": 11.0,
+            "ENTRY_OPEN": 12.0,
+            "EXIT": 20.0,
+        }[event_type]
+
+    result = simulate_execution_aware_strategy(
+        frame,
+        pd.Series([0.5, -0.25, -0.25], index=index),
+        pd.Series([10.0, 10.0, 10.0], index=index),
+        stop_atr=2.0,
+        take_profit_atr=2.0,
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=0.0,
+        transaction_cost_provider=cost_provider,
+    )
+
+    reversal_calls = [call for call in calls if call[0] == 1]
+    assert [(call[1], call[3], call[4]) for call in reversal_calls] == [
+        (0.5, "sell", "ENTRY_CLOSE"),
+        (0.25, "sell", "ENTRY_OPEN"),
+    ]
+    assert result["effective_transaction_cost_bps"].iloc[1] == pytest.approx(
+        (0.5 * 11.0 + 0.25 * 12.0) / 0.75
+    )
+
+
+def test_router_position_cost_series_splits_sign_reversal(monkeypatch):
+    from app import research_execution_costs as costs_module
+
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=2, freq="h")
+    calls = []
+
+    def fake_cost(_context, *, bar_position, turnover, reference_price, side, namespace):
+        calls.append((bar_position, turnover, reference_price, side, namespace))
+        return (10.0 if namespace.endswith(":OPEN") else 20.0), None
+
+    monkeypatch.setattr(costs_module, "execution_cost_for_event", fake_cost)
+    context = {"model_fingerprint": "f" * 64, "context_sha256": "c" * 64}
+    positions = pd.Series([0.5, -0.25], index=index)
+    prices = pd.Series([100.0, 100.0], index=index)
+
+    per_bar, audit = execution_cost_series_for_positions(
+        context, positions, prices, namespace="router-test", fallback_cost_bps=7.5
+    )
+
+    reversal_calls = [call for call in calls if call[0] == 1]
+    assert [(call[1], call[3], call[4]) for call in reversal_calls] == [
+        (0.5, "sell", "router-test:CLOSE"),
+        (0.25, "sell", "router-test:OPEN"),
+    ]
+    assert per_bar.iloc[1] == pytest.approx((0.5 * 20.0 + 0.25 * 10.0) / 0.75)
+    assert audit["execution_cost_model_complete"] is True
+
+
 def test_strategy_router_return_stream_uses_per_event_research_costs(monkeypatch):
     from app import strategy_router
 
