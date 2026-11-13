@@ -914,23 +914,8 @@ async def record_customer_paper_fill(
     # preflight. A mark fetched before preflight can age beyond the five-second
     # limit while database identity and RLS checks run.
     await _assert_customer_paper_ready()
-    if group_mark_prices_loader is not None:
-        if group_mark_prices is not None:
-            raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
-        try:
-            group_mark_prices = await group_mark_prices_loader()
-        except CustomerPaperMarkVerificationError:
-            raise
-        except CustomerPaperLedgerBlocked:
-            raise
-        except Exception as exc:
-            raise CustomerPaperMarkVerificationError(
-                "current correlation-group marks could not be verified"
-            ) from exc
-        if not isinstance(group_mark_prices, Mapping):
-            raise CustomerPaperMarkVerificationError(
-                "current correlation-group mark loader returned invalid data"
-            )
+    if group_mark_prices_loader is not None and group_mark_prices is not None:
+        raise ValueError("provide either group_mark_prices or group_mark_prices_loader, not both")
     engine = _paper_engine()
     try:
         async with engine.begin() as conn:
@@ -1063,6 +1048,24 @@ async def record_customer_paper_fill(
                     text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
                     {"lock_key": f"paper-risk-budget:{customer_id}"},
                 )
+                # Fetch marks only after acquiring the shared customer budget lock.
+                # Time spent waiting for the lock must not age quotes before the
+                # fill's strict five-second freshness check.
+                if group_mark_prices_loader is not None:
+                    try:
+                        group_mark_prices = await group_mark_prices_loader()
+                    except CustomerPaperMarkVerificationError:
+                        raise
+                    except CustomerPaperLedgerBlocked:
+                        raise
+                    except Exception as exc:
+                        raise CustomerPaperMarkVerificationError(
+                            "current correlation-group marks could not be verified"
+                        ) from exc
+                    if not isinstance(group_mark_prices, Mapping):
+                        raise CustomerPaperMarkVerificationError(
+                            "current correlation-group mark loader returned invalid data"
+                        )
                 cap = Decimal(str(settings.correlation_group_cap_usd))
                 if not cap.is_finite() or cap < 0:
                     raise CustomerPaperLedgerBlocked("correlation-group cap is not a finite non-negative amount")
