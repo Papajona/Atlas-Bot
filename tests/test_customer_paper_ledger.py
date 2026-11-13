@@ -49,9 +49,9 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
     return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
-@pytest.mark.parametrize("fail_lock_commit", [False, True])
+@pytest.mark.parametrize(("fail_lock_commit", "fail_unlock"), [(False, False), (True, False), (False, True)])
 def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without_open_transaction(
-    monkeypatch, fail_lock_commit,
+    monkeypatch, fail_lock_commit, fail_unlock,
 ):
     from app.correlation_risk import RISK_GROUPS
 
@@ -80,6 +80,7 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
             self.session_locks = set()
             self.invalidated = False
             self.fail_next_commit = False
+            self.fail_unlock_consumed = False
 
         def in_transaction(self):
             return self._in_transaction
@@ -100,8 +101,12 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
 
             if "pg_advisory_unlock(" in query:
                 lock_key = params["lock_key"]
-                released = lock_key in self.session_locks
-                self.session_locks.discard(lock_key)
+                if fail_unlock and not self.fail_unlock_consumed:
+                    self.fail_unlock_consumed = True
+                    released = False
+                else:
+                    released = lock_key in self.session_locks
+                    self.session_locks.discard(lock_key)
                 events.append(("unlock", lock_key, released))
                 return FakeResult(scalar=released)
 
@@ -190,7 +195,7 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
 
     async def load_group_marks():
         expected_locks = {
-            f"paper-risk-budget:92001",
+            "paper-risk-budget:92001",
             *(f"paper-correlation-group:92001:{group}" for group in RISK_GROUPS),
         }
         events.append(("marks", conn.in_transaction(), set(conn.session_locks)))
@@ -238,10 +243,15 @@ def test_customer_paper_fill_fetches_marks_with_session_and_legacy_locks_without
         assert write_event_indexes
         assert events.index(mark_event) < write_event_indexes[0]
 
-    assert len(unlock_events) == len(RISK_GROUPS) + 1
-    assert all(item[2] is True for item in unlock_events)
+    if fail_unlock:
+        assert len(unlock_events) == 1
+        assert unlock_events[0][2] is False
+        assert conn.invalidated is True
+    else:
+        assert len(unlock_events) == len(RISK_GROUPS) + 1
+        assert all(item[2] is True for item in unlock_events)
+        assert conn.invalidated is False
     assert conn.session_locks == set()
-    assert conn.invalidated is False
     assert engine.disposed is True
 
 def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
