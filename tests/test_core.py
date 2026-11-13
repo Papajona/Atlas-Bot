@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
+import pytest
 
-from app.trading_core import build_features, triple_barrier, rsi, _aligned_log_loss
+from app.trading_core import build_features, triple_barrier, rsi, _aligned_log_loss, predict_latest
 from app.ids import client_order_id, make_signal_id
 
 
@@ -100,3 +101,25 @@ def test_aligned_log_loss_handles_classes_absent_from_training_fold():
     score = _aligned_log_loss(y_true, probs, np.array([0, 2]))
     assert np.isfinite(score)
     assert score > 0
+
+def test_predict_latest_maps_sparse_reordered_class_probabilities(monkeypatch):
+    class SparseClassModel:
+        # The flat class is absent and the estimator's probability columns are
+        # deliberately ordered differently from the canonical [-1, 0, 1] order.
+        classes_ = np.array([2, 0], dtype=int)
+
+        def predict_proba(self, _features):
+            return np.array([[0.75, 0.25]], dtype=float)
+
+    monkeypatch.setattr(
+        "app.trading_core.load_model",
+        lambda _model_path: (SparseClassModel(), {"model_sha256": "test-model"}),
+    )
+
+    result = predict_latest(frame(500), "unused-model-path")
+
+    assert result["long_probability"] == pytest.approx(0.75)
+    assert result["short_probability"] == pytest.approx(0.25)
+    assert result["flat_probability"] == pytest.approx(0.0)
+    assert result["score"] == pytest.approx(0.5)
+    assert result["signal"] == 1
