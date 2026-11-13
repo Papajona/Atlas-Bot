@@ -89,6 +89,22 @@ def _strategy_returns(
     )
     if sliced_cached is not None:
         per_bar_costs, cost_audit = sliced_cached
+    elif execution_cost_context is None:
+        # Preserve the caller's configured scalar cost without an O(history)
+        # Python event loop on every adaptive-router decision.
+        per_bar_costs = pd.Series(
+            float(costs_bps), index=position.index, dtype=float,
+            name="execution_cost_bps",
+        )
+        cost_audit = {
+            "execution_cost_model_complete": False,
+            "execution_cost_model_status": "CALLER_STATIC_COST_NO_CALIBRATED_CONTEXT",
+            "execution_cost_model_fingerprint": None,
+            "per_bar_execution_context_sha256": None,
+            "execution_cost_failure_reasons": {
+                "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED": 1
+            },
+        }
     else:
         per_bar_costs, cost_audit = execution_cost_series_for_positions(
             execution_cost_context,
@@ -571,14 +587,15 @@ def router_walk_forward_backtest(
         return {"status": "INSUFFICIENT_DATA", "folds": []}
     cfg = cfg or StrategyConfig()
     if execution_cost_context is None:
-        execution_cost_context, context_audit = build_research_execution_cost_context(
-            df,
-            settings=settings,
-            taker_bps=float(settings.research_taker_bps),
-            base_slippage_bps=float(settings.research_slippage_bps),
-            cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
-            asset=asset,
-        )
+        # Router callers own their configured cost basis. Do not silently replace
+        # adaptive/live selection costs with research calibration settings.
+        context_audit = {
+            "execution_cost_model_complete": False,
+            "execution_cost_model_status": "CALLER_COST_BASIS_NO_CALIBRATED_CONTEXT",
+            "reason": "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED",
+            "execution_cost_model_fingerprint": None,
+            "per_bar_execution_context_sha256": None,
+        }
     else:
         context_audit = {
             "execution_cost_model_complete": True,
@@ -709,14 +726,15 @@ def policy_walk_forward_backtest(
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
     if execution_cost_context is None:
-        execution_cost_context, context_audit = build_research_execution_cost_context(
-            df,
-            settings=settings,
-            taker_bps=float(settings.research_taker_bps),
-            base_slippage_bps=float(settings.research_slippage_bps),
-            cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
-            asset=asset,
-        )
+        # Router callers own their configured cost basis. Do not silently replace
+        # adaptive/live selection costs with research calibration settings.
+        context_audit = {
+            "execution_cost_model_complete": False,
+            "execution_cost_model_status": "CALLER_COST_BASIS_NO_CALIBRATED_CONTEXT",
+            "reason": "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED",
+            "execution_cost_model_fingerprint": None,
+            "per_bar_execution_context_sha256": None,
+        }
     else:
         context_audit = {
             "execution_cost_model_complete": True,
