@@ -210,6 +210,22 @@ def test_cost_breakeven_report_uses_per_bar_session_costs_and_validates_inputs()
     assert invalid["status"] == "INVALID_COST_INPUT"
 
 
+def test_cost_stress_rejects_misaligned_per_bar_costs():
+    from app.research_validation import cost_breakeven_report
+
+    report = cost_breakeven_report(
+        np.full(30, 0.01),
+        np.ones(30),
+        taker_bps=5.0,
+        slippage_bps=5.0,
+        bars_per_year=252,
+        variable_cost_bps_per_bar=np.full(29, 10.0),
+    )
+    assert report["status"] == "INVALID_COST_ALIGNMENT"
+    assert report["input_lengths"]["gross_returns"] == 30
+    assert report["input_lengths"]["variable_cost_bps_per_bar"] == 29
+
+
 def test_session_cost_schedule_rejects_missing_or_nonfinite_sessions():
     valid = {
         "LONDON": 10.0,
