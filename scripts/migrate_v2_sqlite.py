@@ -6,7 +6,9 @@ backup API includes committed records that may still reside in the WAL file.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 import sys
 from pathlib import Path
 
@@ -15,9 +17,28 @@ def create_backup(source_path: Path, backup_path: Path) -> None:
     """Create a transactionally consistent SQLite backup, including WAL contents."""
     temporary_path = backup_path.with_name(backup_path.name + ".tmp")
     temporary_path.unlink(missing_ok=True)
-    source = sqlite3.connect(source_path)
+    try:
+        backup_mode = stat.S_IMODE(backup_path.stat().st_mode)
+    except FileNotFoundError:
+        backup_mode = 0o600
+
+    # Create the destination before sqlite3 opens it. SQLite preserves the mode
+    # of an existing file, so a mode-0600 backup stays private across replacement.
+    # New backups default to owner-only access even under a permissive umask.
+    fd = os.open(
+        temporary_path,
+        os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+        0o600,
+    )
+    try:
+        os.fchmod(fd, backup_mode)
+    finally:
+        os.close(fd)
+
+    source = None
     destination = None
     try:
+        source = sqlite3.connect(source_path)
         destination = sqlite3.connect(temporary_path)
         source.backup(destination)
         destination.commit()
@@ -27,7 +48,8 @@ def create_backup(source_path: Path, backup_path: Path) -> None:
     finally:
         if destination is not None:
             destination.close()
-        source.close()
+        if source is not None:
+            source.close()
     temporary_path.replace(backup_path)
 
 
