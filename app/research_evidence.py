@@ -302,6 +302,16 @@ def validate_execution_cost_calibration(document, trusted_public_keys, *, venue:
                 session_samples = exact_count(held.get("sample_count"))
                 session_spread_error = float(held.get("mean_absolute_spread_error_bps"))
                 session_slippage_error = float(held.get("mean_absolute_slippage_error_bps"))
+                # Bind both calibration and held-out venue observations to the exact
+                # submitted per-side schedule rate. Sample counts and generic error
+                # bounds alone cannot authenticate an arbitrary cost number.
+                submitted_rate = float(normalized_session_costs[session_name])
+                training_observed_rate = float(row.get("observed_cost_bps"))
+                heldout_observed_rate = float(held.get("observed_cost_bps"))
+                heldout_estimated_rate = float(held.get("estimated_cost_bps"))
+                observed_rate_tolerance = float(
+                    held.get("accepted_cost_error_bps", spread_limit + slippage_limit)
+                )
                 session_start = _time(row.get("validation_start") or doc.get("validation_start"))
                 session_end = _time(row.get("validation_end") or doc.get("validation_end"))
                 if (
@@ -316,6 +326,15 @@ def validate_execution_cost_calibration(document, trusted_public_keys, *, venue:
                     or session_slippage_error < 0
                     or session_spread_error > spread_limit
                     or session_slippage_error > slippage_limit
+                    or not all(math.isfinite(value) for value in (
+                        training_observed_rate, heldout_observed_rate,
+                        heldout_estimated_rate, observed_rate_tolerance,
+                    ))
+                    or observed_rate_tolerance < 0
+                    or observed_rate_tolerance > spread_limit + slippage_limit
+                    or abs(training_observed_rate - submitted_rate) > observed_rate_tolerance
+                    or abs(heldout_observed_rate - submitted_rate) > observed_rate_tolerance
+                    or abs(heldout_estimated_rate - submitted_rate) > observed_rate_tolerance
                     or session_start is None
                     or session_end is None
                     or session_start >= session_end
@@ -327,6 +346,11 @@ def validate_execution_cost_calibration(document, trusted_public_keys, *, venue:
                     "heldout_samples": session_samples,
                     "spread_error_bps": session_spread_error,
                     "slippage_error_bps": session_slippage_error,
+                    "submitted_cost_bps": submitted_rate,
+                    "training_observed_cost_bps": training_observed_rate,
+                    "heldout_observed_cost_bps": heldout_observed_rate,
+                    "heldout_estimated_cost_bps": heldout_estimated_rate,
+                    "accepted_cost_error_bps": observed_rate_tolerance,
                 }
             session_costs_reason = "SESSION_COST_SCHEDULE_VERIFIED"
         except (TypeError, ValueError, OverflowError, AttributeError):
