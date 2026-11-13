@@ -173,6 +173,17 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         db, customer_id, 25, reference_id=release_ref
                     )
                     await db.commit()
+                    # Exact retries remain idempotent; a changed amount must not
+                    # silently reuse the original release journal.
+                    await release_withdrawal(
+                        db, customer_id, 25, reference_id=release_ref
+                    )
+                    await db.commit()
+                    with pytest.raises(ValueError, match="different or inconsistent operation"):
+                        await release_withdrawal(
+                            db, customer_id, 26, reference_id=release_ref
+                        )
+                    await db.rollback()
                     balance = await customer_balance(db, customer_id)
                     assert balance["available_exact"] == "100.000000"
                     assert balance["withdrawal_reserved_exact"] == "0.000000"
@@ -186,6 +197,17 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         db, customer_id, 30, reference_id=reserve_two_ref
                     )
                     await db.commit()
+                    # The matching replay is a no-op; changing the payout amount
+                    # under the same idempotency key is rejected.
+                    await settle_withdrawal(
+                        db, customer_id, 30, reference_id=reserve_two_ref
+                    )
+                    await db.commit()
+                    with pytest.raises(ValueError, match="different or inconsistent operation"):
+                        await settle_withdrawal(
+                            db, customer_id, 31, reference_id=reserve_two_ref
+                        )
+                    await db.rollback()
 
                     balance = await customer_balance(db, customer_id)
                     assert balance["available_exact"] == "70.000000"
