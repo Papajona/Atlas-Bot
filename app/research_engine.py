@@ -440,7 +440,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
 
     # Validate venue calibration before generating any returns so the exact verified
     # per-session schedule is what the research simulator and OOS cost stress consume.
-    from .research_evidence import oos_sample_fingerprint
+    from .research_evidence import (
+        RESEARCH_PROTOCOL_VERSION, canonical_sha256, oos_sample_fingerprint,
+        validate_comparable_trial_archive, validate_crypto_universe_manifest,
+        validate_execution_cost_calibration,
+    )
+    evidence_keys = getattr(settings, "research_evidence_public_keys_json", "")
+    research_symbol = str(provenance.get("symbol") or df.attrs.get("symbol") or "").strip()
+    research_venue = str(provenance.get("exchange") or df.attrs.get("exchange") or "").strip()
+    research_market_type = str(provenance.get("market_type") or df.attrs.get("market_type") or "").strip()
+    research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
+    protocol_version = RESEARCH_PROTOCOL_VERSION
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
     model_fingerprint = canonical_sha256({
         "model": "atlas-research-cost-v2-session-aware",
@@ -587,7 +597,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         vcfg=StrategyConfig(**{**asdict(cfg), "signal_threshold": float(cfg.signal_threshold*mult)})
         vr=_component_backtest(df,"ensemble",vcfg,taker_bps,slippage_bps,asset,carry,session_costs_bps)
         variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits = _protected_component_position(
-            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
         )
         if math.isclose(float(mult), 1.00, rel_tol=0.0, abs_tol=1e-12):
             variant_oos = oos
