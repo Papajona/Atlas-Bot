@@ -8,8 +8,11 @@ in-memory fallback.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import tempfile
 import uuid
+from unittest import mock
 from decimal import Decimal
 
 import pytest
@@ -18,6 +21,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.customer_funds import (
+    DEFICIT_ACCOUNT,
     customer_balance,
     ledger_invariant_report,
     post_deposit,
@@ -29,9 +33,11 @@ from app.db import (
     Base,
     CustomerLedgerAccount,
     CustomerProfile,
+    Incident,
     LedgerEntry,
     LedgerJournal,
     LedgerJournalLine,
+    Withdrawal,
 )
 
 
@@ -85,12 +91,13 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
         # The mandatory ledger workflow sets both URLs to the isolated PostgreSQL
         # service after applying the repository's migrations. SQLite is only the
         # fallback for the ordinary developer test suite.
-        database_url = os.environ.get("ATLAS_POSTGRES_URL") or "sqlite+aiosqlite:///:memory:"
+        run_token = uuid.uuid4().hex
+        sqlite_path = os.path.join(tempfile.gettempdir(), f"atlas-custody-acceptance-{run_token}.db")
+        database_url = os.environ.get("ATLAS_POSTGRES_URL") or f"sqlite+aiosqlite:///{sqlite_path}"
         is_sqlite = database_url.startswith("sqlite")
         engine = create_async_engine(database_url, pool_pre_ping=True)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         customer_id: int | None = None
-        run_token = uuid.uuid4().hex
         wallet_id = 7001
         deposit_ref = f"acceptance-deposit-{run_token}"
         reserve_one_ref = f"acceptance-reserve-one-{run_token}"
@@ -105,6 +112,9 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
         ]
         try:
             if is_sqlite:
+                async with engine.connect() as conn:
+                    await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                    await conn.commit()
                 async with engine.begin() as conn:
                     await conn.run_sync(Base.metadata.create_all)
 
@@ -173,6 +183,31 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         db, customer_id, 25, reference_id=release_ref
                     )
                     await db.commit()
+                    # Exact retries remain idempotent; a changed amount must not
+                    # silently reuse the original release journal.
+                    await release_withdrawal(
+                        db, customer_id, 25, reference_id=release_ref
+                    )
+                    await db.commit()
+                    with mock.patch("app.customer_funds.SessionLocal", sessions):
+                        with pytest.raises(ValueError, match="different or inconsistent operation"):
+                            await release_withdrawal(
+                                db, customer_id, 26, reference_id=release_ref
+                            )
+                    # The validator rolls back the rejected action, commits its
+                    # incident in a fresh transaction, then raises. An additional
+                    # caller rollback must not erase that incident.
+                    await db.rollback()
+                    release_incident = (
+                        await db.execute(
+                            select(Incident).where(
+                                Incident.incident_key
+                                == f"WITHDRAWAL_REPLAY_MISMATCH:withdrawal-release:{release_ref}"
+                            )
+                        )
+                    ).scalar_one()
+                    assert release_incident.severity == "HIGH"
+                    assert release_incident.status == "OPEN"
                     balance = await customer_balance(db, customer_id)
                     assert balance["available_exact"] == "100.000000"
                     assert balance["withdrawal_reserved_exact"] == "0.000000"
@@ -186,6 +221,28 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         db, customer_id, 30, reference_id=reserve_two_ref
                     )
                     await db.commit()
+                    # The matching replay is a no-op; changing the payout amount
+                    # under the same idempotency key is rejected.
+                    await settle_withdrawal(
+                        db, customer_id, 30, reference_id=reserve_two_ref
+                    )
+                    await db.commit()
+                    with mock.patch("app.customer_funds.SessionLocal", sessions):
+                        with pytest.raises(ValueError, match="different or inconsistent operation"):
+                            await settle_withdrawal(
+                                db, customer_id, 31, reference_id=reserve_two_ref
+                            )
+                    await db.rollback()
+                    settlement_incident = (
+                        await db.execute(
+                            select(Incident).where(
+                                Incident.incident_key
+                                == f"WITHDRAWAL_REPLAY_MISMATCH:withdrawal-settlement:{reserve_two_ref}"
+                            )
+                        )
+                    ).scalar_one()
+                    assert settlement_incident.severity == "HIGH"
+                    assert settlement_incident.status == "OPEN"
 
                     balance = await customer_balance(db, customer_id)
                     assert balance["available_exact"] == "70.000000"
@@ -281,6 +338,12 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                     await db.rollback()
         finally:
             await engine.dispose()
+            if is_sqlite:
+                for suffix in ("", "-wal", "-shm"):
+                    try:
+                        os.remove(sqlite_path + suffix)
+                    except FileNotFoundError:
+                        pass
 
     asyncio.run(run())
 
@@ -373,3 +436,235 @@ def test_ledger_invariant_report_detects_embedded_customer_account_mismatch():
             await engine.dispose()
 
     asyncio.run(run())
+
+@pytest.mark.parametrize(
+    "reserved_debit,deficit_debit,metadata_reserved,metadata_shortfall",
+    [
+        (Decimal("20"), Decimal("10"), Decimal("20"), Decimal("10")),
+        (Decimal("-5"), Decimal("35"), Decimal("-5"), Decimal("35")),
+    ],
+)
+def test_settlement_replay_rejects_invalid_debit_components_and_persists_incident(
+    reserved_debit, deficit_debit, metadata_reserved, metadata_shortfall
+):
+    async def run():
+        sqlite_path = os.path.join(tempfile.gettempdir(), f"atlas-corrupt-settlement-{uuid.uuid4().hex}.db")
+        engine = create_async_engine(f"sqlite+aiosqlite:///{sqlite_path}", pool_pre_ping=True)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        reference_id = f"corrupt-settlement-debit-split-{uuid.uuid4().hex}"
+        idem = f"withdrawal-settlement:{reference_id}"
+        try:
+            async with engine.connect() as conn:
+                await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+                await conn.commit()
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id=f"corrupt-settlement-debit-split-{uuid.uuid4().hex}",
+                    email="",
+                    display_name="Replay validation test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                db.add(
+                    CustomerLedgerAccount(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        available=0,
+                        trading_reserved=0,
+                        withdrawal_reserved=0,
+                    )
+                )
+                journal = LedgerJournal(
+                    currency="USDT",
+                    entry_type="WITHDRAWAL_SETTLEMENT",
+                    reference_type="WITHDRAWAL",
+                    reference_id=reference_id,
+                    idempotency_key=idem,
+                    description="Deliberately inconsistent historical debit split",
+                )
+                db.add(journal)
+                await db.flush()
+                db.add_all(
+                    [
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=1,
+                            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=reserved_debit,
+                            credit=0,
+                        ),
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=2,
+                            account_code=DEFICIT_ACCOUNT,
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=deficit_debit,
+                            credit=0,
+                        ),
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=3,
+                            account_code="ASSET:TRON:WITHDRAWAL",
+                            customer_id=None,
+                            currency="USDT",
+                            debit=0,
+                            credit=30,
+                        ),
+                    ]
+                )
+                db.add(
+                    LedgerEntry(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        entry_type="WITHDRAWAL_SETTLEMENT",
+                        debit=30,
+                        credit=0,
+                        amount=30,
+                        reference_type="WITHDRAWAL",
+                        reference_id=reference_id,
+                        idempotency_key=idem,
+                        metadata_json=json.dumps(
+                            {
+                                "requested_amount": "30.000000",
+                                "settled_from_reserve": format(metadata_reserved, "f"),
+                                "shortfall": format(metadata_shortfall, "f"),
+                            },
+                            separators=(",", ":"),
+                        ),
+                    )
+                )
+                await db.commit()
+
+                with mock.patch("app.customer_funds.SessionLocal", sessions):
+                    with pytest.raises(ValueError, match="different or inconsistent operation"):
+                        await settle_withdrawal(
+                            db, customer_id, 30, reference_id=reference_id
+                        )
+                await db.rollback()
+
+                incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key
+                            == f"WITHDRAWAL_REPLAY_MISMATCH:{idem}"
+                        )
+                    )
+                ).scalar_one()
+                assert incident.severity == "HIGH"
+                assert incident.status == "OPEN"
+                detail = json.loads(incident.detail_json)
+                assert "settlement journal lines" in detail["problems"]
+        finally:
+            await engine.dispose()
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.remove(sqlite_path + suffix)
+                except FileNotFoundError:
+                    pass
+
+    asyncio.run(run())
+
+
+def test_legacy_partial_release_retry_uses_original_withdrawal_amount():
+    async def run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        request_id = "legacy-partial-release-request"
+        reference_id = f"{request_id}:release"
+        idem = f"withdrawal-release:{reference_id}"
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            async with sessions() as db:
+                profile = CustomerProfile(
+                    auth_user_id="legacy-partial-release-test",
+                    email="",
+                    display_name="Legacy partial release test",
+                )
+                db.add(profile)
+                await db.flush()
+                customer_id = int(profile.id)
+                db.add(
+                    CustomerLedgerAccount(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        available=Decimal("100"),
+                        trading_reserved=Decimal("0"),
+                        withdrawal_reserved=Decimal("0"),
+                    )
+                )
+                db.add(
+                    Withdrawal(
+                        customer_id=customer_id,
+                        wallet_id=None,
+                        request_id=request_id,
+                        amount=Decimal("30"),
+                        currency="USDT",
+                        status="FAILED",
+                    )
+                )
+                journal = LedgerJournal(
+                    currency="USDT",
+                    entry_type="WITHDRAWAL_RELEASE",
+                    reference_type="WITHDRAWAL",
+                    reference_id=reference_id,
+                    idempotency_key=idem,
+                    description="Legacy partial release without requested-amount metadata",
+                )
+                db.add(journal)
+                await db.flush()
+                db.add_all(
+                    [
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=1,
+                            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:WITHDRAWAL_RESERVED",
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=10,
+                            credit=0,
+                        ),
+                        LedgerJournalLine(
+                            journal_id=journal.id,
+                            line_no=2,
+                            account_code=f"LIABILITY:CUSTOMER:{customer_id}:USDT:AVAILABLE",
+                            customer_id=customer_id,
+                            currency="USDT",
+                            debit=0,
+                            credit=10,
+                        ),
+                    ]
+                )
+                db.add(
+                    LedgerEntry(
+                        customer_id=customer_id,
+                        currency="USDT",
+                        entry_type="WITHDRAWAL_RELEASE",
+                        debit=0,
+                        credit=10,
+                        amount=10,
+                        reference_type="WITHDRAWAL",
+                        reference_id=reference_id,
+                        idempotency_key=idem,
+                        metadata_json="{}",
+                    )
+                )
+                await db.commit()
+
+                # The old ledger only stored the effective release (10), while
+                # the immutable withdrawal request preserves the original ask (30).
+                result = await release_withdrawal(
+                    db, customer_id, 30, reference_id=reference_id
+                )
+                assert result.customer_id == customer_id
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
+
