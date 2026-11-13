@@ -497,14 +497,17 @@ def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
 require "yaml"
 deploy = YAML.load_file(ARGV.fetch(0))
 preflight = YAML.load_file(ARGV.fetch(1))
+acceptance = YAML.load_file(ARGV.fetch(2))
 abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
 abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
+abort("customer paper acceptance job missing") unless acceptance.fetch("jobs").key?("customer-paper-acceptance")
 """
     result = subprocess.run(
         [
             "ruby", "-e", ruby,
             str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
             str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
+            str(ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml"),
         ],
         capture_output=True,
         text=True,
