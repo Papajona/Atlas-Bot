@@ -486,7 +486,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert '-f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT"' in deploy
     assert '-f "dispatch_id=$dispatch_id"' in deploy
     assert 'secrets.token_hex(16)' in deploy
-    assert 'acceptance_wait_seconds=12600' in deploy
+    assert 'acceptance_wait_seconds=5400' in deploy
     assert 'acceptance_poll_interval_seconds=30' in deploy
     assert 'timeout-minutes: 300' in deploy
     assert 'gh run view "$acceptance_run_id"' in deploy
@@ -494,6 +494,18 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "select(.displayTitle == $expected)" in deploy
     assert "uniquely correlated staging preflight run was not observed" in deploy
     assert "main advanced during staging preflight" in deploy
+    gate_wait = deploy.split(
+        "      - name: Wait for required CI gates to pass on this exact commit", 1
+    )[1].split("      - name: Validate staging inputs", 1)[0]
+    assert "gate_wait_seconds=7200" in gate_wait
+    assert "gate_poll_interval_seconds=30" in gate_wait
+    assert "while true; do" in gate_wait
+    assert 'sleep "$gate_poll_interval_seconds"' in gate_wait
+    deploy_step = deploy.index("      - name: Deploy restricted paper-only Cloud Run service")
+    freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
+    cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
+    assert freshness_guard < cloud_run_change
+    assert 'GH_TOKEN: ${{ github.token }}' in deploy[deploy_step:cloud_run_change]
     assert "timeout-minutes: 300" in deploy
     assert "actions: write" in deploy
 
