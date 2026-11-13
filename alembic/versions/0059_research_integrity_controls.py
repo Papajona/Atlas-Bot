@@ -91,17 +91,25 @@ def _secure_service_tables(bind) -> None:
         END
         $atlas_holdout_immutable$;
     """))
+    # asyncpg executes prepared statements and rejects multiple top-level SQL
+    # commands in one statement. Keep every DROP/CREATE as its own migration call.
     op.execute(sa.text("""
         DROP TRIGGER IF EXISTS trg_research_holdout_registry_immutable
-            ON public.research_holdout_registry;
+            ON public.research_holdout_registry
+    """))
+    op.execute(sa.text("""
         CREATE TRIGGER trg_research_holdout_registry_immutable
         BEFORE UPDATE OR DELETE ON public.research_holdout_registry
-        FOR EACH ROW EXECUTE FUNCTION public.atlas_research_holdout_registry_immutable();
+        FOR EACH ROW EXECUTE FUNCTION public.atlas_research_holdout_registry_immutable()
+    """))
+    op.execute(sa.text("""
         DROP TRIGGER IF EXISTS trg_research_holdout_registry_no_truncate
-            ON public.research_holdout_registry;
+            ON public.research_holdout_registry
+    """))
+    op.execute(sa.text("""
         CREATE TRIGGER trg_research_holdout_registry_no_truncate
         BEFORE TRUNCATE ON public.research_holdout_registry
-        FOR EACH STATEMENT EXECUTE FUNCTION public.atlas_research_holdout_registry_immutable();
+        FOR EACH STATEMENT EXECUTE FUNCTION public.atlas_research_holdout_registry_immutable()
     """))
 
 
@@ -191,7 +199,3 @@ def downgrade() -> None:
     # can safely revisit this retained schema without recreating existing objects.
     pass
 
-def downgrade() -> None:
-    # Preserve append-only experiment records and holdout-consumption evidence.
-    # Removing their integrity metadata would allow accidental reuse/rewrite.
-    pass
