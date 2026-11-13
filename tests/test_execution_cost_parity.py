@@ -159,6 +159,23 @@ def test_shared_execution_cost_kernel_rejects_invalid_market_inputs(kwargs):
         execution_cost_components(**kwargs)
 
 
+
+def test_market_impact_kernel_rejects_infinite_coefficient_before_impact_cap():
+    from app.execution_costs import market_impact_bps
+
+    # A finite impact cap must not mask an invalid runtime coefficient. This
+    # exercises the real shared kernel validator, not a mocked caller failure.
+    with pytest.raises(
+        ValueError, match="impact_coefficient must be finite and non-negative"
+    ):
+        market_impact_bps(
+            volatility_bps=200.0,
+            participation_rate=0.1,
+            impact_coefficient=float("inf"),
+            max_market_impact_bps=100.0,
+        )
+
+
 def test_shared_net_return_kernel_rejects_invalid_costs():
     with pytest.raises(ValueError):
         net_return_after_costs(
