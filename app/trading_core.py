@@ -117,9 +117,10 @@ def triple_barrier(
     v = vol.reindex(close.index).to_numpy(dtype=float)
     h = high.reindex(close.index).to_numpy(dtype=float) if high is not None else c.copy()
     l = low.reindex(close.index).to_numpy(dtype=float) if low is not None else c.copy()
+    has_executable_open = entry_open is not None
     opens = (
         entry_open.reindex(close.index).to_numpy(dtype=float)
-        if entry_open is not None else c.copy()
+        if has_executable_open else c.copy()
     )
     y = np.full(len(c), np.nan, dtype=float)
     try:
@@ -145,7 +146,9 @@ def triple_barrier(
         raise ValueError("triple-barrier inputs must align to close index")
     for i in range(len(c) - hold):
         entry_i = i + 1
-        entry_price = opens[entry_i]
+        # Older offline callers without OHLC open data retain the historical close[i]
+        # entry anchor. Production training and walk-forward callers supply next-open.
+        entry_price = opens[entry_i] if has_executable_open else c[i]
         if (
             not np.isfinite(v[i]) or v[i] <= 0
             or not np.isfinite(entry_price) or entry_price <= 0
@@ -157,10 +160,10 @@ def triple_barrier(
         end = min(len(c), entry_i + hold)
         for j in range(entry_i, end):
             # Price gaps are executable at the observed open, not at a stale barrier.
-            if j > entry_i and opens[j] >= upper:
+            if has_executable_open and j > entry_i and opens[j] >= upper:
                 y[i] = 1
                 break
-            if j > entry_i and opens[j] <= lower:
+            if has_executable_open and j > entry_i and opens[j] <= lower:
                 y[i] = -1
                 break
             up_hit = np.isfinite(h[j]) and h[j] >= upper
