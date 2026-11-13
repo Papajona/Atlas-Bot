@@ -1305,6 +1305,9 @@ def test_customer_paper_sell_pnl_terminal_events_and_reversal_cash_guard(monkeyp
                 customer_id=customer_id,
                 fill_id=sell["fill_id"],
                 idempotency_key="reverse-eth-sale-after-spend",
+                group_mark_prices={
+                    ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
+                },
             )
         balances = await get_customer_paper_balances(customer_id=customer_id)
         by_code = {row["account_code"]: Decimal(row["balance"]) for row in balances}
