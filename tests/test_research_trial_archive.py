@@ -176,6 +176,8 @@ def test_grid_variant_archive_uses_evaluated_variant_configuration_hash():
         "oos_total_return": 0.15,
         "oos_max_drawdown": -0.04,
         "oos_trades": 22,
+        "annualization_factor": 8760,
+        "oos_return_sample": [0.01, 0.02, -0.01, 0.025],
     }
     row = _row_payload(
         report, context, "variant:t1.20:r0.80@" + variant_sha,
