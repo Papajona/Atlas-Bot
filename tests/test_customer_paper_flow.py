@@ -1813,6 +1813,31 @@ def test_customer_paper_strategy_sell_does_not_operate_on_manual_position(monkey
     assert result_without_owner["reason"] == "manual_position_requires_manual_execution"
 
 
+def test_mark_verification_failure_keeps_its_worker_log_classification(caplog):
+    import logging
+    import app.customer_paper_flow as flow
+    from app.customer_paper_lifecycle import CustomerPaperMarkVerificationError
+
+    caplog.set_level(logging.ERROR)
+
+    async def fail_mark_verification():
+        raise CustomerPaperMarkVerificationError(
+            "Current paper correlation-group marks could not be verified"
+        )
+
+    with pytest.raises(
+        CustomerPaperFlowBlocked,
+        match="Current paper correlation-group marks could not be verified",
+    ):
+        asyncio.run(flow._paper_call(
+            fail_mark_verification(),
+            "append isolated paper fill",
+        ))
+
+    assert "customer_paper_mark_verification_failed" in caplog.text
+    assert "customer_paper_ledger_operation_failed" not in caplog.text
+
+
 def test_customer_paper_overdraw_conflict_keeps_safe_recovery_signal():
     import app.customer_paper_flow as flow
 
