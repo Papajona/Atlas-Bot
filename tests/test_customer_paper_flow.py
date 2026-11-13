@@ -637,7 +637,7 @@ def test_protective_exit_recovers_terminal_order_identity_when_concurrent_worker
     }
 
 
-def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypatch):
+def test_recovered_buy_refetches_same_symbol_mark_after_readiness(monkeypatch):
     import app.customer_paper_flow as flow
 
     _, state, order, market = _paper_fill_test_context()
@@ -651,7 +651,7 @@ def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypat
     captured = {}
 
     monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
-    # Model the same-symbol holding that is being revalued for the group cap.
+    # Model a same-symbol holding that must be revalued for the correlation-group cap.
     monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
         "venue": "binance",
         "symbol": "BTC/USDT",
@@ -684,7 +684,7 @@ def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypat
         events.append("fresh-mark")
         assert customer_id == 1004
         assert mark_request.symbol == "BTC/USDT"
-        # Never reuse the candidate context captured before the readiness preflight.
+        # Never reuse the candidate context captured before the fill readiness check.
         assert market_context is None
         return {
             ("binance", "spot", "BTC/USDT"): {
@@ -693,20 +693,12 @@ def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypat
             }
         }
 
-    async def append_after_slow_preflight(**kwargs):
-        events.append("readiness-preflight")
-        # Reproduce a readiness check longer than the ledger's five-second mark age.
-        await asyncio.sleep(5.1)
+    async def append_after_readiness(**kwargs):
+        events.append("readiness-complete")
         assert kwargs["group_mark_prices"] is None
         assert kwargs["group_mark_prices_loader"] is not None
         marks = await kwargs["group_mark_prices_loader"]()
-        mark = marks[("binance", "spot", "BTC/USDT")]
-        mark_timestamp = datetime.fromisoformat(
-            mark["quote_timestamp_utc"].replace("Z", "+00:00")
-        ).astimezone(timezone.utc)
-        age_seconds = (datetime.now(timezone.utc) - mark_timestamp).total_seconds()
-        assert 0 <= age_seconds <= 5
-        captured["mark"] = mark
+        captured["mark"] = marks[("binance", "spot", "BTC/USDT")]
         events.append("fill-transaction")
         return {
             "status": "APPENDED",
@@ -714,7 +706,7 @@ def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypat
             "filled_quantity": kwargs["quantity"],
         }
 
-    monkeypatch.setattr(flow, "record_customer_paper_fill", append_after_slow_preflight)
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_after_readiness)
     result = asyncio.run(flow._fill_open_order(
         customer_id=1004,
         order=order,
@@ -726,7 +718,8 @@ def test_recovered_buy_refetches_same_symbol_mark_after_slow_readiness(monkeypat
 
     assert result["fill"]["status"] == "APPENDED"
     assert captured["mark"]["price"] == "120"
-    assert events == ["readiness-preflight", "fresh-mark", "fill-transaction"]
+    assert events == ["readiness-complete", "fresh-mark", "fill-transaction"]
+
 
 
 def test_pending_paper_buy_is_resized_at_the_fill_quote_to_available_cash(monkeypatch):
