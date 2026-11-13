@@ -852,6 +852,8 @@ def fixed_signal_walk_forward_oos(
     benchmark_random_trials: int = 100,
     session_costs_bps: dict[str, float] | None = None,
     transaction_cost_bps_per_bar: pd.Series | None = None,
+    execution_cost_context: dict[str, object] | None = None,
+    benchmark_execution_cost_namespace: str = "research:ensemble",
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -972,6 +974,9 @@ def fixed_signal_walk_forward_oos(
     oos_benchmark_entry_signal_blocks: list[np.ndarray] = []
     oos_benchmark_atr_blocks: list[np.ndarray] = []
     oos_candidate_net_blocks = []
+    oos_execution_cost_context_blocks: list[dict[str, object] | None] | None = (
+        [] if execution_cost_context is not None else None
+    )
     trades = 0
     for fold in splits:
         start, end = fold.test_start, fold.test_end
@@ -981,6 +986,13 @@ def fixed_signal_walk_forward_oos(
         oos_gross_returns.append(gross.iloc[start:end])
         oos_turnover.append(turnover.iloc[start:end])
         oos_ohlc_blocks.append(df.iloc[start:end].copy())
+        if oos_execution_cost_context_blocks is not None:
+            from .research_execution_costs import slice_research_execution_context
+            oos_execution_cost_context_blocks.append(
+                slice_research_execution_context(
+                    execution_cost_context, df.index[start:end]
+                )
+            )
         if benchmark_signal is not None:
             oos_benchmark_entry_signal_blocks.append(benchmark_signal.iloc[start:end].to_numpy(dtype=float))
         if benchmark_atr is not None:
@@ -1111,6 +1123,8 @@ def fixed_signal_walk_forward_oos(
             cooldown_bars=benchmark_cooldown_bars,
             random_trials=benchmark_random_trials,
             session_costs_bps=session_costs_bps,
+            execution_cost_context_blocks=oos_execution_cost_context_blocks,
+            candidate_execution_cost_namespace=benchmark_execution_cost_namespace,
         )
     return {
         "status": "OK",
