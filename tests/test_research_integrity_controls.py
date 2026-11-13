@@ -630,6 +630,35 @@ def test_ai_triple_barrier_marks_target_neutral_when_execution_cost_exceeds_rewa
     # The target is only 1% away while round-trip execution costs are 2%.
     assert labels.iloc[0] == 0.0
 
+def test_triple_barrier_timeout_uses_net_return_before_volatility_dead_zone():
+    index = pd.date_range("2026-02-01", periods=5, freq="h", tz="UTC")
+    close = pd.Series([100.0, 100.0, 101.1, 101.1, 101.1], index=index)
+    volatility = pd.Series(0.01, index=index)
+    # A 5-sigma barrier is not touched during the two-bar timeout window.
+    no_touch_high = close.copy()
+    no_touch_low = close.copy()
+
+    gross = triple_barrier(
+        close, volatility, no_touch_high, no_touch_low,
+        pt=5.0, sl=5.0, max_hold=2, round_trip_cost_bps=0.0,
+    )
+    fee_reduces_to_flat = triple_barrier(
+        close, volatility, no_touch_high, no_touch_low,
+        pt=5.0, sl=5.0, max_hold=2, round_trip_cost_bps=70.0,
+    )
+    fee_turns_net_negative = triple_barrier(
+        close, volatility, no_touch_high, no_touch_low,
+        pt=5.0, sl=5.0, max_hold=2, round_trip_cost_bps=170.0,
+    )
+
+    # Gross timeout return is +1.1%. After 70 bps fees it is +0.4%,
+    # inside the 0.5% volatility dead zone; after 170 bps it is -0.6%.
+    assert gross.iloc[0] == 1.0
+    assert fee_reduces_to_flat.iloc[0] == 0.0
+    assert fee_turns_net_negative.iloc[0] == -1.0
+
+
+
 
 
 def test_one_time_holdout_release_requires_risk_officer_authorization():
