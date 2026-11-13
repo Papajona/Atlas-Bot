@@ -28,6 +28,7 @@ from .customer_paper_ledger import (
     get_customer_paper_balances,
 )
 from .customer_paper_lifecycle import (
+    CustomerPaperMarkVerificationError,
     CustomerPaperOrderConflict,
     cancel_customer_paper_order,
     expire_customer_paper_order,
@@ -952,7 +953,7 @@ def build_customer_paper_router(
                                     profile.id, mark_req, None
                                 )
                             except Exception as mark_exc:
-                                raise CustomerPaperOrderConflict(
+                                raise CustomerPaperMarkVerificationError(
                                     "Current paper correlation-group marks could not be verified"
                                 ) from mark_exc
 
