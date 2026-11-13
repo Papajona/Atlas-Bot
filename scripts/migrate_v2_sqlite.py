@@ -22,18 +22,16 @@ def create_backup(source_path: Path, backup_path: Path) -> None:
     except FileNotFoundError:
         backup_mode = 0o600
 
-    # Create the destination before sqlite3 opens it. SQLite preserves the mode
-    # of an existing file, so a mode-0600 backup stays private across replacement.
-    # New backups default to owner-only access even under a permissive umask.
+    # Keep the temporary database owner-only throughout the copy, regardless
+    # of the process umask or the previous backup's mode. Apply the previous
+    # backup's exact mode (or 0600 for a new backup) only after SQLite is closed,
+    # immediately before the atomic replacement.
     fd = os.open(
         temporary_path,
         os.O_CREAT | os.O_EXCL | os.O_WRONLY,
         0o600,
     )
-    try:
-        os.fchmod(fd, backup_mode)
-    finally:
-        os.close(fd)
+    os.close(fd)
 
     source = None
     destination = None
@@ -50,6 +48,7 @@ def create_backup(source_path: Path, backup_path: Path) -> None:
             destination.close()
         if source is not None:
             source.close()
+    os.chmod(temporary_path, backup_mode)
     temporary_path.replace(backup_path)
 
 
