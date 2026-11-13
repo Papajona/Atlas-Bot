@@ -463,7 +463,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
 
     assert "workflow_dispatch:" in trigger_header
     assert "push:" in trigger_header
-    assert "branches:\\n      - main" in trigger_header
+    assert "branches:\n      - main" in trigger_header
     assert "workflow_run:" not in trigger_header
     assert "github.event_name == 'push' || github.event_name == 'workflow_dispatch'" in job
     assert "atlas-paper-staging-deploy-once-20261023" not in deploy
