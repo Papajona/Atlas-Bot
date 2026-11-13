@@ -25,12 +25,12 @@ def _secure_service_tables(bind) -> None:
         DO $atlas_research_integrity_public_acl$
         BEGIN
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
-                REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM anon;
-                REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM anon;
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM anon';
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM anon';
             END IF;
             IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
-                REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM authenticated;
-                REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM authenticated;
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM authenticated';
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM authenticated';
             END IF;
         END
         $atlas_research_integrity_public_acl$;
