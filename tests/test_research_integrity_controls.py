@@ -116,7 +116,7 @@ def test_triple_barrier_costs_widen_barriers_and_timeout_dead_zone():
 
 def test_triple_barrier_uses_entry_session_costs_for_each_label():
     idx = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    close = pd.Series([120.0, 100.0, 102.0, 103.0], index=idx)
+    close = pd.Series([120.0, 100.0, 101.9, 103.0], index=idx)
     vol = pd.Series([0.01] * 4, index=idx)
     high = pd.Series([121.0, 101.5, 102.9, 104.0], index=idx)
     low = pd.Series([119.0, 99.0, 100.0, 101.0], index=idx)
