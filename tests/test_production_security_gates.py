@@ -471,6 +471,13 @@ def test_staging_deployment_cancels_superseded_runs_and_rechecks_sha_before_depl
     assert guard < comparison < image < mutation
     assert "main advanced before Cloud Run deployment" in deploy_step
 
+    post_deploy_guard = deploy.split(
+        "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert 'current_main_sha="$(gh api' in post_deploy_guard
+    assert 'if [[ "$current_main_sha" != "$GITHUB_SHA" ]]' in post_deploy_guard
+    assert "main advanced during staging deployment" in post_deploy_guard
+
 def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_gates():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     trigger_header = deploy.split("\npermissions:", 1)[0]
