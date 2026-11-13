@@ -379,3 +379,18 @@ def test_staging_acceptance_uses_pinned_runner_and_hashlock_python_version():
     python_version = workflow.index('python-version: "3.13"', setup_python)
     dependency_install = workflow.index("Install hash-locked Atlas dependencies")
     assert setup_python < python_version < dependency_install
+
+def test_customer_paper_api_and_worker_defer_risk_marks_until_fill_readiness():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    api = (root / "app" / "customer_paper_api.py").read_text(encoding="utf-8")
+    worker = (root / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
+
+    assert "group_mark_prices = await group_mark_price_loader(" not in api
+    assert "group_mark_prices = await group_mark_price_loader(" not in worker
+    assert "group_mark_prices_loader = load_group_marks_after_preflight" in api
+    assert "group_mark_prices_loader = load_group_marks_after_preflight" in worker
+    assert api.count("group_mark_prices_loader=group_mark_prices_loader") == 2
+    assert worker.count("group_mark_prices_loader=group_mark_prices_loader") == 1
+
