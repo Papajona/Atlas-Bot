@@ -579,46 +579,65 @@ def router_walk_forward_backtest(
 
 
 def policy_walk_forward_backtest(
-    df: pd.DataFrame, cfg: StrategyConfig | None = None, *, asset: str = "crypto",
-    costs_bps: float = 7.5, folds: int = 5, min_train: int = 800, min_trades: int = 20,
-    switch_min_advantage: float = 0.15, min_regime_bars: int = 3,
-    online_weight: float = 0.25, cooldown_bars: int = 6, blend_enabled: bool = True,
-    blend_top_n: int = 3, decision_stride: int = 4,
+    df: pd.DataFrame,
+    cfg: StrategyConfig | None = None,
+    *,
+    asset: str = "crypto",
+    costs_bps: float = 7.5,
+    folds: int = 5,
+    min_train: int = 800,
+    min_trades: int = 20,
+    switch_min_advantage: float = 0.15,
+    min_regime_bars: int = 3,
+    online_weight: float = 0.25,
+    cooldown_bars: int = 6,
+    blend_enabled: bool = True,
+    blend_top_n: int = 3,
+    decision_stride: int = 4,
+    execution_cost_context: dict[str, object] | None = None,
 ) -> dict:
-    """Walk-forward validate the adaptive router policy, including feedback and switching.
-
-    This is intentionally a research simulation. Each test-bar reward becomes available
-    only after that bar, so later selections may use it while earlier selections cannot.
-    The simulator mirrors the live router's hold/switch/blend/abstain logic closely enough
-    to test the policy as a whole rather than only ranking component strategies.
-    """
+    """Walk-forward validate adaptive routing with the same per-event cost inputs."""
     cfg = cfg or StrategyConfig()
     splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
+    if execution_cost_context is None:
+        execution_cost_context, context_audit = build_research_execution_cost_context(
+            df,
+            settings=settings,
+            taker_bps=float(settings.research_taker_bps),
+            base_slippage_bps=float(settings.research_slippage_bps),
+            cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
+            asset=asset,
+        )
+    else:
+        context_audit = {
+            "execution_cost_model_complete": True,
+            "execution_cost_model_fingerprint": execution_cost_context.get("model_fingerprint"),
+            "per_bar_execution_context_sha256": execution_cost_context.get("context_sha256"),
+        }
+
     signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
     fold_rows = []
     fold_series: list[pd.Series] = []
+    cost_complete_by_fold = []
+    failure_reasons: dict[str, int] = {}
 
     for fold in splits:
         current_strategy = None
         last_switch_bar = -10**9
         observed = []
-        # A result ending at open[t] is not available to decisions made at earlier
-        # closes. Queue feedback until its endpoint bar has completed.
         pending_feedback = []
-        prev_pos = 0.0
+        previous_position = 0.0
         net_rows = []
         test_start, test_end = fold.test_start, fold.test_end
         if test_end - test_start < 3:
             continue
         stride = max(1, int(decision_stride))
-        # A decision made after close[i] may only enter at open[i + 1].  Leave
-        # enough bars inside the held-out fold to measure an executable open-to-open
-        # return without borrowing prices from the next fold.
         decision_points = list(range(test_start, max(test_start + 1, test_end - 2), stride))
         net_index = []
+        fold_cost_complete = True
         for i in decision_points:
             still_pending = []
             for available_at, feedback in pending_feedback:
@@ -628,6 +647,9 @@ def policy_walk_forward_backtest(
                     still_pending.append((available_at, feedback))
             pending_feedback = still_pending
             history = df.iloc[: i + 1]
+            history_context = slice_research_execution_context(
+                execution_cost_context, history.index
+            )
             current_regime = str(regimes.iloc[i])
             cooldown_active = (i - last_switch_bar) < int(max(0, cooldown_bars))
             online = online_strategy_scores(
@@ -640,23 +662,30 @@ def policy_walk_forward_backtest(
                 switch_min_advantage=switch_min_advantage, min_trades=min_trades,
                 costs_bps=costs_bps, online_scores=online, online_weight=online_weight,
                 blend_enabled=blend_enabled, blend_top_n=blend_top_n,
+                execution_cost_context=history_context,
             )
             if decision.get("status") != "OK" or decision.get("strategy") in {None, "none"}:
-                target_pos = 0.0
+                target_position = 0.0
             else:
                 signal = float(decision.get("signal", 0.0))
-                vol = float(signals.iloc[i].get("realized_vol") or 0.0)
-                if not np.isfinite(vol) or vol <= 0 or abs(signal) < cfg.signal_threshold:
-                    target_pos = 0.0
+                volatility = float(signals.iloc[i].get("realized_vol") or 0.0)
+                if (
+                    not np.isfinite(volatility)
+                    or volatility <= 0.0
+                    or abs(signal) < cfg.signal_threshold
+                ):
+                    target_position = 0.0
                 else:
-                    lev = min(cfg.max_leverage, cfg.target_vol_annual / vol)
-                    target_pos = float(np.clip(signal * lev, -cfg.max_leverage, cfg.max_leverage))
+                    leverage = min(cfg.max_leverage, cfg.target_vol_annual / volatility)
+                    target_position = float(
+                        np.clip(signal * leverage, -cfg.max_leverage, cfg.max_leverage)
+                    )
                 if decision.get("action") == "SWITCH":
                     last_switch_bar = i
-                current_strategy = str(decision.get("strategy") or current_strategy or "") or None
+                current_strategy = str(
+                    decision.get("strategy") or current_strategy or ""
+                ) or None
 
-            # Price exposure starts at the first executable open after the signal bar.
-            # The next decision likewise only changes exposure at its following open.
             next_i = min(i + stride, test_end - 2)
             entry_i = i + 1
             exit_i = next_i + 1
@@ -664,36 +693,68 @@ def policy_walk_forward_backtest(
                 continue
             entry_open = float(df["open"].iloc[entry_i])
             exit_open = float(df["open"].iloc[exit_i])
-            if not np.isfinite(entry_open) or not np.isfinite(exit_open) or entry_open <= 0:
+            if (
+                not np.isfinite(entry_open)
+                or not np.isfinite(exit_open)
+                or entry_open <= 0.0
+            ):
                 raise ValueError("router walk-forward requires finite positive executable open prices")
-            next_ret = exit_open / entry_open - 1.0
-            turnover = abs(target_pos - prev_pos)
-            net = target_pos * next_ret - turnover * float(costs_bps) / 10000.0
+            next_return = exit_open / entry_open - 1.0
+            turnover = abs(target_position - previous_position)
+            cost_rate = float(costs_bps)
+            if turnover > 0.0:
+                side = "buy" if target_position - previous_position > 0.0 else "sell"
+                calibrated_cost, reason = execution_cost_for_event(
+                    execution_cost_context,
+                    bar_position=entry_i,
+                    turnover=turnover,
+                    reference_price=entry_open,
+                    side=side,
+                    namespace=f"policy-router:fold:{len(fold_rows)}:event:{entry_i}",
+                )
+                if calibrated_cost is None:
+                    fold_cost_complete = False
+                    key = reason or "EXECUTION_EVENT_UNAVAILABLE"
+                    failure_reasons[key] = failure_reasons.get(key, 0) + 1
+                else:
+                    cost_rate = calibrated_cost
+            net = target_position * next_return - turnover * cost_rate / 10_000.0
             net_rows.append(net)
             net_index.append(df.index[exit_i])
-            if target_pos != 0.0:
-                reward_bps = float(np.sign(target_pos) * next_ret * 10000.0 - float(costs_bps) * (1.0 if prev_pos == 0.0 else 0.5))
+            if target_position != 0.0:
+                reward_cost_bps = (
+                    turnover / abs(target_position) * cost_rate
+                    if abs(target_position) > 0.0 else 0.0
+                )
+                reward_bps = float(
+                    np.sign(target_position) * next_return * 10_000.0 - reward_cost_bps
+                )
                 pending_feedback.append((exit_i, {
                     "strategy": str(current_strategy or decision.get("strategy") or "ensemble"),
                     "regime": current_regime,
                     "net_return_bps": reward_bps,
-                    # Feedback is queued until the endpoint bar has completed.
                     "created_at": df.index[exit_i].to_pydatetime(),
                 }))
-            prev_pos = target_pos
+            previous_position = target_position
 
         fold_net = pd.Series(net_rows, index=pd.DatetimeIndex(net_index))
         fold_series.append(fold_net)
-        fm = _metrics(fold_net, asset=asset)
-        fm.update({
+        fold_cost_complete = fold_cost_complete and bool(execution_cost_context is not None)
+        cost_complete_by_fold.append(fold_cost_complete)
+        fold_metrics = _metrics(fold_net, asset=asset)
+        fold_metrics.update({
             "test_start": df.index[test_start].isoformat(),
             "test_end": df.index[test_end - 1].isoformat(),
+            "execution_cost_model_complete": fold_cost_complete,
         })
-        fold_rows.append(fm)
+        fold_rows.append(fold_metrics)
 
     joined = pd.concat(fold_series).sort_index() if fold_series else pd.Series(dtype=float)
     overall = _metrics(joined, asset=asset)
-    positive_ratio = (sum(float(x.get("total_return", 0.0)) > 0 for x in fold_rows) / len(fold_rows)) if fold_rows else 0.0
+    positive_ratio = (
+        sum(float(row.get("total_return", 0.0)) > 0 for row in fold_rows) / len(fold_rows)
+        if fold_rows else 0.0
+    )
     overall.update({
         "status": "OK" if fold_rows else "INSUFFICIENT_DATA",
         "folds": fold_rows,
@@ -701,6 +762,20 @@ def policy_walk_forward_backtest(
         "router": "FULL_ADAPTIVE_POLICY_WALK_FORWARD",
         "includes": ["regime", "online_outcome_feedback", "switch_hysteresis", "blending", "abstention"],
         "decision_stride_bars": int(max(1, decision_stride)),
+        "execution_cost_model_complete": (
+            bool(cost_complete_by_fold) and all(cost_complete_by_fold)
+        ),
+        "execution_cost_calibration_status": context_audit.get(
+            "execution_cost_calibration_status"
+        ),
+        "execution_cost_model_fingerprint": context_audit.get(
+            "execution_cost_model_fingerprint"
+        ),
+        "per_bar_execution_context_sha256": context_audit.get(
+            "per_bar_execution_context_sha256"
+        ),
+        "execution_cost_model_reason": context_audit.get("reason"),
+        "execution_cost_failure_reasons": failure_reasons,
     })
     return overall
 
