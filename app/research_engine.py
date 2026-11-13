@@ -18,7 +18,7 @@ from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
                                   multiple_testing_sharpe_adjustment, cost_sensitivity,
                                   purged_walk_forward_splits, fixed_signal_walk_forward_oos,
                                   regime_conditioned_performance, oos_promotion_gate,
-                                  deflated_sharpe_report)
+                                  deflated_sharpe_report, deflated_sharpe_report_from_summary)
 
 
 def _safe(x: float, default: float = 0.0) -> float:
@@ -70,38 +70,40 @@ def _verified_dsr_comparable_trial_count(archive_verified: bool, archive_sharpes
 
 
 def _full_sample_dsr_diagnostic(
-    full_sample: object,
+    full_sample_statistics: object,
     trial_sharpes_annual: list[float],
     bars_per_year: int,
     *,
     expected_trial_count: int,
 ) -> dict[str, object]:
-    """Compute full-OOS DSR from current-run variants only, never promotion evidence."""
-    sample = np.asarray(full_sample if isinstance(full_sample, (list, tuple, np.ndarray)) else [], dtype=float)
-    sample = sample[np.isfinite(sample)]
+    """Compute a full-OOS DSR from compact candidate summaries, not raw arrays."""
+    summary = full_sample_statistics if isinstance(full_sample_statistics, dict) else {}
     sharpes = [float(value) for value in trial_sharpes_annual if math.isfinite(float(value))]
+    observations = int(summary.get("observations", 0) or 0)
     if len(sharpes) != int(expected_trial_count) or len(sharpes) < 2:
         return {
             "status": "INCOMPLETE_CURRENT_RUN_FULL_SAMPLE_TRIAL_SET",
-            "observations": int(len(sample)),
+            "observations": observations,
             "trial_count_current_run": len(sharpes),
             "expected_trial_count": int(expected_trial_count),
         }
-    report = deflated_sharpe_report(sample, sharpes, len(sharpes), max(1, int(bars_per_year)))
+    report = deflated_sharpe_report_from_summary(
+        summary, sharpes, len(sharpes), max(1, int(bars_per_year))
+    )
     report.update({
         "trial_scope": "CURRENT_RUN_ONLY_FULL_OOS_SAMPLE_DIAGNOSTIC",
         "trial_count_current_run": len(sharpes),
         "historical_archive_verified": False,
         "historical_archive_required_for_promotion": True,
         "promotion_eligible": False,
+        "sample_sha256": summary.get("sample_sha256"),
         "note": (
-            "Full uncapped OOS diagnostic. It uses every current-run candidate evaluated on this full sample; "
-            "no complete signed historical archive is validated for this full-sample fingerprint, so it cannot "
-            "satisfy the promotion gate."
+            "Full uncapped OOS diagnostic. It uses compact statistics for every current-run candidate "
+            "evaluated on this full sample; no complete signed historical archive is validated for this "
+            "full-sample fingerprint, so it cannot satisfy the promotion gate."
         ),
     })
     return report
-
 
 
 def _apply_protective_halts(
@@ -573,7 +575,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "oos_sharpe":variant_oos.get("sharpe"), "oos_total_return":variant_oos.get("oos_total_return"),
             "oos_max_drawdown":variant_oos.get("max_drawdown"), "oos_trades":variant_oos.get("trades"),
             "oos_return_sample":variant_oos.get("oos_return_sample", []),
-            "oos_return_sample_full":variant_oos.get("oos_return_sample_full", []),
+            "full_sample_statistics":variant_oos.get("full_sample_statistics", {}),
         })
     robustness={
         "monte_carlo": monte_carlo_bootstrap(
@@ -825,9 +827,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         if row.get("status") == "OK" and value is not None and math.isfinite(value):
             current_trial_sharpes.append(value)
             current_trial_labels.append(f"component:{component}")
-        full_value = _sample_annualized_sharpe(row.get("oos_return_sample_full") or [])
-        if row.get("status") == "OK" and full_value is not None and math.isfinite(full_value):
-            current_trial_sharpes_full.append(full_value)
+        full_stats = row.get("full_sample_statistics") if isinstance(row.get("full_sample_statistics"), dict) else {}
+        full_value = full_stats.get("annualized_sharpe")
+        if row.get("status") == "OK" and isinstance(full_value, (int, float)) and math.isfinite(float(full_value)):
+            current_trial_sharpes_full.append(float(full_value))
             current_trial_labels_full.append(f"component:{component}")
     for variant in variants:
         if math.isclose(float(variant.get("multiplier", 1.0)), 1.0, rel_tol=0.0, abs_tol=1e-12):
@@ -836,9 +839,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         if variant.get("oos_status") == "OK" and value is not None and math.isfinite(value):
             current_trial_sharpes.append(value)
             current_trial_labels.append(f"variant:{variant['multiplier']}")
-        full_value = _sample_annualized_sharpe(variant.get("oos_return_sample_full") or [])
-        if variant.get("oos_status") == "OK" and full_value is not None and math.isfinite(full_value):
-            current_trial_sharpes_full.append(full_value)
+        full_stats = variant.get("full_sample_statistics") if isinstance(variant.get("full_sample_statistics"), dict) else {}
+        full_value = full_stats.get("annualized_sharpe")
+        if variant.get("oos_status") == "OK" and isinstance(full_value, (int, float)) and math.isfinite(float(full_value)):
+            current_trial_sharpes_full.append(float(full_value))
             current_trial_labels_full.append(f"variant:{variant['multiplier']}")
     current_trials_complete = (
         len(current_trial_sharpes) == len(this_labels)
@@ -902,17 +906,15 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Report the full uncapped fixed-signal OOS sample alongside the existing <=5,000-bar
     # promotion sample. Historical archive outcomes are tied to the capped sample SHA, so
     # this second DSR is deliberately a current-run-only diagnostic and cannot promote.
-    full_oos_sample = oos.get("oos_return_sample_full") or []
+    full_sample_statistics = oos.get("full_sample_statistics") or {}
     full_sample_dsr = _full_sample_dsr_diagnostic(
-        full_oos_sample,
+        full_sample_statistics,
         current_trial_sharpes_full,
         max(1, int(round(annualization_factor))),
         expected_trial_count=len(this_labels),
     )
-    full_sample_array = np.asarray(full_oos_sample, dtype="<f8")
-    full_sample_dsr["full_sample_sha256"] = hashlib.sha256(full_sample_array.tobytes()).hexdigest()
     full_sample_dsr["trial_labels_current_run"] = current_trial_labels_full
-    oos["full_sample_observations"] = int(len(full_sample_array))
+    oos["full_sample_observations"] = int(full_sample_statistics.get("observations", 0) or 0)
     oos["capped_sample_observations"] = int(
         np.isfinite(np.asarray(oos.get("oos_return_sample") or [], dtype=float)).sum()
     )
@@ -967,8 +969,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         in_sample_ranked = _rank_for_research(results.copy())
     # Headline order is based on held-out metrics; invalid OOS results always rank last.
     oos_ranked = _rank_by_oos(results.copy(), per_strategy_oos)
-    for sample_target in [oos, *per_strategy_oos.values(), *variants]:
-        sample_target.pop("oos_return_sample_full", None)
     return {
         "research_version": "3.10.3-validation-v2",
         "asset_class": str(asset).lower(),
