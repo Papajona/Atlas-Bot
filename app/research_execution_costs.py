@@ -180,7 +180,7 @@ def build_research_execution_cost_context(
     try:
         canonical_ohlcv = df.loc[:, ["open", "high", "low", "close", "volume"]]
         serialized_ohlcv = canonical_ohlcv.reset_index().to_csv(
-            index=False, float_format="%.17g", lineterminator="\\n"
+            index=False, float_format="%.17g", lineterminator="\n"
         )
         current_dataset_sha256 = hashlib.sha256(
             serialized_ohlcv.encode("utf-8")
