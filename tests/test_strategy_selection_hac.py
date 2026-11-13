@@ -23,7 +23,11 @@ def test_paired_hac_comparison_recognizes_a_clear_net_return_lead():
 def test_paired_hac_comparison_holds_for_a_small_noisy_lead():
     rng = np.random.default_rng(7)
     incumbent = rng.normal(0.0, 0.002, 800)
-    challenger = rng.normal(0.00003, 0.002, 800)
+    paired_noise = rng.normal(0.0, 0.002, 800)
+    # Keep the paired mean close to the intended small edge deterministically;
+    # independent sample draws can create an accidental significant lead.
+    paired_noise -= paired_noise.mean()
+    challenger = incumbent + 0.00003 + paired_noise
     result = paired_return_lead(challenger, incumbent, candidate_count=5)
     assert result["status"] == "OK"
     assert result["significant_lead"] is False
