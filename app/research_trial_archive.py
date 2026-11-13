@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
 from .db import ResearchTrialArchive, ResearchTrialLedgerHead, SessionLocal
@@ -235,7 +235,7 @@ _LEDGER_PAYLOAD_FIELDS = (
     "annualized_sharpe", "oos_total_return", "max_drawdown", "trades", "results_sha256",
     "archive_status",
 )
-_LEDGER_VERSION = "atlas-research-trial-ledger-v1"
+_LEDGER_VERSION = "atlas-research-trial-ledger-v2"
 
 
 def _ledger_payload(value: Mapping[str, Any] | ResearchTrialArchive) -> dict[str, Any]:
@@ -244,23 +244,79 @@ def _ledger_payload(value: Mapping[str, Any] | ResearchTrialArchive) -> dict[str
     return {field: getattr(value, field) for field in _LEDGER_PAYLOAD_FIELDS}
 
 
+def _load_trial_ledger_keyring() -> tuple[dict[str, bytes], str | None]:
+    """Load all retained HMAC keys plus the explicit active key identifier."""
+    raw = os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_KEYRING_JSON")
+    active_id = str(os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_ACTIVE_KEY_ID") or "").strip()
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("TRIAL_LEDGER_KEYRING_INVALID_JSON") from exc
+        if not isinstance(parsed, dict) or not parsed:
+            raise ValueError("TRIAL_LEDGER_KEYRING_EMPTY")
+        keyring: dict[str, bytes] = {}
+        for key_id, secret in parsed.items():
+            normalized_id = str(key_id).strip()
+            if not normalized_id or len(normalized_id) > 100 or not isinstance(secret, str):
+                raise ValueError("TRIAL_LEDGER_KEYRING_ENTRY_INVALID")
+            encoded = secret.encode("utf-8")
+            if len(encoded) < 32:
+                raise ValueError(f"TRIAL_LEDGER_KEY_TOO_SHORT:{normalized_id}")
+            keyring[normalized_id] = encoded
+        if not active_id or active_id not in keyring:
+            raise ValueError("TRIAL_LEDGER_ACTIVE_KEY_ID_MISSING")
+        return keyring, active_id
+
+    # Backward-compatible migration path for the original single secret. Its key
+    # identifier is explicit and remains verifiable while the operator migrates
+    # the secret into the keyring. Do not accept an empty or short key.
+    legacy = os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY")
+    if legacy:
+        encoded = legacy.encode("utf-8")
+        if len(encoded) < 32:
+            raise ValueError("TRIAL_LEDGER_HMAC_KEY_TOO_SHORT")
+        return {"legacy": encoded}, "legacy"
+    if active_id:
+        raise ValueError("TRIAL_LEDGER_ACTIVE_KEY_ID_WITHOUT_KEYRING")
+    return {}, None
+
+
 def compute_trial_ledger_integrity(
     payload: Mapping[str, Any],
     *,
     sequence: int,
     previous_entry_sha256: str,
     signing_key: str | bytes | None = None,
+    signing_key_id: str | None = None,
+    assurance_mode: str | None = None,
 ) -> tuple[str, str | None, str]:
-    """Return deterministic entry SHA, optional HMAC, and explicit assurance level."""
+    """Hash payload, sequence, predecessor, and authenticated assurance/key identity."""
     if isinstance(sequence, bool) or int(sequence) != sequence or int(sequence) < 1:
         raise ValueError("ledger sequence must be a positive integer")
     previous = str(previous_entry_sha256 or "")
     if previous and not _sha(previous):
         raise ValueError("previous ledger hash must be an empty value or SHA-256")
+    key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
+    mode = assurance_mode or (
+        "HMAC_SIGNED" if key is not None else "HASH_CHAIN_UNSIGNED"
+    )
+    key_id = str(signing_key_id or "").strip() if mode == "HMAC_SIGNED" else ""
+    if mode not in {"HMAC_SIGNED", "HASH_CHAIN_UNSIGNED"}:
+        raise ValueError("unknown trial-ledger assurance mode")
+    if mode == "HMAC_SIGNED":
+        if not key_id or len(key_id) > 100:
+            raise ValueError("HMAC ledger entries require a valid key identifier")
+        if key is not None and len(key) < 32:
+            raise ValueError("HMAC signing key must contain at least 32 bytes")
+    elif key is not None or key_id:
+        raise ValueError("unsigned ledger entries cannot carry a signing key or key identifier")
     envelope = {
         "ledger_version": _LEDGER_VERSION,
         "sequence": int(sequence),
         "previous_entry_sha256": previous,
+        "assurance_mode": mode,
+        "signing_key_id": key_id or None,
         "payload": _ledger_payload(payload),
     }
     canonical = json.dumps(
@@ -268,15 +324,72 @@ def compute_trial_ledger_integrity(
         allow_nan=False, default=str,
     ).encode("utf-8")
     entry_sha = hashlib.sha256(canonical).hexdigest()
-    key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
-    if key and len(key) >= 32:
+    if mode == "HMAC_SIGNED" and key is not None:
         signature = hmac.new(key, entry_sha.encode("ascii"), hashlib.sha256).hexdigest()
-        return entry_sha, signature, "HMAC_SIGNED"
-    return entry_sha, None, "HASH_CHAIN_UNSIGNED"
+        return entry_sha, signature, mode
+    return entry_sha, None, mode
 
 
-async def _verify_trial_ledger_in_session(db, signing_key: str | bytes | None = None) -> dict[str, Any]:
-    """Verify the complete prospective chain and the database head under one session."""
+def _verify_row_integrity(
+    row: ResearchTrialArchive,
+    *,
+    keyring: Mapping[str, bytes],
+) -> tuple[bool, bool, str]:
+    """Return (valid, signature_verifiable, reason) for one chain row."""
+    mode = str(row.ledger_status or "")
+    key_id = str(row.ledger_hmac_key_id or "").strip() or None
+    if mode == "HMAC_SIGNED":
+        if not key_id:
+            return False, False, "SIGNED_ENTRY_KEY_ID_MISSING"
+        key = keyring.get(key_id)
+        try:
+            calculated, _signature, assurance = compute_trial_ledger_integrity(
+                _ledger_payload(row),
+                sequence=int(row.ledger_sequence),
+                previous_entry_sha256=str(row.ledger_previous_sha256 or ""),
+                signing_key=key,
+                signing_key_id=key_id,
+                assurance_mode=mode,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False, False, "SIGNED_ENTRY_PAYLOAD_INVALID"
+        if assurance != mode or not hmac.compare_digest(
+            str(row.ledger_entry_sha256 or ""), calculated
+        ):
+            return False, False, "LEDGER_ENTRY_HASH_MISMATCH"
+        if key is None:
+            return True, False, "HMAC_KEY_NOT_AVAILABLE"
+        if not row.ledger_hmac_sha256 or not hmac.compare_digest(
+            str(row.ledger_hmac_sha256),
+            hmac.new(key, calculated.encode("ascii"), hashlib.sha256).hexdigest(),
+        ):
+            return False, True, "LEDGER_HMAC_MISMATCH"
+        return True, True, "OK"
+    if mode == "HASH_CHAIN_UNSIGNED":
+        if key_id or row.ledger_hmac_sha256:
+            return False, True, "UNSIGNED_ENTRY_HAS_SIGNING_METADATA"
+        try:
+            calculated, _signature, assurance = compute_trial_ledger_integrity(
+                _ledger_payload(row),
+                sequence=int(row.ledger_sequence),
+                previous_entry_sha256=str(row.ledger_previous_sha256 or ""),
+                assurance_mode=mode,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return False, True, "UNSIGNED_ENTRY_PAYLOAD_INVALID"
+        if assurance != mode or not hmac.compare_digest(
+            str(row.ledger_entry_sha256 or ""), calculated
+        ):
+            return False, True, "LEDGER_ENTRY_HASH_MISMATCH"
+        return True, True, "OK"
+    return False, True, "UNKNOWN_LEDGER_ASSURANCE"
+
+
+async def _verify_trial_ledger_in_session(
+    db, keyring: Mapping[str, bytes] | None = None
+) -> dict[str, Any]:
+    """Full-history audit intended for explicit admin verification, not every append."""
+    keyring = keyring or {}
     rows = (
         await db.execute(
             select(ResearchTrialArchive)
@@ -287,11 +400,10 @@ async def _verify_trial_ledger_in_session(db, signing_key: str | bytes | None = 
     head = await db.get(ResearchTrialLedgerHead, 1)
     if head is None:
         return {"status": "BROKEN", "reason": "LEDGER_HEAD_MISSING", "entries": len(rows)}
-    key = signing_key.encode("utf-8") if isinstance(signing_key, str) else signing_key
     previous = ""
     expected_sequence = 1
     signed_count = unsigned_count = 0
-    signature_unverifiable = False
+    unverifiable_key_ids: set[str] = set()
     for row in rows:
         if row.ledger_sequence != expected_sequence:
             return {
@@ -300,50 +412,34 @@ async def _verify_trial_ledger_in_session(db, signing_key: str | bytes | None = 
                 "entries": len(rows),
             }
         if str(row.ledger_previous_sha256 or "") != previous:
-            return {"status": "BROKEN", "reason": "LEDGER_PREVIOUS_HASH_MISMATCH",
-                    "sequence": expected_sequence, "entries": len(rows)}
-        try:
-            calculated, signature, assurance = compute_trial_ledger_integrity(
-                _ledger_payload(row),
-                sequence=expected_sequence,
-                previous_entry_sha256=previous,
-                signing_key=key if key and len(key) >= 32 else None,
-            )
-        except (TypeError, ValueError, OverflowError):
-            return {"status": "BROKEN", "reason": "LEDGER_PAYLOAD_INVALID",
-                    "sequence": expected_sequence, "entries": len(rows)}
-        if not hmac.compare_digest(str(row.ledger_entry_sha256 or ""), calculated):
-            return {"status": "BROKEN", "reason": "LEDGER_ENTRY_HASH_MISMATCH",
-                    "sequence": expected_sequence, "entries": len(rows)}
+            return {
+                "status": "BROKEN", "reason": "LEDGER_PREVIOUS_HASH_MISMATCH",
+                "sequence": expected_sequence, "entries": len(rows),
+            }
+        valid, verifiable, reason = _verify_row_integrity(row, keyring=keyring)
+        if not valid:
+            return {
+                "status": "BROKEN", "reason": reason,
+                "sequence": expected_sequence, "entries": len(rows),
+            }
         if row.ledger_status == "HMAC_SIGNED":
             signed_count += 1
-            if not key or len(key) < 32:
-                signature_unverifiable = True
-            elif not row.ledger_hmac_sha256 or not hmac.compare_digest(
-                str(row.ledger_hmac_sha256), hmac.new(
-                    key, calculated.encode("ascii"), hashlib.sha256
-                ).hexdigest()
-            ):
-                return {"status": "BROKEN", "reason": "LEDGER_HMAC_MISMATCH",
-                        "sequence": expected_sequence, "entries": len(rows)}
-        elif row.ledger_status == "HASH_CHAIN_UNSIGNED":
-            unsigned_count += 1
-            if row.ledger_hmac_sha256:
-                return {"status": "BROKEN", "reason": "UNEXPECTED_LEDGER_HMAC",
-                        "sequence": expected_sequence, "entries": len(rows)}
+            if not verifiable:
+                unverifiable_key_ids.add(str(row.ledger_hmac_key_id))
         else:
-            return {"status": "BROKEN", "reason": "UNKNOWN_LEDGER_ASSURANCE",
-                    "sequence": expected_sequence, "entries": len(rows)}
-        previous = calculated
+            unsigned_count += 1
+        previous = str(row.ledger_entry_sha256 or "")
         expected_sequence += 1
     last_sequence = expected_sequence - 1
     if int(head.last_sequence or 0) != last_sequence:
-        return {"status": "BROKEN", "reason": "LEDGER_HEAD_SEQUENCE_MISMATCH",
-                "head_sequence": head.last_sequence, "verified_sequence": last_sequence,
-                "entries": len(rows)}
+        return {
+            "status": "BROKEN", "reason": "LEDGER_HEAD_SEQUENCE_MISMATCH",
+            "head_sequence": head.last_sequence, "verified_sequence": last_sequence,
+            "entries": len(rows),
+        }
     if str(head.last_entry_sha256 or "") != previous:
         return {"status": "BROKEN", "reason": "LEDGER_HEAD_HASH_MISMATCH", "entries": len(rows)}
-    if signature_unverifiable:
+    if unverifiable_key_ids:
         status = "HMAC_KEY_MISSING"
     elif signed_count and unsigned_count:
         status = "HASH_CHAIN_VALID_PARTIALLY_SIGNED"
@@ -356,19 +452,90 @@ async def _verify_trial_ledger_in_session(db, signing_key: str | bytes | None = 
         "entries": len(rows),
         "signed_entries": signed_count,
         "unsigned_entries": unsigned_count,
+        "unverifiable_key_ids": sorted(unverifiable_key_ids),
         "last_sequence": last_sequence,
         "last_entry_sha256": previous or None,
-        "hmac_key_configured": bool(key and len(key) >= 32),
+        "hmac_key_ids": sorted({str(row.ledger_hmac_key_id) for row in rows if row.ledger_hmac_key_id}),
         "legacy_unchained_rows_excluded": True,
         "promotion_evidence_complete": False,
     }
 
 
+async def _verify_trial_ledger_head_in_session(
+    db,
+    head: ResearchTrialLedgerHead,
+    keyring: Mapping[str, bytes],
+) -> dict[str, Any]:
+    """Constant-size append preflight: verify only the locked head and predecessor."""
+    sequence = int(head.last_sequence or 0)
+    head_hash = str(head.last_entry_sha256 or "")
+    if sequence == 0:
+        existing = (
+            await db.execute(
+                select(ResearchTrialArchive.trial_key)
+                .where(ResearchTrialArchive.ledger_sequence.is_not(None))
+                .limit(1)
+            )
+        ).first()
+        if head_hash or existing is not None:
+            return {"status": "BROKEN", "reason": "EMPTY_LEDGER_HEAD_MISMATCH"}
+        return {"status": "EMPTY", "last_sequence": 0}
+    if not _sha(head_hash):
+        return {"status": "BROKEN", "reason": "LEDGER_HEAD_HASH_INVALID"}
+    row = (
+        await db.execute(
+            select(ResearchTrialArchive)
+            .where(ResearchTrialArchive.ledger_sequence == sequence)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None or not hmac.compare_digest(
+        str(row.ledger_entry_sha256 or ""), head_hash
+    ):
+        return {"status": "BROKEN", "reason": "LEDGER_HEAD_ROW_MISSING_OR_MISMATCH"}
+    valid, verifiable, reason = _verify_row_integrity(row, keyring=keyring)
+    if not valid:
+        return {"status": "BROKEN", "reason": reason}
+    if sequence > 1:
+        predecessor = (
+            await db.execute(
+                select(ResearchTrialArchive.ledger_entry_sha256)
+                .where(ResearchTrialArchive.ledger_sequence == sequence - 1)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if not predecessor or not hmac.compare_digest(
+            str(row.ledger_previous_sha256 or ""), str(predecessor)
+        ):
+            return {"status": "BROKEN", "reason": "LEDGER_PREDECESSOR_MISMATCH"}
+    if row.ledger_status == "HMAC_SIGNED" and not verifiable:
+        return {
+            "status": "HMAC_KEY_MISSING",
+            "reason": "TRIAL_LEDGER_HISTORICAL_SIGNING_KEY_UNAVAILABLE",
+            "key_id": row.ledger_hmac_key_id,
+            "last_sequence": sequence,
+        }
+    return {
+        "status": "HEAD_LINK_VALID",
+        "last_sequence": sequence,
+        "last_entry_sha256": head_hash,
+        "last_entry_assurance": row.ledger_status,
+        "last_entry_key_id": row.ledger_hmac_key_id,
+    }
+
+
 async def verify_research_trial_ledger() -> dict[str, Any]:
-    """Verify the prospective append-only trial chain without certifying legacy rows."""
-    key = os.getenv("ATLAS_RESEARCH_TRIAL_LEDGER_HMAC_KEY") or None
+    """Full chain verifier for the admin status endpoint."""
+    try:
+        keyring, active_key_id = _load_trial_ledger_keyring()
+    except ValueError as exc:
+        return {"status": "KEYRING_INVALID", "reason": str(exc)}
     async with SessionLocal() as db:
-        return await _verify_trial_ledger_in_session(db, key)
+        result = await _verify_trial_ledger_in_session(db, keyring)
+    result["active_key_id"] = active_key_id
+    result["retained_key_ids"] = sorted(keyring)
+    result["key_rotation_supported"] = True
+    return result
 
 
 def _same_immutable_row(existing: ResearchTrialArchive, payload: Mapping[str, Any]) -> bool:
