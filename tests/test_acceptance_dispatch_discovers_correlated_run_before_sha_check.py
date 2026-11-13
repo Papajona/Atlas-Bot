@@ -38,4 +38,4 @@ def test_discovered_acceptance_run_is_still_rejected_when_sha_or_branch_differs(
     assert 'candidate_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
     assert 'if [[ "$candidate_sha" != "$GITHUB_SHA" || "$candidate_branch" != "main" ]]; then' in block
     assert "BLOCKED: uniquely correlated acceptance run is not on exact main commit" in block
-    assert 'run_name != "$expected_run_name"' in block
+    assert '|| "$run_name" != "$expected_run_name" ]]' in block
