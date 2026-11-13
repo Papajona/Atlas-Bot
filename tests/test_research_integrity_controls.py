@@ -13,7 +13,7 @@ from app.execution_aware_research import (
 )
 from app.market_sessions import normalize_session_costs_bps, session_cost_series
 from app.research_trial_archive import compute_trial_ledger_integrity
-from app.research_validation import parameter_plateau_score
+from app.research_validation import oos_benchmark_comparison, parameter_plateau_score
 from app.trading_core import triple_barrier
 
 
@@ -777,3 +777,42 @@ def test_flat_timeout_with_nonzero_costs_is_neutral_not_a_short_label():
         round_trip_cost_bps=200.0,
     )
     assert labels.iloc[0] == 0.0
+
+
+
+def test_buy_and_hold_benchmark_charges_entry_and_terminal_fees_at_their_sessions():
+    index = pd.DatetimeIndex([
+        "2026-01-05T08:00:00Z",  # LONDON
+        "2026-01-06T02:00:00Z",  # OTHER
+    ])
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 110.0],
+            "high": [101.0, 111.0],
+            "low": [99.0, 109.0],
+            "close": [100.0, 110.0],
+        },
+        index=index,
+    )
+    schedule = {
+        "LONDON": 10.0,
+        "NEW_YORK": 20.0,
+        "NEW_YORK_LATE": 25.0,
+        "OTHER": 30.0,
+    }
+
+    report = oos_benchmark_comparison(
+        [frame],
+        [np.zeros(2, dtype=float)],
+        [np.zeros(2, dtype=float)],
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=None,
+        random_trials=2,
+        session_costs_bps=schedule,
+    )
+
+    expected = (1.0 + 0.10 - 0.001) * (1.0 - 0.003) - 1.0
+    assert report["status"] == "OK"
+    assert report["buy_and_hold_net_return"] == pytest.approx(expected)
+    assert report["buy_and_hold_session_cost_model_complete"] is True
+    assert report["buy_and_hold_session_costs_bps"] == schedule
