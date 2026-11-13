@@ -7,7 +7,10 @@ import pandas as pd
 import pytest
 
 from app.decision_outcome_research import evaluate_decision_outcome_labels_once
-from app.execution_aware_research import simulate_execution_aware_strategy
+from app.execution_aware_research import (
+    costed_execution_returns,
+    simulate_execution_aware_strategy,
+)
 from app.market_sessions import normalize_session_costs_bps, session_cost_series
 from app.research_trial_archive import compute_trial_ledger_integrity
 from app.research_validation import parameter_plateau_score
@@ -671,3 +674,58 @@ def test_one_time_holdout_release_requires_risk_officer_authorization():
         '@app.post("/api/research/decision-outcomes/holdout-once")', 1
     )[1].split('@app.post("/api/research/backtest-all")', 1)[0]
     assert 'await require_role(claims, "RISK_OFFICER")' in route
+
+
+
+def test_gap_exit_uses_fill_session_fee_and_oos_replay_matches_simulator():
+    index = pd.DatetimeIndex([
+        "2026-01-05T02:00:00Z",  # OTHER
+        "2026-01-05T14:00:00Z",  # NEW_YORK
+        "2026-01-06T02:00:00Z",  # OTHER
+    ])
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 95.0],
+            "high": [101.0, 101.0, 96.0],
+            "low": [99.0, 99.0, 94.0],
+            "close": [100.0, 100.0, 95.0],
+        },
+        index=index,
+    )
+    requested = pd.Series([0.0, 1.0, 0.0], index=index)
+    atr = pd.Series([1.0, 1.0, 1.0], index=index)
+    schedule = {
+        "LONDON": 10.0,
+        "NEW_YORK": 20.0,
+        "NEW_YORK_LATE": 25.0,
+        "OTHER": 30.0,
+    }
+
+    simulation = simulate_execution_aware_strategy(
+        frame,
+        requested,
+        atr,
+        stop_atr=2.0,
+        take_profit_atr=4.0,
+        transaction_cost_bps=7.5,
+        session_costs_bps=schedule,
+    )
+    # Entry is charged at 20 bps (New York); the stop gaps at the next
+    # observed open and must be charged at 30 bps (OTHER), not 20 bps.
+    assert simulation["audit"]["gap_exits"] == 1
+    assert simulation["turnover"].iloc[1] == pytest.approx(2.0)
+    assert simulation["transaction_cost_drag"].iloc[1] == pytest.approx(0.005)
+    assert simulation["effective_transaction_cost_bps"].iloc[1] == pytest.approx(25.0)
+    assert simulation["audit"]["gap_exit_fee_uses_fill_session"] is True
+    assert simulation["net_returns"].iloc[1] == pytest.approx(-0.055)
+
+    replayed_oos_returns = costed_execution_returns(
+        simulation["positions"],
+        simulation["market_returns"],
+        transaction_cost_bps=simulation["effective_transaction_cost_bps"],
+        carry_bps_per_bar=None,
+        exit_mask=simulation["intrabar_exit"],
+    )
+    assert replayed_oos_returns.to_numpy() == pytest.approx(
+        simulation["net_returns"].to_numpy()
+    )
