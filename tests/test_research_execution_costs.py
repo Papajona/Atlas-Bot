@@ -115,6 +115,9 @@ def _research_frame():
         },
         index=index,
     )
+    canonical = frame.reset_index().to_csv(
+        index=False, float_format="%.17g", lineterminator="\\n"
+    )
     frame.attrs["data_provenance"] = {
         "source": "ccxt_ohlcv",
         "asset_class": "crypto",
@@ -124,7 +127,7 @@ def _research_frame():
         "timeframe": "1h",
         "volume_unit": "base_asset",
         "volume_unit_verified": True,
-        "sha256": "a" * 64,
+        "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
     }
     return frame
 
@@ -232,6 +235,26 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
     )
     assert blocked_cost is None
     assert blocked_reason == "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+
+
+def test_rejects_ohlcv_mutation_after_provenance_was_attached(tmp_path):
+    frame = _research_frame()
+    settings = _settings(tmp_path)
+    _research_cost_evidence(frame, settings)
+    frame.iloc[-1, frame.columns.get_loc("close")] += 0.25
+
+    context, audit = build_research_execution_cost_context(
+        frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+    )
+
+    assert context is None
+    assert audit["execution_cost_model_complete"] is False
+    assert audit["reason"] == "MARKET_DATA_CONTENT_HASH_MISMATCH"
 
 
 def test_signature_binds_spread_series_and_dataset_context(tmp_path):
