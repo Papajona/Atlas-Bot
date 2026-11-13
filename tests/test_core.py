@@ -39,14 +39,14 @@ def test_triple_barrier_does_not_label_incomplete_future_window():
     assert set(y.dropna().unique()).issubset({-1.0, 0.0, 1.0})
 
 
-def test_triple_barrier_same_bar_touch_is_conservative_neutral():
+def test_triple_barrier_same_bar_touch_uses_execution_stop_first_rule():
     idx = pd.date_range("2025-01-01", periods=20, freq="h", tz="UTC")
     close = pd.Series(100.0, index=idx)
     vol = pd.Series(.01, index=idx)
     high = close.copy(); low = close.copy()
     high.iloc[1] = 102.5; low.iloc[1] = 97.5
     y = triple_barrier(close, vol, high, low, pt=2.0, sl=2.0, max_hold=5)
-    assert y.iloc[0] == 0
+    assert y.iloc[0] == -1
 
 
 def test_signal_id_and_client_order_id_are_deterministic():
