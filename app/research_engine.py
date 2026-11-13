@@ -504,13 +504,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
     protocol_version = RESEARCH_PROTOCOL_VERSION
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
-    model_fingerprint = canonical_sha256({
-        "model": "atlas-research-cost-v2-session-aware",
-        "session_cost_model": "market-sessions-v1",
-        "taker_bps": float(taker_bps),
-        "slippage_bps": float(slippage_bps),
-        "cost_stress_multiplier": cost_mult,
-    })
+    model_fingerprint = research_execution_model_fingerprint(
+        settings,
+        taker_bps=float(taker_bps),
+        base_slippage_bps=float(slippage_bps),
+        cost_stress_multiplier=cost_mult,
+    )
     cost_document = df.attrs.get("execution_cost_calibration_evidence")
     if research_venue and research_market_type and research_symbol:
         cost_validation = validate_execution_cost_calibration(
@@ -538,9 +537,20 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         session_cost_series(df.index, session_costs_bps)
         if session_costs_bps is not None else None
     )
+    execution_cost_context, execution_context_audit = build_research_execution_cost_context(
+        df,
+        settings=settings,
+        taker_bps=float(taker_bps),
+        base_slippage_bps=float(slippage_bps),
+        cost_stress_multiplier=cost_mult,
+        asset=asset,
+    )
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
     results = [
-        _component_backtest(df, c, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps)
+        _component_backtest(
+            df, c, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
+            execution_cost_context,
+        )
         for c in components
     ]
     for row in results:
