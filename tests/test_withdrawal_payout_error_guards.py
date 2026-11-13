@@ -123,3 +123,28 @@ def test_sweep_and_withdrawal_terminal_states_are_explicit():
     assert '"UNKNOWN"' in custody
     sweep = (ROOT / "app" / "tron_sweep.py").read_text(encoding="utf-8")
     assert 'return "UNKNOWN"' in sweep
+
+def test_confirmed_provider_outcomes_survive_ledger_replay_mismatches():
+    release = ast.unparse(_fn("release_withdrawal"))
+    assert "except ValueError as mismatch" in release
+    assert "await db2.commit()" in release
+    assert "await db3.commit()" in release
+    assert "WITHDRAWAL_LEDGER_REPLAY_MISMATCH" in release
+    assert "withdrawal ledger mismatch requires reconciliation" in release
+
+    reconcile = ast.unparse(_fn("reconcile_withdrawal"))
+    assert "except ValueError as mismatch" in reconcile
+    assert "await db.commit()" in reconcile
+    assert "WITHDRAWAL_LEDGER_REPLAY_MISMATCH" in reconcile
+
+    mark_not_sent = ast.unparse(_fn("mark_withdrawal_not_sent"))
+    assert "except ValueError as mismatch" in mark_not_sent
+    assert "w.provider_status = 'NOT_SENT'" in mark_not_sent
+    assert "await db.commit()" in mark_not_sent
+
+    reject = ast.unparse(_fn("reject_withdrawal"))
+    assert "except ValueError as mismatch" in reject
+    assert "w.rejected_by = req.admin_id" in reject
+    assert "w.rejection_reason = req.reason.strip()" in reject
+    assert "await db.commit()" in reject
+
