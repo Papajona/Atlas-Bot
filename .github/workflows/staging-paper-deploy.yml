@@ -46,8 +46,13 @@ jobs:
           workflows=("ci.yml" "ledger-concurrency-check.yml" "production-verification.yml")
           labels=("Atlas CI" "PostgreSQL ledger concurrency" "Production Verification Gate")
           declare -A passed=()
+          gate_wait_seconds=7200
+          gate_poll_interval_seconds=30
+          gate_started_at="$(date +%s)"
 
-          for attempt in $(seq 1 90); do
+          # The required CI jobs have 20-45 minute limits; allow two hours for
+          # queue delay and completion before this paper-only deployment is blocked.
+          while true; do
             all_passed=true
             for index in "${!workflows[@]}"; do
               workflow="${workflows[$index]}"
@@ -112,10 +117,14 @@ jobs:
               echo "PASS: all required exact-commit CI gates passed; staging deployment may proceed."
               exit 0
             fi
-            sleep 10
+            now="$(date +%s)"
+            if (( now - gate_started_at >= gate_wait_seconds )); then
+              break
+            fi
+            sleep "$gate_poll_interval_seconds"
           done
 
-          echo "BLOCKED: timed out waiting for Atlas CI, PostgreSQL concurrency, and Production Verification to finish successfully on exact commit $GITHUB_SHA"
+          echo "BLOCKED: timed out after ${gate_wait_seconds}s waiting for Atlas CI, PostgreSQL concurrency, and Production Verification to finish successfully on exact commit $GITHUB_SHA"
           exit 1
 
       - name: Validate staging inputs
@@ -165,9 +174,16 @@ jobs:
           echo "Built and pushed image for ${GITHUB_SHA}"
 
       - name: Deploy restricted paper-only Cloud Run service
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
+            echo "BLOCKED: main advanced before Cloud Run deployment; refusing to replace staging with stale commit $GITHUB_SHA."
+            exit 1
+          fi
           IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")"
           gcloud run deploy "$STAGING_SERVICE" \
             --project="$GCP_PROJECT_ID" \
@@ -344,7 +360,7 @@ jobs:
             -f "dispatch_id=$dispatch_id"
 
           acceptance_run_id=0
-          acceptance_wait_seconds=12600
+          acceptance_wait_seconds=5400
           acceptance_poll_interval_seconds=30
           while true; do
             now="$(date +%s)"
