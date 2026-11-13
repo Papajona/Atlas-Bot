@@ -82,7 +82,7 @@ def test_triple_barrier_uses_next_open_as_entry_not_signal_bar_close():
     close = pd.Series([120.0, 100.0, 102.0, 103.0], index=idx)
     vol = pd.Series([0.01] * 4, index=idx)
     high = pd.Series([121.0, 102.0, 102.5, 104.0], index=idx)
-    low = pd.Series([119.0, 99.0, 100.0, 101.0], index=idx)
+    low = pd.Series([119.0, 99.5, 100.0, 101.0], index=idx)
     opens = pd.Series([120.0, 100.0, 102.0, 103.0], index=idx)
 
     labels = triple_barrier(
