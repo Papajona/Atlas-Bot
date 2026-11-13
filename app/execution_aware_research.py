@@ -179,6 +179,8 @@ def simulate_execution_aware_strategy(
     market_returns = np.zeros(n, dtype=float)
     exit_mask = np.zeros(n, dtype=bool)
     turnover = np.zeros(n, dtype=float)
+    transaction_cost_drag = np.zeros(n, dtype=float)
+    effective_transaction_cost_bps = per_bar_transaction_bps.copy()
     net_returns = np.zeros(n, dtype=float)
     stop_exits = take_exits = ambiguous_bars = gap_exits = terminal_close_exits = 0
     active_sign = 0
@@ -261,6 +263,7 @@ def simulate_execution_aware_strategy(
         actual = float(requested) if active_sign != 0 else 0.0
         bar_return = 0.0
         exited = False
+        gap_exit_fill = False
         if actual != 0.0:
             if actual > 0:
                 stop_hit = lows[i] <= float(stop_price)
@@ -300,6 +303,7 @@ def simulate_execution_aware_strategy(
                 if gap_stop or gap_target:
                     bar_return = next_open / opens[i] - 1.0
                     exited = True
+                    gap_exit_fill = True
                     if gap_stop:
                         stop_exits += 1
                     else:
@@ -317,8 +321,18 @@ def simulate_execution_aware_strategy(
         actual_positions[i] = actual
         market_returns[i] = float(bar_return)
         exit_mask[i] = exited
-        turnover[i] = abs(actual - previous_position) + (abs(actual) if exited and actual != 0.0 else 0.0)
-        step = actual * float(bar_return) - turnover[i] * per_bar_transaction_bps[i] / 10_000.0
+        entry_turnover = abs(actual - previous_position)
+        exit_turnover = abs(actual) if exited and actual != 0.0 else 0.0
+        turnover[i] = entry_turnover + exit_turnover
+        exit_cost_index = i + 1 if gap_exit_fill and i + 1 < n else i
+        entry_cost_drag = entry_turnover * per_bar_transaction_bps[i] / 10_000.0
+        exit_cost_drag = exit_turnover * per_bar_transaction_bps[exit_cost_index] / 10_000.0
+        transaction_cost_drag[i] = entry_cost_drag + exit_cost_drag
+        if turnover[i] > 0.0:
+            effective_transaction_cost_bps[i] = (
+                transaction_cost_drag[i] * 10_000.0 / turnover[i]
+            )
+        step = actual * float(bar_return) - transaction_cost_drag[i]
         if carry is not None:
             step -= abs(actual) * carry / 10_000.0
         step = max(-1.0, float(step))
@@ -365,6 +379,10 @@ def simulate_execution_aware_strategy(
     exit_series = pd.Series(exit_mask, index=df.index, dtype=bool)
     net_series = pd.Series(net_returns, index=df.index, dtype=float)
     turnover_series = pd.Series(turnover, index=df.index, dtype=float)
+    transaction_cost_drag_series = pd.Series(transaction_cost_drag, index=df.index, dtype=float)
+    effective_transaction_cost_series = pd.Series(
+        effective_transaction_cost_bps, index=df.index, dtype=float
+    )
     audit = {
         "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
         "stop_loss_exits": stop_exits,
@@ -375,6 +393,8 @@ def simulate_execution_aware_strategy(
         "financing_cost_model_complete": carry is not None,
         "carry_bps_per_bar": carry,
         "transaction_cost_bps": transaction_bps,
+        "transaction_cost_drag": float(transaction_cost_drag.sum()),
+        "gap_exit_fee_uses_fill_session": True,
         "session_cost_model_complete": session_schedule is not None,
         "session_costs_bps": session_schedule,
         "session_cost_observations": int(len(per_bar_transaction_bps)) if session_schedule is not None else 0,
@@ -398,6 +418,8 @@ def simulate_execution_aware_strategy(
         "market_returns": return_series,
         "intrabar_exit": exit_series,
         "turnover": turnover_series,
+        "transaction_cost_drag": transaction_cost_drag_series,
+        "effective_transaction_cost_bps": effective_transaction_cost_series,
         "net_returns": net_series,
         "audit": audit,
     }
