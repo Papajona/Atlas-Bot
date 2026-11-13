@@ -855,6 +855,8 @@ def fixed_signal_walk_forward_oos(
         "oos_total_return": float(np.prod(1.0 + values) - 1.0),
         "oos_mean_return": mean_return,
         "oos_return_sample": values[-5000:].tolist(),
+        # Internal hand-off for full-sample diagnostics; research_engine removes the raw vector before serialization.
+        "oos_return_sample_full": values.tolist(),
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "trades": trades,
