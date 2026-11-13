@@ -43,6 +43,11 @@ For research and strategy-router returns to use the same execution-cost inputs a
 - `spread_bps`: one observed full bid/ask spread value for each data bar, in exact index order;
 - `spread_observation_count`: exactly the number of bars;
 - `spread_values_sha256`: canonical SHA-256 of the submitted spread list.
+- `fee_source` and `fee_evidence_id`: exact matches for `RESEARCH_FEE_SOURCE` and `RESEARCH_FEE_EVIDENCE_ID`;
+- `taker_fee_bps`: the exact configured `RESEARCH_TAKER_BPS` rate used in the research returns;
+- `fee_schedule_source_sha256`: the hash of the single `fee_schedule` source record in the signed source list.
+
+The configured taker fee is not accepted merely because the evidence document contains a fee-schedule URI. Atlas checks that the signed fee rate matches the configured numeric rate, that the configured source/evidence identifiers match, and that the fee-schedule hash binds to exactly one hashed fee-source artifact. The fee-source settings and rate are included in the execution-model fingerprint.
 
 The signed context must cover the exact dataset and bar index; reordering, truncating, resampling, or substituting bars invalidates it. Volume and volatility are not accepted from the request or the evidence author: Atlas derives the median base-asset volume and realized close-return volatility from the preceding 20 completed CCXT spot bars only. This deliberately excludes derivatives, FX, commodities, non-USD/stable quote pairs, and feeds whose volume units are not verified.
 
