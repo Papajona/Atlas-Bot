@@ -508,6 +508,18 @@ async def evaluate_decision_outcome_labels_once(
     # the HTTP request is cancelled while a running thread cannot be interrupted.
     worker.add_done_callback(lambda _future: _HOLDOUT_EVALUATION_GATE.release())
     report = await asyncio.wrap_future(worker, loop=loop)
+    coverage = report.get("coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    if int(coverage.get("invalid_records", 0) or 0) > 0:
+        return {
+            "status": "HOLDOUT_HISTORY_INVALID",
+            "holdout_version": HOLDOUT_REGISTRY_VERSION,
+            "consumed": False,
+            "metrics_released": False,
+            "report": None,
+            "invalid_records": int(coverage.get("invalid_records", 0) or 0),
+            "reason": "normalized_history_contains_invalid_or_unsupported_decision_labels",
+        }
     usable = [
         row for row in report.get("out_of_sample", [])
         if isinstance(row, dict)
@@ -662,6 +674,10 @@ class DecisionOutcomeHistoryResourceLimit(RuntimeError):
     """The complete audit history exceeds the configured in-memory research budget."""
 
 
+class DecisionOutcomeHistoryIntegrityError(RuntimeError):
+    """A matching audit row cannot be decoded as a complete decision label."""
+
+
 async def load_all_decision_outcome_labels(
     *,
     batch_size: int = 2000,
@@ -703,10 +719,26 @@ async def load_all_decision_outcome_labels(
                 elif isinstance(detail, str):
                     try:
                         record = json.loads(detail)
-                    except (TypeError, ValueError):
-                        continue
+                    except (TypeError, ValueError) as exc:
+                        raise DecisionOutcomeHistoryIntegrityError(
+                            f"matching decision-outcome audit row {int(_row_id)} contains malformed JSON; "
+                            "holdout was not consumed"
+                        ) from exc
                 else:
-                    continue
+                    raise DecisionOutcomeHistoryIntegrityError(
+                        f"matching decision-outcome audit row {int(_row_id)} has an unsupported detail type; "
+                        "holdout was not consumed"
+                    )
+                if not isinstance(record, dict):
+                    raise DecisionOutcomeHistoryIntegrityError(
+                        f"matching decision-outcome audit row {int(_row_id)} is not a JSON object; "
+                        "holdout was not consumed"
+                    )
+                if record.get("record_type") != "adaptive_decision_outcome_label":
+                    raise DecisionOutcomeHistoryIntegrityError(
+                        f"matching decision-outcome audit row {int(_row_id)} has an invalid record_type; "
+                        "holdout was not consumed"
+                    )
                 if isinstance(record, dict):
                     try:
                         record_bytes = len(json.dumps(
