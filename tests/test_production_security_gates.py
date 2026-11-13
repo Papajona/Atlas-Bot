@@ -505,6 +505,26 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "gate_poll_interval_seconds=30" in gate_wait
     assert "while true; do" in gate_wait
     assert 'sleep "$gate_poll_interval_seconds"' in gate_wait
+    assert "id: wait-required-gates" in deploy
+    assert 'if [[ "$current_main_sha" != "$GITHUB_SHA" ]]' in gate_wait
+    assert 'echo "stale=true" >> "$GITHUB_OUTPUT"' in gate_wait
+    assert gate_wait.index("current_main_sha=") < gate_wait.index("run_json=")
+    for downstream_step in (
+        "Validate staging inputs",
+        "Checkout exact main commit",
+        "Authenticate to Google Cloud with main-only workload identity",
+        "Set up Google Cloud SDK",
+        "Build and push exact commit image to Artifact Registry",
+        "Deploy restricted paper-only Cloud Run service",
+        "Dispatch and require read-only staging identity preflight on this exact commit",
+        "Dispatch and require customer-paper acceptance on this exact deployment",
+    ):
+        step = deploy.split(f"      - name: {downstream_step}", 1)[1].split("\\n      - name:", 1)[0]
+        assert "steps.wait-required-gates.outputs.stale != 'true'" in step, downstream_step
+    diagnostic_step = deploy.split(
+        "      - name: Capture Cloud Run startup diagnostics after deployment failure", 1
+    )[1].split("\\n      - name:", 1)[0]
+    assert "failure() && steps.wait-required-gates.outputs.stale != 'true'" in diagnostic_step
     deploy_step = deploy.index("      - name: Deploy restricted paper-only Cloud Run service")
     freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
     cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
