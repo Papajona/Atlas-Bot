@@ -315,6 +315,12 @@ class WithdrawalNotSentRequest(BaseModel):
     evidence: str = Field(min_length=20, max_length=2000)
 
 
+class WithdrawalLedgerRepairRequest(BaseModel):
+    operator_id: str = Field(min_length=2, max_length=120)
+    admin_id: str = Field(min_length=2, max_length=120)
+    evidence: str = Field(min_length=20, max_length=2000)
+
+
 class ModelRollbackRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
     symbol: str = Field(default="BTC/USDT:USDT", min_length=3, max_length=80)
