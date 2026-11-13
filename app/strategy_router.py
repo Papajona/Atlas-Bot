@@ -344,14 +344,22 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                 # This is a paired test, not a comparison of two noisy Sharpe estimates.
                 historical_regimes = classify_regime(history, asset=asset)
                 regime_mask = historical_regimes == current_regime
-                challenger_stream = _strategy_returns(
-                    history, cfg, best["strategy"], costs_bps, asset,
-                    execution_cost_context=history_execution_context,
-                ).loc[regime_mask]
-                incumbent_stream = _strategy_returns(
-                    history, cfg, current_strategy, costs_bps, asset,
-                    execution_cost_context=history_execution_context,
-                ).loc[regime_mask]
+                if history_execution_context is None:
+                    challenger_stream = _strategy_returns(
+                        history, cfg, best["strategy"], costs_bps, asset
+                    ).loc[regime_mask]
+                    incumbent_stream = _strategy_returns(
+                        history, cfg, current_strategy, costs_bps, asset
+                    ).loc[regime_mask]
+                else:
+                    challenger_stream = _strategy_returns(
+                        history, cfg, best["strategy"], costs_bps, asset,
+                        execution_cost_context=history_execution_context,
+                    ).loc[regime_mask]
+                    incumbent_stream = _strategy_returns(
+                        history, cfg, current_strategy, costs_bps, asset,
+                        execution_cost_context=history_execution_context,
+                    ).loc[regime_mask]
                 switch_inference = paired_return_lead(
                     challenger_stream.to_numpy(dtype=float),
                     incumbent_stream.to_numpy(dtype=float),
