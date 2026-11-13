@@ -735,3 +735,45 @@ def test_gap_exit_uses_fill_session_fee_and_oos_replay_matches_simulator():
     assert replayed_oos_returns.to_numpy() == pytest.approx(
         simulation["net_returns"].to_numpy()
     )
+
+
+
+def test_short_lower_barrier_requires_net_reward_after_entry_and_exit_costs():
+    index = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+    close = pd.Series([100.0] * len(index), index=index)
+    opens = pd.Series([100.0] * len(index), index=index)
+    high = pd.Series([100.0, 100.5, 100.2, 100.0, 100.0], index=index)
+    low = pd.Series([100.0, 98.8, 99.5, 100.0, 100.0], index=index)
+    volatility = pd.Series([0.01] * len(index), index=index)
+    frozen_atr = pd.Series([np.nan, 1.0, 1.0, 1.0, 1.0], index=index)
+
+    profitable_short = triple_barrier(
+        close, volatility, high, low, max_hold=2, entry_open=opens,
+        entry_atr=frozen_atr, stop_atr=1.0, take_profit_atr=1.5,
+        round_trip_cost_bps=20.0,
+    )
+    cost_consumed_short = triple_barrier(
+        close, volatility, high, low, max_hold=2, entry_open=opens,
+        entry_atr=frozen_atr, stop_atr=1.0, take_profit_atr=1.5,
+        round_trip_cost_bps=200.0,
+    )
+
+    assert profitable_short.iloc[0] == -1.0
+    assert cost_consumed_short.iloc[0] == 0.0
+
+
+def test_flat_timeout_with_nonzero_costs_is_neutral_not_a_short_label():
+    index = pd.date_range("2026-01-01", periods=5, freq="h", tz="UTC")
+    close = pd.Series([100.0] * len(index), index=index)
+    opens = pd.Series([100.0] * len(index), index=index)
+    high = pd.Series([100.2] * len(index), index=index)
+    low = pd.Series([99.8] * len(index), index=index)
+    volatility = pd.Series([0.01] * len(index), index=index)
+    frozen_atr = pd.Series([np.nan, 1.0, 1.0, 1.0, 1.0], index=index)
+
+    labels = triple_barrier(
+        close, volatility, high, low, max_hold=2, entry_open=opens,
+        entry_atr=frozen_atr, stop_atr=2.0, take_profit_atr=3.0,
+        round_trip_cost_bps=200.0,
+    )
+    assert labels.iloc[0] == 0.0
