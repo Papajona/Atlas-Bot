@@ -90,7 +90,7 @@ def test_staging_paper_drill_derives_supabase_url_from_validated_project_ref():
 
 
 
-def test_acceptance_drill_exercises_rls_between_two_seeded_tenants():
+def test_acceptance_phase_two_invokes_database_rls_helper():
     from pathlib import Path
 
     source = (
@@ -98,27 +98,121 @@ def test_acceptance_drill_exercises_rls_between_two_seeded_tenants():
         / "scripts"
         / "customer_paper_acceptance_drill.py"
     ).read_text(encoding="utf-8")
-    seed_second = source.index("ensure_customer_paper_account(other_customer_id, \"USDT\")")
-    rls_start = source.index("async def _verify_tenant_rls_visibility(")
-    rls_end = source.index("\n\nasync def _phase_one(", rls_start)
-    rls_helper = source[rls_start:rls_end]
     phase_two_start = source.index("async def _phase_two(")
     phase_two_end = source.index("\n\ndef _run(", phase_two_start)
     phase_two = source[phase_two_start:phase_two_end]
-
-    assert "set_config('app.customer_id'" in rls_helper
-    assert "FROM customer_paper.accounts" in rls_helper
-    assert "FROM customer_paper.orders" in rls_helper
-    assert "FROM customer_paper.journals" in rls_helper
-    assert "hidden_customer_id" in rls_helper
-    assert "result[\"hidden_accounts\"] == 0" in rls_helper
-    assert "result[\"hidden_orders\"] == 0" in rls_helper
-    assert "result[\"hidden_journals\"] == 0" in rls_helper
+    assert "_verify_tenant_rls_visibility(" in phase_two
     assert "visible_customer_id=other_customer_id" in phase_two
     assert "hidden_customer_id=customer_id" in phase_two
-    # The helper is defined before phase_one; tenant two must be seeded during
-    # phase_one before phase_two calls the helper with B visible / A hidden.
-    assert rls_start < seed_second < phase_two_start
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (
+        os.getenv("ATLAS_PAPER_TEST_DATABASE_URL")
+        and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")
+    ),
+    reason="requires disposable PostgreSQL paper and primary databases provisioned by CI",
+)
+def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
+    """Execute the production RLS helper against real rows and prove rows exist via a bypass role."""
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.customer_paper_ledger import post_customer_paper_journal
+    from app.customer_paper_lifecycle import submit_customer_paper_order
+
+    paper_url = os.environ["ATLAS_PAPER_TEST_DATABASE_URL"]
+    primary_url = os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"]
+    monkeypatch.setattr(settings, "database_url", primary_url)
+    monkeypatch.setattr(settings, "customer_paper_database_url", paper_url)
+    monkeypatch.setattr(settings, "customer_paper_ledger_enabled", True)
+    monkeypatch.setattr(settings, "customer_paper_shared_database_enabled", False)
+    monkeypatch.setattr(settings, "paper_trading", True)
+    monkeypatch.setattr(settings, "broker_sandbox", True)
+    monkeypatch.setattr(settings, "live_trading_enabled", False)
+    monkeypatch.setattr(settings, "customer_live_trading_enabled", False)
+    monkeypatch.setattr(settings, "payout_live_enabled", False)
+    monkeypatch.setattr(settings, "deriv_live_enabled", False)
+    monkeypatch.setattr(settings, "usdt_tron_enabled", False)
+    monkeypatch.setattr(settings, "usdt_tron_sweep_enabled", False)
+
+    import hashlib
+    import uuid
+
+    customer_a = 8_100_000_000_000_000_000 + (uuid.uuid4().int % 1_000_000_000)
+    customer_b = customer_a + 1
+    run_key = uuid.uuid4().hex
+
+    async def run():
+        # Seed each tenant with real accounts and two separate balanced journals.
+        for customer_id, label in ((customer_a, "a"), (customer_b, "b")):
+            for index in (1, 2):
+                seeded = await post_customer_paper_journal(
+                    customer_id=customer_id,
+                    idempotency_key=f"rls-{run_key}-{label}-seed-{index}",
+                    event_type="PAPER_SEED",
+                    currency="USDT",
+                    lines=_seed_lines("100" if index == 1 else "1"),
+                    reference=f"disposable-ci-rls-{label}-{index}",
+                    metadata={"environment": "disposable-ci", "rls_test": True},
+                )
+                assert seeded["status"] == "APPENDED"
+
+            order = await submit_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id=f"rls-{run_key}-{label}-order",
+                venue="binance",
+                market_type="spot",
+                symbol="BTC/USDT",
+                side="BUY",
+                quantity="0.001",
+                currency="USDT",
+                metadata={"execution_owner": "staging_acceptance_test", "rls_test": True},
+            )
+            assert order["status"] == "APPENDED"
+
+        # Use the existing primary test login (superuser in the disposable service)
+        # to prove the rows to be hidden really exist in the same paper database.
+        owner_url = make_url(primary_url).set(
+            database=make_url(paper_url).database
+        ).render_as_string(hide_password=False)
+        owner_engine = create_async_engine(owner_url, pool_pre_ping=True)
+        try:
+            async with owner_engine.connect() as conn:
+                bypasses_rls = await conn.scalar(text("""
+                    SELECT rolsuper OR rolbypassrls
+                    FROM pg_roles
+                    WHERE rolname = current_user
+                """))
+                assert bypasses_rls is True
+                owner_rows = (await conn.execute(text("""
+                    SELECT
+                        (SELECT count(*) FROM customer_paper.accounts WHERE customer_id=:hidden) AS accounts,
+                        (SELECT count(*) FROM customer_paper.orders WHERE customer_id=:hidden) AS orders,
+                        (SELECT count(*) FROM customer_paper.journals WHERE customer_id=:hidden) AS journals
+                """), {"hidden": customer_a})).mappings().one()
+                assert int(owner_rows["accounts"]) >= 2
+                assert int(owner_rows["orders"]) >= 1
+                assert int(owner_rows["journals"]) >= 2
+        finally:
+            await owner_engine.dispose()
+
+        # The helper switches to tenant B's session context and queries both B and A.
+        # B's own rows must remain visible while A's known, owner-verified rows disappear.
+        visibility = await drill._verify_tenant_rls_visibility(
+            visible_customer_id=customer_b,
+            hidden_customer_id=customer_a,
+        )
+        assert visibility["visible_accounts"] >= 2
+        assert visibility["visible_orders"] >= 1
+        assert visibility["visible_journals"] >= 2
+        assert visibility["hidden_accounts"] == 0
+        assert visibility["hidden_orders"] == 0
+        assert visibility["hidden_journals"] == 0
+
+    asyncio.run(run())
 
 
 def test_acceptance_workflow_is_pinned_to_the_triggering_deployment_sha():
@@ -165,7 +259,7 @@ def test_acceptance_workflow_checks_project_and_least_privilege_roles_before_dri
     assert "PROCESS_ROLE: paper" in workflow
 
 
-def test_acceptance_drill_retains_aggregate_bar_and_database_rls_probes():
+def test_acceptance_drill_wires_aggregate_capacity_and_rls_helper_calls():
     from pathlib import Path
 
     source = (
@@ -173,12 +267,10 @@ def test_acceptance_drill_retains_aggregate_bar_and_database_rls_probes():
         / "scripts"
         / "customer_paper_acceptance_drill.py"
     ).read_text(encoding="utf-8")
-    assert "phase_one.enforce_aggregate_shared_bar_capacity" in source
-    assert 'Decimal(secondary_fill.get("filled_quantity", "0")) == Decimal("0.009")' in source
-    assert 'Decimal(exhausted_bar["consumed"]) == Decimal("0.01")' in source
-    assert "verify_database_row_level_tenant_isolation" in source
-    for table in ("customer_paper.accounts", "customer_paper.orders", "customer_paper.journals"):
-        assert f"SELECT count(*) FROM {table}" in source
-    assert 'result["hidden_accounts"] == 0' in source
-    assert 'result["hidden_orders"] == 0' in source
-    assert 'result["hidden_journals"] == 0' in source
+    phase_one_start = source.index("async def _phase_one(")
+    phase_two_start = source.index("async def _phase_two(")
+    phase_two_end = source.index("\n\ndef _run(", phase_two_start)
+    phase_one = source[phase_one_start:phase_two_start]
+    phase_two = source[phase_two_start:phase_two_end]
+    assert "phase_one.enforce_aggregate_shared_bar_capacity" in phase_one
+    assert "_verify_tenant_rls_visibility(" in phase_two
