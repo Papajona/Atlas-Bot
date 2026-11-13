@@ -436,10 +436,14 @@ def make_execution_cost_provider(
 
 
 def execution_cost_series_for_positions(
-    context: Mapping[str, Any] | None, position: pd.Series, reference_prices: pd.Series,
-    *, namespace: str, fallback_cost_bps: float,
+    context: Mapping[str, Any] | None,
+    position: pd.Series,
+    reference_prices: pd.Series,
+    *,
+    namespace: str,
+    fallback_cost_bps: float,
 ) -> tuple[pd.Series, dict[str, Any]]:
-    """Build router costs; fallback rows are explicitly marked incomplete."""
+    """Price position increases and reductions as separate executable order events."""
     fallback = _number(fallback_cost_bps)
     if fallback is None:
         raise ValueError("fallback_cost_bps must be finite and non-negative")
@@ -451,26 +455,70 @@ def execution_cost_series_for_positions(
     reasons: dict[str, int] = {}
     complete = isinstance(context, Mapping)
     previous = 0.0
-    for i, current in enumerate(positions.to_numpy(dtype=float)):
-        if not math.isfinite(float(current)):
+    for i, current_value in enumerate(positions.to_numpy(dtype=float)):
+        current = float(current_value)
+        if not math.isfinite(current):
             complete = False
             reasons["NONFINITE_POSITION"] = reasons.get("NONFINITE_POSITION", 0) + 1
             previous = 0.0
             continue
-        turnover = abs(float(current) - previous)
-        if turnover > 0.0:
-            side = "buy" if current - previous > 0.0 else "sell"
+        turnover = abs(current - previous)
+        if turnover == 0.0:
+            previous = current
+            continue
+
+        sign_flip = previous != 0.0 and current != 0.0 and math.copysign(1.0, previous) != math.copysign(1.0, current)
+        close_quantity = 0.0
+        open_quantity = 0.0
+        close_side = "sell" if previous > 0.0 else "buy"
+        open_side = "buy" if current > 0.0 else "sell"
+        if previous != 0.0 and (current == 0.0 or sign_flip or abs(current) < abs(previous)):
+            close_quantity = abs(previous) if (current == 0.0 or sign_flip) else abs(previous) - abs(current)
+        if current != 0.0 and (previous == 0.0 or sign_flip or abs(current) > abs(previous)):
+            open_quantity = abs(current) if (previous == 0.0 or sign_flip) else abs(current) - abs(previous)
+
+        event_rates: list[tuple[float, float]] = []
+        event_failed = False
+        if close_quantity > 0.0:
             cost, reason = execution_cost_for_event(
-                context, bar_position=i, turnover=turnover,
-                reference_price=float(prices.iloc[i]), side=side, namespace=namespace,
+                context,
+                bar_position=i,
+                turnover=close_quantity,
+                reference_price=float(prices.iloc[i]),
+                side=close_side,
+                namespace=f"{namespace}:CLOSE",
             )
             if cost is None:
-                complete = False
+                event_failed = True
                 key = reason or "EXECUTION_EVENT_UNAVAILABLE"
                 reasons[key] = reasons.get(key, 0) + 1
             else:
-                values[i] = cost
-        previous = float(current)
+                event_rates.append((close_quantity, cost))
+        if open_quantity > 0.0:
+            cost, reason = execution_cost_for_event(
+                context,
+                bar_position=i,
+                turnover=open_quantity,
+                reference_price=float(prices.iloc[i]),
+                side=open_side,
+                namespace=f"{namespace}:OPEN",
+            )
+            if cost is None:
+                event_failed = True
+                key = reason or "EXECUTION_EVENT_UNAVAILABLE"
+                reasons[key] = reasons.get(key, 0) + 1
+            else:
+                event_rates.append((open_quantity, cost))
+
+        if event_failed or not event_rates or not math.isclose(
+            sum(quantity for quantity, _ in event_rates), turnover,
+            rel_tol=1e-10, abs_tol=1e-12,
+        ):
+            complete = False
+        else:
+            values[i] = sum(quantity * rate for quantity, rate in event_rates) / turnover
+        previous = current
+
     return pd.Series(values, index=positions.index, dtype=float, name="execution_cost_bps"), {
         "execution_cost_model_complete": bool(complete),
         "execution_cost_model_status": (
