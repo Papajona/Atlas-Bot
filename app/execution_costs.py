@@ -6,6 +6,7 @@ make missing or assumed inputs venue-calibrated.
 """
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Any
 
@@ -118,6 +119,50 @@ def adverse_fill_price(reference_price: Any, side: str, slippage_bps: Any) -> fl
         raise ValueError("adverse fill price must remain finite and positive")
     return result
 
+
+
+def deterministic_execution_draws(order_key: str) -> tuple[float, float]:
+    """Return reproducible rejection and latency uniforms for the paper execution model."""
+    key = str(order_key or "").strip()
+    if not key:
+        raise ValueError("order_key is required for deterministic execution draws")
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    scale = float(2**64)
+    return (
+        int.from_bytes(digest[:8], "big") / scale,
+        int.from_bytes(digest[8:16], "big") / scale,
+    )
+
+
+def latency_from_quantiles(
+    uniform_draw: Any,
+    *,
+    minimum_ms: Any,
+    median_ms: Any,
+    p95_ms: Any,
+    maximum_ms: Any,
+) -> float:
+    """Interpolate calibrated latency quantiles using the shared paper-model method."""
+    try:
+        draw = float(uniform_draw)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("latency draw must be a finite number in [0, 1)") from exc
+    if not math.isfinite(draw) or not 0.0 <= draw < 1.0:
+        raise ValueError("latency draw must be a finite number in [0, 1)")
+    minimum = _finite_nonnegative(minimum_ms, "minimum_ms")
+    median = _finite_nonnegative(median_ms, "median_ms", strictly_positive=True)
+    p95 = _finite_nonnegative(p95_ms, "p95_ms", strictly_positive=True)
+    maximum = _finite_nonnegative(maximum_ms, "maximum_ms", strictly_positive=True)
+    if not minimum <= median <= p95 <= maximum:
+        raise ValueError("latency quantiles must satisfy min <= median <= p95 <= max")
+    anchors = ((0.0, minimum), (0.50, median), (0.95, p95), (1.0, maximum))
+    for (x0, y0), (x1, y1) in zip(anchors, anchors[1:]):
+        if draw <= x1:
+            if x1 == x0:
+                return float(y1)
+            weight = (draw - x0) / (x1 - x0)
+            return float(y0 + weight * (y1 - y0))
+    return float(maximum)
 
 def net_returns_after_costs(
     gross_returns: Any,

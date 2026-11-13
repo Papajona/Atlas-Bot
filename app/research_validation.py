@@ -236,6 +236,8 @@ def oos_benchmark_comparison(
     random_trials: int = 100,
     seed: int = 20261026,
     session_costs_bps: dict[str, float] | None = None,
+    execution_cost_context_blocks: list[dict[str, object] | None] | None = None,
+    candidate_execution_cost_namespace: str = "research:ensemble",
 ) -> dict:
     """Compare candidate returns with OHLC-derived buy-and-hold and fresh-entry controls.
 
@@ -251,6 +253,37 @@ def oos_benchmark_comparison(
         and (entry_atr_blocks is None or len(entry_atr_blocks) == len(ohlc_blocks))
     ):
         return {"status": "INSUFFICIENT_DATA", "reason": "fold_block_mismatch"}
+    if (
+        execution_cost_context_blocks is not None
+        and len(execution_cost_context_blocks) != len(ohlc_blocks)
+    ):
+        return {
+            "status": "INCOMPLETE",
+            "reason": "benchmark_execution_context_block_mismatch",
+            "execution_cost_model_complete": False,
+        }
+    if execution_cost_context_blocks is not None and any(
+        not isinstance(context, dict) for context in execution_cost_context_blocks
+    ):
+        return {
+            "status": "INCOMPLETE",
+            "reason": "benchmark_execution_context_unavailable_for_one_or_more_folds",
+            "execution_cost_model_complete": False,
+        }
+    from .research_execution_costs import (
+        ResearchExecutionCostError,
+        execution_cost_for_event,
+        make_execution_cost_provider,
+    )
+    benchmark_cost_complete = (
+        execution_cost_context_blocks is not None
+        and all(isinstance(context, dict) for context in execution_cost_context_blocks)
+    )
+    context_blocks = (
+        execution_cost_context_blocks
+        if execution_cost_context_blocks is not None
+        else [None] * len(ohlc_blocks)
+    )
     try:
         cost_rate = float(transaction_cost_bps) / 10000.0
         carry_rate = None if carry_bps_per_bar is None else float(carry_bps_per_bar) / 10000.0
@@ -359,15 +392,80 @@ def oos_benchmark_comparison(
             return False
         return True
 
-    def _simulate_signal(frame: pd.DataFrame, market: np.ndarray,
-                         signal: np.ndarray, atr: np.ndarray):
+    def _event_cost_drag(
+        context: dict[str, object],
+        bar_position: int,
+        previous_position: float,
+        current_position: float,
+        reference_price: float,
+        namespace: str,
+    ) -> float:
+        turnover = abs(current_position - previous_position)
+        if turnover == 0.0:
+            return 0.0
+
+        def price(quantity: float, side: str, event_namespace: str) -> float:
+            rate, reason = execution_cost_for_event(
+                context,
+                bar_position=bar_position,
+                turnover=quantity,
+                reference_price=reference_price,
+                side=side,
+                namespace=event_namespace,
+            )
+            if rate is None:
+                raise ResearchExecutionCostError(
+                    reason or "BENCHMARK_EXECUTION_EVENT_UNAVAILABLE"
+                )
+            return float(rate)
+
+        reversal = (
+            previous_position != 0.0
+            and current_position != 0.0
+            and math.copysign(1.0, previous_position) != math.copysign(1.0, current_position)
+        )
+        if reversal:
+            close_quantity = abs(previous_position)
+            open_quantity = abs(current_position)
+            close_side = "sell" if previous_position > 0.0 else "buy"
+            open_side = "buy" if current_position > 0.0 else "sell"
+            close_rate = price(close_quantity, close_side, f"{namespace}:CLOSE")
+            open_rate = price(open_quantity, open_side, f"{namespace}:OPEN")
+            return (
+                close_quantity * close_rate + open_quantity * open_rate
+            ) / 10_000.0
+
+        side = "buy" if current_position - previous_position > 0.0 else "sell"
+        event_type = (
+            "OPEN" if previous_position == 0.0
+            else "CLOSE" if current_position == 0.0
+            else "ADJUST"
+        )
+        rate = price(turnover, side, f"{namespace}:{event_type}")
+        return turnover * rate / 10_000.0
+
+    def _simulate_signal(
+        frame: pd.DataFrame,
+        market: np.ndarray,
+        signal: np.ndarray,
+        atr: np.ndarray,
+        execution_context: dict[str, object] | None,
+        execution_namespace: str,
+    ):
         if bracket_configured:
+            cost_provider = (
+                make_execution_cost_provider(
+                    execution_context, namespace=execution_namespace
+                )
+                if isinstance(execution_context, dict) else None
+            )
             simulated = simulate_execution_aware_strategy(
                 frame, signal, atr,
                 stop_atr=float(stop_atr),
                 take_profit_atr=float(take_profit_atr),
                 transaction_cost_bps=float(transaction_cost_bps),
-                session_costs_bps=session_costs_bps,
+                session_costs_bps=session_costs_bps if cost_provider is None else None,
+                transaction_cost_provider=cost_provider,
                 carry_bps_per_bar=carry_bps_per_bar,
                 drawdown_limit=drawdown_limit,
                 daily_loss_limit=daily_loss_limit,
@@ -391,7 +489,36 @@ def oos_benchmark_comparison(
         turnover = np.abs(signal - previous)
         if len(turnover):
             turnover[-1] += abs(float(signal[-1]))
-        net = signal * market - turnover * cost_rate
+        if isinstance(execution_context, dict):
+            transaction_drag = np.zeros(len(signal), dtype=float)
+            for bar_position, (prior, current) in enumerate(zip(previous, signal, strict=True)):
+                transaction_drag[bar_position] += _event_cost_drag(
+                    execution_context,
+                    bar_position,
+                    float(prior),
+                    float(current),
+                    float(frame["open"].iloc[bar_position]),
+                    f"{execution_namespace}:bar:{bar_position}",
+                )
+            if len(signal) and float(signal[-1]) != 0.0:
+                final_position = float(signal[-1])
+                exit_side = "sell" if final_position > 0.0 else "buy"
+                exit_cost, reason = execution_cost_for_event(
+                    execution_context,
+                    bar_position=len(signal) - 1,
+                    turnover=abs(final_position),
+                    reference_price=float(frame["close"].iloc[-1]),
+                    side=exit_side,
+                    namespace=f"{execution_namespace}:TERMINAL_EXIT",
+                )
+                if exit_cost is None:
+                    raise ResearchExecutionCostError(
+                        reason or "BENCHMARK_TERMINAL_EXIT_COST_UNAVAILABLE"
+                    )
+                transaction_drag[-1] += abs(final_position) * float(exit_cost) / 10_000.0
+        else:
+            transaction_drag = turnover * cost_rate
+        net = signal * market - transaction_drag
         if carry_rate is not None:
             net = net - np.abs(signal) * carry_rate
         net = np.clip(net, -1.0, None)
@@ -408,9 +535,20 @@ def oos_benchmark_comparison(
     candidate_fold_values: list[float] = []
     candidate_turnover_total = 0.0
     candidate_exit_count = 0
-    for frame, market, signal, atr in zip(frame_blocks, market_blocks, signals, atr_blocks):
+    for block_index, (frame, market, signal, atr, execution_context) in enumerate(zip(
+        frame_blocks, market_blocks, signals, atr_blocks, context_blocks, strict=True
+    )):
         try:
-            net, turnover, executed, exits, audited_exits = _simulate_signal(frame, market, signal, atr)
+            net, turnover, executed, exits, audited_exits = _simulate_signal(
+                frame, market, signal, atr, execution_context,
+                candidate_execution_cost_namespace,
+            )
+        except ResearchExecutionCostError as exc:
+            return {
+                "status": "INCOMPLETE",
+                "reason": f"benchmark_candidate_execution_cost_unavailable:{exc}",
+                "execution_cost_model_complete": False,
+            }
         except (TypeError, ValueError, OverflowError, FloatingPointError):
             return {"status": "INVALID_DATA", "reason": "candidate_fold_execution_invalid"}
         candidate_fold_values.extend(np.asarray(net, dtype=float).tolist())
@@ -457,12 +595,41 @@ def oos_benchmark_comparison(
 
     buy_hold_values = []
     buy_hold_turnover = 0.0
-    for frame, market in zip(frame_blocks, market_blocks):
+    for block_index, (frame, market, execution_context) in enumerate(zip(
+        frame_blocks, market_blocks, context_blocks, strict=True
+    )):
         turnover = np.zeros(len(market), dtype=float)
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
         buy_hold_turnover += float(turnover.sum())
-        if session_costs_bps is not None:
+        if isinstance(execution_context, dict):
+            entry_cost, entry_reason = execution_cost_for_event(
+                execution_context,
+                bar_position=0,
+                turnover=1.0,
+                reference_price=float(frame["open"].iloc[0]),
+                side="buy",
+                namespace=f"benchmark:buy-and-hold:fold:{block_index}:ENTRY",
+            )
+            exit_cost, exit_reason = execution_cost_for_event(
+                execution_context,
+                bar_position=len(frame) - 1,
+                turnover=1.0,
+                reference_price=float(frame["close"].iloc[-1]),
+                side="sell",
+                namespace=f"benchmark:buy-and-hold:fold:{block_index}:EXIT",
+            )
+            if entry_cost is None or exit_cost is None:
+                reason = entry_reason or exit_reason or "BUY_AND_HOLD_EXECUTION_COST_UNAVAILABLE"
+                return {
+                    "status": "INCOMPLETE",
+                    "reason": f"benchmark_buy_and_hold_execution_cost_unavailable:{reason}",
+                    "execution_cost_model_complete": False,
+                }
+            transaction_drag = np.zeros(len(market), dtype=float)
+            transaction_drag[0] += float(entry_cost) / 10_000.0
+            transaction_drag[-1] += float(exit_cost) / 10_000.0
+        elif session_costs_bps is not None:
             # Entry and terminal liquidation are separate fills and must use
             # the fee schedule at their own observed execution sessions.
             from .market_sessions import session_cost_series
@@ -494,7 +661,7 @@ def oos_benchmark_comparison(
     random_exit_bar_counts: list[int] = []
     random_requested_exposure_bars: list[int] = []
     random_requested_entry_counts: list[int] = []
-    for _ in range(max(1, int(random_trials))):
+    for trial_index in range(max(1, int(random_trials))):
         trial_values: list[float] = []
         trade_count = 0
         turnover_total = 0.0
@@ -502,9 +669,10 @@ def oos_benchmark_comparison(
         exit_bar_count = 0
         requested_exposure_bars = 0
         requested_entry_count = 0
-        for frame, market, original_signal, atr, valid_shifts in zip(
-            frame_blocks, market_blocks, signals, atr_blocks, valid_shift_offsets
-        ):
+        for block_index, (frame, market, original_signal, atr, valid_shifts, execution_context) in enumerate(zip(
+            frame_blocks, market_blocks, signals, atr_blocks, valid_shift_offsets,
+            context_blocks, strict=True
+        )):
             shift = int(rng.choice(valid_shifts))
             shifted = _shift_signal(original_signal, shift)
             requested_exposure_bars += int(np.count_nonzero(shifted))
@@ -514,7 +682,16 @@ def oos_benchmark_comparison(
                 & ((previous_requested == 0.0) | (np.sign(shifted) != np.sign(previous_requested)))
             ))
             try:
-                net, turnover, executed, exits, audited_exits = _simulate_signal(frame, market, shifted, atr)
+                net, turnover, executed, exits, audited_exits = _simulate_signal(
+                    frame, market, shifted, atr, execution_context,
+                    f"benchmark:random:{trial_index}:fold:{block_index}",
+                )
+            except ResearchExecutionCostError as exc:
+                return {
+                    "status": "INCOMPLETE",
+                    "reason": f"benchmark_random_control_execution_cost_unavailable:{exc}",
+                    "execution_cost_model_complete": False,
+                }
             except (TypeError, ValueError, OverflowError, FloatingPointError):
                 return {"status": "INVALID_DATA", "reason": "random_control_fold_execution_invalid"}
             previous_executed = np.r_[0.0, executed[:-1]]
@@ -541,6 +718,12 @@ def oos_benchmark_comparison(
     random_p95 = float(np.quantile(random_returns, 0.95))
     return {
         "status": "OK",
+        "execution_cost_model_complete": bool(benchmark_cost_complete),
+        "execution_cost_model_status": (
+            "VERIFIED_PER_BAR_EXECUTION_COSTS"
+            if benchmark_cost_complete else "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+        ),
+        "execution_cost_model_namespace": candidate_execution_cost_namespace,
         "candidate_net_return": candidate_return,
         "candidate_stream_net_return": candidate_stream_return,
         "candidate_turnover": candidate_turnover_total,
@@ -571,9 +754,17 @@ def oos_benchmark_comparison(
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
-        "gate_passed": candidate_return > buy_hold_return and candidate_return > random_p95,
+        "gate_passed": (
+            benchmark_cost_complete
+            and candidate_return > buy_hold_return
+            and candidate_return > random_p95
+        ),
         "cost_assumptions": {"transaction_cost_bps_per_turnover": float(transaction_cost_bps), "carry_bps_per_bar": carry_bps_per_bar},
-        "note": "Candidate and random controls are independently re-simulated from requested positions inside each fold. Every fold starts flat and liquidates at its observed terminal close; market returns come from raw OHLC.",
+        "note": (
+            "Candidate and random controls are independently re-simulated from requested positions inside each fold. "
+            "Every fold starts flat and liquidates at its observed terminal close; market returns come from raw OHLC. "
+            "Benchmark promotion remains incomplete unless every control event uses verified per-bar execution evidence."
+        ),
     }
 
 
@@ -669,6 +860,8 @@ def fixed_signal_walk_forward_oos(
     benchmark_random_trials: int = 100,
     session_costs_bps: dict[str, float] | None = None,
     transaction_cost_bps_per_bar: pd.Series | None = None,
+    execution_cost_context: dict[str, object] | None = None,
+    benchmark_execution_cost_namespace: str = "research:ensemble",
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -789,6 +982,9 @@ def fixed_signal_walk_forward_oos(
     oos_benchmark_entry_signal_blocks: list[np.ndarray] = []
     oos_benchmark_atr_blocks: list[np.ndarray] = []
     oos_candidate_net_blocks = []
+    oos_execution_cost_context_blocks: list[dict[str, object] | None] | None = (
+        [] if execution_cost_context is not None else None
+    )
     trades = 0
     for fold in splits:
         start, end = fold.test_start, fold.test_end
@@ -798,6 +994,13 @@ def fixed_signal_walk_forward_oos(
         oos_gross_returns.append(gross.iloc[start:end])
         oos_turnover.append(turnover.iloc[start:end])
         oos_ohlc_blocks.append(df.iloc[start:end].copy())
+        if oos_execution_cost_context_blocks is not None:
+            from .research_execution_costs import slice_research_execution_context
+            oos_execution_cost_context_blocks.append(
+                slice_research_execution_context(
+                    execution_cost_context, df.index[start:end]
+                )
+            )
         if benchmark_signal is not None:
             oos_benchmark_entry_signal_blocks.append(benchmark_signal.iloc[start:end].to_numpy(dtype=float))
         if benchmark_atr is not None:
@@ -928,6 +1131,8 @@ def fixed_signal_walk_forward_oos(
             cooldown_bars=benchmark_cooldown_bars,
             random_trials=benchmark_random_trials,
             session_costs_bps=session_costs_bps,
+            execution_cost_context_blocks=oos_execution_cost_context_blocks,
+            candidate_execution_cost_namespace=benchmark_execution_cost_namespace,
         )
     return {
         "status": "OK",

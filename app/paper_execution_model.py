@@ -19,6 +19,8 @@ from .execution_costs import (
     EXECUTION_COST_MODEL_VERSION,
     adverse_fill_price,
     execution_cost_components,
+    deterministic_execution_draws,
+    latency_from_quantiles,
 )
 
 
@@ -193,25 +195,6 @@ def _calibration_evidence_matches(
     return False
 
 
-def _latency_from_quantiles(
-    uniform_draw: float,
-    *,
-    minimum_ms: float,
-    median_ms: float,
-    p95_ms: float,
-    maximum_ms: float,
-) -> float:
-    """Deterministically interpolate declared empirical latency quantiles."""
-    anchors = ((0.0, minimum_ms), (0.50, median_ms), (0.95, p95_ms), (1.0, maximum_ms))
-    for (x0, y0), (x1, y1) in zip(anchors, anchors[1:]):
-        if uniform_draw <= x1:
-            if x1 == x0:
-                return float(y1)
-            weight = (uniform_draw - x0) / (x1 - x0)
-            return float(y0 + weight * (y1 - y0))
-    return float(maximum_ms)
-
-
 def calibrated_model_available(
     market_context: Any,
     *,
@@ -354,10 +337,8 @@ def estimate_paper_fill(
     if not minimum_ms <= median_ms <= p95_ms <= maximum_ms:
         raise PaperExecutionModelError("latency quantiles must satisfy min <= median <= p95 <= max")
 
-    digest = hashlib.sha256(key.encode("utf-8")).digest()
-    rejection_draw = int.from_bytes(digest[:8], "big") / float(2**64)
-    latency_draw = int.from_bytes(digest[8:16], "big") / float(2**64)
-    simulated_latency_ms = _latency_from_quantiles(
+    rejection_draw, latency_draw = deterministic_execution_draws(key)
+    simulated_latency_ms = latency_from_quantiles(
         latency_draw,
         minimum_ms=minimum_ms,
         median_ms=median_ms,

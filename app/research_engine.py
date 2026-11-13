@@ -11,6 +11,12 @@ from .trading_core import ai_walk_forward_backtest
 from .strategy_evidence import evidence_for
 from .research_validation import monte_carlo_bootstrap, parameter_plateau_score, cost_breakeven_report
 from .config import settings
+from .research_execution_costs import (
+    ResearchExecutionCostError,
+    build_research_execution_cost_context,
+    make_execution_cost_provider,
+    research_execution_model_fingerprint,
+)
 
 # Fail-closed release gate: no trusted signed comparable-trial archive verifier is
 # integrated into this code path yet. Do not enable from report fields or fixtures.
@@ -216,6 +222,26 @@ def _apply_protective_halts(
     }
 
 
+def _benchmark_execution_inputs(
+    execution_cost_context: dict[str, object] | None,
+    execution_audit: dict,
+    session_costs_bps: dict[str, float] | None,
+) -> tuple[dict[str, object] | None, dict[str, float] | None]:
+    """Keep benchmark controls on the candidate's actual fallback cost model.
+
+    A candidate that hit a participation rejection is re-run with static/session
+    costs. Its independent benchmark controls must not retry the rejected signed
+    per-bar context, or the benchmark report disappears instead of staying
+    diagnostic-only.
+    """
+    if execution_audit.get("per_bar_execution_cost_model_status") == "FALLBACK_AFTER_EVENT_REJECTION":
+        return None, session_costs_bps
+    return (
+        execution_cost_context,
+        None if execution_cost_context is not None else session_costs_bps,
+    )
+
+
 def _protected_component_position(
     df: pd.DataFrame,
     component: str,
@@ -225,27 +251,57 @@ def _protected_component_position(
     asset: str = "crypto",
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
+    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_namespace: str = "research",
 ):
-    """Return one execution-aware, costed, risk-controlled stream for all research metrics."""
+    """Return one costed, execution-aware and risk-controlled return stream."""
     signals = strategy_signals(df, cfg, asset=asset)
     raw = signals[component].fillna(0.0)
     requested = target_positions(raw, signals["realized_vol"], cfg).shift(1).fillna(0.0)
     carry = carry_bps_per_bar
     if carry is None:
         carry = settings.research_carry_bps_per_bar
-    execution = simulate_execution_aware_strategy(
-        df,
-        requested,
-        signals["atr"].shift(1),
-        stop_atr=cfg.stop_atr,
-        take_profit_atr=cfg.take_profit_atr,
-        transaction_cost_bps=float(taker_bps) + float(slippage_bps),
-        session_costs_bps=session_costs_bps,
-        carry_bps_per_bar=carry,
-        drawdown_limit=settings.strategy_drawdown_halt,
-        daily_loss_limit=settings.strategy_daily_loss_halt,
-        loss_event_threshold=settings.strategy_stoploss_guard_trades,
-        cooldown_bars=settings.strategy_stoploss_guard_bars,
+    cost_provider = make_execution_cost_provider(
+        execution_cost_context, namespace=execution_cost_namespace
+    )
+    execution_session_costs = None if cost_provider is not None else session_costs_bps
+    execution_kwargs = {
+        "stop_atr": cfg.stop_atr,
+        "take_profit_atr": cfg.take_profit_atr,
+        "transaction_cost_bps": float(taker_bps) + float(slippage_bps),
+        "session_costs_bps": execution_session_costs,
+        "transaction_cost_provider": cost_provider,
+        "carry_bps_per_bar": carry,
+        "drawdown_limit": settings.strategy_drawdown_halt,
+        "daily_loss_limit": settings.strategy_daily_loss_halt,
+        "loss_event_threshold": settings.strategy_stoploss_guard_trades,
+        "cooldown_bars": settings.strategy_stoploss_guard_bars,
+    }
+    try:
+        execution = simulate_execution_aware_strategy(
+            df, requested, signals["atr"].shift(1), **execution_kwargs
+        )
+    except ResearchExecutionCostError as exc:
+        # Keep diagnostic returns available, but never mix calibrated and static
+        # costs inside one candidate stream after a participation/context violation.
+        fallback_kwargs = dict(execution_kwargs)
+        fallback_kwargs["transaction_cost_provider"] = None
+        fallback_kwargs["session_costs_bps"] = session_costs_bps
+        execution = simulate_execution_aware_strategy(
+            df, requested, signals["atr"].shift(1), **fallback_kwargs
+        )
+        execution["audit"]["per_bar_execution_cost_model_complete"] = False
+        execution["audit"]["per_bar_execution_cost_model_status"] = "FALLBACK_AFTER_EVENT_REJECTION"
+        execution["audit"]["per_bar_execution_cost_failure"] = str(exc)
+    execution["audit"]["execution_cost_model_fingerprint"] = (
+        execution_cost_context.get("model_fingerprint")
+        if isinstance(execution_cost_context, dict)
+        else None
+    )
+    execution["audit"]["per_bar_execution_context_sha256"] = (
+        execution_cost_context.get("context_sha256")
+        if isinstance(execution_cost_context, dict)
+        else None
     )
     return (
         signals, raw, requested, execution["market_returns"], execution["positions"],
@@ -253,11 +309,23 @@ def _protected_component_position(
         execution["effective_transaction_cost_bps"],
     )
 
-def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, taker_bps: float, slippage_bps: float, asset: str = "crypto", carry_bps_per_bar: float | None = None, session_costs_bps: dict[str, float] | None = None) -> dict:
+def _component_backtest(
+    df: pd.DataFrame,
+    component: str,
+    cfg: StrategyConfig,
+    taker_bps: float,
+    slippage_bps: float,
+    asset: str = "crypto",
+    carry_bps_per_bar: float | None = None,
+    session_costs_bps: dict[str, float] | None = None,
+    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_namespace: str | None = None,
+) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
+    namespace = execution_cost_namespace or f"research:{component}"
     s, _, _, _, protected, protected_net, protection_audit, _, _ = _protected_component_position(
         df, component, cfg, taker_bps, slippage_bps, asset, carry_bps_per_bar,
-        session_costs_bps,
+        session_costs_bps, execution_cost_context, namespace,
     )
     ann = float(s.attrs.get("annualization_factor", 252.0))
     active = protected != 0
@@ -295,6 +363,11 @@ def _component_backtest(df: pd.DataFrame, component: str, cfg: StrategyConfig, t
             and bool(str(settings.research_carry_evidence_id or "").strip())
         ),
         "intrabar_stop_target_model_complete": protection_audit["intrabar_stop_target_model_complete"],
+        "execution_cost_model_complete": protection_audit.get("per_bar_execution_cost_model_complete") is True,
+        "execution_cost_model_status": protection_audit.get("per_bar_execution_cost_model_status"),
+        "execution_cost_model_fingerprint": protection_audit.get("execution_cost_model_fingerprint"),
+        "per_bar_execution_context_sha256": protection_audit.get("per_bar_execution_context_sha256"),
+        "per_bar_execution_cost_failure": protection_audit.get("per_bar_execution_cost_failure"),
         "transaction_cost_bps": float(taker_bps + slippage_bps),
         "annualization_factor": ann,
         "risk_protections": {
@@ -442,7 +515,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Validate venue calibration before generating any returns so the exact verified
     # per-session schedule is what the research simulator and OOS cost stress consume.
     from .research_evidence import (
-        RESEARCH_PROTOCOL_VERSION, canonical_sha256, oos_sample_fingerprint,
+        RESEARCH_PROTOCOL_VERSION, oos_sample_fingerprint,
         validate_comparable_trial_archive, validate_crypto_universe_manifest,
         validate_execution_cost_calibration,
     )
@@ -453,13 +526,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     research_timeframe = str(provenance.get("timeframe") or df.attrs.get("timeframe") or "").strip()
     protocol_version = RESEARCH_PROTOCOL_VERSION
     cost_mult = float(getattr(settings, "research_cost_stress_multiplier", 2.0))
-    model_fingerprint = canonical_sha256({
-        "model": "atlas-research-cost-v2-session-aware",
-        "session_cost_model": "market-sessions-v1",
-        "taker_bps": float(taker_bps),
-        "slippage_bps": float(slippage_bps),
-        "cost_stress_multiplier": cost_mult,
-    })
+    model_fingerprint = research_execution_model_fingerprint(
+        settings,
+        taker_bps=float(taker_bps),
+        base_slippage_bps=float(slippage_bps),
+        cost_stress_multiplier=cost_mult,
+    )
     cost_document = df.attrs.get("execution_cost_calibration_evidence")
     if research_venue and research_market_type and research_symbol:
         cost_validation = validate_execution_cost_calibration(
@@ -487,9 +559,20 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         session_cost_series(df.index, session_costs_bps)
         if session_costs_bps is not None else None
     )
+    execution_cost_context, execution_context_audit = build_research_execution_cost_context(
+        df,
+        settings=settings,
+        taker_bps=float(taker_bps),
+        base_slippage_bps=float(slippage_bps),
+        cost_stress_multiplier=cost_mult,
+        asset=asset,
+    )
     components = ["trend", "momentum", "breakout", "mean_reversion", "ensemble"]
     results = [
-        _component_backtest(df, c, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps)
+        _component_backtest(
+            df, c, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
+            execution_cost_context,
+        )
         for c in components
     ]
     for row in results:
@@ -506,7 +589,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     signal_frame = strategy_signals(df, cfg, asset=asset)
     annualization_factor = float(signal_frame.attrs.get("annualization_factor", 252.0))
     ensemble_signals, _, ensemble_requested, bar_returns, ensemble_pos, ensemble_net, ensemble_audit, ensemble_exits, ensemble_cost_bps = _protected_component_position(
-        df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        df, "ensemble", cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
+        execution_cost_context, "research:ensemble",
     )
     gross = ensemble_pos * bar_returns
     turnover = execution_turnover(ensemble_pos, ensemble_exits)
@@ -529,6 +613,9 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         for size in bootstrap_block_sizes
     }
     adjusted = multiple_testing_sharpe_adjustment([r.get("sharpe", 0.0) for r in results], trials=len(results))
+    benchmark_execution_context, benchmark_session_costs = _benchmark_execution_inputs(
+        execution_cost_context, ensemble_audit, session_costs_bps
+    )
     oos = fixed_signal_walk_forward_oos(
         df, ensemble_pos, costs_bps=taker_bps + slippage_bps,
         folds=folds, min_train=min_train,
@@ -545,11 +632,30 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         benchmark_daily_loss_limit=settings.strategy_daily_loss_halt,
         benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
         benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
-        session_costs_bps=session_costs_bps,
+        session_costs_bps=benchmark_session_costs,
         transaction_cost_bps_per_bar=(
-            ensemble_cost_bps if session_costs_bps is not None else None
+            ensemble_cost_bps
+            if execution_cost_context is not None or session_costs_bps is not None
+            else None
         ),
+        execution_cost_context=benchmark_execution_context,
+        benchmark_execution_cost_namespace="research:ensemble",
     )
+    oos["execution_cost_model_complete"] = (
+        ensemble_audit.get("per_bar_execution_cost_model_complete") is True
+    )
+    oos["execution_cost_model_status"] = ensemble_audit.get("per_bar_execution_cost_model_status")
+    oos["execution_cost_model_fingerprint"] = ensemble_audit.get("execution_cost_model_fingerprint")
+    oos["per_bar_execution_context_sha256"] = ensemble_audit.get("per_bar_execution_context_sha256")
+    oos["per_bar_execution_cost_failure"] = ensemble_audit.get("per_bar_execution_cost_failure")
+    if isinstance(oos.get("cost_analysis"), dict):
+        oos["cost_analysis"].update({
+            "execution_cost_model_complete": oos["execution_cost_model_complete"],
+            "execution_cost_model_status": oos["execution_cost_model_status"],
+            "execution_cost_model_fingerprint": oos["execution_cost_model_fingerprint"],
+            "per_bar_execution_context_sha256": oos["per_bar_execution_context_sha256"],
+            "per_bar_execution_cost_failure": oos["per_bar_execution_cost_failure"],
+        })
     ensemble_overlap = _fold_trade_boundary_overlap(ensemble_pos, ensemble_exits, validation_splits)
     oos["trade_boundary_overlap_bars"] = ensemble_overlap["total_bars"]
     oos["trade_boundary_overlap_by_fold"] = ensemble_overlap["by_fold"]
@@ -561,8 +667,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         if component == "ensemble":
             per_strategy_oos[component] = oos
             continue
-        component_signals, _, component_requested, component_returns, component_position, _, _, component_exits, component_cost_bps = _protected_component_position(
-            df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        component_signals, _, component_requested, component_returns, component_position, _, component_audit, component_exits, component_cost_bps = _protected_component_position(
+            df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
+            execution_cost_context, f"research:{component}",
+        )
+        benchmark_execution_context, benchmark_session_costs = _benchmark_execution_inputs(
+            execution_cost_context, component_audit, session_costs_bps
         )
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
             df, component_position, costs_bps=taker_bps + slippage_bps,
@@ -582,11 +692,22 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
             benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
             benchmark_random_trials=25,
-            session_costs_bps=session_costs_bps,
+            session_costs_bps=benchmark_session_costs,
             transaction_cost_bps_per_bar=(
-                component_cost_bps if session_costs_bps is not None else None
+                component_cost_bps
+                if execution_cost_context is not None or session_costs_bps is not None
+                else None
             ),
+            execution_cost_context=benchmark_execution_context,
+            benchmark_execution_cost_namespace=f"research:{component}",
         )
+        per_strategy_oos[component]["execution_cost_model_complete"] = (
+            component_audit.get("per_bar_execution_cost_model_complete") is True
+        )
+        per_strategy_oos[component]["execution_cost_model_status"] = component_audit.get("per_bar_execution_cost_model_status")
+        per_strategy_oos[component]["execution_cost_model_fingerprint"] = component_audit.get("execution_cost_model_fingerprint")
+        per_strategy_oos[component]["per_bar_execution_context_sha256"] = component_audit.get("per_bar_execution_context_sha256")
+        per_strategy_oos[component]["per_bar_execution_cost_failure"] = component_audit.get("per_bar_execution_cost_failure")
         component_overlap = _fold_trade_boundary_overlap(component_position, component_exits, validation_splits)
         per_strategy_oos[component]["trade_boundary_overlap_bars"] = component_overlap["total_bars"]
         per_strategy_oos[component]["trade_boundary_overlap_by_fold"] = component_overlap["by_fold"]
@@ -611,11 +732,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "stop_atr": float(cfg.stop_atr * risk_mult),
             "take_profit_atr": float(cfg.take_profit_atr * risk_mult),
         })
+        variant_namespace = f"research:variant:{threshold_mult:.2f}:{risk_mult:.2f}"
         vr = _component_backtest(
-            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
+            session_costs_bps, execution_cost_context, variant_namespace,
         )
-        variant_signals, _, variant_requested, variant_returns, variant_position, _, _, variant_exits, variant_cost_bps = _protected_component_position(
-            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry, session_costs_bps
+        variant_signals, _, variant_requested, variant_returns, variant_position, _, variant_audit, variant_exits, variant_cost_bps = _protected_component_position(
+            df, "ensemble", vcfg, taker_bps, slippage_bps, asset, carry,
+            session_costs_bps, execution_cost_context, variant_namespace,
+        )
+        variant_benchmark_context, variant_benchmark_session_costs = _benchmark_execution_inputs(
+            execution_cost_context, variant_audit, session_costs_bps
         )
         is_baseline = (
             math.isclose(threshold_mult, 1.0, rel_tol=0.0, abs_tol=1e-12)
@@ -640,11 +767,22 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 benchmark_loss_event_threshold=settings.strategy_stoploss_guard_trades,
                 benchmark_cooldown_bars=settings.strategy_stoploss_guard_bars,
                 benchmark_random_trials=25,
-                session_costs_bps=session_costs_bps,
+                session_costs_bps=variant_benchmark_session_costs,
                 transaction_cost_bps_per_bar=(
-                    variant_cost_bps if session_costs_bps is not None else None
+                    variant_cost_bps
+                    if execution_cost_context is not None or session_costs_bps is not None
+                    else None
                 ),
+                execution_cost_context=variant_benchmark_context,
+                benchmark_execution_cost_namespace=variant_namespace,
             )
+        variant_oos["execution_cost_model_complete"] = (
+            variant_audit.get("per_bar_execution_cost_model_complete") is True
+        )
+        variant_oos["execution_cost_model_status"] = variant_audit.get("per_bar_execution_cost_model_status")
+        variant_oos["execution_cost_model_fingerprint"] = variant_audit.get("execution_cost_model_fingerprint")
+        variant_oos["per_bar_execution_context_sha256"] = variant_audit.get("per_bar_execution_context_sha256")
+        variant_oos["per_bar_execution_cost_failure"] = variant_audit.get("per_bar_execution_cost_failure")
         variant_overlap = _fold_trade_boundary_overlap(variant_position, variant_exits, validation_splits)
         variant_oos["trade_boundary_overlap_bars"] = variant_overlap["total_bars"]
         variant_oos["trade_boundary_overlap_by_fold"] = variant_overlap["by_fold"]
@@ -669,6 +807,11 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "oos_trades": variant_oos.get("trades"),
             "oos_return_sample": variant_oos.get("oos_return_sample", []),
             "full_sample_statistics": variant_oos.get("full_sample_statistics", {}),
+            "execution_cost_model_complete": (
+                variant_oos.get("execution_cost_model_complete") is True
+            ),
+            "execution_cost_model_fingerprint": variant_oos.get("execution_cost_model_fingerprint"),
+            "per_bar_execution_context_sha256": variant_oos.get("per_bar_execution_context_sha256"),
         })
     robustness={
         "monte_carlo": monte_carlo_bootstrap(
@@ -779,7 +922,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         fixed_cost_drag=None if carry is None else (ensemble_pos.abs() * (float(carry) / 10000.0)).to_numpy(),
         variable_cost_bps_per_bar=(
             ensemble_cost_bps.to_numpy(dtype=float)
-            if applied_session_costs is not None else None
+            if applied_session_costs is not None or execution_cost_context is not None else None
         ),
     )
     ens_cost["carry_rate_configured"] = carry is not None
@@ -787,12 +930,23 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["carry_evidence_id_present"] = bool(carry_evidence_id)
     ens_cost["financing_cost_model_complete"] = carry_evidence_complete
     ens_cost["intrabar_stop_target_model_complete"] = False
-    ens_cost["execution_cost_model_complete"] = False
-    ens_cost["session_cost_model_complete"] = applied_session_costs is not None
+    ens_cost["execution_cost_model_complete"] = (
+        ensemble_audit.get("per_bar_execution_cost_model_complete") is True
+    )
+    ens_cost["execution_cost_model_fingerprint"] = ensemble_audit.get("execution_cost_model_fingerprint")
+    ens_cost["per_bar_execution_context_sha256"] = ensemble_audit.get("per_bar_execution_context_sha256")
+    ens_cost["per_bar_execution_cost_failure"] = ensemble_audit.get("per_bar_execution_cost_failure")
+    ens_cost["session_cost_model_complete"] = (
+        applied_session_costs is not None and execution_cost_context is None
+    )
     ens_cost["session_costs_bps"] = session_costs_bps
     ens_cost["session_costs_reason"] = cost_validation.get("session_costs_reason")
-    ens_cost["execution_cost_calibration_status"] = "MISSING_VENUE_CALIBRATION_EVIDENCE"
-    ens_cost["execution_cost_calibration_evidence_id"] = None
+    ens_cost["execution_cost_calibration_status"] = str(
+        cost_validation.get("reason") or "MISSING_VENUE_CALIBRATION_EVIDENCE"
+    ) if not calibration_ok else "VERIFIED"
+    ens_cost["execution_cost_calibration_evidence_id"] = (
+        cost_validation.get("evidence_id") if calibration_ok else None
+    )
     if not carry_evidence_complete:
         ens_cost["note"] = (
             str(ens_cost.get("note") or "")
@@ -887,14 +1041,31 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # applied the calibrated model. Keep execution_cost_model_complete false until
     # the calibrated estimator is wired into the actual research return stream.
     for cost_target in [ens_cost, oos, *per_strategy_oos.values()]:
+        per_bar_costs_complete = cost_target.get("execution_cost_model_complete") is True
         cost_target["execution_cost_calibration_status"] = calibration_status
         cost_target["execution_cost_calibration_evidence_id"] = calibration_evidence_id
-        cost_target["execution_cost_model_complete"] = False
-        cost_target["session_cost_model_complete"] = applied_session_costs is not None
+        cost_target["execution_cost_model_complete"] = per_bar_costs_complete
+        cost_target["execution_cost_model_fingerprint"] = (
+            cost_target.get("execution_cost_model_fingerprint")
+            or execution_context_audit.get("execution_cost_model_fingerprint")
+            or model_fingerprint
+        )
+        cost_target["per_bar_execution_context_sha256"] = (
+            cost_target.get("per_bar_execution_context_sha256")
+            or execution_context_audit.get("per_bar_execution_context_sha256")
+        )
+        cost_target["execution_cost_model_reason"] = execution_context_audit.get("reason")
+        cost_target["session_cost_model_complete"] = (
+            applied_session_costs is not None and execution_cost_context is None
+        )
         cost_target["session_costs_bps"] = session_costs_bps
         cost_target["session_costs_reason"] = cost_validation.get("session_costs_reason")
-        cost_target["slippage_model_complete"] = False
-        cost_target["slippage_model_status"] = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
+        cost_target["slippage_model_complete"] = per_bar_costs_complete
+        cost_target["slippage_model_status"] = (
+            "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+            if per_bar_costs_complete
+            else "STATIC_OR_SESSION_COST_FALLBACK"
+        )
 
     trial_registry_complete = False
     # DSR is calculated from every distinct candidate evaluated on the identical
@@ -1030,6 +1201,16 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     oos["trial_registry_complete"] = trial_registry_complete
     oos["deflated_sharpe_detail"] = dsr
 
+    fixed_signal_execution_costs_complete = bool(
+        oos.get("execution_cost_model_complete") is True
+        and all(
+            per_strategy_oos.get(component, {}).get("execution_cost_model_complete") is True
+            for component in components
+        )
+        and all(row.get("execution_cost_model_complete") is True for row in results)
+        and all(row.get("execution_cost_model_complete") is True for row in variants)
+    )
+
     for component in components:
         component_returns = per_strategy_oos[component].get("oos_return_sample") or []
         if not archive_sharpes_valid:
@@ -1096,11 +1277,28 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                         "carry_evidence_source": carry_evidence_source or None,
                         "carry_evidence_id": carry_evidence_id or None,
                         "intrabar_stop_target_model_complete": False,
-                        "execution_cost_model_complete": False,
+                        "execution_cost_model_complete": fixed_signal_execution_costs_complete,
+                        "execution_cost_model_status": (
+                            "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+                            if fixed_signal_execution_costs_complete
+                            else "STATIC_OR_SESSION_COST_FALLBACK"
+                        ),
                         "execution_cost_calibration_status": calibration_status,
                         "execution_cost_calibration_evidence_id": calibration_evidence_id,
                         "execution_cost_calibration": cost_validation,
                         "execution_cost_model_fingerprint": model_fingerprint,
+                        "per_bar_execution_context_sha256": execution_context_audit.get(
+                            "per_bar_execution_context_sha256"
+                        ),
+                        "per_bar_execution_context_status": execution_context_audit.get("status"),
+                        "per_bar_execution_context_reason": execution_context_audit.get("reason"),
+                        "per_bar_execution_context": {
+                            "venue": execution_context_audit.get("venue"),
+                            "market_type": execution_context_audit.get("market_type"),
+                            "symbol": execution_context_audit.get("symbol"),
+                            "timeframe": execution_context_audit.get("timeframe"),
+                            "dataset_sha256": execution_context_audit.get("dataset_sha256"),
+                        },
                         "crypto_universe_validation": universe_validation,
                         "comparable_trial_archive": archive_validation,
                         "oos_sample_sha256": sample_sha256 or None,
