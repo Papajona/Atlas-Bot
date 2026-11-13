@@ -463,11 +463,14 @@ def test_large_complete_label_history_fails_closed_without_truncation(monkeypatc
     )
 
     class _Rows:
-        def all(self):
-            return [
+        def __init__(self, rows=None):
+            self.rows = rows if rows is not None else [
                 (1, json.dumps(_outcome_label(1))),
                 (2, json.dumps(_outcome_label(2))),
             ]
+
+        def all(self):
+            return self.rows
 
     class _Transaction:
         async def __aenter__(self):
