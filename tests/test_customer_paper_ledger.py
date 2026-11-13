@@ -1300,15 +1300,25 @@ def test_customer_paper_sell_pnl_terminal_events_and_reversal_cash_guard(monkeyp
             quantity="1",
             price="100",
         )
+        # Build marks from the persisted open-position identities rather than
+        # assuming the database's canonical venue/market/symbol casing.
+        open_positions = await get_customer_paper_positions(customer_id=customer_id)
+        reversal_marks = {
+            (
+                position["venue"].strip().lower(),
+                position["market_type"].strip().lower(),
+                position["symbol"].strip().upper(),
+            ): _fresh_group_mark("100")
+            for position in open_positions
+        }
+        # The SELL being reversed is currently flat, but reversal restores it.
+        reversal_marks[("binance", "spot", "ETH/USDT")] = _fresh_group_mark("100")
         with pytest.raises(CustomerPaperOrderConflict, match="overdraw paper cash"):
             await reverse_customer_paper_fill(
                 customer_id=customer_id,
                 fill_id=sell["fill_id"],
                 idempotency_key="reverse-eth-sale-after-spend",
-                group_mark_prices={
-                    ("binance", "spot", "BTC/USDT"): _fresh_group_mark("100"),
-                    ("binance", "spot", "ETH/USDT"): _fresh_group_mark("100"),
-                },
+                group_mark_prices=reversal_marks,
             )
         balances = await get_customer_paper_balances(customer_id=customer_id)
         by_code = {row["account_code"]: Decimal(row["balance"]) for row in balances}
