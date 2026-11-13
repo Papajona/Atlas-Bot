@@ -29,6 +29,7 @@ from app.db import (
     Base,
     CustomerLedgerAccount,
     CustomerProfile,
+    Incident,
     LedgerEntry,
     LedgerJournal,
     LedgerJournalLine,
@@ -183,7 +184,20 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                         await release_withdrawal(
                             db, customer_id, 26, reference_id=release_ref
                         )
+                    # The validator rolls back the rejected action, commits its
+                    # incident in a fresh transaction, then raises. An additional
+                    # caller rollback must not erase that incident.
                     await db.rollback()
+                    release_incident = (
+                        await db.execute(
+                            select(Incident).where(
+                                Incident.incident_key
+                                == f"WITHDRAWAL_REPLAY_MISMATCH:withdrawal-release:{release_ref}"
+                            )
+                        )
+                    ).scalar_one()
+                    assert release_incident.severity == "HIGH"
+                    assert release_incident.status == "OPEN"
                     balance = await customer_balance(db, customer_id)
                     assert balance["available_exact"] == "100.000000"
                     assert balance["withdrawal_reserved_exact"] == "0.000000"
@@ -208,6 +222,16 @@ def test_custody_withdrawal_acceptance_round_trip_is_idempotent():
                             db, customer_id, 31, reference_id=reserve_two_ref
                         )
                     await db.rollback()
+                    settlement_incident = (
+                        await db.execute(
+                            select(Incident).where(
+                                Incident.incident_key
+                                == f"WITHDRAWAL_REPLAY_MISMATCH:withdrawal-settlement:{reserve_two_ref}"
+                            )
+                        )
+                    ).scalar_one()
+                    assert settlement_incident.severity == "HIGH"
+                    assert settlement_incident.status == "OPEN"
 
                     balance = await customer_balance(db, customer_id)
                     assert balance["available_exact"] == "70.000000"
