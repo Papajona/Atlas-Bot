@@ -492,22 +492,22 @@ async def evaluate_decision_outcome_labels_once(
             "report": None,
             "reason": "bounded_holdout_worker_is_already_processing_a_request",
         }
-    try:
-        from functools import partial
-        loop = asyncio.get_running_loop()
-        report = await loop.run_in_executor(
-            _HOLDOUT_EVALUATION_EXECUTOR,
-            partial(
-                evaluate_decision_outcome_labels,
-                records,
-                holdout_fraction=holdout_fraction,
-                min_group_samples=min_group_samples,
-                min_unique_timestamps=min_unique_timestamps,
-                redact_holdout=False,
-            ),
+    from functools import partial
+    loop = asyncio.get_running_loop()
+    worker = _HOLDOUT_EVALUATION_EXECUTOR.submit(
+        partial(
+            evaluate_decision_outcome_labels,
+            records,
+            holdout_fraction=holdout_fraction,
+            min_group_samples=min_group_samples,
+            min_unique_timestamps=min_unique_timestamps,
+            redact_holdout=False,
         )
-    finally:
-        _HOLDOUT_EVALUATION_GATE.release()
+    )
+    # Release the bounded slot only when the worker really stops, including when
+    # the HTTP request is cancelled while a running thread cannot be interrupted.
+    worker.add_done_callback(lambda _future: _HOLDOUT_EVALUATION_GATE.release())
+    report = await asyncio.wrap_future(worker, loop=loop)
     usable = [
         row for row in report.get("out_of_sample", [])
         if isinstance(row, dict)
@@ -546,7 +546,11 @@ async def evaluate_decision_outcome_labels_once(
         }
 
     # Release only independently sufficient groups, never the thin-arm groups.
-    report["out_of_sample"] = adequately_sampled
+    excluded_thin_groups = len(usable) - len(adequately_sampled)
+    usable = adequately_sampled
+    report["out_of_sample"] = usable
+    report["holdout_metrics_withheld"] = False
+    report["excluded_thin_holdout_groups"] = excluded_thin_groups
     normalized, _coverage = _normalise_labels(records)
     # Bind all normalized metadata and every horizon outcome, not merely label IDs.
     # This makes a changed return, execution cost, timestamp, or decision field a new
