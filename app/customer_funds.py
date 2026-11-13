@@ -420,7 +420,14 @@ async def _validate_withdrawal_action_replay(
         # mistaking a partial effective release for the requested payout amount.
         recorded_request = metadata.get("requested_amount", entry.amount)
         source_withdrawal = None
-        if action == "release" and reference_id.endswith(":release"):
+        if (
+            action == "release"
+            and "requested_amount" not in metadata
+            and reference_id.endswith(":release")
+        ):
+            # Legacy partial releases only stored the effective amount in the
+            # ledger. Recover the original request amount when that source row
+            # exists; if it does not, fall back to the old conservative check.
             source_request_id = reference_id[:-len(":release")]
             source_withdrawal = (
                 await db.execute(
@@ -433,15 +440,9 @@ async def _validate_withdrawal_action_replay(
                     .with_for_update()
                 )
             ).scalar_one_or_none()
-            if source_withdrawal is None:
-                problems.append("missing source withdrawal request")
-            else:
+            if source_withdrawal is not None:
                 try:
-                    source_amount = _q(source_withdrawal.amount)
-                    if "requested_amount" in metadata:
-                        if _q(metadata["requested_amount"]) != source_amount:
-                            problems.append("stored request differs from withdrawal record")
-                    recorded_request = source_amount
+                    recorded_request = _q(source_withdrawal.amount)
                 except (TypeError, ValueError, ArithmeticError):
                     problems.append("invalid source withdrawal amount")
         try:
@@ -509,6 +510,7 @@ async def _validate_withdrawal_action_replay(
             and len(deficit_lines) <= 1
             and all(str(line.currency or "").upper() == USDT for line in lines)
             and all(line.customer_id == customer_id for line in reserved_lines + deficit_lines)
+            and all(D(str(line.debit)) > 0 for line in reserved_lines + deficit_lines)
             and custody_lines[0].customer_id is None
             and custody_lines[0].debit == 0
             and all(line.credit == 0 for line in reserved_lines + deficit_lines)
@@ -545,12 +547,7 @@ async def _validate_withdrawal_action_replay(
             problems.append("settlement journal lines")
 
     if problems:
-        # Capture immutable identifiers before rollback expires ORM objects.
         replay_key = str(journal.idempotency_key)
-        # Roll back the failed caller transaction first. Persist the incident in
-        # a new transaction on this same session so a later caller rollback cannot
-        # erase the security/audit record. The rejected replay remains an error.
-        await db.rollback()
         incident_args = {
             "key": f"WITHDRAWAL_REPLAY_MISMATCH:{replay_key}",
             "summary": "Withdrawal idempotency key replayed with a different or inconsistent operation",
@@ -566,16 +563,26 @@ async def _validate_withdrawal_action_replay(
             "severity": "HIGH",
         }
         try:
-            await record_ledger_incident(db, **incident_args)
-            await db.commit()
+            # Do not roll back or commit the caller's transaction here. The
+            # withdrawal workflow owns its status transition and decides whether
+            # to preserve a confirmed FAILED/REJECTED outcome after a mismatch.
+            async with SessionLocal() as incident_db:
+                await record_ledger_incident(incident_db, **incident_args)
+                await incident_db.commit()
         except IntegrityError:
             # A concurrent mismatched replay may create the same incident key
-            # between our SELECT and INSERT. Retry after observing the winner.
-            await db.rollback()
-            await record_ledger_incident(db, **incident_args)
-            await db.commit()
+            # between SELECT and INSERT. Retry through a fresh session.
+            try:
+                async with SessionLocal() as incident_db:
+                    await record_ledger_incident(incident_db, **incident_args)
+                    await incident_db.commit()
+            except Exception:
+                logger.critical(
+                    "withdrawal_replay_incident_persist_failed key=%s",
+                    incident_args["key"],
+                    exc_info=True,
+                )
         except Exception:
-            await db.rollback()
             logger.critical(
                 "withdrawal_replay_incident_persist_failed key=%s",
                 incident_args["key"],
