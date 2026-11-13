@@ -20,6 +20,7 @@ def _frame(n=700):
 def _select_with_paired_streams(
     monkeypatch, *, regime_bars=300, challenger_edge=0.00002, seed=11,
     blend_enabled=False, cooldown_active=False, switch_min_advantage=0.0,
+    incumbent_best=False,
 ):
     df = _frame()
     history_index = df.index[:-1]
@@ -29,7 +30,15 @@ def _select_with_paired_streams(
         lambda frame, asset="crypto": pd.Series(regime_values[:len(frame)], index=frame.index),
     )
     metrics = {
-        name: {"score": (2.0 if name == "trend" else 0.25), "bars": regime_bars, "trades": 100}
+        name: {
+            "score": (
+                2.0 if name == ("momentum" if incumbent_best else "trend")
+                else 1.25 if incumbent_best and name == "trend"
+                else 0.25
+            ),
+            "bars": regime_bars,
+            "trades": 100,
+        }
         for name in router.STRATEGIES
     }
     monkeypatch.setattr(
@@ -115,6 +124,28 @@ def test_failed_switch_inference_cannot_leak_rejected_challenger_into_blend(monk
     # The rejected trend challenger has a stronger raw score and signal; it must
     # not contribute to the actual HOLD composite.
     assert result["signal"] == 0.25
+
+
+
+def test_incumbent_best_preserves_the_configured_positive_strategy_blend(monkeypatch):
+    result = _select_with_paired_streams(
+        monkeypatch,
+        blend_enabled=True,
+        incumbent_best=True,
+    )
+
+    assert result["status"] == "OK"
+    assert result["strategy"] == "momentum"
+    assert result["action"] == "HOLD"
+    assert result["switch_inference"] is None
+    assert result["blend_scope"] == "RANKED_POSITIVE_STRATEGIES"
+    assert [row["strategy"] for row in result["blend"]] == [
+        "momentum", "trend", "breakout"
+    ]
+    assert result["blend"][0]["weight"] > 0
+    assert result["blend"][1]["weight"] > 0
+    # The steady-state HOLD must retain the non-incumbent signal in the ensemble.
+    assert result["signal"] != 0.25
 
 
 def test_cooldown_skips_expensive_paired_return_calculation(monkeypatch):
