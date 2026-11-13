@@ -1087,10 +1087,11 @@ async def record_customer_paper_fill(
                     if limit is not None and ((side == "BUY" and fill_price > limit) or (side == "SELL" and fill_price < limit)):
                         raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
 
-                    if side == "BUY" and not risk_budget_lock_acquired:
-                        raise CustomerPaperLedgerBlocked(
-                            "customer risk-budget lock was not acquired before the BUY transaction"
-                        )
+                    if side == "BUY":
+                        if not risk_budget_lock_acquired:
+                            raise CustomerPaperLedgerBlocked(
+                                "customer risk-budget lock was not acquired before the BUY transaction"
+                            )
                         cap = Decimal(str(settings.correlation_group_cap_usd))
                         if not cap.is_finite() or cap < 0:
                             raise CustomerPaperLedgerBlocked("correlation-group cap is not a finite non-negative amount")
