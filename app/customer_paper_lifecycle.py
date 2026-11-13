@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import text
 
 from .config import settings
-from .correlation_risk import risk_group
+from .correlation_risk import shares_risk_budget
 from .customer_paper_ledger import (
     CustomerPaperIdempotencyConflict,
     CustomerPaperLedgerBlocked,
@@ -1056,13 +1056,12 @@ async def record_customer_paper_fill(
                 raise CustomerPaperOrderConflict("fill price violates the immutable limit price")
 
             if side == "BUY":
-                # A per-symbol position lock cannot protect a shared risk budget across
-                # different markets. Serialize all BUY fills for this customer's group,
-                # then reread the latest committed position events inside this transaction.
-                target_group = risk_group(symbol)
+                # Unclassified positions consume every known group budget. A group-specific
+                # lock would let concurrent BUYs in different groups spend the same unknown
+                # exposure headroom, so serialize BUYs on this customer's risk budget.
                 await conn.execute(
                     text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
-                    {"lock_key": f"paper-correlation-group:{customer_id}:{target_group}"},
+                    {"lock_key": f"paper-risk-budget:{customer_id}"},
                 )
                 cap = Decimal(str(settings.correlation_group_cap_usd))
                 if not cap.is_finite() or cap < 0:
@@ -1077,7 +1076,7 @@ async def record_customer_paper_fill(
                 existing_group_notional = Decimal("0")
                 for current_position in latest_positions:
                     current_symbol = str(current_position["symbol"] or "")
-                    if risk_group(current_symbol) != target_group:
+                    if not shares_risk_budget(symbol, current_symbol):
                         continue
                     current_quantity = Decimal(str(current_position["quantity_after"] or "0"))
                     if not current_quantity.is_finite():
