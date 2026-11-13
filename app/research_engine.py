@@ -493,7 +493,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Validate venue calibration before generating any returns so the exact verified
     # per-session schedule is what the research simulator and OOS cost stress consume.
     from .research_evidence import (
-        RESEARCH_PROTOCOL_VERSION, canonical_sha256, oos_sample_fingerprint,
+        RESEARCH_PROTOCOL_VERSION, oos_sample_fingerprint,
         validate_comparable_trial_archive, validate_crypto_universe_manifest,
         validate_execution_cost_calibration,
     )
@@ -630,7 +630,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         fold_row["boundary_overlap_bars"] = overlap_bars
     regime_performance = regime_conditioned_performance(df, ensemble_net, asset=asset)
     per_strategy_oos = {}
-    per_strategy_execution_audits = {"ensemble": ensemble_audit}
     for component in components:
         if component == "ensemble":
             per_strategy_oos[component] = oos
@@ -639,7 +638,6 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             df, component, cfg, taker_bps, slippage_bps, asset, carry, session_costs_bps,
             execution_cost_context, f"research:{component}",
         )
-        per_strategy_execution_audits[component] = component_audit
         per_strategy_oos[component] = fixed_signal_walk_forward_oos(
             df, component_position, costs_bps=taker_bps + slippage_bps,
             folds=folds, min_train=min_train,
