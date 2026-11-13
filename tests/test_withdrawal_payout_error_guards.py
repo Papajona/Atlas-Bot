@@ -167,7 +167,7 @@ def test_terminal_withdrawal_ledger_repair_is_authorized_and_never_sends():
         "WITHDRAWAL_REPLAY_MISMATCH:",
         "persist_withdrawal_replay_mismatch(db, mismatch)",
         "incident.status = 'RESOLVED'",
-        "provider_send_attempted = False",
+        "'provider_send_attempted': False",
     ):
         assert required in repair, required
     assert "provider.send(" not in repair
