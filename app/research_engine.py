@@ -762,12 +762,7 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
 
-    # External evidence is verified and bound to this exact dataset and split protocol.
-    from .research_evidence import (
-        RESEARCH_PROTOCOL_VERSION, canonical_sha256, oos_sample_fingerprint,
-        validate_comparable_trial_archive, validate_crypto_universe_manifest,
-        validate_execution_cost_calibration,
-    )
+    # External evidence uses the verified context loaded above before simulation.
     evidence_keys = getattr(settings, "research_evidence_public_keys_json", "")
     research_symbol = str(provenance.get("symbol") or df.attrs.get("symbol") or "").strip()
     research_venue = str(provenance.get("exchange") or df.attrs.get("exchange") or "").strip()
