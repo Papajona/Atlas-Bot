@@ -519,11 +519,11 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
         "Dispatch and require read-only staging identity preflight on this exact commit",
         "Dispatch and require customer-paper acceptance on this exact deployment",
     ):
-        step = deploy.split(f"      - name: {downstream_step}", 1)[1].split("\\n      - name:", 1)[0]
+        step = deploy.split(f"      - name: {downstream_step}", 1)[1].split("\n      - name:", 1)[0]
         assert "steps.wait-required-gates.outputs.stale != 'true'" in step, downstream_step
     diagnostic_step = deploy.split(
         "      - name: Capture Cloud Run startup diagnostics after deployment failure", 1
-    )[1].split("\\n      - name:", 1)[0]
+    )[1].split("\n      - name:", 1)[0]
     assert "failure() && steps.wait-required-gates.outputs.stale != 'true'" in diagnostic_step
     deploy_step = deploy.index("      - name: Deploy restricted paper-only Cloud Run service")
     freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
