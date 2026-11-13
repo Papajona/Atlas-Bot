@@ -49,6 +49,54 @@ def _fresh_group_mark(price: str, *, at: datetime | None = None) -> dict[str, st
     return {"price": price, "quote_timestamp_utc": timestamp.isoformat()}
 
 
+def test_customer_paper_fill_fetches_group_mark_after_readiness_preflight(monkeypatch):
+    events = []
+
+    class StopBeforeTransaction(RuntimeError):
+        pass
+
+    class FakeEngine:
+        def begin(self):
+            events.append("transaction")
+            raise StopBeforeTransaction("stop before database transaction")
+
+        async def dispose(self):
+            events.append("dispose")
+
+    async def readiness_preflight():
+        events.append("preflight")
+
+    async def load_group_marks():
+        events.append("fresh_group_mark")
+        return {("binance", "spot", "BTC/USDT"): _fresh_group_mark("100")}
+
+    def create_engine():
+        events.append("engine")
+        return FakeEngine()
+
+    monkeypatch.setattr(paper_lifecycle, "_assert_customer_paper_ready", readiness_preflight)
+    monkeypatch.setattr(paper_lifecycle, "_paper_engine", create_engine)
+
+    with pytest.raises(StopBeforeTransaction, match="stop before database transaction"):
+        asyncio.run(record_customer_paper_fill(
+            customer_id=92001,
+            client_order_id="mark-after-preflight-order",
+            idempotency_key="mark-after-preflight-fill",
+            bar_key="mark-after-preflight-bar",
+            quantity="1",
+            price="100",
+            group_mark_prices_loader=load_group_marks,
+        ))
+
+    assert events == [
+        "preflight",
+        "fresh_group_mark",
+        "engine",
+        "transaction",
+        "dispose",
+    ]
+
+
 def test_public_customer_paper_journal_writer_only_accepts_positive_seed():
     valid = _seed_lines("10")
 
