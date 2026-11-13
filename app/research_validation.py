@@ -823,6 +823,36 @@ def fixed_signal_walk_forward_oos(
         )
 
     inference = newey_west_mean_inference(values)
+    # Keep only compact full-sample sufficient statistics in the returned report.
+    # The complete values array is local to this evaluation and is released on return;
+    # callers need not retain one Python list per strategy/parameter variant.
+    full_sample_statistics = {
+        "status": "INSUFFICIENT_DATA",
+        "observations": int(len(values)),
+        "effective_observations": inference.get("effective_observations"),
+        "annualized_sharpe": sharpe,
+        "sample_sha256": None,
+    }
+    if len(values) >= 30 and std_return > 0 and math.isfinite(std_return):
+        centred = (values - mean_return) / std_return
+        import hashlib
+        full_sample_statistics = {
+            "status": "OK",
+            "observations": int(len(values)),
+            "effective_observations": (
+                int(inference["effective_observations"])
+                if inference.get("status") == "OK"
+                else int(len(values))
+            ),
+            "per_period_sharpe": float(mean_return / std_return),
+            "annualized_sharpe": sharpe,
+            "skew": float(np.mean(centred ** 3)),
+            "kurtosis": float(np.mean(centred ** 4)),
+            "sample_sha256": hashlib.sha256(
+                np.asarray(values, dtype="<f8").tobytes()
+            ).hexdigest(),
+        }
+        del centred
     if benchmark_signal is None:
         benchmark_comparison = {
             "status": "INSUFFICIENT_DATA",
@@ -855,8 +885,7 @@ def fixed_signal_walk_forward_oos(
         "oos_total_return": float(np.prod(1.0 + values) - 1.0),
         "oos_mean_return": mean_return,
         "oos_return_sample": values[-5000:].tolist(),
-        # Internal hand-off for full-sample diagnostics; research_engine removes the raw vector before serialization.
-        "oos_return_sample_full": values.tolist(),
+        "full_sample_statistics": full_sample_statistics,
         "sharpe": sharpe,
         "max_drawdown": max_drawdown,
         "trades": trades,
@@ -1158,6 +1187,70 @@ def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bar
             "sharpe_hurdle_per_period": float(expected_max_sharpe(trials, var)), "trials": trials,
             "observations": int(len(x)), "effective_observations": n_eff, "skew": skew, "kurtosis": kurt,
             "note": "Probability the Sharpe is real after correcting for selection among `trials`; >= 0.95 is the usual bar."}
+
+
+def deflated_sharpe_report_from_summary(
+    summary: dict,
+    trial_sharpes_annual: Iterable[float],
+    n_trials: int,
+    bars_per_year: int,
+) -> dict:
+    """Compute DSR from compact full-sample statistics without retaining raw returns."""
+    if not isinstance(summary, dict) or summary.get("status") != "OK":
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "observations": int(summary.get("observations", 0)) if isinstance(summary, dict) else 0,
+        }
+
+    def finite(value):
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    sr = finite(summary.get("per_period_sharpe"))
+    skew = finite(summary.get("skew"))
+    kurt = finite(summary.get("kurtosis"))
+    raw_n = summary.get("observations")
+    raw_effective_n = summary.get("effective_observations")
+    if (
+        isinstance(raw_n, bool) or not isinstance(raw_n, int) or raw_n < 30
+        or isinstance(raw_effective_n, bool) or not isinstance(raw_effective_n, int)
+        or not 2 <= raw_effective_n <= raw_n
+        or sr is None or skew is None or kurt is None
+        or isinstance(bars_per_year, bool) or int(bars_per_year) < 1
+    ):
+        return {"status": "INVALID_FULL_SAMPLE_STATISTICS", "observations": raw_n}
+    try:
+        sharpes = [float(value) for value in trial_sharpes_annual]
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_TRIAL_SHARPE_SUMMARY", "observations": raw_n}
+    if len(sharpes) < 2 or any(not math.isfinite(value) for value in sharpes):
+        return {"status": "INSUFFICIENT_TRIAL_DISPERSION", "observations": raw_n}
+    per_period = [value / math.sqrt(int(bars_per_year)) for value in sharpes]
+    variance = float(np.var(per_period, ddof=1))
+    if not math.isfinite(variance):
+        return {"status": "INVALID_TRIAL_DISPERSION", "observations": raw_n}
+    from .research_stats import deflated_sharpe_ratio, expected_max_sharpe
+    trials = max(1, int(n_trials))
+    dsr = deflated_sharpe_ratio(
+        sr, raw_effective_n, trials, variance, skew=skew, kurt=kurt
+    )
+    return {
+        "status": "OK",
+        "deflated_sharpe_ratio": float(dsr),
+        "per_period_sharpe": sr,
+        "sharpe_hurdle_per_period": float(expected_max_sharpe(trials, variance)),
+        "trials": trials,
+        "observations": raw_n,
+        "effective_observations": raw_effective_n,
+        "skew": skew,
+        "kurtosis": kurt,
+        "note": "Full-sample DSR calculated from compact statistics; it is diagnostic only unless a signed archive matches this exact sample.",
+    }
 
 
 def cost_breakeven_report(
