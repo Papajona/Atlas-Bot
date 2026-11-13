@@ -21,9 +21,7 @@ from .strategy_engine import StrategyConfig, strategy_signals, next_open_returns
 from .research_validation import purged_walk_forward_splits
 from .strategy_selection import paired_return_lead
 from .execution_costs import EXECUTION_COST_MODEL_VERSION, net_returns_after_costs
-from .config import settings
 from .research_execution_costs import (
-    build_research_execution_cost_context,
     execution_cost_for_event,
     execution_cost_series_for_positions,
     slice_research_execution_context,
