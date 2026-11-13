@@ -480,3 +480,74 @@ def test_holdout_route_checks_consumption_before_loading_history():
     assert route.index("decision_outcome_holdout_status()") < route.index("load_all_decision_outcome_labels(")
     assert "DecisionOutcomeHistoryResourceLimit" in route
     assert "no holdout was consumed" in route
+
+
+
+def test_session_cost_series_preserves_naive_utc_index_for_oos_alignment():
+    index = pd.date_range("2026-01-05T08:00:00", periods=3, freq="h")
+    series = session_cost_series(index, _schedule())
+    assert series.index.equals(index)
+    positions = pd.Series([1.0, 1.0, 0.0], index=index)
+    returns = pd.Series([0.0, 0.0, 0.0], index=index)
+    costs = costed_execution_returns(
+        positions,
+        returns,
+        transaction_cost_bps=series,
+        carry_bps_per_bar=None,
+    )
+    assert costs.index.equals(index)
+    assert costs.iloc[0] < 0
+
+
+def test_thin_decision_arm_does_not_consume_one_time_holdout(monkeypatch):
+    from app import db as db_module
+    from app.decision_outcome_research import evaluate_decision_outcome_labels_once
+
+    registry: dict[str, object] = {}
+
+    class _Nested:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _FakeSession:
+        def __init__(self):
+            self.pending = None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, model, key):
+            return registry.get(key)
+
+        def begin_nested(self):
+            return _Nested()
+
+        def add(self, row):
+            self.pending = row
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            registry[self.pending.scope_sha256] = self.pending
+
+    monkeypatch.setattr(db_module, "SessionLocal", lambda: _FakeSession())
+    labels = []
+    for position in range(80):
+        row = _outcome_label(position)
+        row["original_decision"] = "NO_TRADE" if position == 0 else "TRADE"
+        labels.append(row)
+
+    result = asyncio.run(evaluate_decision_outcome_labels_once(
+        labels, holdout_fraction=0.30, min_group_samples=10, min_unique_timestamps=10,
+    ))
+    assert result["status"] == "INSUFFICIENT_HOLDOUT"
+    assert result["metrics_released"] is False
+    assert result["consumed"] is False
+    assert registry == {}
