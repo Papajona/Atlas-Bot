@@ -2109,10 +2109,23 @@ async def reverse_customer_paper_fill(
                             "customer_paper_risk_lock_release_failed",
                             extra={"customer_id": customer_id, "operation": "reverse_customer_paper_fill"},
                         )
-                        await conn.invalidate()
+                        try:
+                            await conn.invalidate()
+                        except Exception:
+                            logger.exception(
+                                "customer_paper_risk_lock_connection_invalidation_failed",
+                                extra={"customer_id": customer_id, "operation": "reverse_customer_paper_fill"},
+                            )
                 elif risk_lock_attempted:
                     # Unknown lock-acquisition outcome: close the connection so a
-                    # server-side session lock cannot leak back into the pool.
-                    await conn.invalidate()
+                    # server-side session lock cannot leak back into the pool. Keep
+                    # cleanup failures from masking the original database error.
+                    try:
+                        await conn.invalidate()
+                    except Exception:
+                        logger.exception(
+                            "customer_paper_risk_lock_connection_invalidation_failed",
+                            extra={"customer_id": customer_id, "operation": "reverse_customer_paper_fill"},
+                        )
     finally:
         await engine.dispose()
