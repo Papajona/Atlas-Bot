@@ -292,10 +292,60 @@ def test_benchmark_candidate_is_resimulated_and_liquidated_at_each_fold_end():
         stop_atr=10.0, take_profit_atr=10.0, random_trials=10, seed=91,
     )
     assert report["status"] == "OK"
+    assert report["execution_cost_model_complete"] is False
+    assert report["execution_cost_model_status"] == "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+    assert report["gate_passed"] is False
     assert np.isclose(report["candidate_net_return"], expected_return)
     assert not np.isclose(report["candidate_net_return"], report["candidate_stream_net_return"])
     assert report["candidate_execution_model"].startswith("INDEPENDENT_FOLD_SIMULATION")
     assert report["candidate_exit_count"] >= 2
+
+
+def test_benchmark_controls_use_signed_per_event_costs_and_fail_closed_without_context(monkeypatch):
+    from app import research_execution_costs
+
+    frame = _ohlcv(32)
+    signal = np.zeros(len(frame), dtype=float)
+    signal[6:18] = 1.0
+    atr = np.ones(len(frame), dtype=float)
+    candidate_net = np.zeros(len(frame), dtype=float)
+    context = {"index": frame.index, "model_fingerprint": "f" * 64}
+    calls = []
+
+    def fake_event_cost(received_context, **kwargs):
+        assert received_context is context
+        calls.append(kwargs)
+        return 6.5, None
+
+    monkeypatch.setattr(research_execution_costs, "execution_cost_for_event", fake_event_cost)
+    report = oos_benchmark_comparison(
+        [frame], [signal], [candidate_net], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        stop_atr=5.0, take_profit_atr=5.0, random_trials=2, seed=23,
+        execution_cost_context_blocks=[context],
+        candidate_execution_cost_namespace="research:ensemble",
+    )
+
+    assert report["status"] == "OK"
+    assert report["execution_cost_model_complete"] is True
+    assert report["gate_passed"] in {True, False}
+    assert any(
+        call["namespace"].startswith("benchmark:buy-and-hold:")
+        for call in calls
+    )
+    assert any(
+        call["namespace"].startswith("benchmark:random:")
+        for call in calls
+    )
+
+    incomplete = oos_benchmark_comparison(
+        [frame], [signal], [candidate_net], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        stop_atr=5.0, take_profit_atr=5.0, random_trials=2, seed=23,
+        execution_cost_context_blocks=[None],
+    )
+    assert incomplete["status"] == "INCOMPLETE"
+    assert incomplete["execution_cost_model_complete"] is False
 
 
 def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
