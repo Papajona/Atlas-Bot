@@ -658,16 +658,16 @@ async def load_all_decision_outcome_labels(
             query = (
                 select(AuditLog.id, AuditLog.detail)
                 .where(AuditLog.event == "ADAPTIVE_DECISION_OUTCOME_LABEL")
-                .order_by(AuditLog.id.desc())
+                .order_by(AuditLog.id.asc())
                 .limit(batch_size)
             )
             if before_id is not None:
-                query = query.where(AuditLog.id < before_id)
+                query = query.where(AuditLog.id > before_id)
             batch = (await db.execute(query)).all()
             if not batch:
                 break
             before_id = int(batch[-1][0])
-            for _row_id, detail in reversed(batch):
+            for _row_id, detail in batch:
                 if isinstance(detail, dict):
                     record = detail
                 elif isinstance(detail, str):
