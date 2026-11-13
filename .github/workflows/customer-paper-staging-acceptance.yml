@@ -1,7 +1,7 @@
 
 name: Customer Paper Staging Acceptance Drill
 
-run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }}
+run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }} attempt ${{ inputs.deployment_run_attempt }} correlation ${{ inputs.dispatch_id }}
 
 on:
   workflow_dispatch:
@@ -12,6 +12,14 @@ on:
         type: string
       deployment_run_id:
         description: Successful Deploy Paper-Only Atlas Staging workflow run ID
+        required: true
+        type: string
+      deployment_run_attempt:
+        description: Exact successful staging deployment attempt number
+        required: true
+        type: string
+      dispatch_id:
+        description: Unique correlation nonce for this acceptance dispatch
         required: true
         type: string
 
@@ -41,6 +49,8 @@ jobs:
       EXPECTED_PAPER_DB_ROLE: ${{ vars.ATLAS_STAGING_PAPER_DB_ROLE || secrets.ATLAS_STAGING_PAPER_DB_ROLE }}
       TARGET_SHA: ${{ inputs.target_sha }}
       DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
+      DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}
+      DISPATCH_ID: ${{ inputs.dispatch_id }}
     steps:
       - name: Validate exact successful main deployment
         env:
@@ -53,7 +63,11 @@ jobs:
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DEPLOYMENT_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$DEPLOYMENT_RUN_ID" -gt 0 ]]
+          [[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$DISPATCH_ID" =~ ^[a-f0-9]{32}$ ]]
 
+          deployment_attempt_before="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOYMENT_RUN_ID" --jq '.run_attempt')"
+          test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"
           deployment_json="$(gh run view "$DEPLOYMENT_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --json name,headSha,headBranch,status,conclusion,jobs)"
@@ -76,7 +90,9 @@ jobs:
           test "$image_outcome" = "success"
           test "$deploy_outcome" = "success"
           test "$preflight_outcome" = "success"
-          echo "PASS: exact paper-only deployment $DEPLOYMENT_RUN_ID built and deployed $TARGET_SHA and passed read-only staging identity/readiness before acceptance"
+          deployment_attempt_after="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOYMENT_RUN_ID" --jq '.run_attempt')"
+          test "$deployment_attempt_after" = "$DEPLOYMENT_RUN_ATTEMPT"
+          echo "PASS: exact paper-only deployment $DEPLOYMENT_RUN_ID attempt $DEPLOYMENT_RUN_ATTEMPT built and deployed $TARGET_SHA and passed read-only staging identity/readiness before acceptance (correlation $DISPATCH_ID)"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
