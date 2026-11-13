@@ -501,15 +501,16 @@ def test_unclassified_customer_paper_candidate_marks_all_known_positions(monkeyp
     assert [row.symbol for row in result["positions"]] == ["BTC/USDT:USDT"]
 
 def test_group_exposure_uses_higher_of_mark_and_booked_entry_price():
+    # SOL and ETH share L1_BETA; BTC is deliberately a separate risk budget.
     positions = [
-        _Pos("BTC/USDT:USDT", 1.0, 900.0),
+        _Pos("SOL/USDT:USDT", 1.0, 900.0),
         _Pos("ETH/USDT:USDT", 1.0, 1200.0),
     ]
     positions[0].average_entry_price = 1100.0
     positions[1].average_entry_price = 1000.0
 
     check = adjusted_group_exposure(
-        positions, proposed_symbol="BTC/USDT:USDT", proposed_notional=1.0,
+        positions, proposed_symbol="SOL/USDT:USDT", proposed_notional=1.0,
         cap_usd=2300.0,
     )
 
@@ -517,7 +518,7 @@ def test_group_exposure_uses_higher_of_mark_and_booked_entry_price():
     assert check["projected_notional"] == 2301.0
     assert check["allowed"] is False
     assert check["members"] == [
-        ("BTC/USDT:USDT", 1100.0),
+        ("SOL/USDT:USDT", 1100.0),
         ("ETH/USDT:USDT", 1200.0),
     ]
 
