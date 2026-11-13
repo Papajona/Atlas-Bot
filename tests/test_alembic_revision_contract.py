@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0058_customer_paper_rls_and_index_hardening"
+        "0059_research_integrity_controls"
     }
 
 
@@ -50,3 +50,15 @@ def test_alembic_revision_contract_rejects_cycles(tmp_path):
     )
     with pytest.raises(ValueError, match="cycle"):
         expected_alembic_heads(tmp_path)
+
+
+
+def test_research_integrity_revision_is_direct_successor_and_single_repository_head():
+    migration = (
+        ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision = "0059_research_integrity_controls"' in migration
+    assert 'down_revision = "0058_customer_paper_rls_and_index_hardening"' in migration
+    assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
+        "0059_research_integrity_controls"
+    }

@@ -8308,6 +8308,50 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         raise _safe_http_error(400, e, "Invalid request") from e
 
 
+@app.get("/api/research/trial-ledger/status")
+async def research_trial_ledger_status(
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Return chain-integrity metadata without exposing signing material."""
+    await auth(x_admin_token, authorization)
+    from .research_trial_archive import verify_research_trial_ledger
+    return await verify_research_trial_ledger()
+
+
+@app.post("/api/research/decision-outcomes/holdout-once")
+async def research_decision_outcomes_holdout_once(
+    x_admin_token: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+):
+    """Consume the single global decision-outcome chronological holdout exactly once."""
+    claims = await auth(x_admin_token, authorization)
+    await require_role(claims, "RISK_OFFICER")
+    from .decision_outcome_research import (
+        DecisionOutcomeHistoryResourceLimit,
+        decision_outcome_holdout_status,
+        evaluate_decision_outcome_labels_once,
+        load_all_decision_outcome_labels,
+    )
+    existing = await decision_outcome_holdout_status()
+    if existing.get("consumed") is True:
+        return {
+            **existing,
+            "report": None,
+            "reason": "one_time_holdout_is_global_and_cannot_be_reopened",
+        }
+    try:
+        records = await load_all_decision_outcome_labels(
+            batch_size=2000, max_records=100_000
+        )
+    except DecisionOutcomeHistoryResourceLimit as exc:
+        raise HTTPException(
+            503,
+            "Complete decision-label history exceeds the bounded holdout evaluation budget; no holdout was consumed",
+        ) from exc
+    return await evaluate_decision_outcome_labels_once(records)
+
+
 @app.post("/api/research/backtest-all")
 async def research_backtest_all(req: ResearchMarketRequest, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     await auth(x_admin_token, authorization)

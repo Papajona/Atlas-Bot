@@ -142,3 +142,46 @@ def test_fixed_signal_trial_archive_without_capped_sample_is_unverified():
 
     assert row["annualized_sharpe"] is None
     assert row["archive_status"] == "UNVERIFIED_MISSING_METRICS"
+
+
+
+def test_grid_variant_archive_uses_evaluated_variant_configuration_hash():
+    from app.research_trial_archive import _row_payload
+
+    context = {
+        "asset_class": "crypto",
+        "venue": "bybit",
+        "market_type": "perpetual",
+        "symbol": "BTC/USDT",
+        "timeframe": "1h",
+        "dataset_sha256": "a" * 64,
+        "protocol_version": "atlas-purged-walk-forward-v3",
+    }
+    variant_sha = "d" * 64
+    report = {
+        "config": {"signal_threshold": 0.05, "stop_atr": 1.5},
+        "code_sha256": "c" * 64,
+        "validation": {
+            "oos_sample_sha256": "b" * 64,
+            "protocol_version": "atlas-purged-walk-forward-v3",
+            "fixed_signal_oos": {"annualization_factor": 8760},
+        },
+    }
+    metrics = {
+        "config_sha256": variant_sha,
+        "threshold_multiplier": 1.2,
+        "risk_multiplier": 0.8,
+        "oos_status": "OK",
+        "oos_sharpe": 0.8,
+        "oos_total_return": 0.15,
+        "oos_max_drawdown": -0.04,
+        "oos_trades": 22,
+        "annualization_factor": 8760,
+        "oos_return_sample": [0.01, 0.02, -0.01, 0.025],
+    }
+    row = _row_payload(
+        report, context, "variant:t1.20:r0.80@" + variant_sha,
+        metrics, "variant", "evaluation",
+    )
+    assert row["config_sha256"] == variant_sha
+    assert row["archive_status"] == "RECORDED_UNVERIFIED"

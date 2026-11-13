@@ -45,7 +45,8 @@ def _label(position: int, *, decision: str | None = None, side: str | None = "bu
 def test_report_separates_trade_and_rejected_signal_outcomes():
     labels = [_label(i) for i in range(20)]
     report = evaluate_decision_outcome_labels(
-        labels, holdout_fraction=0.30, min_group_samples=3, min_unique_timestamps=10
+        labels, holdout_fraction=0.30, min_group_samples=3, min_unique_timestamps=10,
+        redact_holdout=False,
     )
 
     assert report["research_only"] is True
@@ -64,7 +65,8 @@ def test_report_separates_trade_and_rejected_signal_outcomes():
 def test_chronological_holdout_purges_training_labels_whose_outcome_overlaps():
     labels = [_label(i) for i in range(20)]
     report = evaluate_decision_outcome_labels(
-        labels, holdout_fraction=0.30, min_group_samples=3, min_unique_timestamps=10
+        labels, holdout_fraction=0.30, min_group_samples=3, min_unique_timestamps=10,
+        redact_holdout=False,
     )
     split = report["out_of_sample"][0]
 
@@ -85,6 +87,7 @@ def test_labels_without_candidate_side_are_counted_but_not_given_invented_return
         holdout_fraction=0.30,
         min_group_samples=1,
         min_unique_timestamps=3,
+        redact_holdout=False,
     )
     assert report["coverage"]["valid_labels_without_candidate_side"] == 1
     assert report["coverage"]["candidate_side_counts"] == {"UNAVAILABLE": 1}
@@ -98,6 +101,7 @@ def test_small_groups_are_explicitly_marked_insufficient_for_holdout():
         holdout_fraction=0.30,
         min_group_samples=3,
         min_unique_timestamps=10,
+        redact_holdout=False,
     )
     assert report["out_of_sample"][0]["status"] == "INSUFFICIENT_UNIQUE_TIMESTAMPS"
     assert report["out_of_sample"][0]["minimum_unique_timestamps"] == 10
@@ -107,7 +111,7 @@ def test_non_valid_and_unrelated_records_are_not_used_as_outcomes():
     labels = [_label(i) for i in range(10)]
     labels.append({**_label(10), "status": "UNSUPPORTED"})
     labels.append({"record_type": "other_event", "status": "VALID"})
-    report = evaluate_decision_outcome_labels(labels, min_group_samples=1, min_unique_timestamps=3)
+    report = evaluate_decision_outcome_labels(labels, min_group_samples=1, min_unique_timestamps=3, redact_holdout=False)
 
     assert report["coverage"]["valid_labels"] == 10
     assert report["coverage"]["ignored_non_valid_or_non_decision_labels"] == 1
@@ -123,7 +127,8 @@ def test_aggregation_separates_instruments_and_exchanges():
         for i in range(10)
     ]
     report = evaluate_decision_outcome_labels(
-        labels, min_group_samples=1, min_unique_timestamps=3
+        labels, min_group_samples=1, min_unique_timestamps=3,
+        redact_holdout=False,
     )
     groups = report["by_market_and_decision"]
     assert {(group["symbol"], group["exchange"]) for group in groups} == {
@@ -140,7 +145,8 @@ def test_duplicate_decision_label_is_counted_once_and_latest_record_wins():
     }
     other = _label(2, decision="TRADE", value=3.0)
     report = evaluate_decision_outcome_labels(
-        [first, latest, other], min_group_samples=1, min_unique_timestamps=3
+        [first, latest, other], min_group_samples=1, min_unique_timestamps=3,
+        redact_holdout=False,
     )
     assert report["coverage"]["input_records"] == 3
     assert report["coverage"]["valid_labels"] == 2
@@ -161,7 +167,8 @@ def test_aggregation_does_not_mix_label_versions_or_cost_profiles():
         "carry_bps_per_bar": 1.0,
     }
     report = evaluate_decision_outcome_labels(
-        [base, alternative], min_group_samples=1, min_unique_timestamps=3
+        [base, alternative], min_group_samples=1, min_unique_timestamps=3,
+        redact_holdout=False,
     )
     groups = report["by_market_and_decision"]
     assert len(groups) == 2
@@ -172,3 +179,16 @@ def test_aggregation_does_not_mix_label_versions_or_cost_profiles():
         ("decision-outcome-v1", "configured_asset_profile", 3.5, 0.25),
         ("decision-outcome-v2", "venue_calibration", 7.0, 1.0),
     }
+
+
+
+def test_holdout_metrics_are_redacted_by_default():
+    report = evaluate_decision_outcome_labels(
+        [_label(i) for i in range(20)],
+        holdout_fraction=0.30,
+        min_group_samples=3,
+        min_unique_timestamps=10,
+    )
+    assert report["holdout_metrics_withheld"] is True
+    assert report["out_of_sample"] == []
+    assert report["research_only"] is True

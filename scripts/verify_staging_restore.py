@@ -32,10 +32,12 @@ SELECT jsonb_build_object(
     SELECT coalesce(jsonb_agg(required.table_name ORDER BY required.table_name), '[]'::jsonb)
     FROM unnest(ARRAY[
       'paper_order_states', 'paper_bar_states', 'paper_fill_events',
-      'research_trial_archive'
+      'research_trial_archive', 'research_trial_ledger_head', 'research_holdout_registry'
     ]::text[]) AS required(table_name)
     WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
   ),
+  'research_trial_ledger_head_present', to_regclass('public.research_trial_ledger_head') IS NOT NULL,
+  'research_holdout_registry_present', to_regclass('public.research_holdout_registry') IS NOT NULL,
   'tables_without_rls', (
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity
@@ -162,6 +164,92 @@ def truthy(value: object) -> bool:
     return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
 
 
+RESEARCH_INTEGRITY_QUERY = r"""
+SELECT jsonb_build_object(
+  'research_trial_ledger_head_rows', (
+    SELECT count(*) FROM public.research_trial_ledger_head
+  ),
+  'research_trial_ledger_head_valid', (
+    SELECT count(*) = 1
+       AND coalesce(bool_and(
+         h.id = 1
+         AND h.last_sequence = archive_state.last_sequence
+         AND h.last_entry_sha256 = archive_state.last_entry_sha256
+       ), false)
+    FROM public.research_trial_ledger_head h
+    CROSS JOIN LATERAL (
+      SELECT
+        coalesce(max(ledger_sequence), 0)::bigint AS last_sequence,
+        coalesce(
+          (
+            SELECT a.ledger_entry_sha256
+            FROM public.research_trial_archive a
+            WHERE a.ledger_sequence = (
+              SELECT coalesce(max(ledger_sequence), 0)
+              FROM public.research_trial_archive
+            )
+          ),
+          ''
+        ) AS last_entry_sha256
+      FROM public.research_trial_archive
+    ) archive_state
+  ),
+  'research_holdout_registry_invalid_rows', (
+    SELECT count(*)
+    FROM public.research_holdout_registry
+    WHERE scope_sha256 !~ '^[0-9a-f]{64}$'
+       OR source_sample_sha256 !~ '^[0-9a-f]{64}$'
+       OR report_sha256 !~ '^[0-9a-f]{64}$'
+       OR holdout_version = ''
+       OR holdout_plan_json = ''
+  )
+)::text;
+"""
+
+def add_research_integrity_observations(
+    observed: dict,
+    *,
+    env: dict[str, str],
+    run=subprocess.run,
+) -> dict:
+    """Fetch the integrity rows only after the base query confirms both relations exist.
+
+    Keeping this as a separate read-only query avoids parse-time relation errors
+    when auditing an older restored schema that has not applied migration 0059 yet.
+    """
+    present = (
+        observed.get("research_trial_ledger_head_present") is True
+        and observed.get("research_holdout_registry_present") is True
+    )
+    if not present:
+        observed.update({
+            "research_trial_ledger_head_rows": None,
+            "research_trial_ledger_head_valid": False,
+            "research_holdout_registry_invalid_rows": None,
+        })
+        return observed
+
+    proc = run(
+        ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", RESEARCH_INTEGRITY_QUERY],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    if proc.returncode:
+        raise RuntimeError("Read-only research-integrity SQL checks failed; database output is withheld")
+    try:
+        integrity = json.loads(proc.stdout.strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Research-integrity SQL audit returned invalid JSON") from exc
+    expected = {
+        "research_trial_ledger_head_rows",
+        "research_trial_ledger_head_valid",
+        "research_holdout_registry_invalid_rows",
+    }
+    if not isinstance(integrity, dict) or not expected.issubset(integrity):
+        raise RuntimeError("Research-integrity SQL audit omitted required result fields")
+    observed.update({key: integrity[key] for key in expected})
+    return observed
+
+
 def audit(args: argparse.Namespace) -> dict:
     database_url = os.environ.get("DATABASE_URL", "")
     env, host = read_database_uri(
@@ -235,6 +323,20 @@ def audit(args: argparse.Namespace) -> dict:
     if int(observed.get("public_table_count", 0)) < 1:
         failures.append("public schema has no tables")
     failures.extend(required_table_failures(observed.get("required_tables_missing")))
+    try:
+        head_rows = int(observed.get("research_trial_ledger_head_rows", -1))
+    except (TypeError, ValueError):
+        head_rows = -1
+    if head_rows != 1:
+        failures.append(f"research trial ledger head must contain exactly one singleton row, observed {head_rows}")
+    if not truthy(observed.get("research_trial_ledger_head_valid")):
+        failures.append("research trial ledger head does not match its last chained archive entry")
+    try:
+        invalid_holdout_rows = int(observed.get("research_holdout_registry_invalid_rows", -1))
+    except (TypeError, ValueError):
+        invalid_holdout_rows = -1
+    if invalid_holdout_rows != 0:
+        failures.append(f"research holdout registry contains invalid retained consumption rows: {invalid_holdout_rows}")
     for key in ("tables_without_rls", "negative_customer_ledger_buckets", "unbalanced_or_empty_journals",
                 "invalid_journal_lines", "orphan_journal_lines", "duplicate_journal_idempotency_keys",
                 "negative_ledger_entries"):

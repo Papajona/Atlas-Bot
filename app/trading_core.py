@@ -89,41 +89,168 @@ def rsi(close: pd.Series, n: int = 14) -> pd.Series:
     return result
 
 
-def triple_barrier(close: pd.Series, vol: pd.Series, high: pd.Series | None = None,
-                   low: pd.Series | None = None, pt: float = 2.0, sl: float = 2.0,
-                   max_hold: int = 12) -> pd.Series:
+def triple_barrier(
+    close: pd.Series,
+    vol: pd.Series,
+    high: pd.Series | None = None,
+    low: pd.Series | None = None,
+    pt: float = 2.0,
+    sl: float = 2.0,
+    max_hold: int = 12,
+    *,
+    entry_open: pd.Series | None = None,
+    entry_atr: pd.Series | None = None,
+    stop_atr: float | None = None,
+    take_profit_atr: float | None = None,
+    round_trip_cost_bps: float | pd.Series = 0.0,
+) -> pd.Series:
+    """Create forward labels using the same entry/exit timing as the OHLC executor.
+
+    The signal is known at close[i]; entry is open[i+1]. Production calls pass the
+    same prior-completed-bar ATR, stop multiplier, and target multiplier as the OHLC
+    execution simulator, so label barriers are identical to simulated order exits.
+    Costs affect the realized target/timeout outcome, not the executable stop/target
+    levels. A gap is filled at the observed next open and simultaneous touches are
+    resolved stop-first. The vol/pt/sl fallback is only for legacy offline callers.
+    """
     c = close.to_numpy(dtype=float)
-    v = vol.to_numpy(dtype=float)
-    h = (high.reindex(close.index).to_numpy(dtype=float) if high is not None else c.copy())
-    l = (low.reindex(close.index).to_numpy(dtype=float) if low is not None else c.copy())
+    v = vol.reindex(close.index).to_numpy(dtype=float)
+    h = high.reindex(close.index).to_numpy(dtype=float) if high is not None else c.copy()
+    l = low.reindex(close.index).to_numpy(dtype=float) if low is not None else c.copy()
+    has_executable_open = entry_open is not None
+    opens = (
+        entry_open.reindex(close.index).to_numpy(dtype=float)
+        if has_executable_open else c.copy()
+    )
+    has_execution_atr = entry_atr is not None
+    entry_atr_values = (
+        entry_atr.reindex(close.index).to_numpy(dtype=float)
+        if has_execution_atr else np.full(len(c), np.nan, dtype=float)
+    )
     y = np.full(len(c), np.nan, dtype=float)
-    if max_hold < 1:
-        raise ValueError("max_hold must be at least 1")
-    for i in range(len(c) - max_hold):
-        if not np.isfinite(v[i]) or v[i] <= 0 or not np.isfinite(c[i]) or c[i] <= 0:
+    session_cost_schedule = isinstance(round_trip_cost_bps, pd.Series)
+    try:
+        hold = int(max_hold)
+        if session_cost_schedule:
+            if not round_trip_cost_bps.index.equals(close.index):
+                raise ValueError("round-trip session costs must align exactly to close index")
+            cost_bps = round_trip_cost_bps.to_numpy(dtype=float)
+        else:
+            cost_bps = np.full(len(c), float(round_trip_cost_bps), dtype=float)
+        pt_mult, sl_mult = float(pt), float(sl)
+        stop_mult = None if stop_atr is None else float(stop_atr)
+        target_mult = None if take_profit_atr is None else float(take_profit_atr)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("invalid triple-barrier configuration") from exc
+    if isinstance(max_hold, bool) or hold != max_hold or hold < 1:
+        raise ValueError("max_hold must be a positive integer")
+    if (
+        not np.isfinite(cost_bps).all() or np.any(cost_bps < 0)
+        or not np.isfinite([pt_mult, sl_mult]).all()
+        or pt_mult <= 0 or sl_mult <= 0
+    ):
+        raise ValueError("barriers and round-trip costs must be finite and positive/non-negative")
+    if has_execution_atr and (
+        not has_executable_open
+        or stop_mult is None or target_mult is None
+        or not np.isfinite([stop_mult, target_mult]).all()
+        or stop_mult <= 0 or target_mult <= 0
+    ):
+        raise ValueError("execution-aligned labels require next-open and positive ATR stop/target")
+    if not (len(v) == len(h) == len(l) == len(opens) == len(entry_atr_values) == len(c)):
+        raise ValueError("triple-barrier inputs must align to close index")
+    for i in range(len(c) - hold):
+        entry_i = i + 1
+        # Older offline callers without OHLC open data retain the historical close[i]
+        # entry anchor. Production training and walk-forward callers supply next-open.
+        entry_price = opens[entry_i] if has_executable_open else c[i]
+        if not np.isfinite(entry_price) or entry_price <= 0:
             continue
-        upper, lower = c[i] * (1 + pt * v[i]), c[i] * (1 - sl * v[i])
-        end = min(len(c), i + max_hold + 1)
-        for j in range(i + 1, end):
-            up_hit = h[j] >= upper
-            down_hit = l[j] <= lower
+        if has_execution_atr:
+            frozen_vol = float(entry_atr_values[entry_i])
+            if not np.isfinite(frozen_vol) or frozen_vol <= 0:
+                continue
+        else:
+            frozen_vol = float(v[i])
+            if not np.isfinite(frozen_vol) or frozen_vol <= 0:
+                continue
+        directional_dead_zone = (
+            0.5 * float(frozen_vol / entry_price)
+            if has_execution_atr else 0.5 * frozen_vol
+        )
+        end = min(len(c), entry_i + hold)
+        for j in range(entry_i, end):
+            # For a session schedule, charge the entry-side rate at entry and the
+            # exit-side rate at this bar. Static profile inputs are already round-trip.
+            exit_cost_bps = (
+                float(cost_bps[entry_i]) + float(cost_bps[j])
+                if session_cost_schedule else float(cost_bps[entry_i])
+            )
+            cost_fraction = exit_cost_bps / 10_000.0
+            if has_execution_atr:
+                # Match simulate_execution_aware_strategy exactly: its stop/target
+                # prices are fixed from next-open and the prior completed ATR.
+                upper = entry_price + float(target_mult) * frozen_vol
+                lower = entry_price - float(stop_mult) * frozen_vol
+            else:
+                # Fees are deducted from realized directional returns below; do not
+                # hide them by moving the executable offline label barriers as well.
+                upper = entry_price * (1.0 + pt_mult * frozen_vol)
+                lower = entry_price * (1.0 - sl_mult * frozen_vol)
+            # Price gaps are executable at the observed open, not at a stale barrier.
+            if has_executable_open and j > entry_i and opens[j] >= upper:
+                gross_return = opens[j] / entry_price - 1.0
+                long_net_return = gross_return - cost_fraction
+                y[i] = 1 if long_net_return > directional_dead_zone else 0
+                break
+            if has_executable_open and j > entry_i and opens[j] <= lower:
+                gross_return = (entry_price - opens[j]) / entry_price
+                short_net_return = gross_return - cost_fraction
+                y[i] = -1 if short_net_return > directional_dead_zone else 0
+                break
+            up_hit = np.isfinite(h[j]) and h[j] >= upper
+            down_hit = np.isfinite(l[j]) and l[j] <= lower
             if up_hit and down_hit:
-                # Intrabar touch order is unknowable from OHLC alone: use conservative neutral label.
-                y[i] = 0
+                # Match the OHLC executor's stop-first fill, but only label a
+                # short when its realized return remains profitable after costs.
+                fill = lower
+                if has_executable_open and j > entry_i and opens[j] < lower:
+                    fill = opens[j]
+                gross_return = (entry_price - fill) / entry_price
+                short_net_return = gross_return - cost_fraction
+                y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
             if up_hit:
-                y[i] = 1
+                fill = opens[j] if has_executable_open and j > entry_i and opens[j] > upper else upper
+                gross_return = fill / entry_price - 1.0
+                long_net_return = gross_return - cost_fraction
+                y[i] = 1 if long_net_return > directional_dead_zone else 0
                 break
             if down_hit:
-                y[i] = -1
+                fill = lower
+                if has_executable_open and j > entry_i and opens[j] < lower:
+                    fill = opens[j]
+                gross_return = (entry_price - fill) / entry_price
+                short_net_return = gross_return - cost_fraction
+                y[i] = -1 if short_net_return > directional_dead_zone else 0
                 break
         else:
-            # A complete holding window elapsed without touching either barrier.
-            # Label the timeout by terminal return, with a volatility-scaled dead zone.
-            terminal_return = c[end - 1] / c[i] - 1.0
-            dead_zone = 0.5 * v[i]
-            if np.isfinite(terminal_return):
-                y[i] = 1 if terminal_return > dead_zone else (-1 if terminal_return < -dead_zone else 0)
+            terminal_return = c[end - 1] / entry_price - 1.0
+            timeout_cost_bps = (
+                float(cost_bps[entry_i]) + float(cost_bps[end - 1])
+                if session_cost_schedule else float(cost_bps[entry_i])
+            )
+            # Evaluate each direction after its own entry+exit costs. A flat or
+            # adverse-to-both trade cannot be mislabeled as a short just because
+            # long net return is negative.
+            cost_fraction = timeout_cost_bps / 10_000.0
+            long_net_return = terminal_return - cost_fraction
+            short_net_return = -terminal_return - cost_fraction
+            if np.isfinite(long_net_return) and np.isfinite(short_net_return):
+                y[i] = (
+                    1 if long_net_return > directional_dead_zone
+                    else (-1 if short_net_return > directional_dead_zone else 0)
+                )
     return pd.Series(y, index=close.index, dtype="float64")
 
 
@@ -157,7 +284,11 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     profile = PROFILES[asset]
     X = build_features(df)
     aligned = df.reindex(X.index)
-    y = triple_barrier(aligned["close"], X["vol_24"], aligned["high"], aligned["low"], max_hold=profile.max_hold)
+    y = triple_barrier(
+        aligned["close"], X["vol_24"], aligned["high"], aligned["low"],
+        max_hold=profile.max_hold, entry_open=aligned["open"],
+        round_trip_cost_bps=2.0 * (float(profile.taker_bps) + float(profile.slippage_bps)),
+    )
     mask = y.notna()
     X, y = X.loc[mask], y.loc[mask]
     if y.nunique() < 2:
@@ -326,6 +457,7 @@ def ai_walk_forward_backtest(
     carry_bps_per_bar: float | None = None,
     max_hold_bars: int | None = None,
     research_trial_evidence_verified: bool = False,
+    session_costs_bps: dict[str, float] | None = None,
 ) -> dict:
     """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
     try:
@@ -369,9 +501,34 @@ def ai_walk_forward_backtest(
         raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
-    y = triple_barrier(aligned.close, X.vol_24, aligned.high, aligned.low, max_hold=hold_horizon)
+    # Use the identical completed-bar ATR input used by the execution simulator:
+    # ATR is shifted one bar so the signal at close[i] enters at open[i+1].
+    label_true_range = pd.concat([
+        (aligned["high"] - aligned["low"]).abs(),
+        (aligned["high"] - aligned["close"].shift(1)).abs(),
+        (aligned["low"] - aligned["close"].shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    entry_atr_for_label = label_true_range.rolling(14, min_periods=14).mean().shift(1)
+    label_round_trip_costs: float | pd.Series = 2.0 * (taker_cost_bps + slippage_cost_bps)
+    if session_costs_bps is not None:
+        from .market_sessions import session_cost_series
+        # The labeler combines entry-session and exit-session per-side rates for
+        # each candidate exit bar; do not flatten them into a static round-trip fee.
+        label_round_trip_costs = session_cost_series(aligned.index, session_costs_bps)
+    y = triple_barrier(
+        aligned.close, X.vol_24, aligned.high, aligned.low,
+        max_hold=hold_horizon, entry_open=aligned.open,
+        entry_atr=entry_atr_for_label,
+        stop_atr=float(settings.strategy_stop_atr),
+        take_profit_atr=float(settings.strategy_take_profit_atr),
+        round_trip_cost_bps=label_round_trip_costs,
+    )
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
+    # The OOS fold indices now address the filtered label matrix. Keep the
+    # execution ATR series on that exact same index so no fold can silently
+    # reuse a pre-filter bar (or pass a warm-up NaN to a non-zero position).
+    entry_atr_for_label = entry_atr_for_label.loc[valid]
     # Use an explicitly expanding chronological split with a full label-horizon purge
     # between every train/test boundary. sklearn.TimeSeriesSplit makes early training
     # folds shorter than min_train, silently skipping them (for example, 1,799 bars
@@ -399,6 +556,7 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
+    oos_session_cost_blocks: list[np.ndarray] = []
     oos_ohlc_blocks: list[pd.DataFrame] = []
     oos_entry_signal_blocks: list[np.ndarray] = []
     oos_entry_atr_blocks: list[np.ndarray] = []
@@ -425,12 +583,7 @@ def ai_walk_forward_backtest(
         scores.extend(score.tolist())
         # The model decision and ATR are shifted to use only the prior completed bar.
         fold_position = np.r_[0, sig[:-1]].astype(float)
-        true_range = pd.concat([
-            (aligned["high"] - aligned["low"]).abs(),
-            (aligned["high"] - aligned["close"].shift(1)).abs(),
-            (aligned["low"] - aligned["close"].shift(1)).abs(),
-        ], axis=1).max(axis=1)
-        entry_atr = true_range.rolling(14, min_periods=14).mean().shift(1)
+        entry_atr = entry_atr_for_label
         fold_frame = aligned.iloc[te]
         fold_targets = pd.Series(fold_position, index=fold_frame.index, dtype=float)
         execution = simulate_execution_aware_strategy(
@@ -440,6 +593,7 @@ def ai_walk_forward_backtest(
             stop_atr=float(settings.strategy_stop_atr),
             take_profit_atr=float(settings.strategy_take_profit_atr),
             transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
+            session_costs_bps=session_costs_bps,
             carry_bps_per_bar=carry_cost_bps,
             drawdown_limit=settings.strategy_drawdown_halt,
             daily_loss_limit=settings.strategy_daily_loss_halt,
@@ -460,6 +614,10 @@ def ai_walk_forward_backtest(
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
+        if session_costs_bps is not None:
+            oos_session_cost_blocks.append(
+                execution["effective_transaction_cost_bps"].to_numpy(dtype=float)
+            )
         # Preserve raw OHLC and the requested entry stream before stops or risk halts
         # condition realized positions and returns. Benchmark controls resimulate both.
         oos_ohlc_blocks.append(fold_frame.copy())
@@ -492,6 +650,9 @@ def ai_walk_forward_backtest(
     turnover = pd.Series(np.concatenate(oos_turnover_blocks), dtype=float)
     position = pd.Series(np.concatenate(oos_position_blocks), dtype=float)
     carry = np.concatenate(oos_carry_blocks)
+    session_variable_costs = (
+        np.concatenate(oos_session_cost_blocks) if oos_session_cost_blocks else None
+    )
     equity = (1 + net).cumprod()
     peak = equity.cummax()
     dd = equity / peak - 1
@@ -503,6 +664,7 @@ def ai_walk_forward_backtest(
         bars_per_year=annualization,
         stress_multiplier=cost_stress_multiplier,
         fixed_cost_drag=carry,
+        variable_cost_bps_per_bar=session_variable_costs,
     )
     dsr_report = _research_trial_dsr_report(
         net.to_numpy(),
@@ -533,6 +695,7 @@ def ai_walk_forward_backtest(
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
+        session_costs_bps=session_costs_bps,
     )
     return {
         "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
@@ -554,6 +717,8 @@ def ai_walk_forward_backtest(
         "trade_boundary_overlap_bars": 0,
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) and carry_evidence_complete if cost_report.get("status") == "OK" else False,
+        "session_cost_model_complete": session_variable_costs is not None,
+        "session_costs_bps": dict(session_costs_bps) if session_variable_costs is not None else None,
         "cost_stress_multiplier": float(stress_multiplier),
         "carry_rate_configured": bool(carry_rate_configured),
         "carry_evidence_source": carry_evidence_source or None,

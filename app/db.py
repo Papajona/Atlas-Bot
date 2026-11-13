@@ -14,7 +14,9 @@ def _utc_date():
 
 engine_kwargs = {"future": True, "pool_pre_ping": True}
 if settings.database_url.startswith("sqlite"):
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
+    # BEGIN IMMEDIATE serializes the trial-ledger head before reads on SQLite;
+    # the bounded busy timeout permits concurrent local appenders to queue safely.
+    engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
 else:
     engine_kwargs.update({
         "pool_size": 10, "max_overflow": 20, "pool_recycle": 1800,
@@ -1262,6 +1264,7 @@ class ResearchTrialArchive(Base):
     __table_args__ = (
         Index("ix_research_trial_context_sample", "asset_class", "venue", "market_type", "symbol", "timeframe", "oos_sample_sha256"),
         Index("ix_research_trial_created_at", "created_at"),
+        Index("uq_research_trial_ledger_sequence", "ledger_sequence", unique=True),
     )
     trial_key: Mapped[str] = mapped_column(String(64), primary_key=True)
     trial_label: Mapped[str] = mapped_column(String(180), nullable=False)
@@ -1283,7 +1286,37 @@ class ResearchTrialArchive(Base):
     trades: Mapped[int | None] = mapped_column(Integer, nullable=True)
     results_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     archive_status: Mapped[str] = mapped_column(String(40), nullable=False, default="UNVERIFIED_MISSING_CONTEXT")
+    ledger_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    ledger_previous_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ledger_entry_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ledger_hmac_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ledger_hmac_key_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ledger_status: Mapped[str] = mapped_column(String(40), nullable=False, default="LEGACY_UNCHAINED")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)
+
+
+class ResearchTrialLedgerHead(Base):
+    """Single locked head row serializing append operations across workers."""
+    __tablename__ = "research_trial_ledger_head"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    last_sequence: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    last_entry_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
+
+
+class ResearchHoldoutRegistry(Base):
+    """Immutable one-time consumption record for the global decision-label holdout."""
+    __tablename__ = "research_holdout_registry"
+    scope_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    holdout_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_sample_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    report_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    holdout_plan_json: Mapped[str] = mapped_column(Text, nullable=False)
+    consumed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False
+    )
 
 
 class ResearchRun(Base):

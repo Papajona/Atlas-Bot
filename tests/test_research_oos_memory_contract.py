@@ -19,6 +19,6 @@ def test_research_engine_never_retains_full_return_lists_per_candidate():
     source = (ROOT / "app" / "research_engine.py").read_text(encoding="utf-8")
 
     assert "oos_return_sample_full" not in source
-    assert '"full_sample_statistics":variant_oos.get("full_sample_statistics", {})' in source
+    assert '"full_sample_statistics": variant_oos.get("full_sample_statistics", {})' in source
     assert 'full_stats.get("annualized_sharpe")' in source
     assert "full_sample_statistics = oos.get(\"full_sample_statistics\")" in source

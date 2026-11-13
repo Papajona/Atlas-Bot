@@ -14,7 +14,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-RESEARCH_PROTOCOL_VERSION = "atlas-purged-walk-forward-v2"
+RESEARCH_PROTOCOL_VERSION = "atlas-purged-walk-forward-v3-session-aware-labels-2d-plateau"
 _UNIVERSE_SOURCES = {"listing_history", "delisting_history", "failed_assets"}
 _COST_SOURCES = {"observed_fills", "order_book", "fee_schedule"}
 _TRIAL_FIELDS = {"trial_label", "config_sha256", "code_sha256", "dataset_sha256",
@@ -270,11 +270,102 @@ def validate_execution_cost_calibration(document, trusted_public_keys, *, venue:
                 "reason": "COST_CALIBRATION_ERROR_EXCEEDS_ACCEPTANCE_THRESHOLDS",
                 "spread_error_bps": spread_error, "spread_limit_bps": spread_limit,
                 "slippage_error_bps": slippage_error, "slippage_limit_bps": slippage_limit}
+    # Session costs are accepted only with independently held-out venue observations
+    # for every session. A signed author-provided list of rates alone is not calibration.
+    session_schedule = doc.get("session_costs_bps")
+    session_validation = doc.get("session_cost_validation")
+    session_costs_verified = False
+    normalized_session_costs = None
+    session_costs_reason = "SESSION_COST_SCHEDULE_MISSING"
+    session_diagnostics = {}
+    if session_schedule is not None:
+        try:
+            from .market_sessions import SESSION_COST_KEYS, normalize_session_costs_bps
+            normalized_session_costs = normalize_session_costs_bps(session_schedule)
+            if (
+                doc.get("session_cost_basis") != "per_side_turnover_bps"
+                or doc.get("session_costs_source") != "venue_observed"
+                or not isinstance(session_validation, Mapping)
+                or set(session_validation.keys()) != set(SESSION_COST_KEYS)
+            ):
+                raise ValueError("session schedule basis, source, or validation set is incomplete")
+            session_costs_verified = True
+            for session_name in sorted(SESSION_COST_KEYS):
+                row = session_validation[session_name]
+                if not isinstance(row, Mapping):
+                    raise ValueError("session validation row is invalid")
+                held = row.get("heldout_validation")
+                if not isinstance(held, Mapping):
+                    raise ValueError("session held-out validation is missing")
+                session_orders = exact_count(row.get("observed_order_count"))
+                session_fills = exact_count(row.get("observed_fill_count"))
+                session_samples = exact_count(held.get("sample_count"))
+                session_spread_error = float(held.get("mean_absolute_spread_error_bps"))
+                session_slippage_error = float(held.get("mean_absolute_slippage_error_bps"))
+                # Bind both calibration and held-out venue observations to the exact
+                # submitted per-side schedule rate. Sample counts and generic error
+                # bounds alone cannot authenticate an arbitrary cost number.
+                submitted_rate = float(normalized_session_costs[session_name])
+                training_observed_rate = float(row.get("observed_cost_bps"))
+                heldout_observed_rate = float(held.get("observed_cost_bps"))
+                heldout_estimated_rate = float(held.get("estimated_cost_bps"))
+                observed_rate_tolerance = float(
+                    held.get("accepted_cost_error_bps", spread_limit + slippage_limit)
+                )
+                session_start = _time(row.get("validation_start") or doc.get("validation_start"))
+                session_end = _time(row.get("validation_end") or doc.get("validation_end"))
+                if (
+                    row.get("status") != "PASS"
+                    or held.get("status") != "PASS"
+                    or session_orders < 30
+                    or session_fills < 30
+                    or session_samples < 30
+                    or not math.isfinite(session_spread_error)
+                    or not math.isfinite(session_slippage_error)
+                    or session_spread_error < 0
+                    or session_slippage_error < 0
+                    or session_spread_error > spread_limit
+                    or session_slippage_error > slippage_limit
+                    or not all(math.isfinite(value) for value in (
+                        training_observed_rate, heldout_observed_rate,
+                        heldout_estimated_rate, observed_rate_tolerance,
+                    ))
+                    or observed_rate_tolerance < 0
+                    or observed_rate_tolerance > spread_limit + slippage_limit
+                    or abs(training_observed_rate - submitted_rate) > observed_rate_tolerance
+                    or abs(heldout_observed_rate - submitted_rate) > observed_rate_tolerance
+                    or abs(heldout_estimated_rate - submitted_rate) > observed_rate_tolerance
+                    or session_start is None
+                    or session_end is None
+                    or session_start >= session_end
+                ):
+                    raise ValueError("session held-out venue evidence is incomplete or outside policy")
+                session_diagnostics[session_name] = {
+                    "observed_orders": session_orders,
+                    "observed_fills": session_fills,
+                    "heldout_samples": session_samples,
+                    "spread_error_bps": session_spread_error,
+                    "slippage_error_bps": session_slippage_error,
+                    "submitted_cost_bps": submitted_rate,
+                    "training_observed_cost_bps": training_observed_rate,
+                    "heldout_observed_cost_bps": heldout_observed_rate,
+                    "heldout_estimated_cost_bps": heldout_estimated_rate,
+                    "accepted_cost_error_bps": observed_rate_tolerance,
+                }
+            session_costs_reason = "SESSION_COST_SCHEDULE_VERIFIED"
+        except (TypeError, ValueError, OverflowError, AttributeError):
+            session_costs_verified = False
+            normalized_session_costs = None
+            session_costs_reason = "SESSION_COST_SCHEDULE_HELDOUT_EVIDENCE_INCOMPLETE"
     return {**signed, "calibration_verified": True, "reason": "VENUE_CALIBRATION_VERIFIED",
             "observed_order_count": orders, "observed_fill_count": fills,
             "heldout_sample_count": count, "model_fingerprint": model_fingerprint,
             "heldout_spread_error_bps": spread_error, "heldout_slippage_error_bps": slippage_error,
-            "accepted_spread_error_bps": spread_limit, "accepted_slippage_error_bps": slippage_limit}
+            "accepted_spread_error_bps": spread_limit, "accepted_slippage_error_bps": slippage_limit,
+            "session_costs_verified": session_costs_verified,
+            "session_costs_reason": session_costs_reason,
+            "session_cost_validation": session_diagnostics if session_costs_verified else None,
+            "session_costs_bps": normalized_session_costs if session_costs_verified else None}
 
 
 def validate_comparable_trial_archive(document, trusted_public_keys, *, candidate_labels: set[str],

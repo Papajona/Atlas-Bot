@@ -235,6 +235,7 @@ def oos_benchmark_comparison(
     loss_lookback_bars: int = 24,
     random_trials: int = 100,
     seed: int = 20261026,
+    session_costs_bps: dict[str, float] | None = None,
 ) -> dict:
     """Compare candidate returns with OHLC-derived buy-and-hold and fresh-entry controls.
 
@@ -366,6 +367,7 @@ def oos_benchmark_comparison(
                 stop_atr=float(stop_atr),
                 take_profit_atr=float(take_profit_atr),
                 transaction_cost_bps=float(transaction_cost_bps),
+                session_costs_bps=session_costs_bps,
                 carry_bps_per_bar=carry_bps_per_bar,
                 drawdown_limit=drawdown_limit,
                 daily_loss_limit=daily_loss_limit,
@@ -455,12 +457,22 @@ def oos_benchmark_comparison(
 
     buy_hold_values = []
     buy_hold_turnover = 0.0
-    for market in market_blocks:
+    for frame, market in zip(frame_blocks, market_blocks):
         turnover = np.zeros(len(market), dtype=float)
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
         buy_hold_turnover += float(turnover.sum())
-        net = market - turnover * cost_rate
+        if session_costs_bps is not None:
+            # Entry and terminal liquidation are separate fills and must use
+            # the fee schedule at their own observed execution sessions.
+            from .market_sessions import session_cost_series
+            session_fees = session_cost_series(frame.index, session_costs_bps).to_numpy(dtype=float)
+            transaction_drag = np.zeros(len(market), dtype=float)
+            transaction_drag[0] += session_fees[0] / 10_000.0
+            transaction_drag[-1] += session_fees[-1] / 10_000.0
+        else:
+            transaction_drag = turnover * cost_rate
+        net = market - transaction_drag
         if carry_rate is not None:
             net = net - carry_rate
         buy_hold_values.extend(np.clip(net, -1.0, None).tolist())
@@ -552,6 +564,10 @@ def oos_benchmark_comparison(
         "random_control_shift_max": max(valid_nonzero_shifts) if valid_nonzero_shifts else None,
         "random_control_exposure_matching": "EXACT_REQUESTED_EXPOSURE_BARS_AND_ENTRY_COUNT",
         "buy_and_hold_turnover": buy_hold_turnover,
+        "buy_and_hold_session_cost_model_complete": session_costs_bps is not None,
+        "buy_and_hold_session_costs_bps": (
+            dict(session_costs_bps) if session_costs_bps is not None else None
+        ),
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
@@ -651,6 +667,8 @@ def fixed_signal_walk_forward_oos(
     benchmark_loss_event_threshold: int = 0,
     benchmark_cooldown_bars: int = 0,
     benchmark_random_trials: int = 100,
+    session_costs_bps: dict[str, float] | None = None,
+    transaction_cost_bps_per_bar: pd.Series | None = None,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -731,8 +749,33 @@ def fixed_signal_walk_forward_oos(
         benchmark_atr = benchmark_atr_for_entry.astype(float)
     gross = position * ret
     turnover = execution_turnover(position, exit_flags)
+    session_cost_values = None
+    effective_cost_values: pd.Series | None = None
+    transaction_cost_values: float | pd.Series = total_cost_bps
+    if session_costs_bps is not None:
+        try:
+            from .market_sessions import session_cost_series
+            session_cost_values = session_cost_series(df.index, session_costs_bps)
+        except (TypeError, ValueError) as exc:
+            return {"status": "INVALID_CONFIG", "reason": f"invalid_session_cost_schedule:{type(exc).__name__}", "folds": []}
+    if transaction_cost_bps_per_bar is not None:
+        if (
+            not isinstance(transaction_cost_bps_per_bar, pd.Series)
+            or not transaction_cost_bps_per_bar.index.equals(df.index)
+        ):
+            return {"status": "INVALID_DATA", "reason": "effective_transaction_cost_index_mismatch", "folds": []}
+        effective_cost_values = transaction_cost_bps_per_bar.astype(float)
+        if (
+            not np.isfinite(effective_cost_values.to_numpy(dtype=float)).all()
+            or (effective_cost_values.to_numpy(dtype=float) < 0).any()
+        ):
+            return {"status": "INVALID_DATA", "reason": "effective_transaction_costs_invalid", "folds": []}
+        transaction_cost_values = effective_cost_values
+    elif session_cost_values is not None:
+        effective_cost_values = session_cost_values
+        transaction_cost_values = session_cost_values
     net = costed_execution_returns(
-        position, ret, transaction_cost_bps=total_cost_bps,
+        position, ret, transaction_cost_bps=transaction_cost_values,
         carry_bps_per_bar=carry, exit_mask=exit_flags,
     ).replace([np.inf, -np.inf], np.nan).fillna(0.0).clip(lower=-1.0)
     fixed_cost = position.abs() * (carry / 10_000.0) if carry is not None else None
@@ -799,6 +842,10 @@ def fixed_signal_walk_forward_oos(
         bars_per_year=max(1, int(round(annualization))),
         stress_multiplier=stress_multiplier,
         fixed_cost_drag=None if all_fixed_cost is None else all_fixed_cost.to_numpy(dtype=float),
+        variable_cost_bps_per_bar=(
+            effective_cost_values.reindex(all_oos.index).to_numpy(dtype=float)
+            if effective_cost_values is not None else None
+        ),
     )
     evidence_source = str(carry_evidence_source or "").strip()
     evidence_id = str(carry_evidence_id or "").strip()
@@ -811,6 +858,11 @@ def fixed_signal_walk_forward_oos(
     cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
     cost_analysis["financing_cost_model_complete"] = cost_complete
+    cost_analysis["session_cost_model_complete"] = session_cost_values is not None
+    cost_analysis["session_costs_bps"] = dict(session_costs_bps) if session_cost_values is not None else None
+    cost_analysis["effective_transaction_cost_series_applied"] = (
+        transaction_cost_bps_per_bar is not None
+    )
     cost_analysis["intrabar_stop_target_model_complete"] = execution_complete
     # The configured fee/slippage stress is not proof of venue-calibrated execution costs.
     cost_analysis["execution_cost_model_complete"] = False
@@ -875,6 +927,7 @@ def fixed_signal_walk_forward_oos(
             loss_event_threshold=benchmark_loss_event_threshold,
             cooldown_bars=benchmark_cooldown_bars,
             random_trials=benchmark_random_trials,
+            session_costs_bps=session_costs_bps,
         )
     return {
         "status": "OK",
@@ -905,6 +958,9 @@ def fixed_signal_walk_forward_oos(
         "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
         "execution_cost_calibration_evidence_id": None,
         "carry_bps_per_bar": carry,
+        "session_cost_model_complete": session_cost_values is not None,
+        "session_costs_bps": dict(session_costs_bps) if session_cost_values is not None else None,
+        "effective_transaction_cost_series_applied": transaction_cost_bps_per_bar is not None,
     }
 
 
@@ -1148,15 +1204,94 @@ def monte_carlo_bootstrap(returns, *, trials: int = 2000, seed: int = 7, block_s
         outcomes[i]=equity[-1]-1.0; max_dd[i]=dd.min()
     return {"status":"OK","observations":int(n),"trials":int(trials),"block_size":int(size),"return_p05":float(np.quantile(outcomes,0.05)),"return_median":float(np.quantile(outcomes,0.50)),"return_p95":float(np.quantile(outcomes,0.95)),"drawdown_p05":float(np.quantile(max_dd,0.05)),"drawdown_median":float(np.quantile(max_dd,0.50)),"probability_negative_return":float(np.mean(outcomes<0))}
 
-def parameter_plateau_score(results: dict, *, metric: str = "sharpe", tolerance: float = 0.20) -> dict:
-    """Measure whether nearby parameter variants retain most of the best metric."""
-    rows=results.get("variants") if isinstance(results,dict) else None
-    if not rows: return {"status":"INSUFFICIENT_DATA"}
-    vals=[float(r.get(metric,0.0)) for r in rows if np.isfinite(float(r.get(metric,0.0)))]
-    if not vals: return {"status":"INSUFFICIENT_DATA"}
-    best=max(vals); floor=best*(1.0-float(tolerance))
-    plateau=sum(v>=floor for v in vals)/len(vals)
-    return {"status":"OK","metric":metric,"best":best,"floor":floor,"plateau_ratio":plateau,"robust":plateau>=0.30,"variants":len(vals)}
+def parameter_plateau_score(
+    results: dict,
+    *,
+    metric: str = "oos_sharpe",
+    tolerance: float = 0.20,
+    minimum_valid_variants: int = 7,
+    minimum_plateau_ratio: float = 0.50,
+) -> dict:
+    """Score plateau stability using held-out values; invalid variants remain in the denominator."""
+    rows = results.get("variants") if isinstance(results, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return {
+            "status": "INSUFFICIENT_DATA", "reason": "parameter_variants_missing",
+            "robust": False, "tested_variants": 0, "valid_variants": 0,
+        }
+    try:
+        tol = float(tolerance)
+        min_ratio = float(minimum_plateau_ratio)
+        min_valid = int(minimum_valid_variants)
+    except (TypeError, ValueError, OverflowError):
+        return {
+            "status": "INVALID_CONFIG", "robust": False,
+            "tested_variants": len(rows), "valid_variants": 0,
+        }
+    if (
+        not math.isfinite(tol) or not 0.0 < tol < 1.0
+        or not math.isfinite(min_ratio) or not 0.0 < min_ratio <= 1.0
+        or isinstance(minimum_valid_variants, bool) or min_valid != minimum_valid_variants
+        or min_valid < 2
+    ):
+        return {
+            "status": "INVALID_CONFIG", "robust": False,
+            "tested_variants": len(rows), "valid_variants": 0,
+        }
+    tested = len(rows)
+    values = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if metric == "oos_sharpe" and row.get("oos_status") != "OK":
+            continue
+        raw = row.get(metric)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(value):
+            values.append(value)
+    if len(values) < min_valid:
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "metric": metric,
+            "tested_variants": tested,
+            "variants": tested,
+            "valid_variants": len(values),
+            "minimum_valid_variants": min_valid,
+            "robust": False,
+        }
+    best = max(values)
+    if best <= 0.0:
+        return {
+            "status": "NOT_ROBUST",
+            "metric": metric,
+            "best": best,
+            "plateau_ratio": 0.0,
+            "valid_variants": len(values),
+            "tested_variants": tested,
+            "reason": "best_held_out_metric_not_positive",
+        }
+    floor = best * (1.0 - tol)
+    plateau_count = sum(value >= floor for value in values)
+    plateau_ratio = plateau_count / tested
+    return {
+        "status": "OK",
+        "metric": metric,
+        "best": best,
+        "floor": floor,
+        "plateau_count": plateau_count,
+        "plateau_ratio": plateau_ratio,
+        "robust": plateau_ratio >= min_ratio and len(values) == tested,
+        "variants": tested,
+        "tested_variants": tested,
+        "valid_variants": len(values),
+        "minimum_valid_variants": min_valid,
+        "minimum_plateau_ratio": min_ratio,
+        "tolerance": tol,
+        "note": "Uses OOS Sharpe only; any invalid/missing variant reduces the plateau ratio and blocks robustness.",
+    }
 
 
 def deflated_sharpe_report(net_returns, trial_sharpes_annual, n_trials: int, bars_per_year: int,
@@ -1264,32 +1399,60 @@ def cost_breakeven_report(
     bars_per_year: int,
     stress_multiplier: float = 2.0,
     fixed_cost_drag: Iterable[float] | None = None,
+    variable_cost_bps_per_bar: Iterable[float] | None = None,
 ) -> dict:
-    """Stress trading fees/slippage plus any fixed per-bar drag such as carry/funding.
-
-    `fixed_cost_drag` is non-negative per-bar cost already measured against the same
-    return/turnover observations. The break-even variable fee estimate deducts that
-    fixed drag first. Missing observations or non-finite/negative cost inputs fail closed.
-    """
+    """Stress trading fees/slippage plus fixed drag, optionally using session-specific per-side costs."""
     g = np.asarray(list(returns_gross), dtype=float)
     t = np.asarray(list(turnover), dtype=float)
     fixed = np.zeros(len(g), dtype=float) if fixed_cost_drag is None else np.asarray(list(fixed_cost_drag), dtype=float)
-    n = min(len(g), len(t), len(fixed))
+    try:
+        default_variable = float(taker_bps) + float(slippage_bps)
+        variable = (
+            np.full(len(g), default_variable, dtype=float)
+            if variable_cost_bps_per_bar is None
+            else np.asarray(list(variable_cost_bps_per_bar), dtype=float)
+        )
+    except (TypeError, ValueError, OverflowError):
+        return {"status": "INVALID_COST_INPUT", "observations": 0, "stress_ok": False}
+    lengths = (len(g), len(t), len(fixed), len(variable))
+    if len(set(lengths)) != 1:
+        return {
+            "status": "INVALID_COST_ALIGNMENT",
+            "observations": int(min(lengths)),
+            "input_lengths": {
+                "gross_returns": lengths[0],
+                "turnover": lengths[1],
+                "fixed_cost_drag": lengths[2],
+                "variable_cost_bps_per_bar": lengths[3],
+            },
+            "stress_ok": False,
+        }
+    n = lengths[0]
     if n < 30:
         return {"status": "INSUFFICIENT_DATA", "observations": int(n), "stress_ok": False}
-    g, t, fixed = g[:n], t[:n], fixed[:n]
     try:
         taker = float(taker_bps)
         slippage = float(slippage_bps)
         multiplier = float(stress_multiplier)
+        annualization = float(bars_per_year)
     except (TypeError, ValueError, OverflowError):
         return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
+    if (
+        isinstance(bars_per_year, bool)
+        or not math.isfinite(annualization)
+        or not annualization.is_integer()
+        or annualization < 1
+    ):
+        return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
+    per_year = int(annualization)
     if (
         not np.all(np.isfinite(g))
         or not np.all(np.isfinite(t))
         or not np.all(np.isfinite(fixed))
+        or not np.all(np.isfinite(variable))
         or np.any(t < 0)
         or np.any(fixed < 0)
+        or np.any(variable < 0)
         or not np.isfinite(taker)
         or not np.isfinite(slippage)
         or not np.isfinite(multiplier)
@@ -1298,27 +1461,31 @@ def cost_breakeven_report(
         or multiplier <= 0
     ):
         return {"status": "INVALID_COST_INPUT", "observations": int(n), "stress_ok": False}
-    variable_cost = (taker + slippage) / 10_000.0
+    variable_drag = t * variable / 10_000.0
     mean_gross = float(g.mean())
     mean_fixed = float(fixed.mean())
     mean_turn = float(t.mean())
-    net = float((g - fixed - t * variable_cost).mean())
-    stressed = float((g - fixed - t * variable_cost * multiplier).mean())
+    mean_variable_drag = float(variable_drag.mean())
+    turnover_weighted_cost_bps = (
+        float(np.sum(t * variable) / np.sum(t)) if float(np.sum(t)) > 0 else 0.0
+    )
+    net = float((g - fixed - variable_drag).mean())
+    stressed = float((g - fixed - variable_drag * multiplier).mean())
     breakeven_bps = ((mean_gross - mean_fixed) / mean_turn * 10_000.0) if mean_turn > 0 else float("inf")
-    per_year = max(1, int(bars_per_year))
     return {
         "status": "OK",
         "observations": int(n),
         "annual_turnover": mean_turn * per_year,
         "annual_gross_return": mean_gross * per_year,
         "annual_fixed_cost_drag": mean_fixed * per_year,
-        "annual_variable_cost_drag": mean_turn * variable_cost * per_year,
-        "annual_cost_drag": (mean_fixed + mean_turn * variable_cost) * per_year,
+        "annual_variable_cost_drag": mean_variable_drag * per_year,
+        "annual_cost_drag": (mean_fixed + mean_variable_drag) * per_year,
         "annual_net_return": net * per_year,
         "annual_net_return_stressed": stressed * per_year,
-        "assumed_cost_bps": variable_cost * 10_000.0,
+        "assumed_cost_bps": turnover_weighted_cost_bps,
         "breakeven_cost_bps": breakeven_bps,
-        "cost_headroom": (breakeven_bps / (variable_cost * 10_000.0)) if variable_cost > 0 and np.isfinite(breakeven_bps) else None,
+        "cost_headroom": (breakeven_bps / turnover_weighted_cost_bps) if turnover_weighted_cost_bps > 0 and np.isfinite(breakeven_bps) else None,
+        "session_variable_costs_applied": variable_cost_bps_per_bar is not None,
         "stress_multiplier": multiplier,
         "stress_ok": bool(stressed > 0.0 and net > 0.0),
         "note": "Arithmetic annualisation of mean bar returns; carry/funding is included in fixed_cost_drag when supplied. The stress gate multiplies trading fees/slippage and retains the full fixed cost.",
