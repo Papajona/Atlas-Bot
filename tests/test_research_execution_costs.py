@@ -609,7 +609,7 @@ def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
     from app import research_execution_costs as costs_module
     from app.research_validation import oos_benchmark_comparison
 
-    source_frame = _research_frame(periods=192)
+    source_frame = _research_frame(periods=256)
     settings = _settings(tmp_path)
     settings.research_order_notional_usd = 10.0
     evidence = _research_cost_evidence(source_frame, settings, attach_to_frame=False)
@@ -625,10 +625,12 @@ def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
     assert full_context is not None
     assert audit["execution_cost_model_complete"] is True
 
-    # Both folds begin after the signed context's 20-bar volume warm-up.
+    # All folds begin after the signed context's 20-bar volume warm-up. Two
+    # folds will reject different control legs; the third remains per-bar priced.
     folds = [
         source_frame.iloc[32:96].copy(),
         source_frame.iloc[96:160].copy(),
+        source_frame.iloc[160:224].copy(),
     ]
     contexts = [
         slice_research_execution_context(full_context, frame.index)
@@ -701,6 +703,9 @@ def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
     assert result["buy_and_hold_net_return"] is not None
     assert result["matched_random_entry_median_net_return"] is not None
     assert result["random_trials"] == 3
+    assert result["buy_and_hold_session_cost_model_complete"] is False
+    assert result["buy_and_hold_session_costs_bps"] is None
+    assert result["buy_and_hold_session_fallback_folds"] == [0, 1]
 
     # The first pass prices the candidate once per verified fold; the one
     # fallback pass uses no per-bar context for either rejected fold.
