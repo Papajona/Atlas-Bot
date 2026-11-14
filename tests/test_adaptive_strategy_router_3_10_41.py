@@ -317,3 +317,51 @@ def test_strategy_router_returns_propagate_verified_venue_calibration_identity(m
     assert policy_result["execution_cost_venue"] == "example-exchange"
     assert policy_result["execution_cost_model_fingerprint"] == "a" * 64
     assert policy_result["per_bar_execution_context_sha256"] == "b" * 64
+
+def test_strategy_ranking_and_selector_expose_calibration_evidence(monkeypatch):
+    from app import strategy_router as router
+
+    frame = _df(320)
+    context = {
+        "model_fingerprint": "d" * 64,
+        "context_sha256": "e" * 64,
+        "dataset_sha256": "f" * 64,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "venue-calibration-router-002",
+        "venue": "example-exchange",
+        "market_type": "spot",
+        "symbol": "BTC/USD",
+        "timeframe": "1h",
+    }
+    monkeypatch.setattr(
+        router, "classify_regime",
+        lambda df, asset="crypto": pd.Series("RANGE", index=df.index),
+    )
+    monkeypatch.setattr(
+        router, "_strategy_returns",
+        lambda df, cfg, strategy, costs_bps, asset, **kwargs: pd.Series(
+            0.0, index=df.index, name="net_return"
+        ),
+    )
+
+    performance = router.regime_conditioned_strategy_performance(
+        frame, StrategyConfig(), execution_cost_context=context
+    )
+    assert performance
+    for regimes in performance.values():
+        assert regimes["RANGE"]["execution_cost_calibration_status"] == "VERIFIED"
+        assert regimes["RANGE"]["execution_cost_calibration_verified"] is True
+        assert regimes["RANGE"]["execution_cost_calibration_evidence_id"] == "venue-calibration-router-002"
+        assert regimes["RANGE"]["execution_cost_venue"] == "example-exchange"
+        assert regimes["RANGE"]["execution_cost_model_fingerprint"] == "d" * 64
+
+    selection = router.select_strategy(
+        frame, StrategyConfig(), min_trades=1, min_regime_bars=3,
+        execution_cost_context=context,
+    )
+    assert selection["status"] == "OK"
+    assert selection["execution_cost_calibration_status"] == "VERIFIED"
+    assert selection["execution_cost_calibration_verified"] is True
+    assert selection["execution_cost_calibration_evidence_id"] == "venue-calibration-router-002"
+    assert selection["execution_cost_venue"] == "example-exchange"
+    assert selection["execution_cost_model_fingerprint"] == "d" * 64
