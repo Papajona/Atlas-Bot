@@ -665,3 +665,26 @@ def test_missing_execution_context_uses_static_cost_without_event_loop(monkeypat
     assert audit["execution_cost_model_status"] == "STATIC_FALLBACK_NO_EXECUTION_CONTEXT"
     assert audit["_execution_cost_model_complete_by_bar"] == [False] * len(index)
     assert len(audit["_execution_cost_failure_reasons_by_bar"]) == len(index)
+
+
+
+@pytest.mark.parametrize(
+    "bar_position",
+    [2, 2.0, np.int64(2), np.float64(2.0)],
+)
+def test_execution_event_accepts_integral_numeric_bar_indices(bar_position):
+    from app.research_execution_costs import execution_cost_for_event
+
+    context = {
+        "index": pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h"),
+    }
+    cost, reason = execution_cost_for_event(
+        context,
+        bar_position=bar_position,
+        turnover=0.0,
+        reference_price=100.0,
+        side="buy",
+        namespace="integral-index-test",
+    )
+    assert cost == 0.0
+    assert reason is None
