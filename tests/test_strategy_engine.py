@@ -647,7 +647,6 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
     from app import research_execution_costs, trading_core
     from app.research_validation import oos_benchmark_comparison
 
-    _install_fast_walk_forward_model(monkeypatch)
     frame = sample_df(1800)
     context = _validator_issued_ai_execution_context(
         frame, model_fingerprint="e" * 64, context_sha256="f" * 64
@@ -658,6 +657,25 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         "NEW_YORK_LATE": 3.0,
         "OTHER": 4.0,
     }
+
+    class PatternModel:
+        classes_ = np.array([0, 1, 2], dtype=int)
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def fit(self, features, labels):
+            assert len(features) == len(labels)
+            return self
+
+        def predict_proba(self, features):
+            probabilities = np.tile(
+                np.array([[0.10, 0.80, 0.10]], dtype=float),
+                (len(features), 1),
+            )
+            active = (np.arange(len(features)) % 60) < 20
+            probabilities[active] = np.array([0.05, 0.10, 0.85])
+            return probabilities
 
     def labels_with_verified_costs(close, vol, high, low, **kwargs):
         result = pd.Series(
@@ -683,6 +701,7 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         return lambda *_args: 0.25
 
     benchmark_inputs = {}
+
     def benchmark_with_small_random_sample(*args, **kwargs):
         benchmark_inputs["fallback_reasons"] = tuple(
             kwargs.get("_execution_cost_fallback_reasons", ())
@@ -691,14 +710,18 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         benchmark_inputs["execution_cost_context_blocks"] = kwargs.get(
             "execution_cost_context_blocks"
         )
-        # Keep this caller regression focused and deterministic; the benchmark
-        # function's fold retry and random-control behavior have dedicated tests.
         kwargs["random_trials"] = 2
         return oos_benchmark_comparison(*args, **kwargs)
 
+    monkeypatch.setattr(trading_core, "LGBMClassifier", PatternModel)
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
     monkeypatch.setattr(
         research_execution_costs, "make_execution_cost_provider", rejected_provider
+    )
+    monkeypatch.setattr(
+        research_execution_costs,
+        "execution_cost_for_event",
+        lambda _context, **_kwargs: (0.25, None),
     )
     monkeypatch.setattr(
         trading_core, "oos_benchmark_comparison", benchmark_with_small_random_sample
@@ -724,6 +747,7 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         "ORDER_PARTICIPATION_LIMIT_EXCEEDED",
     )
     benchmark = result["benchmark_comparison"]
+    assert benchmark["status"] == "OK"
     assert benchmark["execution_cost_model_complete"] is False
     assert benchmark["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
     assert benchmark["execution_cost_model_fallback_used"] is True
