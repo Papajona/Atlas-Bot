@@ -13,6 +13,7 @@ to pass execute_signal()/risk_gate().
 """
 
 from datetime import datetime, timezone
+from collections.abc import Mapping
 import math
 import numpy as np
 import pandas as pd
@@ -36,7 +37,7 @@ def _execution_cost_context_audit(
     context: dict[str, object] | None,
 ) -> dict[str, object]:
     """Expose the verified venue calibration identity with routed research returns."""
-    values = context if isinstance(context, dict) else {}
+    values = context if isinstance(context, Mapping) else {}
     evidence_id = str(
         values.get("execution_cost_calibration_evidence_id")
         or values.get("evidence_id")
