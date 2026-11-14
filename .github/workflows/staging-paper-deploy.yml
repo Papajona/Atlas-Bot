@@ -54,21 +54,19 @@ jobs:
           gate_poll_interval_seconds=30
           gate_started_at="$(date +%s)"
 
-          # Retry transient GitHub API failures (for example HTTP 502) on read-only
-          # lookups. Never retry workflow dispatch POSTs, which could duplicate runs.
+          # Share the bounded GitHub API retry helper with later steps in this job.
+          cat > "$RUNNER_TEMP/atlas-gh-retry.sh" <<'ATLAS_GH_RETRY'
           gh_retry() {
             local attempt=1 max_attempts=6 delay=2 output rc
             while (( attempt <= max_attempts )); do
               if output="$(gh "$@" 2>&1)"; then
-                printf '%s\\n' "$output"
+                printf '%s\n' "$output"
                 return 0
               else
                 rc=$?
               fi
-              if (( attempt == max_attempts )) || ! grep -Eqi \\
-                'HTTP (429|5[0-9][0-9])|status code: (429|5[0-9][0-9])|Bad Gateway|Service Unavailable|Gateway Timeout|temporarily unavailable|connection reset|timed out' \\
-                <<< "$output"; then
-                printf '%s\\n' "$output" >&2
+              if (( attempt == max_attempts )) || ! grep -Eqi 'HTTP (429|5[0-9][0-9])|status code: (429|5[0-9][0-9])|Bad Gateway|Service Unavailable|Gateway Timeout|temporarily unavailable|connection reset|timed out' <<< "$output"; then
+                printf '%s\n' "$output" >&2
                 return "$rc"
               fi
               echo "Transient GitHub API read failure (attempt $attempt/$max_attempts); retrying in ${delay}s." >&2
@@ -78,6 +76,9 @@ jobs:
             done
             return 1
           }
+          ATLAS_GH_RETRY
+          source "$RUNNER_TEMP/atlas-gh-retry.sh"
+          echo "ATLAS_GH_RETRY_HELPER=$RUNNER_TEMP/atlas-gh-retry.sh" >> "$GITHUB_ENV"
 
           # The required CI jobs have 20-45 minute limits; allow two hours for
           # queue delay and completion before this paper-only deployment is blocked.
@@ -221,6 +222,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source "$ATLAS_GH_RETRY_HELPER"
           current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
             echo "BLOCKED: main advanced before Cloud Run deployment; refusing to replace staging with stale commit $GITHUB_SHA."
@@ -291,6 +293,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source "$ATLAS_GH_RETRY_HELPER"
           current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
             echo "BLOCKED: main advanced during staging deployment; refusing to certify a different commit."
@@ -384,6 +387,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          source "$ATLAS_GH_RETRY_HELPER"
           current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
             echo "BLOCKED: main advanced before customer-paper acceptance dispatch."
