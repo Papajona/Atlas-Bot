@@ -31,6 +31,42 @@ STRATEGIES = ("trend", "momentum", "breakout", "mean_reversion", "ensemble")
 REGIMES = ("TREND_UP", "TREND_DOWN", "RANGE", "HIGH_VOL", "TRANSITION")
 
 
+def _execution_cost_context_audit(
+    context: dict[str, object] | None,
+) -> dict[str, object]:
+    """Expose the verified venue calibration identity with routed research returns."""
+    values = context if isinstance(context, dict) else {}
+    evidence_id = str(
+        values.get("execution_cost_calibration_evidence_id")
+        or values.get("evidence_id")
+        or ""
+    ).strip()
+    calibration_status = str(
+        values.get("execution_cost_calibration_status") or ""
+    ).strip().upper()
+    if calibration_status == "VERIFIED" and not evidence_id:
+        calibration_status = "MISSING_CALIBRATION_EVIDENCE_ID"
+    elif calibration_status != "VERIFIED":
+        calibration_status = calibration_status or (
+            "UNATTESTED_EXECUTION_COST_CONTEXT"
+            if values else "MISSING_VENUE_CALIBRATION_EVIDENCE"
+        )
+    return {
+        "execution_cost_calibration_status": calibration_status,
+        "execution_cost_calibration_verified": (
+            calibration_status == "VERIFIED" and bool(evidence_id)
+        ),
+        "execution_cost_calibration_evidence_id": evidence_id or None,
+        "execution_cost_model_fingerprint": values.get("model_fingerprint"),
+        "per_bar_execution_context_sha256": values.get("context_sha256"),
+        "execution_cost_venue": values.get("venue"),
+        "execution_cost_market_type": values.get("market_type"),
+        "execution_cost_symbol": values.get("symbol"),
+        "execution_cost_timeframe": values.get("timeframe"),
+        "execution_cost_dataset_sha256": values.get("dataset_sha256"),
+    }
+
+
 def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     """Classify each completed bar without using future observations."""
     c = df["close"].astype(float)
@@ -584,22 +620,21 @@ def router_walk_forward_backtest(
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
     cfg = cfg or StrategyConfig()
-    if execution_cost_context is None:
-        # Router callers own their configured cost basis. Do not silently replace
-        # adaptive/live selection costs with research calibration settings.
-        context_audit = {
-            "execution_cost_model_complete": False,
-            "execution_cost_model_status": "CALLER_COST_BASIS_NO_CALIBRATED_CONTEXT",
-            "reason": "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED",
-            "execution_cost_model_fingerprint": None,
-            "per_bar_execution_context_sha256": None,
-        }
-    else:
-        context_audit = {
-            "execution_cost_model_complete": True,
-            "execution_cost_model_fingerprint": execution_cost_context.get("model_fingerprint"),
-            "per_bar_execution_context_sha256": execution_cost_context.get("context_sha256"),
-        }
+    # Router callers own their configured cost basis unless a verified research
+    # context is explicitly supplied. Preserve venue/evidence identity so downstream
+    # promotion gates can distinguish calibrated from static returns.
+    context_audit = _execution_cost_context_audit(execution_cost_context)
+    context_audit.update({
+        "execution_cost_model_complete": execution_cost_context is not None,
+        "execution_cost_model_status": (
+            "CONTEXT_PROVIDED" if execution_cost_context is not None
+            else "CALLER_COST_BASIS_NO_CALIBRATED_CONTEXT"
+        ),
+        "reason": (
+            None if execution_cost_context is not None
+            else "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED"
+        ),
+    })
 
     signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
@@ -683,9 +718,29 @@ def router_walk_forward_backtest(
         "execution_cost_model_complete": (
             all_costs_complete and all(ranking_audits)
         ),
+        "execution_cost_model_status": (
+            "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+            if execution_cost_context is not None and all_costs_complete and all(ranking_audits)
+            and context_audit.get("execution_cost_calibration_verified") is True
+            else "PER_BAR_EXECUTION_UNATTESTED_CONTEXT"
+            if execution_cost_context is not None and all_costs_complete and all(ranking_audits)
+            else "PER_BAR_EXECUTION_INCOMPLETE" if execution_cost_context is not None
+            else "STATIC_FALLBACK_NO_EXECUTION_CONTEXT"
+        ),
         "execution_cost_calibration_status": context_audit.get(
             "execution_cost_calibration_status"
         ),
+        "execution_cost_calibration_verified": context_audit.get(
+            "execution_cost_calibration_verified"
+        ),
+        "execution_cost_calibration_evidence_id": context_audit.get(
+            "execution_cost_calibration_evidence_id"
+        ),
+        "execution_cost_venue": context_audit.get("execution_cost_venue"),
+        "execution_cost_market_type": context_audit.get("execution_cost_market_type"),
+        "execution_cost_symbol": context_audit.get("execution_cost_symbol"),
+        "execution_cost_timeframe": context_audit.get("execution_cost_timeframe"),
+        "execution_cost_dataset_sha256": context_audit.get("execution_cost_dataset_sha256"),
         "execution_cost_model_fingerprint": context_audit.get(
             "execution_cost_model_fingerprint"
         ),
@@ -723,22 +778,21 @@ def policy_walk_forward_backtest(
     splits = purged_walk_forward_splits(len(df), folds=folds, min_train=min_train, purge=1, embargo=1)
     if not splits:
         return {"status": "INSUFFICIENT_DATA", "folds": []}
-    if execution_cost_context is None:
-        # Router callers own their configured cost basis. Do not silently replace
-        # adaptive/live selection costs with research calibration settings.
-        context_audit = {
-            "execution_cost_model_complete": False,
-            "execution_cost_model_status": "CALLER_COST_BASIS_NO_CALIBRATED_CONTEXT",
-            "reason": "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED",
-            "execution_cost_model_fingerprint": None,
-            "per_bar_execution_context_sha256": None,
-        }
-    else:
-        context_audit = {
-            "execution_cost_model_complete": True,
-            "execution_cost_model_fingerprint": execution_cost_context.get("model_fingerprint"),
-            "per_bar_execution_context_sha256": execution_cost_context.get("context_sha256"),
-        }
+    # Router callers own their configured cost basis unless a verified research
+    # context is explicitly supplied. Preserve venue/evidence identity so downstream
+    # promotion gates can distinguish calibrated from static returns.
+    context_audit = _execution_cost_context_audit(execution_cost_context)
+    context_audit.update({
+        "execution_cost_model_complete": execution_cost_context is not None,
+        "execution_cost_model_status": (
+            "CONTEXT_PROVIDED" if execution_cost_context is not None
+            else "CALLER_COST_BASIS_NO_CALIBRATED_CONTEXT"
+        ),
+        "reason": (
+            None if execution_cost_context is not None
+            else "EXECUTION_COST_CONTEXT_NOT_EXPLICITLY_SUPPLIED"
+        ),
+    })
 
     signals = strategy_signals(df, cfg, asset=asset)
     regimes = classify_regime(df, asset=asset)
@@ -934,9 +988,31 @@ def policy_walk_forward_backtest(
         "execution_cost_model_complete": (
             bool(cost_complete_by_fold) and all(cost_complete_by_fold)
         ),
+        "execution_cost_model_status": (
+            "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+            if execution_cost_context is not None and bool(cost_complete_by_fold)
+            and all(cost_complete_by_fold)
+            and context_audit.get("execution_cost_calibration_verified") is True
+            else "PER_BAR_EXECUTION_UNATTESTED_CONTEXT"
+            if execution_cost_context is not None and bool(cost_complete_by_fold)
+            and all(cost_complete_by_fold)
+            else "PER_BAR_EXECUTION_INCOMPLETE" if execution_cost_context is not None
+            else "STATIC_FALLBACK_NO_EXECUTION_CONTEXT"
+        ),
         "execution_cost_calibration_status": context_audit.get(
             "execution_cost_calibration_status"
         ),
+        "execution_cost_calibration_verified": context_audit.get(
+            "execution_cost_calibration_verified"
+        ),
+        "execution_cost_calibration_evidence_id": context_audit.get(
+            "execution_cost_calibration_evidence_id"
+        ),
+        "execution_cost_venue": context_audit.get("execution_cost_venue"),
+        "execution_cost_market_type": context_audit.get("execution_cost_market_type"),
+        "execution_cost_symbol": context_audit.get("execution_cost_symbol"),
+        "execution_cost_timeframe": context_audit.get("execution_cost_timeframe"),
+        "execution_cost_dataset_sha256": context_audit.get("execution_cost_dataset_sha256"),
         "execution_cost_model_fingerprint": context_audit.get(
             "execution_cost_model_fingerprint"
         ),
