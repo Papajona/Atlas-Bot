@@ -920,7 +920,11 @@ def ai_walk_forward_backtest(
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
-        session_costs_bps=session_costs_bps if execution_cost_context is None else None,
+        session_costs_bps=(
+            session_costs_bps
+            if execution_cost_context is None or not all(fold_execution_cost_complete)
+            else None
+        ),
         execution_cost_context_blocks=(
             oos_execution_cost_context_blocks
             if execution_cost_context is not None
@@ -948,7 +952,7 @@ def ai_walk_forward_backtest(
         and benchmark_costs_complete
     )
     if execution_cost_context is None:
-        execution_cost_model_status = "STATIC_OR_SESSION_COSTS_NO_VERIFIED_CONTEXT"
+        execution_cost_model_status = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
     elif not label_cost_complete:
         execution_cost_model_status = "INCOMPLETE_AI_LABEL_EXECUTION_COSTS"
     elif not fold_costs_complete:
