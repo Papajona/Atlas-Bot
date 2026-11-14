@@ -957,7 +957,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     if include_ai:
         try:
             ai_result = ai_walk_forward_backtest(
-                df, asset, folds, min_train, ai_threshold, session_costs_bps=session_costs_bps
+                df,
+                asset,
+                folds,
+                min_train,
+                ai_threshold,
+                cost_stress_multiplier=cost_mult,
+                taker_bps=taker_bps,
+                slippage_bps=slippage_bps,
+                carry_bps_per_bar=carry,
+                session_costs_bps=session_costs_bps,
+                execution_cost_context=execution_cost_context,
             )
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}
