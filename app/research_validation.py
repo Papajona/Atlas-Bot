@@ -517,6 +517,21 @@ def oos_benchmark_comparison(
                         reason or "BENCHMARK_TERMINAL_EXIT_COST_UNAVAILABLE"
                     )
                 transaction_drag[-1] += abs(final_position) * float(exit_cost) / 10_000.0
+        elif session_costs_bps is not None:
+            # A fold with rejected calibration may still have a separately verified
+            # per-session schedule. Apply it per bar, including terminal liquidation,
+            # rather than reverting to the unrelated scalar cost rate.
+            from .market_sessions import session_cost_series
+            session_rates = session_cost_series(
+                pd.DatetimeIndex(frame.index), session_costs_bps
+            ).to_numpy(dtype=float)
+            if (
+                session_rates.shape != turnover.shape
+                or not np.isfinite(session_rates).all()
+                or np.any(session_rates < 0.0)
+            ):
+                raise ValueError("invalid per-session benchmark cost schedule")
+            transaction_drag = turnover * session_rates / 10_000.0
         else:
             transaction_drag = turnover * cost_rate
         net = signal * market - transaction_drag
