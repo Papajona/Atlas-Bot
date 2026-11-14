@@ -62,10 +62,28 @@ class TradingRequirementsRequest(BaseModel):
 
 
 class CustomerBotStartRequest(MarketRequest):
+    # Optional calibration evidence is never trusted on shape alone; the server
+    # verifies its signature, market binding, source hashes and per-bar context.
+    execution_cost_calibration_evidence: dict[str, Any] | None = Field(default=None, repr=False)
     risk_fraction: float | None = Field(default=None, gt=0, le=0.02)
     autonomous: bool = True
     interval_seconds: int = Field(default=900, ge=60, le=86400)
     strategy_candidate_id: int | None = Field(default=None, gt=0)
+
+    @field_validator("execution_cost_calibration_evidence")
+    @classmethod
+    def _validate_execution_cost_evidence_size(cls, value: dict[str, Any] | None):
+        if value is None:
+            return None
+        try:
+            size = len(json.dumps(
+                value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+            ).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("execution cost calibration evidence must be finite JSON data") from exc
+        if size > 512 * 1024:
+            raise ValueError("execution_cost_calibration_evidence exceeds its 524288 byte limit")
+        return value
 
 
 class SmartTradeRequest(BaseModel):
