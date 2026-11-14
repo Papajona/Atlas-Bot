@@ -370,11 +370,9 @@ def execution_cost_for_event(
     """Calculate one-side taker fee plus calibrated spread, impact and latency."""
     if not isinstance(context, Mapping):
         return None, "EXECUTION_CONTEXT_UNAVAILABLE"
-    # Do not silently coerce booleans or fractional bar indices into valid
-    # execution events. Such coercion can price an order against the wrong bar.
-    if isinstance(bar_position, (bool, np.bool_)) or not isinstance(
-        bar_position, (int, np.integer)
-    ):
+    # Reject booleans and fractional indices, while preserving integral numeric
+    # values (including 2.0) that the previous int() conversion accepted.
+    if isinstance(bar_position, (bool, np.bool_)):
         return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     if isinstance(turnover, (bool, np.bool_)) or isinstance(
         reference_price, (bool, np.bool_)
@@ -382,9 +380,12 @@ def execution_cost_for_event(
         return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     try:
         position = int(bar_position)
+        numeric_position = float(bar_position)
         amount = float(turnover)
         price = float(reference_price)
     except (TypeError, ValueError, OverflowError):
+        return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+    if not math.isfinite(numeric_position) or numeric_position != float(position):
         return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     if position < 0 or position >= len(context.get("index", [])):
         return None, "EXECUTION_EVENT_BAR_OUT_OF_RANGE"
