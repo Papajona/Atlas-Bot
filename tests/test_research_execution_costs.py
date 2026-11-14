@@ -571,11 +571,13 @@ def test_benchmark_control_cost_rejection_falls_back_and_preserves_diagnostics(
         "OTHER": 4.0,
     }
 
+    # Generators are consumed by input validation; fallback retries must use
+    # the already-materialized fold arrays rather than these exhausted iterators.
     result = oos_benchmark_comparison(
         [fold],
-        [signal],
-        [candidate_net],
-        [atr],
+        [iter(signal)],
+        [iter(candidate_net)],
+        [iter(atr)],
         transaction_cost_bps=7.5,
         carry_bps_per_bar=0.0,
         random_trials=2,
@@ -598,6 +600,150 @@ def test_benchmark_control_cost_rejection_falls_back_and_preserves_diagnostics(
     assert result["buy_and_hold_net_return"] is not None
     assert result["matched_random_entry_median_net_return"] is not None
     assert result["random_trials"] == 2
+    assert result["buy_and_hold_session_cost_model_complete"] is True
+
+
+def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
+    tmp_path, monkeypatch
+):
+    from app import research_execution_costs as costs_module
+    from app.research_validation import oos_benchmark_comparison
+
+    source_frame = _research_frame(periods=128)
+    settings = _settings(tmp_path)
+    settings.research_order_notional_usd = 10.0
+    evidence = _research_cost_evidence(source_frame, settings, attach_to_frame=False)
+    full_context, audit = build_research_execution_cost_context(
+        source_frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+        calibration_evidence=evidence,
+    )
+    assert full_context is not None
+    assert audit["execution_cost_model_complete"] is True
+
+    folds = [
+        source_frame.iloc[:64].copy(),
+        source_frame.iloc[64:].copy(),
+    ]
+    contexts = [
+        slice_research_execution_context(full_context, frame.index)
+        for frame in folds
+    ]
+    assert all(context is not None for context in contexts)
+    signals = []
+    atr_blocks = []
+    candidate_blocks = []
+    for _frame in folds:
+        signal = np.zeros(len(_frame), dtype=float)
+        signal[8:20] = 0.5
+        signals.append(signal)
+        atr_blocks.append(np.ones(len(_frame), dtype=float))
+        candidate_blocks.append(np.zeros(len(_frame), dtype=float))
+
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+    calls = []
+    original_event_cost = costs_module.execution_cost_for_event
+
+    def reject_two_different_fold_legs(received_context, **kwargs):
+        namespace = str(kwargs["namespace"])
+        calls.append((received_context, namespace))
+        if (
+            received_context is contexts[0]
+            and namespace == "benchmark:buy-and-hold:fold:0:ENTRY"
+        ):
+            return None, "SYNTHETIC_BUY_HOLD_REJECTION_FOLD_0"
+        if (
+            received_context is contexts[1]
+            and namespace.startswith("benchmark:random:")
+        ):
+            return None, "SYNTHETIC_RANDOM_REJECTION_FOLD_1"
+        return original_event_cost(received_context, **kwargs)
+
+    monkeypatch.setattr(
+        costs_module, "execution_cost_for_event", reject_two_different_fold_legs
+    )
+    result = oos_benchmark_comparison(
+        folds,
+        signals,
+        candidate_blocks,
+        atr_blocks,
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=0.0,
+        random_trials=3,
+        seed=47,
+        session_costs_bps=session_schedule,
+        execution_cost_context_blocks=contexts,
+        candidate_execution_cost_namespace="candidate-two-pass-regression",
+    )
+
+    assert result["status"] == "OK"
+    assert result["execution_cost_model_complete"] is False
+    assert result["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
+    assert result["execution_cost_model_fallback_used"] is True
+    assert "SYNTHETIC_BUY_HOLD_REJECTION_FOLD_0" in " ".join(
+        result["execution_cost_model_failure"]
+    )
+    assert "SYNTHETIC_RANDOM_REJECTION_FOLD_1" in " ".join(
+        result["execution_cost_model_failure"]
+    )
+    assert result["gate_passed"] is False
+    assert result["candidate_net_return"] is not None
+    assert result["buy_and_hold_net_return"] is not None
+    assert result["matched_random_entry_median_net_return"] is not None
+    assert result["random_trials"] == 3
+
+    # The first pass prices the candidate once per verified fold; the one
+    # fallback pass uses no per-bar context for either rejected fold.
+    for context in contexts:
+        candidate_event_calls = [
+            namespace for received, namespace in calls
+            if received is context
+            and namespace.startswith("candidate-two-pass-regression:")
+        ]
+        assert len(candidate_event_calls) == 2
+
+
+def test_session_only_benchmark_is_not_reported_as_a_fallback():
+    from app.research_validation import oos_benchmark_comparison
+
+    frame = _research_frame(periods=64)
+    signal = np.zeros(len(frame), dtype=float)
+    signal[8:20] = 0.5
+    candidate_net = np.zeros(len(frame), dtype=float)
+    atr = np.ones(len(frame), dtype=float)
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    result = oos_benchmark_comparison(
+        [frame],
+        [signal],
+        [candidate_net],
+        [atr],
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=53,
+        session_costs_bps=session_schedule,
+    )
+
+    assert result["status"] == "OK"
+    assert result["execution_cost_model_complete"] is False
+    assert result["execution_cost_model_status"] == "INCOMPLETE_SESSION_BENCHMARK_COSTS"
+    assert result["execution_cost_model_fallback_used"] is False
+    assert result["execution_cost_model_failure"] is None
     assert result["buy_and_hold_session_cost_model_complete"] is True
 
 
