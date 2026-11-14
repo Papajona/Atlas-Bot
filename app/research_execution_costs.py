@@ -6,6 +6,7 @@ import math
 from decimal import Decimal, InvalidOperation
 from collections.abc import Callable, Mapping
 from typing import Any
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -26,10 +27,10 @@ _ALLOWED_USD_QUOTE_ASSETS = {"USD", "USDT", "USDC", "BUSD", "FDUSD", "DAI"}
 _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN = object()
 
 
-class _VerifiedResearchExecutionCostContext(dict[str, Any]):
-    """Authenticated immutable mapping produced only by the signed calibration validator."""
+class _VerifiedResearchExecutionCostContext(Mapping[str, Any]):
+    """Authenticated, deeply read-only mapping from the signed calibration validator."""
 
-    __slots__ = ("_verification_token",)
+    __slots__ = ("_values", "_verification_token")
 
     _ARRAY_FIELDS = frozenset({"spread_bps", "volume_units", "volatility_bps"})
 
@@ -40,8 +41,7 @@ class _VerifiedResearchExecutionCostContext(dict[str, Any]):
         for key, value in values.items():
             if key in self._ARRAY_FIELDS:
                 array = np.array(value, dtype=np.float64, copy=True)
-                # An immutable bytes backing store prevents callers from simply
-                # flipping NumPy's writeable flag back on after validation.
+                # Bytes-backed NumPy arrays cannot have write access re-enabled.
                 frozen[key] = np.frombuffer(
                     array.tobytes(order="C"), dtype=np.float64
                 ).reshape(array.shape)
@@ -49,21 +49,17 @@ class _VerifiedResearchExecutionCostContext(dict[str, Any]):
                 frozen[key] = value.copy(deep=True)
             else:
                 frozen[key] = value
-        dict.__init__(self, frozen)
+        object.__setattr__(self, "_values", MappingProxyType(frozen))
         object.__setattr__(self, "_verification_token", _token)
 
-    @staticmethod
-    def _reject_mutation(*_args: Any, **_kwargs: Any) -> None:
-        raise TypeError("verified research execution contexts are immutable")
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
 
-    __setitem__ = _reject_mutation
-    __delitem__ = _reject_mutation
-    clear = _reject_mutation
-    pop = _reject_mutation
-    popitem = _reject_mutation
-    setdefault = _reject_mutation
-    update = _reject_mutation
-    __ior__ = _reject_mutation
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
 
     def __setattr__(self, _name: str, _value: Any) -> None:
         raise TypeError("verified research execution contexts are immutable")
@@ -169,7 +165,7 @@ def build_research_execution_cost_context(
     df: pd.DataFrame, *, settings: Any, taker_bps: float,
     base_slippage_bps: float, cost_stress_multiplier: float, asset: str = "crypto",
     calibration_evidence: Mapping[str, Any] | None = None,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+) -> tuple[Mapping[str, Any] | None, dict[str, Any]]:
     """Verify signed per-bar spreads and build causal volume/volatility inputs."""
     if not isinstance(df, pd.DataFrame) or df.empty:
         return None, {"status": "INCOMPLETE", "reason": "RESEARCH_DATAFRAME_MISSING",
@@ -413,7 +409,7 @@ def build_research_execution_cost_context(
     }
 
 
-def slice_research_execution_context(context: Mapping[str, Any] | None, index: pd.Index) -> dict[str, Any] | None:
+def slice_research_execution_context(context: Mapping[str, Any] | None, index: pd.Index) -> Mapping[str, Any] | None:
     """Return an exact index-aligned view of a previously verified full context."""
     if not isinstance(context, Mapping):
         return None
