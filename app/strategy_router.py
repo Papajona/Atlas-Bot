@@ -105,7 +105,7 @@ def _strategy_returns(
     costs_bps: float,
     asset: str,
     *,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     execution_cost_namespace: str = "strategy-router",
     precomputed_execution_costs: dict[str, tuple[pd.Series, dict[str, object]]] | None = None,
 ) -> pd.Series:
@@ -214,7 +214,7 @@ def _slice_precomputed_execution_costs(
 def _precompute_router_execution_costs(
     df: pd.DataFrame,
     cfg: StrategyConfig,
-    execution_cost_context: dict[str, object] | None,
+    execution_cost_context: Mapping[str, object] | None,
     *,
     costs_bps: float,
     asset: str,
@@ -274,7 +274,7 @@ def regime_conditioned_strategy_performance(
     *,
     costs_bps: float = 7.5,
     asset: str = "crypto",
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     precomputed_execution_costs: dict[str, tuple[pd.Series, dict[str, object]]] | None = None,
 ) -> dict:
     """Compute per-strategy performance separately inside each market regime."""
@@ -423,7 +423,7 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                     costs_bps: float = 7.5, online_scores: dict[str, float] | None = None,
                     online_weight: float = 0.25, blend_enabled: bool = True,
                     blend_top_n: int = 3,
-                    execution_cost_context: dict[str, object] | None = None,
+                    execution_cost_context: Mapping[str, object] | None = None,
                     precomputed_execution_costs: dict[str, tuple[pd.Series, dict[str, object]]] | None = None) -> dict:
     """Select/hold/blend using completed history and an uncertainty-aware switch test.
 
@@ -611,7 +611,7 @@ def router_walk_forward_backtest(
     min_trades: int = 20,
     switch_min_advantage: float = 0.15,
     min_regime_bars: int = 3,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
 ) -> dict:
     """Evaluate regime-conditioned selection on unseen folds and evidence-backed costs."""
     splits = purged_walk_forward_splits(
@@ -771,7 +771,7 @@ def policy_walk_forward_backtest(
     blend_enabled: bool = True,
     blend_top_n: int = 3,
     decision_stride: int = 4,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
 ) -> dict:
     """Walk-forward validate adaptive routing with the same per-event cost inputs."""
     cfg = cfg or StrategyConfig()
