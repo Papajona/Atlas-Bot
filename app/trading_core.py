@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 import hashlib
 import json
@@ -393,7 +394,7 @@ def triple_barrier(
     )
     result.attrs["execution_cost_model_fingerprint"] = (
         execution_cost_context.get("model_fingerprint")
-        if isinstance(execution_cost_context, dict) else None
+        if isinstance(execution_cost_context, Mapping) else None
     )
     result.attrs["per_bar_execution_context_sha256"] = (
         execution_cost_context.get("context_sha256")
@@ -593,6 +594,36 @@ def _research_trial_dsr_report(
     )
 
 
+def _ai_execution_cost_context_attestation(
+    execution_cost_context: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """Distinguish validator-authenticated cost context from caller-supplied mappings."""
+    if execution_cost_context is None:
+        return {
+            "verified": False,
+            "status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
+            "evidence_id": None,
+        }
+    from .research_execution_costs import is_verified_research_execution_cost_context
+
+    evidence_id = str(
+        execution_cost_context.get("execution_cost_calibration_evidence_id")
+        or execution_cost_context.get("evidence_id")
+        or ""
+    ).strip()
+    verified = (
+        is_verified_research_execution_cost_context(execution_cost_context)
+        and bool(evidence_id)
+        and str(execution_cost_context.get("execution_cost_calibration_status") or "").strip().upper()
+        == "VERIFIED"
+    )
+    return {
+        "verified": verified,
+        "status": "VERIFIED" if verified else "UNATTESTED_EXECUTION_COST_CONTEXT",
+        "evidence_id": evidence_id if verified else None,
+    }
+
+
 def ai_walk_forward_backtest(
     df: pd.DataFrame,
     asset: str = "crypto",
@@ -654,9 +685,14 @@ def ai_walk_forward_backtest(
     aligned = df.reindex(X.index)
     from .research_execution_costs import (
         ResearchExecutionCostError,
+        is_verified_research_execution_cost_context,
         make_execution_cost_provider,
         slice_research_execution_context,
     )
+    execution_cost_attestation = _ai_execution_cost_context_attestation(
+        execution_cost_context
+    )
+    execution_context_verified = execution_cost_attestation["verified"] is True
     label_execution_context = None
     if execution_cost_context is not None:
         label_execution_context = slice_research_execution_context(
@@ -835,6 +871,7 @@ def ai_walk_forward_backtest(
             execution["audit"]["per_bar_execution_cost_model_status"] = "FALLBACK_AFTER_EVENT_REJECTION"
             execution["audit"]["per_bar_execution_cost_failure"] = reason
             fold_cost_complete = False
+        fold_cost_complete = bool(fold_cost_complete and execution_context_verified)
         fold_execution_cost_complete.append(fold_cost_complete)
         if execution_cost_context is not None:
             # Preserve the actual per-fold execution basis: successful folds retain
@@ -955,9 +992,10 @@ def ai_walk_forward_backtest(
         ),
         candidate_execution_cost_namespace="ai-walk-forward",
     )
-    label_cost_complete = label_execution_cost_audit.get(
-        "execution_cost_model_complete"
-    ) is True
+    label_cost_complete = (
+        execution_context_verified
+        and label_execution_cost_audit.get("execution_cost_model_complete") is True
+    )
     fold_costs_complete = (
         execution_cost_context is not None
         and bool(fold_execution_cost_complete)
@@ -967,13 +1005,15 @@ def ai_walk_forward_backtest(
         benchmark_report.get("execution_cost_model_complete") is True
     )
     execution_cost_model_complete = (
-        execution_cost_context is not None
+        execution_context_verified
         and label_cost_complete
         and fold_costs_complete
         and benchmark_costs_complete
     )
     if execution_cost_context is None:
         execution_cost_model_status = "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED"
+    elif not execution_context_verified:
+        execution_cost_model_status = "UNATTESTED_EXECUTION_COST_CONTEXT"
     elif not label_cost_complete:
         execution_cost_model_status = "INCOMPLETE_AI_LABEL_EXECUTION_COSTS"
     elif not fold_costs_complete:
@@ -1024,13 +1064,9 @@ def ai_walk_forward_backtest(
         "execution_cost_model_status": execution_cost_model_status,
         "execution_cost_model_fingerprint": execution_cost_model_fingerprint,
         "per_bar_execution_context_sha256": per_bar_execution_context_sha256,
-        "execution_cost_calibration_status": (
-            "VERIFIED" if execution_cost_context is not None else "MISSING_VENUE_CALIBRATION_EVIDENCE"
-        ),
-        "execution_cost_calibration_evidence_id": (
-            execution_cost_context.get("evidence_id")
-            if isinstance(execution_cost_context, dict) else None
-        ),
+        "execution_cost_calibration_status": execution_cost_attestation["status"],
+        "execution_cost_calibration_verified": bool(execution_context_verified),
+        "execution_cost_calibration_evidence_id": execution_cost_attestation["evidence_id"],
         "execution_cost_failure_reasons": execution_cost_failure_reasons,
         "slippage_model_complete": bool(execution_cost_model_complete),
         "slippage_model_status": execution_cost_model_status,
