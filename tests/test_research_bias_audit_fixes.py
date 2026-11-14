@@ -266,12 +266,22 @@ def test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source(
 
 
 def test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback():
+    from app.research_validation import purged_walk_forward_splits
+
     frame = _ohlcv(1400)
-    index = np.arange(len(frame))
-    signal = pd.Series(
-        np.where(index % 48 < 16, 0.0, 0.5),
+    candidate_signal = pd.Series(
+        np.where(np.arange(len(frame)) % 2 == 0, 0.0, 0.5),
         index=frame.index,
     )
+    # Construct an independent benchmark entry path with flat bars at both
+    # ends of each actual OOS fold, ensuring exposure-preserving random shifts
+    # exist for every benchmark fold.
+    benchmark_signal = pd.Series(0.0, index=frame.index)
+    folds = purged_walk_forward_splits(
+        len(frame), folds=3, min_train=500, purge=1, embargo=1
+    )
+    for fold in folds:
+        benchmark_signal.iloc[fold.test_start + 8:fold.test_end - 8] = 0.5
     schedule = {
         "LONDON": 1.0,
         "NEW_YORK": 2.0,
@@ -281,14 +291,14 @@ def test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback()
 
     result = fixed_signal_walk_forward_oos(
         frame,
-        signal,
+        candidate_signal,
         costs_bps=2.0,
         folds=3,
         min_train=500,
         session_costs_bps=schedule,
         session_costs_applied=True,
         execution_cost_fallback_used=True,
-        benchmark_entry_signal=signal,
+        benchmark_entry_signal=benchmark_signal,
         benchmark_random_trials=2,
     )
 
