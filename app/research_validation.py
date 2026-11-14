@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
+from collections.abc import Mapping
 import math
 import numpy as np
 import pandas as pd
@@ -236,7 +237,7 @@ def oos_benchmark_comparison(
     random_trials: int = 100,
     seed: int = 20261026,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context_blocks: list[dict[str, object] | None] | None = None,
+    execution_cost_context_blocks: list[Mapping[str, object] | None] | None = None,
     candidate_execution_cost_namespace: str = "research:ensemble",
 ) -> dict:
     """Compare candidate returns with OHLC-derived buy-and-hold and fresh-entry controls.
@@ -263,7 +264,7 @@ def oos_benchmark_comparison(
             "execution_cost_model_complete": False,
         }
     if execution_cost_context_blocks is not None and any(
-        context is not None and not isinstance(context, dict)
+        context is not None and not isinstance(context, Mapping)
         for context in execution_cost_context_blocks
     ):
         return {
@@ -274,11 +275,16 @@ def oos_benchmark_comparison(
     from .research_execution_costs import (
         ResearchExecutionCostError,
         execution_cost_for_event,
+        is_verified_research_execution_cost_context,
         make_execution_cost_provider,
     )
     benchmark_cost_complete = (
         execution_cost_context_blocks is not None
-        and all(isinstance(context, dict) for context in execution_cost_context_blocks)
+        and bool(execution_cost_context_blocks)
+        and all(
+            is_verified_research_execution_cost_context(context)
+            for context in execution_cost_context_blocks
+        )
     )
     context_blocks = (
         execution_cost_context_blocks
