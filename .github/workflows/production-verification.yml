@@ -129,7 +129,7 @@ jobs:
         run: |
           python -m compileall -q app alembic
           python -m pyflakes app
-          python -m bandit -r app -lll
+          python -m bandit -r app -ll
           python - <<'PY'
           import multidict
           assert multidict.CIMultiDict.__module__ == "multidict._multidict_py", multidict.CIMultiDict.__module__

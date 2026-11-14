@@ -1,6 +1,7 @@
 from .config import settings
 import json
 import logging
+import re
 import time
 import uuid
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
@@ -14,6 +15,22 @@ ORDERS = Counter("trader_orders_total", "Orders by mode/status", ["mode", "statu
 EQUITY = Gauge("trader_equity", "Current account equity")
 DRAWDOWN = Gauge("trader_drawdown", "Current equity drawdown")
 OPEN_POSITIONS = Gauge("trader_open_positions", "Number of non-zero positions")
+
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{8,64}$")
+_KNOWN_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+
+
+def safe_request_id(candidate: str | None) -> str:
+    value = (candidate or "").strip()
+    return value if _REQUEST_ID_RE.fullmatch(value) else uuid.uuid4().hex
+
+
+def metric_path_label(request: Request) -> str:
+    """Use a server-defined route template, never an attacker-controlled raw path."""
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    return template if isinstance(template, str) and template else "unmatched"
+
 
 
 # The admin dashboard now uses a same-origin external script and delegated data-action handlers.
@@ -31,13 +48,15 @@ COMPAT_CONTENT_SECURITY_POLICY = (
 
 class TelemetryMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
+        request_id = safe_request_id(request.headers.get("x-request-id"))
         start = time.perf_counter()
         response = await call_next(request)
         elapsed = time.perf_counter() - start
         path = request.url.path
-        REQUESTS.labels(request.method, path, str(response.status_code)).inc()
-        REQUEST_LATENCY.labels(request.method, path).observe(elapsed)
+        method_label = request.method if request.method in _KNOWN_METHODS else "OTHER"
+        path_label = metric_path_label(request)
+        REQUESTS.labels(method_label, path_label, str(response.status_code)).inc()
+        REQUEST_LATENCY.labels(method_label, path_label).observe(elapsed)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
@@ -56,7 +75,7 @@ class TelemetryMiddleware(BaseHTTPMiddleware):
             else:
                 policy = CONTENT_SECURITY_POLICY
             response.headers["Content-Security-Policy"] = policy
-        logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": path,
+        logger.info(json.dumps({"request_id": request_id, "method": request.method, "path": path[:256],
                                 "status": response.status_code, "duration_ms": round(elapsed * 1000, 2)}))
         return response
 

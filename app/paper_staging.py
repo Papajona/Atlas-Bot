@@ -50,9 +50,9 @@ _paper_preflight_cache_lock = asyncio.Lock()
 _paper_api_request_times: dict[str, list[float]] = {}
 
 
-# This exact predicate is used by the live read-only preflight and exercised against
-# PostgreSQL by the membership regression tests below. The exception is deliberately
-# limited to the one observed Supabase control-plane membership.
+# Test fixture for the PostgreSQL membership regression tests. The production preflight
+# below repeats this allowlist literally so its SQL remains static and scanner-visible.
+# The exception is deliberately limited to the one observed Supabase control-plane membership.
 _SAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE = """
 member_role.rolname='postgres'
 AND grantor_role.rolname='supabase_admin'
@@ -153,7 +153,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
     """Permit only read-only access to the two existing tables required for paper auth/kill switch."""
     try:
         async with engine.connect() as conn:
-            row = (await conn.execute(text(f"""
+            row = (await conn.execute(text("""
                 SELECT current_database(), current_user, session_user,
                        current_setting('transaction_read_only') AS transaction_read_only,
                        r.rolcanlogin, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
@@ -163,7 +163,15 @@ async def _primary_reader_preflight() -> dict[str, Any]:
                          JOIN pg_roles member_role ON member_role.oid=m.member
                          JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
                          WHERE m.roleid=r.oid
-                           AND {_UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE}
+                           AND NOT (
+                             member_role.rolname='postgres'
+                             AND grantor_role.rolname='supabase_admin'
+                             AND m.admin_option
+                             AND (to_jsonb(m) ? 'inherit_option')
+                             AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false)=false
+                             AND (to_jsonb(m) ? 'set_option')
+                             AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false)=false
+                           )
                        ) AS member_count,
                        has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
                        has_schema_privilege(current_user, 'public', 'CREATE') AS public_create,
