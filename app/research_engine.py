@@ -300,7 +300,11 @@ def _set_session_cost_report_status(
     applied = _session_cost_schedule_was_applied(
         execution_cost_context, execution_audit, session_costs_bps
     )
-    reported_schedule = dict(session_costs_bps) if applied and session_costs_bps is not None else None
+    reported_schedule = (
+        dict(session_costs_bps)
+        if applied and session_costs_bps is not None
+        else None
+    )
     cost_target["session_cost_model_complete"] = applied
     cost_target["session_costs_bps"] = reported_schedule
     nested_cost_analysis = cost_target.get("cost_analysis")
