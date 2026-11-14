@@ -5,6 +5,7 @@ that a strategy has predictive skill or substitute for venue-calibration data.
 """
 import numpy as np
 import pandas as pd
+import pytest
 
 from app.execution_aware_research import simulate_execution_aware_strategy
 from app.research_validation import (
@@ -223,6 +224,45 @@ def test_fixed_signal_oos_reports_inference_benchmark_and_hold_horizon():
     # non-wrapping, exposure-preserving entry shift. The benchmark must fail closed.
     assert result["benchmark_comparison"]["status"] == "INSUFFICIENT_DATA"
     assert result["benchmark_comparison"]["reason"] == "no_exposure_preserving_randomized_entry_control"
+
+
+@pytest.mark.parametrize("session_costs_applied", [False, True])
+def test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source(
+    session_costs_applied,
+):
+    frame = _ohlcv(1400)
+    signal = pd.Series(
+        np.where(np.arange(len(frame)) % 48 < 24, 0.5, -0.5),
+        index=frame.index,
+    )
+    schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+    # This per-bar series represents the candidate's already-priced stream.
+    # A separately verified session schedule may still be present solely for
+    # benchmark-fold fallback and must not be reported as applied by availability.
+    per_bar_costs = pd.Series(4.0, index=frame.index)
+
+    result = fixed_signal_walk_forward_oos(
+        frame,
+        signal,
+        costs_bps=2.0,
+        folds=3,
+        min_train=500,
+        session_costs_bps=schedule,
+        session_costs_applied=session_costs_applied,
+        transaction_cost_bps_per_bar=per_bar_costs,
+    )
+
+    assert result["status"] == "OK"
+    assert result["session_cost_model_complete"] is session_costs_applied
+    assert result["cost_analysis"]["session_cost_model_complete"] is session_costs_applied
+    expected_schedule = schedule if session_costs_applied else None
+    assert result["session_costs_bps"] == expected_schedule
+    assert result["cost_analysis"]["session_costs_bps"] == expected_schedule
 
 
 def test_promotion_gate_requires_inference_and_benchmarks_when_configured():
