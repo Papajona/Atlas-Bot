@@ -33,7 +33,7 @@ def test_customer_market_context_helper_is_referenced_by_runtime_code() -> None:
     assert len(_named_references(tree, "_server_paper_market_context")) >= 3
 
 
-def test_platform_paper_step_uses_bar_driven_simulator_not_customer_context_helper() -> None:
+def test_platform_paper_step_uses_bar_simulator_with_server_context_when_calibrated() -> None:
     source = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     route = next(
@@ -41,27 +41,23 @@ def test_platform_paper_step_uses_bar_driven_simulator_not_customer_context_help
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "paper_step"
     )
     assert _named_calls(route, "advance_platform_paper_orders")
-    assert not _named_references(route, "_server_paper_market_context")
+    assert _named_references(route, "_server_paper_market_context")
+    assert _named_references(route, "configured_paper_execution_settings")
 
 
-def test_active_runtime_does_not_call_standalone_calibrated_model() -> None:
-    runtime_paths = [
-        ROOT / "app" / "main.py",
-        ROOT / "app" / "execution.py",
-        ROOT / "app" / "customer_paper_flow.py",
-        ROOT / "app" / "worker.py",
-    ]
-    for path in runtime_paths:
+def test_active_platform_and_autonomous_customer_runtime_call_the_calibrated_model() -> None:
+    for path in (ROOT / "app" / "execution.py", ROOT / "app" / "customer_paper_flow.py"):
         source = path.read_text(encoding="utf-8")
-        assert "from .paper_execution_model import" not in source, path.name
-        assert "from app.paper_execution_model import" not in source, path.name
-        assert "estimate_paper_fill(" not in source, path.name
-        assert "calibrated_model_available(" not in source, path.name
+        assert "from .paper_execution_model import" in source, path.name
+        assert "estimate_paper_fill(" in source, path.name
+        assert "configured_paper_execution_settings(settings)" in source, path.name
+    manual_api = (ROOT / "app" / "customer_paper_api.py").read_text(encoding="utf-8")
+    assert "market_impact_bps(" in manual_api
+    assert "estimate_paper_fill(" not in manual_api
 
 
 def test_readiness_doc_distinguishes_market_context_from_calibrated_fill_model() -> None:
     doc = (ROOT / "docs" / "PAPER_TESTING_READINESS_2026-10-15.md").read_text(encoding="utf-8")
-    assert "Calibrated fill-model integration remains incomplete" in doc
-    assert "Customer-paper controller/submission paths call" in doc
-    assert "Platform `/api/paper/step` does not call that helper" in doc
-    assert "do not currently reject platform paper orders because calibrated-model evidence is absent" in doc
+    assert "The calibrated estimator is now wired into" in doc
+    assert "manual customer API advancement remains heuristic" in doc
+    assert "Partial calibration configuration fails closed" in doc
