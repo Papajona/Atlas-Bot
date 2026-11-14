@@ -3933,18 +3933,6 @@ def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> p
 
 
 
-def _attach_router_execution_cost_evidence(df: pd.DataFrame, req: Any) -> pd.DataFrame:
-    """Attach an optional signed calibration document without changing market provenance."""
-    if not isinstance(df, pd.DataFrame):
-        raise TypeError("execution-cost evidence can only be attached to a pandas DataFrame")
-    document = getattr(req, "execution_cost_calibration_evidence", None)
-    if document is None:
-        return df
-    result = df.copy(deep=False)
-    result.attrs["execution_cost_calibration_evidence"] = document
-    return result
-
-
 def _router_validation_cache_matches_execution_context(
     validation: dict[str, Any],
     *,
@@ -5993,7 +5981,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
 
     try:
         df = await _fetch_customer_oanda_data(profile.id, req) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(market_data, req)
-        df = _attach_router_execution_cost_evidence(df, req)
         try:
             router_execution_cost_context, router_execution_cost_audit = await asyncio.to_thread(
                 build_research_execution_cost_context,
@@ -6003,6 +5990,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 base_slippage_bps=float(settings.research_slippage_bps),
                 cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
                 asset=req.asset,
+                calibration_evidence=getattr(req, "execution_cost_calibration_evidence", None),
             )
         except Exception as exc:  # noqa: BLE001
             router_execution_cost_context = None
