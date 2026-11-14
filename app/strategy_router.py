@@ -24,6 +24,7 @@ from .execution_costs import EXECUTION_COST_MODEL_VERSION, net_returns_after_cos
 from .research_execution_costs import (
     execution_cost_for_event,
     execution_cost_series_for_positions,
+    is_verified_research_execution_cost_context,
     slice_research_execution_context,
 )
 
@@ -41,21 +42,25 @@ def _execution_cost_context_audit(
         or values.get("evidence_id")
         or ""
     ).strip()
-    calibration_status = str(
+    claimed_status = str(
         values.get("execution_cost_calibration_status") or ""
     ).strip().upper()
-    if calibration_status == "VERIFIED" and not evidence_id:
-        calibration_status = "MISSING_CALIBRATION_EVIDENCE_ID"
-    elif calibration_status != "VERIFIED":
-        calibration_status = calibration_status or (
+    trusted_context = is_verified_research_execution_cost_context(context)
+    calibration_verified = (
+        trusted_context and claimed_status == "VERIFIED" and bool(evidence_id)
+    )
+    if calibration_verified:
+        calibration_status = "VERIFIED"
+    elif claimed_status == "VERIFIED":
+        calibration_status = "UNATTESTED_EXECUTION_COST_CONTEXT"
+    else:
+        calibration_status = claimed_status or (
             "UNATTESTED_EXECUTION_COST_CONTEXT"
             if values else "MISSING_VENUE_CALIBRATION_EVIDENCE"
         )
     return {
         "execution_cost_calibration_status": calibration_status,
-        "execution_cost_calibration_verified": (
-            calibration_status == "VERIFIED" and bool(evidence_id)
-        ),
+        "execution_cost_calibration_verified": calibration_verified,
         "execution_cost_calibration_evidence_id": evidence_id or None,
         "execution_cost_model_fingerprint": values.get("model_fingerprint"),
         "per_bar_execution_context_sha256": values.get("context_sha256"),
