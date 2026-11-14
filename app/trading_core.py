@@ -104,15 +104,15 @@ def triple_barrier(
     stop_atr: float | None = None,
     take_profit_atr: float | None = None,
     round_trip_cost_bps: float | pd.Series = 0.0,
+    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_namespace: str = "ai-triple-barrier",
 ) -> pd.Series:
-    """Create forward labels using the same entry/exit timing as the OHLC executor.
+    """Create forward labels with the same execution-cost evidence as OOS simulation.
 
-    The signal is known at close[i]; entry is open[i+1]. Production calls pass the
-    same prior-completed-bar ATR, stop multiplier, and target multiplier as the OHLC
-    execution simulator, so label barriers are identical to simulated order exits.
-    Costs affect the realized target/timeout outcome, not the executable stop/target
-    levels. A gap is filled at the observed next open and simultaneous touches are
-    resolved stop-first. The vol/pt/sl fallback is only for legacy offline callers.
+    The signal is known at close[i]; entry is open[i+1]. If a verified per-bar
+    execution context is supplied, both entry and realized exit are priced as
+    separate orders using that bar's spread, prior volume, volatility and latency.
+    Static/session cost schedules remain available to legacy diagnostic callers.
     """
     c = close.to_numpy(dtype=float)
     v = vol.reindex(close.index).to_numpy(dtype=float)
@@ -160,8 +160,42 @@ def triple_barrier(
         raise ValueError("execution-aligned labels require next-open and positive ATR stop/target")
     if not (len(v) == len(h) == len(l) == len(opens) == len(entry_atr_values) == len(c)):
         raise ValueError("triple-barrier inputs must align to close index")
+
+    execution_cost_failures: dict[str, int] = {}
+    execution_cost_pairs_priced = 0
+    first_cost_ready_bar = 0
+    if execution_cost_context is not None:
+        from .research_execution_costs import execution_cost_for_event
+
+        context_index = execution_cost_context.get("index")
+        if not isinstance(context_index, pd.Index) or not context_index.equals(close.index):
+            raise ValueError("per-bar execution context must align exactly with triple-barrier labels")
+        try:
+            context_spreads = np.asarray(execution_cost_context["spread_bps"], dtype=float)
+            context_volume = np.asarray(execution_cost_context["volume_units"], dtype=float)
+            context_volatility = np.asarray(execution_cost_context["volatility_bps"], dtype=float)
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("per-bar execution context is missing valid market arrays") from exc
+        if not (
+            context_spreads.shape == (len(c),)
+            and context_volume.shape == (len(c),)
+            and context_volatility.shape == (len(c),)
+        ):
+            raise ValueError("per-bar execution context arrays must align exactly with triple-barrier labels")
+        ready = (
+            np.isfinite(context_spreads) & (context_spreads >= 0.0)
+            & np.isfinite(context_volume) & (context_volume > 0.0)
+            & np.isfinite(context_volatility) & (context_volatility >= 0.0)
+        )
+        ready_positions = np.flatnonzero(ready)
+        first_cost_ready_bar = int(ready_positions[0]) if len(ready_positions) else len(c)
+
     for i in range(len(c) - hold):
         entry_i = i + 1
+        # The evidence-bound context intentionally has a prior-volume warm-up.
+        # Do not create labels before the first bar with causal cost observations.
+        if execution_cost_context is not None and entry_i < first_cost_ready_bar:
+            continue
         # Older offline callers without OHLC open data retain the historical close[i]
         # entry anchor. Production training and walk-forward callers supply next-open.
         entry_price = opens[entry_i] if has_executable_open else c[i]
@@ -180,6 +214,54 @@ def triple_barrier(
             if has_execution_atr else 0.5 * frozen_vol
         )
         end = min(len(c), entry_i + hold)
+
+        def _net_label_return(
+            gross_return: float,
+            direction: str,
+            exit_i: int,
+            exit_price: float,
+            legacy_cost_bps: float,
+        ) -> float | None:
+            nonlocal execution_cost_pairs_priced
+            if execution_cost_context is None:
+                return net_return_after_costs(
+                    gross_return, turnover=1.0,
+                    execution_cost_bps=legacy_cost_bps,
+                )
+            entry_side = "buy" if direction == "long" else "sell"
+            exit_side = "sell" if direction == "long" else "buy"
+            event_namespace = f"{execution_cost_namespace}:label:{i}:{direction}"
+            entry_cost, entry_reason = execution_cost_for_event(
+                execution_cost_context,
+                bar_position=entry_i,
+                turnover=1.0,
+                reference_price=float(entry_price),
+                side=entry_side,
+                namespace=f"{event_namespace}:ENTRY",
+            )
+            if entry_cost is None:
+                reason = entry_reason or "EXECUTION_LABEL_ENTRY_COST_UNAVAILABLE"
+                execution_cost_failures[reason] = execution_cost_failures.get(reason, 0) + 1
+                return None
+            exit_cost, exit_reason = execution_cost_for_event(
+                execution_cost_context,
+                bar_position=exit_i,
+                turnover=1.0,
+                reference_price=float(exit_price),
+                side=exit_side,
+                namespace=f"{event_namespace}:EXIT",
+            )
+            if exit_cost is None:
+                reason = exit_reason or "EXECUTION_LABEL_EXIT_COST_UNAVAILABLE"
+                execution_cost_failures[reason] = execution_cost_failures.get(reason, 0) + 1
+                return None
+            execution_cost_pairs_priced += 1
+            return net_return_after_costs(
+                gross_return,
+                turnover=1.0,
+                execution_cost_bps=float(entry_cost) + float(exit_cost),
+            )
+
         for j in range(entry_i, end):
             # For a session schedule, charge the entry-side rate at entry and the
             # exit-side rate at this bar. Static profile inputs are already round-trip.
@@ -199,14 +281,26 @@ def triple_barrier(
                 lower = entry_price * (1.0 - sl_mult * frozen_vol)
             # Price gaps are executable at the observed open, not at a stale barrier.
             if has_executable_open and j > entry_i and opens[j] >= upper:
-                gross_return = opens[j] / entry_price - 1.0
-                long_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
-                y[i] = 1 if long_net_return > directional_dead_zone else 0
+                fill = float(opens[j])
+                gross_return = fill / entry_price - 1.0
+                long_net_return = _net_label_return(
+                    gross_return, "long", j, fill, exit_cost_bps
+                )
+                y[i] = (
+                    1 if long_net_return is not None and long_net_return > directional_dead_zone
+                    else (0 if long_net_return is not None else np.nan)
+                )
                 break
             if has_executable_open and j > entry_i and opens[j] <= lower:
-                gross_return = (entry_price - opens[j]) / entry_price
-                short_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
-                y[i] = -1 if short_net_return > directional_dead_zone else 0
+                fill = float(opens[j])
+                gross_return = (entry_price - fill) / entry_price
+                short_net_return = _net_label_return(
+                    gross_return, "short", j, fill, exit_cost_bps
+                )
+                y[i] = (
+                    -1 if short_net_return is not None and short_net_return > directional_dead_zone
+                    else (0 if short_net_return is not None else np.nan)
+                )
                 break
             up_hit = np.isfinite(h[j]) and h[j] >= upper
             down_hit = np.isfinite(l[j]) and l[j] <= lower
@@ -215,27 +309,43 @@ def triple_barrier(
                 # short when its realized return remains profitable after costs.
                 fill = lower
                 if has_executable_open and j > entry_i and opens[j] < lower:
-                    fill = opens[j]
+                    fill = float(opens[j])
                 gross_return = (entry_price - fill) / entry_price
-                short_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
-                y[i] = -1 if short_net_return > directional_dead_zone else 0
+                short_net_return = _net_label_return(
+                    gross_return, "short", j, float(fill), exit_cost_bps
+                )
+                y[i] = (
+                    -1 if short_net_return is not None and short_net_return > directional_dead_zone
+                    else (0 if short_net_return is not None else np.nan)
+                )
                 break
             if up_hit:
-                fill = opens[j] if has_executable_open and j > entry_i and opens[j] > upper else upper
+                fill = float(opens[j]) if has_executable_open and j > entry_i and opens[j] > upper else float(upper)
                 gross_return = fill / entry_price - 1.0
-                long_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
-                y[i] = 1 if long_net_return > directional_dead_zone else 0
+                long_net_return = _net_label_return(
+                    gross_return, "long", j, fill, exit_cost_bps
+                )
+                y[i] = (
+                    1 if long_net_return is not None and long_net_return > directional_dead_zone
+                    else (0 if long_net_return is not None else np.nan)
+                )
                 break
             if down_hit:
-                fill = lower
+                fill = float(lower)
                 if has_executable_open and j > entry_i and opens[j] < lower:
-                    fill = opens[j]
+                    fill = float(opens[j])
                 gross_return = (entry_price - fill) / entry_price
-                short_net_return = net_return_after_costs(gross_return, turnover=1.0, execution_cost_bps=exit_cost_bps)
-                y[i] = -1 if short_net_return > directional_dead_zone else 0
+                short_net_return = _net_label_return(
+                    gross_return, "short", j, fill, exit_cost_bps
+                )
+                y[i] = (
+                    -1 if short_net_return is not None and short_net_return > directional_dead_zone
+                    else (0 if short_net_return is not None else np.nan)
+                )
                 break
         else:
-            terminal_return = c[end - 1] / entry_price - 1.0
+            terminal_price = float(c[end - 1])
+            terminal_return = terminal_price / entry_price - 1.0
             # Missing terminal observations remain unlabeled. Do not let one
             # incomplete future window abort the remaining label batch.
             if not np.isfinite(terminal_return):
@@ -247,19 +357,48 @@ def triple_barrier(
             # Evaluate each direction after its own entry+exit costs. A flat or
             # adverse-to-both trade cannot be mislabeled as a short just because
             # long net return is negative.
-            long_net_return = net_return_after_costs(
-                terminal_return, turnover=1.0, execution_cost_bps=timeout_cost_bps
+            long_net_return = _net_label_return(
+                terminal_return, "long", end - 1, terminal_price, timeout_cost_bps
             )
-            short_net_return = net_return_after_costs(
-                -terminal_return, turnover=1.0, execution_cost_bps=timeout_cost_bps
+            short_net_return = _net_label_return(
+                -terminal_return, "short", end - 1, terminal_price, timeout_cost_bps
             )
-            if np.isfinite(long_net_return) and np.isfinite(short_net_return):
+            if (
+                long_net_return is not None and short_net_return is not None
+                and np.isfinite(long_net_return) and np.isfinite(short_net_return)
+            ):
                 y[i] = (
                     1 if long_net_return > directional_dead_zone
                     else (-1 if short_net_return > directional_dead_zone else 0)
                 )
-    return pd.Series(y, index=close.index, dtype="float64")
 
+    result = pd.Series(y, index=close.index, dtype="float64")
+    result.attrs["execution_cost_model_complete"] = (
+        execution_cost_context is not None
+        and execution_cost_pairs_priced > 0
+        and not execution_cost_failures
+    )
+    result.attrs["execution_cost_model_status"] = (
+        "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+        if result.attrs["execution_cost_model_complete"]
+        else (
+            "INCOMPLETE_PER_BAR_LABEL_COSTS"
+            if execution_cost_context is not None
+            else "STATIC_OR_SESSION_LABEL_COSTS"
+        )
+    )
+    result.attrs["execution_cost_model_fingerprint"] = (
+        execution_cost_context.get("model_fingerprint")
+        if isinstance(execution_cost_context, dict) else None
+    )
+    result.attrs["per_bar_execution_context_sha256"] = (
+        execution_cost_context.get("context_sha256")
+        if isinstance(execution_cost_context, dict) else None
+    )
+    result.attrs["execution_cost_failure_reasons"] = execution_cost_failures
+    result.attrs["execution_cost_label_event_pairs_priced"] = execution_cost_pairs_priced
+    result.attrs["execution_cost_label_warmup_bars"] = first_cost_ready_bar
+    return result
 
 def _model_paths(model_path: str):
     p = Path(model_path)
