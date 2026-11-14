@@ -694,6 +694,7 @@ def ai_walk_forward_backtest(
     }
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
+    y = y.loc[valid]
     # The OOS fold indices now address the filtered label matrix. Keep the
     # execution ATR series on that exact same index so no fold can silently
     # reuse a pre-filter bar (or pass a warm-up NaN to a non-zero position).
