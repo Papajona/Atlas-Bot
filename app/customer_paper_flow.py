@@ -16,6 +16,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
 
 from .config import settings
+from .paper_execution_model import (
+    PaperExecutionModelError,
+    configured_paper_execution_settings,
+    estimate_paper_fill,
+)
 from .customer_paper_ledger import (
     CustomerPaperLedgerBlocked,
     get_customer_paper_balances,
@@ -403,6 +408,80 @@ def _fill_price_and_fee(side: str, quantity: Decimal, market: dict) -> tuple[str
     return format(price, "f"), format(fee, "f"), cost_details
 
 
+def _estimate_calibrated_customer_paper_fill(
+    side: str,
+    quantity: Decimal,
+    market: Mapping,
+    *,
+    order_key: str,
+    available_capacity: Decimal,
+    calibration: Mapping,
+) -> tuple[Decimal, str, str, dict, dict]:
+    """Apply the shared SHA-pinned estimator to a server-verified customer spot bar."""
+    supplied = market.get("market_context")
+    if not isinstance(supplied, Mapping):
+        raise PaperExecutionModelError("server customer-paper market context is unavailable")
+    timeframe = str(supplied.get("timeframe") or "")
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(timeframe)
+    if timeframe_seconds is None:
+        # The context builder is authoritative; the persisted order timeframe is
+        # also checked against the same supported timeframe list before this call.
+        raise PaperExecutionModelError("market context lacks a supported bar duration")
+    bid = _finite_decimal(market.get("bid"), "bid")
+    ask = _finite_decimal(market.get("ask"), "ask")
+    if bid <= 0 or ask < bid:
+        raise PaperExecutionModelError("market context bid/ask is invalid")
+    context = {
+        "exchange": str(supplied.get("exchange") or "").lower(),
+        "symbol": str(supplied.get("symbol") or ""),
+        "market_type": "spot",
+        "tradable_volume_units": str(market.get("base_volume")),
+        "spread_bps": str(market.get("spread_bps")),
+        "recent_volatility_bps": supplied.get("recent_volatility_bps"),
+        "bar_duration_ms": supplied.get("bar_duration_ms") or timeframe_seconds * 1000,
+    }
+    midpoint = (bid + ask) / Decimal("2")
+    estimated = estimate_paper_fill(
+        order_key=order_key,
+        side=str(side).lower(),
+        requested_quantity=str(quantity),
+        reference_price=str(midpoint),
+        market_context=context,
+        available_capacity_units=str(available_capacity),
+        **dict(calibration),
+    )
+    if estimated.get("simulated_rejection"):
+        return Decimal("0"), "", "", {
+            "cost_model_status": "CALIBRATED_ASSUMPTIONS",
+            "execution_model": estimated,
+        }, estimated
+    fee_bps, _legacy_slippage, _legacy_status = _cost_inputs()
+    raw_price = _finite_decimal(estimated.get("fill_price"), "calibrated fill price")
+    rounding = ROUND_UP if str(side).upper() == "BUY" else ROUND_DOWN
+    price = raw_price.quantize(_BAR_QUANTUM, rounding=rounding)
+    if price <= 0:
+        raise PaperExecutionModelError("calibrated fill price is not representable")
+    fill_quantity = _finite_decimal(estimated.get("filled_quantity"), "calibrated fill quantity")
+    rounded_quantity, _notional, fee = _rounded_paper_fill_notional_and_fee(
+        fill_quantity, price, fee_bps
+    )
+    execution_record = {
+        key: value for key, value in estimated.items()
+        if key not in {"reference_price", "requested_quantity"}
+    }
+    costs = {
+        "cost_model_status": "CALIBRATED_ASSUMPTIONS",
+        "fee_bps_assumption": format(fee_bps, "f"),
+        "slippage_bps_assumption": str(estimated.get("total_slippage_bps")),
+        "observed_spread_bps_at_simulated_fill": format(_finite_decimal(market.get("spread_bps"), "spread_bps", non_negative=True), "f"),
+        "top_of_book_price": format(ask if str(side).upper() == "BUY" else bid, "f"),
+        "quote_timestamp_utc": str(market.get("quote_timestamp") or ""),
+        "data_sha256": str(market.get("data_sha256") or ""),
+        "execution_model": execution_record,
+    }
+    return rounded_quantity, format(price, "f"), format(fee, "f"), costs, estimated
+
+
 def conservative_customer_paper_buy_price(market_context: Mapping) -> Decimal:
     """Price a BUY with the exact ask/slippage/rounding model used by paper fills.
 
@@ -575,6 +654,12 @@ async def _fill_open_order(
         # then the no-position path above expires the stale remainder.
         remaining = min(remaining, held)
 
+    calibrated_settings = configured_paper_execution_settings(settings)
+    participation_rate = (
+        calibrated_settings["max_participation_rate"]
+        if calibrated_settings is not None
+        else settings.paper_max_bar_volume_participation
+    )
     try:
         budget = await _paper_call(register_customer_paper_market_bar(
             venue=str(state["venue"]).lower(),
@@ -583,7 +668,7 @@ async def _fill_open_order(
             bar_at=market["bar_timestamp"],
             bar_data_sha256=str(market["bar_data_sha256"]),
             base_volume=market["base_volume"],
-            participation_rate=str(settings.paper_max_bar_volume_participation),
+            participation_rate=str(participation_rate),
         ), "register paper market-bar budget")
     except (CustomerPaperLedgerBlocked, CustomerPaperOrderConflict, ValueError) as exc:
         raise CustomerPaperFlowBlocked(f"Shared paper market-bar budget is unavailable: {exc}") from exc
@@ -598,6 +683,20 @@ async def _fill_open_order(
         "read same-bar paper fill",
     )
     if prior_fill is not None:
+        prior_execution_model = prior_fill.get("execution_model")
+        prior_cancelled = (
+            Decimal(str(prior_execution_model.get("cancelled_quantity") or "0"))
+            if isinstance(prior_execution_model, Mapping) else Decimal("0")
+        )
+        if prior_cancelled > 0:
+            await _paper_call(
+                expire_customer_paper_order(
+                    customer_id=customer_id,
+                    client_order_id=client_id,
+                    idempotency_key="paper-model-remainder-cancel-" + _sha(f"{client_id}|{bar_key}")[:40],
+                ),
+                "recover calibrated paper remainder cancellation",
+            )
         ttl_expired = await _expire_open_order_if_ttl(
             customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
             is_protective_exit=is_protective_exit, bar_identity=bar_key,
@@ -619,26 +718,91 @@ async def _fill_open_order(
             "recovered_pending_order": True,
         }
 
-    try:
-        fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
-    except CustomerPaperFlowBlocked as exc:
-        if side == "SELL" and "Rounded simulated fill price is invalid" in str(exc):
-            # Keep the immutable exit intent pending until a representable positive
-            # quote exists. Never write a zero-price fill or overstate proceeds.
+    calibrated_fill_quantity = Decimal("0")
+    calibrated_cancelled_quantity = Decimal("0")
+    execution_model_record = None
+    available_capacity = Decimal(str(budget.get("available") or "0"))
+    if calibrated_settings is not None:
+        if available_capacity <= 0:
             ttl_expired = await _expire_open_order_if_ttl(
                 customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
                 is_protective_exit=is_protective_exit, bar_identity=bar_key,
             )
             return {
-                "status": "EXPIRED_TTL" if ttl_expired else "WAITING_FOR_PRICE_PRECISION",
+                "status": "EXPIRED_TTL" if ttl_expired else "WAITING_FOR_SHARED_BAR_CAPACITY",
                 "client_order_id": client_id,
                 "order_id": state["order_id"],
                 "bar_key": bar_key,
                 "fill": {"status": "EXPIRED" if ttl_expired else "NOT_FILLED"},
-                "reason": "Positive SELL quote rounds to zero at numeric(38,18) precision",
                 "recovered_pending_order": True,
             }
-        raise
+        order_remaining = remaining
+        try:
+            (
+                calibrated_fill_quantity,
+                fill_price,
+                fee,
+                costs,
+                calibrated_estimate,
+            ) = _estimate_calibrated_customer_paper_fill(
+                side,
+                remaining,
+                market,
+                order_key=f"{client_id}|{bar_key}",
+                available_capacity=available_capacity,
+                calibration=calibrated_settings,
+            )
+        except (PaperExecutionModelError, TypeError, ValueError, OverflowError) as exc:
+            raise CustomerPaperFlowBlocked(
+                "SHA-pinned calibrated paper execution model rejected the market or evidence context"
+            ) from exc
+        if calibrated_estimate.get("simulated_rejection"):
+            await _paper_call(
+                expire_customer_paper_order(
+                    customer_id=customer_id,
+                    client_order_id=client_id,
+                    idempotency_key="paper-model-reject-" + _sha(f"{client_id}|{bar_key}")[:40],
+                ),
+                "cancel paper order after calibrated simulated venue rejection",
+            )
+            return {
+                "status": "SIMULATED_VENUE_REJECTION",
+                "client_order_id": client_id,
+                "order_id": state["order_id"],
+                "bar_key": bar_key,
+                "fill": {"status": "REJECTED"},
+                "cost_model": costs,
+                "recovered_pending_order": True,
+            }
+        if calibrated_fill_quantity <= 0:
+            raise CustomerPaperFlowBlocked("Calibrated paper model produced no positive fill quantity")
+        remaining = min(order_remaining, calibrated_fill_quantity)
+        calibrated_cancelled_quantity = max(
+            Decimal("0"), order_remaining - remaining
+        )
+        execution_model_record = dict(costs.get("execution_model") or {})
+        execution_model_record["cancelled_quantity"] = str(
+            calibrated_cancelled_quantity
+        )
+    else:
+        try:
+            fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+        except CustomerPaperFlowBlocked as exc:
+            if side == "SELL" and "Rounded simulated fill price is invalid" in str(exc):
+                ttl_expired = await _expire_open_order_if_ttl(
+                    customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
+                    is_protective_exit=is_protective_exit, bar_identity=bar_key,
+                )
+                return {
+                    "status": "EXPIRED_TTL" if ttl_expired else "WAITING_FOR_PRICE_PRECISION",
+                    "client_order_id": client_id,
+                    "order_id": state["order_id"],
+                    "bar_key": bar_key,
+                    "fill": {"status": "EXPIRED" if ttl_expired else "NOT_FILLED"},
+                    "reason": "Positive SELL quote rounds to zero at numeric(38,18) precision",
+                    "recovered_pending_order": True,
+                }
+            raise
     if side == "BUY":
         balances = await _paper_call(
             get_customer_paper_balances(customer_id=customer_id), "read paper cash for fill"
@@ -675,7 +839,21 @@ async def _fill_open_order(
                 "recovered_pending_order": True,
                 "cost_model": costs,
             }
-        fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+        if calibrated_settings is None:
+            fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
+        else:
+            rounded, _notional, recalculated_fee = _rounded_paper_fill_notional_and_fee(
+                remaining, Decimal(fill_price), fee_bps
+            )
+            remaining = rounded
+            fee = format(recalculated_fee, "f")
+            calibrated_cancelled_quantity = max(
+                Decimal("0"),
+                Decimal(str(state["remaining_quantity"])) - remaining,
+            )
+            if execution_model_record is not None:
+                execution_model_record["cancelled_quantity"] = str(calibrated_cancelled_quantity)
+                costs["execution_model"] = execution_model_record
 
     group_mark_prices_loader = None
     if side == "BUY" and group_mark_prices is None and group_mark_price_loader is not None:
@@ -708,6 +886,7 @@ async def _fill_open_order(
             quantity=format(remaining, "f"),
             price=fill_price,
             fee_amount=fee,
+            execution_model=execution_model_record,
             enforce_market_bar_budget=True,
             group_mark_prices=group_mark_prices,
             group_mark_prices_loader=group_mark_prices_loader,
@@ -734,6 +913,15 @@ async def _fill_open_order(
                 "cost_model": costs,
             }
         raise
+    if calibrated_cancelled_quantity > 0 and str(result.get("status") or "").upper() in {"APPENDED", "REPLAYED"}:
+        await _paper_call(
+            expire_customer_paper_order(
+                customer_id=customer_id,
+                client_order_id=client_id,
+                idempotency_key="paper-model-remainder-cancel-" + _sha(f"{client_id}|{bar_key}")[:40],
+            ),
+            "cancel calibrated paper fill remainder",
+        )
     ttl_expired = await _expire_open_order_if_ttl(
         customer_id, client_id, elapsed_bars=elapsed_bars, ttl_bars=ttl_bars,
         is_protective_exit=is_protective_exit, bar_identity=bar_key,
@@ -766,6 +954,7 @@ async def _fill_open_order(
         "bar_available_before_fill": budget.get("available"),
         "fill": result,
         "cost_model": costs,
+        "execution_model": execution_model_record,
         "recovered_pending_order": True,
     }
 
