@@ -696,3 +696,125 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
     assert [fold["execution_cost_model_complete"] for fold in result["folds"]] == [
         False, True, True, True
     ]
+
+
+
+def test_ai_walk_forward_keeps_unpriced_labels_on_original_oos_timeline(monkeypatch):
+    from app import trading_core
+    from app.research_validation import purged_walk_forward_splits
+
+    _install_fast_walk_forward_model(monkeypatch)
+    frame = sample_df(1800)
+    features = trading_core.build_features(frame)
+    folds, min_train, hold_horizon = 4, 500, trading_core.PROFILES["crypto"].max_hold
+    test_size = (
+        len(features) - min_train - (2 * folds - 1) * hold_horizon
+    ) // folds
+    split_specs = purged_walk_forward_splits(
+        len(features),
+        folds=folds,
+        min_train=min_train,
+        test_size=test_size,
+        purge=hold_horizon,
+        embargo=hold_horizon,
+    )
+    unpriced_index = features.index[split_specs[1].test_start + 5]
+    captured = []
+    original_simulator = trading_core.simulate_execution_aware_strategy
+
+    def labels_with_one_unpriced_bar(close, vol, high, low, **kwargs):
+        labels = pd.Series(
+            np.resize(np.array([-1.0, 0.0, 1.0]), len(close)),
+            index=close.index,
+            dtype=float,
+        )
+        labels.loc[unpriced_index] = np.nan
+        labels.attrs["execution_cost_model_complete"] = False
+        labels.attrs["execution_cost_model_status"] = "INCOMPLETE_PER_BAR_LABEL_COSTS"
+        labels.attrs["execution_cost_failure_reasons"] = {
+            "SYNTHETIC_UNPRICED_LABEL": 1
+        }
+        labels.attrs["execution_cost_label_event_pairs_priced"] = 0
+        return labels
+
+    def capture_simulation_bars(fold_frame, *args, **kwargs):
+        captured.append(fold_frame.index.copy())
+        return original_simulator(fold_frame, *args, **kwargs)
+
+    monkeypatch.setattr(trading_core, "triple_barrier", labels_with_one_unpriced_bar)
+    monkeypatch.setattr(
+        trading_core, "simulate_execution_aware_strategy", capture_simulation_bars
+    )
+    monkeypatch.setattr(
+        trading_core,
+        "oos_benchmark_comparison",
+        lambda *_args, **_kwargs: {
+            "status": "OK",
+            "execution_cost_model_complete": False,
+        },
+    )
+
+    result = trading_core.ai_walk_forward_backtest(
+        frame, asset="crypto", folds=folds, min_train=min_train
+    )
+
+    assert len(captured) == folds
+    assert len(result["folds"]) == folds
+    for i, split in enumerate(split_specs):
+        expected_index = features.index[split.test_start:split.test_end]
+        assert captured[i].equals(expected_index)
+        assert captured[i].is_monotonic_increasing
+        assert captured[i].to_series().diff().dropna().eq(pd.Timedelta(hours=1)).all()
+    assert unpriced_index in captured[1]
+    assert result["oos_bars"] == sum(len(index) for index in captured)
+    assert result["validated_bars"] == result["oos_bars"]
+    assert result["execution_cost_model_complete"] is False
+
+
+def test_triple_barrier_timeout_counts_unpriceable_label_once(monkeypatch):
+    from app import research_execution_costs
+    from app.trading_core import triple_barrier
+
+    index = pd.date_range("2026-01-01", periods=6, freq="h", tz="UTC")
+    close = pd.Series([100.0] * len(index), index=index)
+    opened = pd.Series([100.0] * len(index), index=index)
+    high = pd.Series([101.0] * len(index), index=index)
+    low = pd.Series([99.0] * len(index), index=index)
+    atr = pd.Series([1.0] * len(index), index=index)
+    context = {
+        "index": index,
+        "spread_bps": np.ones(len(index)),
+        "volume_units": np.full(len(index), 100_000.0),
+        "volatility_bps": np.full(len(index), 10.0),
+        "model_fingerprint": "1" * 64,
+        "context_sha256": "2" * 64,
+    }
+    calls = []
+
+    def reject_event(_context, **kwargs):
+        calls.append(kwargs)
+        return None, "SIMULATED_COST_REJECTION"
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", reject_event
+    )
+    labels = triple_barrier(
+        close,
+        pd.Series([0.01] * len(index), index=index),
+        high,
+        low,
+        max_hold=2,
+        entry_open=opened,
+        entry_atr=atr,
+        stop_atr=10.0,
+        take_profit_atr=10.0,
+        execution_cost_context=context,
+    )
+
+    assert labels.iloc[:4].isna().all()
+    assert labels.attrs["execution_cost_failure_reasons"] == {
+        "SIMULATED_COST_REJECTION": 4
+    }
+    assert labels.attrs["execution_cost_label_event_pairs_priced"] == 0
+    # One rejected label is priced once, not once again for its opposite direction.
+    assert len(calls) == 4
