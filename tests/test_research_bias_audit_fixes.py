@@ -429,3 +429,40 @@ def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
     assert report["candidate_requested_exposure_bars"] == 12
     assert report["random_control_requested_exposure_bars_median"] == 12.0
     assert report["random_trials"] == 20
+
+
+
+def test_no_bracket_benchmark_fallback_applies_session_costs_per_bar():
+    frame = _ohlcv(32)
+    signal = np.zeros(len(frame), dtype=float)
+    signal[6:18] = 1.0
+    candidate = np.zeros(len(frame), dtype=float)
+    schedule = {
+        "LONDON": 20.0,
+        "NEW_YORK": 20.0,
+        "NEW_YORK_LATE": 20.0,
+        "OTHER": 20.0,
+    }
+
+    session_priced = oos_benchmark_comparison(
+        [frame], [signal], [candidate],
+        transaction_cost_bps=1.0,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=41,
+        session_costs_bps=schedule,
+        execution_cost_context_blocks=[None],
+    )
+    scalar_priced = oos_benchmark_comparison(
+        [frame], [signal], [candidate],
+        transaction_cost_bps=1.0,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=41,
+    )
+
+    assert session_priced["status"] == "OK"
+    assert session_priced["execution_cost_model_complete"] is False
+    assert session_priced["gate_passed"] is False
+    assert session_priced["candidate_net_return"] < scalar_priced["candidate_net_return"]
+    assert session_priced["buy_and_hold_session_cost_model_complete"] is True
