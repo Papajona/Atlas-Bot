@@ -27,15 +27,46 @@ _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN = object()
 
 
 class _VerifiedResearchExecutionCostContext(dict[str, Any]):
-    """In-process marker proving the signed calibration builder validated this mapping."""
+    """Authenticated immutable mapping produced only by the signed calibration validator."""
 
     __slots__ = ("_verification_token",)
+
+    _ARRAY_FIELDS = frozenset({"spread_bps", "volume_units", "volatility_bps"})
 
     def __init__(self, values: Mapping[str, Any], *, _token: object) -> None:
         if _token is not _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN:
             raise TypeError("verified execution contexts can only be created by the validator")
-        super().__init__(values)
-        self._verification_token = _token
+        frozen: dict[str, Any] = {}
+        for key, value in values.items():
+            if key in self._ARRAY_FIELDS:
+                array = np.array(value, dtype=np.float64, copy=True)
+                # An immutable bytes backing store prevents callers from simply
+                # flipping NumPy's writeable flag back on after validation.
+                frozen[key] = np.frombuffer(
+                    array.tobytes(order="C"), dtype=np.float64
+                ).reshape(array.shape)
+            elif key == "index" and isinstance(value, pd.Index):
+                frozen[key] = value.copy(deep=True)
+            else:
+                frozen[key] = value
+        dict.__init__(self, frozen)
+        object.__setattr__(self, "_verification_token", _token)
+
+    @staticmethod
+    def _reject_mutation(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("verified research execution contexts are immutable")
+
+    __setitem__ = _reject_mutation
+    __delitem__ = _reject_mutation
+    clear = _reject_mutation
+    pop = _reject_mutation
+    popitem = _reject_mutation
+    setdefault = _reject_mutation
+    update = _reject_mutation
+    __ior__ = _reject_mutation
+
+    def __setattr__(self, _name: str, _value: Any) -> None:
+        raise TypeError("verified research execution contexts are immutable")
 
 
 def is_verified_research_execution_cost_context(context: Any) -> bool:
