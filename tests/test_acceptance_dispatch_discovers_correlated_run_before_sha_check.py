@@ -22,7 +22,7 @@ def _acceptance_dispatch_block() -> str:
 
 def test_acceptance_run_discovery_uses_unique_correlation_without_sha_filter():
     block = _acceptance_dispatch_block()
-    discovery = block.split('run_list="$(gh run list', 1)[1].split(')"', 1)[0]
+    discovery = block.split('run_list="$(gh_retry run list', 1)[1].split(')"', 1)[0]
 
     assert '--workflow "customer-paper-staging-acceptance.yml"' in discovery
     assert "--event workflow_dispatch" in discovery
