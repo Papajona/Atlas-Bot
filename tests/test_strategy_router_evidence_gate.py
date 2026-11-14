@@ -45,12 +45,33 @@ def _gate(validation=None, context=None, dataset_sha256="c" * 64):
     )
 
 
-def test_adaptive_router_promotion_requires_current_signed_per_bar_cost_context():
+def test_router_gate_rejects_caller_supplied_verified_labels_without_validator_provenance():
     result = _gate()
-    assert result["passed"] is True
-    assert result["execution_cost_calibration_verified"] is True
-    assert result["execution_cost_model_complete"] is True
-    assert result["execution_cost_dataset_matches_current_data"] is True
+    assert result["passed"] is False
+    assert result["execution_cost_calibration_verified"] is False
+    assert result["execution_cost_model_complete"] is False
+    assert "SIGNED_VENUE_CALIBRATION_EVIDENCE_NOT_VERIFIED" in result["rejection_reasons"]
+
+
+def test_strategy_router_does_not_mark_plain_dict_as_verified_calibration():
+    from app import strategy_router
+
+    claimed_context = {
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "caller-controlled-id",
+        "evidence_id": "caller-controlled-id",
+        "model_fingerprint": "a" * 64,
+        "context_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+        "index": [],
+        "spread_bps": [],
+        "volume_units": [],
+        "volatility_bps": [],
+    }
+    audit = strategy_router._execution_cost_context_audit(claimed_context)
+    assert audit["execution_cost_calibration_verified"] is False
+    assert audit["execution_cost_calibration_status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
+    assert audit["execution_cost_calibration_evidence_id"] == "caller-controlled-id"
 
 
 def test_adaptive_router_promotion_fails_without_signed_context():
