@@ -115,12 +115,10 @@ Original Qodo review [#401](https://github.com/Papajona/Atlas-Bot/pull/401), com
 ## PR406 — Qodo follow-up review (2026-11-14)
 
 Qodo review comment `6876549905` was most recently reviewed against exact
-PR406 head `22cce9bae3b15d31b0ecc6d038432eb42607b0b8`. That snapshot contains
-fourteen findings: twelve were marked resolved and two new findings identified
-errors in this maintainer ledger. Those two ledger defects are corrected in the
-current follow-up commit; a subsequent Qodo review is required before describing
-them as Qodo-resolved. The session-status IDs
-`2058abdb-cc66-40be-b462-3734faeec4c9` and
+PR406 head `70fef103dbebdc2ec32ae25efe981e858ca82f61`. That snapshot contains
+fourteen findings, and all fourteen are marked resolved. The table below records
+the resolved findings once, against that exact review snapshot. The session-status
+IDs `2058abdb-cc66-40be-b462-3734faeec4c9` and
 `967e5bef-327c-4517-85f1-0d2b5dc8a2b6` each appear once.
 
 | Qodo finding | Disposition | Code/test evidence |
@@ -132,8 +130,8 @@ them as Qodo-resolved. The session-status IDs
 | Session-priced returns appear unverified | Qodo-marked resolved at `7e4aecc` | When no precomputed per-bar series is supplied, the session schedule is the selected pricing branch even if an explicit audit flag is false. With a precomputed series, its audit flag still distinguishes session-derived from signed per-bar pricing. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_reports_session_schedule_when_selected_without_precomputed_series`. |
 | `2058abdb-cc66-40be-b462-3734faeec4c9` — Session-priced candidates appear unverified | Qodo-marked resolved at `2ff685a` | Each ensemble/component OOS report is paired with its matching simulator audit. `_set_session_cost_report_status()` updates top-level and nested `cost_analysis` from that audit. Regression: `tests/test_research_execution_costs.py::test_session_cost_report_status_uses_the_matching_simulator_audit`. |
 | `967e5bef-327c-4517-85f1-0d2b5dc8a2b6` — Verified runs show conflicting cost flags | Qodo-marked resolved at `2ff685a` | A schedule retained only for benchmark fallback is not reported as used by a verified per-bar candidate. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source`. |
-| Ledger cites a regression test that does not exist | Fixed in this ledger update; pending a fresh Qodo review | The AI benchmark/session-cost row now cites the existing caller regression and the existing real benchmark fallback regression. The obsolete test name `test_ai_walk_forward_benchmark_control_rejection_uses_verified_session_schedule` has been removed. |
-| Ledger gives two different PR406 review states | Fixed in this ledger update; pending a fresh Qodo review | The PR406 section and Maintainer result bullet now identify the same reviewed head `22cce9bae3b15d31b0ecc6d038432eb42607b0b8`, the same 14-finding snapshot, and the same 12 Qodo-resolved / 2 ledger-correction status. |
+| Ledger cites a regression test that does not exist | Qodo-marked resolved in the review of head `70fef103` | The AI benchmark/session-cost row cites the existing caller regression `test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection` and the real benchmark regression `test_benchmark_control_cost_rejection_falls_back_and_preserves_diagnostics`; the obsolete name has been removed. |
+| Ledger gives two different PR406 review states | Qodo-marked resolved in the review of head `70fef103` | The PR406 section and Maintainer result bullet identify the same reviewed head `70fef103dbebdc2ec32ae25efe981e858ca82f61`, the same fourteen findings, and the same all-resolved status. |
 | Ledger gives one Qodo comment two meanings | Qodo-marked resolved in the current review snapshot | Comment `6876549905` is recorded as one review snapshot and one finding table, not as two separate reviews. |
 | Disposition ledger contradicts itself on open findings | Qodo-marked resolved at `2142c1c` | The PR406 summary and finding rows use one consistent count and state for each review snapshot. |
 | Partial fallback reports buy-and-hold as session-priced | Qodo-marked resolved at `bc4b082` | Buy-and-hold completeness and published session schedule require every fold to have used session pricing. The report separately lists actual fallback fold indices. Regression: `tests/test_research_execution_costs.py::test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry`. |
@@ -142,8 +140,7 @@ them as Qodo-resolved. The session-status IDs
 
 The separate Qodo fixer response (`6876551111`) is a fixer-scope message, not a
 review disposition. Qodo remains advisory; code changes and exact-head
-verification determine application status. The two ledger corrections above
-are not represented as Qodo-resolved until a fresh review reports that result.
+verification determine application status.
 
 
 ## PR407 — readiness and telemetry follow-up
@@ -166,7 +163,7 @@ PR408 is Qodo's automated cherry-pick/fixer PR for the readiness fields already 
 - PR399's only active item is fixed by merged PR405, which Qodo reviewed with zero material findings.
 - PR400's two historical active findings are implemented in current main with behavioral/PostgreSQL regressions.
 - PR401 findings #2, #5 and #6 are implemented in current main; #1 and #4 are fixed in the PR406 follow-up; #3 now has an explicit EXIT-namespace behavioral regression on PR406 head `4393fa51`; #18 is covered by the same batched benchmark-fallback implementation.
-- PR406's latest published Qodo review (`6876549905`) is tied to exact head `22cce9bae3b15d31b0ecc6d038432eb42607b0b8`: twelve reviewed findings are marked resolved, with two new ledger-documentation findings corrected above. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 was merged only after exact-head CI and PostgreSQL verification.
+- PR406's latest published Qodo review (`6876549905`) is tied to exact head `70fef103dbebdc2ec32ae25efe981e858ca82f61`; all fourteen findings are marked resolved. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 was merged only after exact-head CI and PostgreSQL verification.
 - PR402/#403 did not receive Qodo review comments because the bot's review quota was exhausted; their relevant risk-lock/reversal code and regressions were manually checked against current main.
 - PR408 is a Qodo auto-fix cherry-pick PR for the readiness settings already implemented on #407; it contains no separate Qodo review findings.
 - Historical Qodo labels do not determine Atlas application progress, block a verified merge, or control release.
