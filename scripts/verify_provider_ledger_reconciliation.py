@@ -164,6 +164,8 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
               AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
               AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
               AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'TRIGGER')
+              AND NOT has_table_privilege(r.rolname,c.oid,'REFERENCES')
             )
             FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relname='research_trial_ledger_head'
@@ -176,6 +178,8 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
               AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
               AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
               AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'TRIGGER')
+              AND NOT has_table_privilege(r.rolname,c.oid,'REFERENCES')
             )
             FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relname='research_holdout_registry'
