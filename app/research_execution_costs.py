@@ -137,6 +137,7 @@ def _valid_model_parameters(parameters: Mapping[str, Any]) -> tuple[dict[str, fl
 def build_research_execution_cost_context(
     df: pd.DataFrame, *, settings: Any, taker_bps: float,
     base_slippage_bps: float, cost_stress_multiplier: float, asset: str = "crypto",
+    calibration_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Verify signed per-bar spreads and build causal volume/volatility inputs."""
     if not isinstance(df, pd.DataFrame) or df.empty:
@@ -149,7 +150,14 @@ def build_research_execution_cost_context(
     symbol = str(provenance.get("symbol") or "").strip()
     timeframe = str(provenance.get("timeframe") or "").strip()
     dataset_sha256 = str(provenance.get("sha256") or "").strip().lower()
-    document = df.attrs.get("execution_cost_calibration_evidence")
+    # Keep large signed documents outside DataFrame.attrs. pandas copies attrs
+    # onto derived objects, so passing this payload explicitly avoids multiplying
+    # a customer-controlled evidence document across rolling windows and folds.
+    document = (
+        calibration_evidence
+        if calibration_evidence is not None
+        else df.attrs.get("execution_cost_calibration_evidence")
+    )
     evidence_id = str(document.get("evidence_id") or "").strip() if isinstance(document, Mapping) else ""
     try:
         fingerprint = research_execution_model_fingerprint(
