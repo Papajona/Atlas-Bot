@@ -362,13 +362,15 @@ def triple_barrier(
             long_net_return = _net_label_return(
                 terminal_return, "long", end - 1, terminal_price, timeout_cost_bps
             )
+            # Both directions share the same entry/exit bars and quantities. If the
+            # first pricing attempt is rejected, leave this label unavailable rather
+            # than retrying the same rejected events for short and double-counting it.
+            if long_net_return is None or not np.isfinite(long_net_return):
+                continue
             short_net_return = _net_label_return(
                 -terminal_return, "short", end - 1, terminal_price, timeout_cost_bps
             )
-            if (
-                long_net_return is not None and short_net_return is not None
-                and np.isfinite(long_net_return) and np.isfinite(short_net_return)
-            ):
+            if short_net_return is not None and np.isfinite(short_net_return):
                 y[i] = (
                     1 if long_net_return > directional_dead_zone
                     else (-1 if short_net_return > directional_dead_zone else 0)
