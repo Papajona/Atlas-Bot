@@ -225,7 +225,8 @@ def test_primary_reader_allowlist_matches_postgres_behavioral_fixture():
 
     assert predicate_end is not None, "production membership predicate must be balanced"
     production_predicate = query[predicate_start:predicate_end]
-    normalize = lambda value: re.sub(r"\\s+", " ", value).strip()
+    def normalize(value):
+        return re.sub(r"\s+", " ", value).strip()
     assert normalize(production_predicate) == normalize(
         paper_staging._UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE
     )
