@@ -637,6 +637,14 @@ def _ai_execution_cost_context_attestation(
     }
 
 
+def _ai_oos_candidate_fallback_reason(oos_block_index: int, reason: str) -> str:
+    """Identify a rejected candidate by its materialized benchmark-block index."""
+    return (
+        f"fold_{oos_block_index}:candidate_session_cost_fallback_after_event_rejection:"
+        f"{reason}"
+    )
+
+
 def ai_walk_forward_backtest(
     df: pd.DataFrame,
     asset: str = "crypto",
@@ -800,7 +808,7 @@ def ai_walk_forward_backtest(
     oos_entry_atr_blocks: list[np.ndarray] = []
     total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
-    for fold_index, fold in enumerate(split_specs):
+    for fold in split_specs:
         train_window = np.arange(fold.train_start, fold.train_end, dtype=int)
         te = np.arange(fold.test_start, fold.test_end, dtype=int)
         # Filter labels only inside the chronological training window. Test rows
@@ -808,6 +816,9 @@ def ai_walk_forward_backtest(
         tr = train_window[valid_label_mask.iloc[train_window].to_numpy(dtype=bool)]
         if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy(dtype=int))) < 2:
             continue
+        # Fallback indices address the OOS benchmark block arrays, not the
+        # original split_specs positions. A skipped split adds no benchmark block.
+        oos_block_index = len(oos_net_blocks)
         m = LGBMClassifier(objective="multiclass", class_weight="balanced",
                            n_estimators=300, max_depth=3, learning_rate=0.05,
                            subsample=0.8, colsample_bytree=0.8, min_child_samples=50,
@@ -863,7 +874,7 @@ def ai_walk_forward_backtest(
             reason = str(exc)[:240] or "RESEARCH_EXECUTION_EVENT_COST_UNAVAILABLE"
             execution_cost_failure_reasons[reason] = execution_cost_failure_reasons.get(reason, 0) + 1
             fold_execution_cost_fallback_reasons.append(
-                f"fold_{fold_index}:candidate_session_cost_fallback_after_event_rejection:{reason}"
+                _ai_oos_candidate_fallback_reason(oos_block_index, reason)
             )
             # A rejected calibrated event invalidates the whole fold's calibrated cost
             # stream. Re-run the fold wholly on its configured diagnostic cost basis;
