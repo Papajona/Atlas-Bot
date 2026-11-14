@@ -604,6 +604,7 @@ def ai_walk_forward_backtest(
     max_hold_bars: int | None = None,
     research_trial_evidence_verified: bool = False,
     session_costs_bps: dict[str, float] | None = None,
+    execution_cost_context: dict[str, object] | None = None,
 ) -> dict:
     """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
     try:
@@ -647,6 +648,18 @@ def ai_walk_forward_backtest(
         raise ValueError("Execution costs and carry must be finite non-negative bps values")
     X = build_features(df)
     aligned = df.reindex(X.index)
+    from .research_execution_costs import (
+        ResearchExecutionCostError,
+        make_execution_cost_provider,
+        slice_research_execution_context,
+    )
+    label_execution_context = None
+    if execution_cost_context is not None:
+        label_execution_context = slice_research_execution_context(
+            execution_cost_context, aligned.index
+        )
+        if label_execution_context is None:
+            raise ValueError("research execution context cannot be aligned to AI label rows")
     # Use the identical completed-bar ATR input used by the execution simulator:
     # ATR is shifted one bar so the signal at close[i] enters at open[i+1].
     label_true_range = pd.concat([
@@ -668,7 +681,17 @@ def ai_walk_forward_backtest(
         stop_atr=float(settings.strategy_stop_atr),
         take_profit_atr=float(settings.strategy_take_profit_atr),
         round_trip_cost_bps=label_round_trip_costs,
+        execution_cost_context=label_execution_context,
+        execution_cost_namespace="ai-walk-forward:labels",
     )
+    label_execution_cost_audit = {
+        "execution_cost_model_complete": y.attrs.get("execution_cost_model_complete") is True,
+        "execution_cost_model_status": y.attrs.get("execution_cost_model_status"),
+        "execution_cost_failure_reasons": dict(y.attrs.get("execution_cost_failure_reasons") or {}),
+        "execution_cost_label_event_pairs_priced": int(
+            y.attrs.get("execution_cost_label_event_pairs_priced", 0) or 0
+        ),
+    }
     valid = y.notna()
     X, aligned = X.loc[valid], aligned.loc[valid]
     # The OOS fold indices now address the filtered label matrix. Keep the
@@ -702,7 +725,12 @@ def ai_walk_forward_backtest(
     oos_turnover_blocks: list[np.ndarray] = []
     oos_position_blocks: list[np.ndarray] = []
     oos_carry_blocks: list[np.ndarray] = []
-    oos_session_cost_blocks: list[np.ndarray] = []
+    oos_variable_cost_blocks: list[np.ndarray] = []
+    oos_execution_cost_context_blocks: list[dict[str, object]] = []
+    fold_execution_cost_complete: list[bool] = []
+    execution_cost_failure_reasons: dict[str, int] = dict(
+        label_execution_cost_audit["execution_cost_failure_reasons"]
+    )
     oos_ohlc_blocks: list[pd.DataFrame] = []
     oos_entry_signal_blocks: list[np.ndarray] = []
     oos_entry_atr_blocks: list[np.ndarray] = []
@@ -732,20 +760,66 @@ def ai_walk_forward_backtest(
         entry_atr = entry_atr_for_label
         fold_frame = aligned.iloc[te]
         fold_targets = pd.Series(fold_position, index=fold_frame.index, dtype=float)
-        execution = simulate_execution_aware_strategy(
-            fold_frame,
-            fold_targets,
-            entry_atr.iloc[te],
-            stop_atr=float(settings.strategy_stop_atr),
-            take_profit_atr=float(settings.strategy_take_profit_atr),
-            transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
-            session_costs_bps=session_costs_bps,
-            carry_bps_per_bar=carry_cost_bps,
-            drawdown_limit=settings.strategy_drawdown_halt,
-            daily_loss_limit=settings.strategy_daily_loss_halt,
-            loss_event_threshold=settings.strategy_stoploss_guard_trades,
-            cooldown_bars=settings.strategy_stoploss_guard_bars,
-        )
+        fold_execution_context = None
+        fold_cost_provider = None
+        if execution_cost_context is not None:
+            fold_execution_context = slice_research_execution_context(
+                execution_cost_context, fold_frame.index
+            )
+            if fold_execution_context is None:
+                raise ValueError("research execution context cannot be aligned to an AI OOS fold")
+            fold_cost_provider = make_execution_cost_provider(
+                fold_execution_context,
+                namespace=f"ai-walk-forward:fold:{len(fold_metrics)}",
+            )
+        try:
+            execution = simulate_execution_aware_strategy(
+                fold_frame,
+                fold_targets,
+                entry_atr.iloc[te],
+                stop_atr=float(settings.strategy_stop_atr),
+                take_profit_atr=float(settings.strategy_take_profit_atr),
+                transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
+                session_costs_bps=session_costs_bps if fold_cost_provider is None else None,
+                transaction_cost_provider=fold_cost_provider,
+                carry_bps_per_bar=carry_cost_bps,
+                drawdown_limit=settings.strategy_drawdown_halt,
+                daily_loss_limit=settings.strategy_daily_loss_halt,
+                loss_event_threshold=settings.strategy_stoploss_guard_trades,
+                cooldown_bars=settings.strategy_stoploss_guard_bars,
+            )
+            fold_cost_complete = (
+                fold_cost_provider is not None
+                and execution["audit"].get("per_bar_execution_cost_model_complete") is True
+            )
+        except ResearchExecutionCostError as exc:
+            reason = str(exc)[:240] or "RESEARCH_EXECUTION_EVENT_COST_UNAVAILABLE"
+            execution_cost_failure_reasons[reason] = execution_cost_failure_reasons.get(reason, 0) + 1
+            # A rejected calibrated event invalidates the whole fold's calibrated cost
+            # stream. Re-run the fold wholly on its configured diagnostic cost basis;
+            # never mix calibrated and static costs inside a single return series.
+            execution = simulate_execution_aware_strategy(
+                fold_frame,
+                fold_targets,
+                entry_atr.iloc[te],
+                stop_atr=float(settings.strategy_stop_atr),
+                take_profit_atr=float(settings.strategy_take_profit_atr),
+                transaction_cost_bps=taker_cost_bps + slippage_cost_bps,
+                session_costs_bps=session_costs_bps,
+                transaction_cost_provider=None,
+                carry_bps_per_bar=carry_cost_bps,
+                drawdown_limit=settings.strategy_drawdown_halt,
+                daily_loss_limit=settings.strategy_daily_loss_halt,
+                loss_event_threshold=settings.strategy_stoploss_guard_trades,
+                cooldown_bars=settings.strategy_stoploss_guard_bars,
+            )
+            execution["audit"]["per_bar_execution_cost_model_complete"] = False
+            execution["audit"]["per_bar_execution_cost_model_status"] = "FALLBACK_AFTER_EVENT_REJECTION"
+            execution["audit"]["per_bar_execution_cost_failure"] = reason
+            fold_cost_complete = False
+        fold_execution_cost_complete.append(fold_cost_complete)
+        if fold_execution_context is not None:
+            oos_execution_cost_context_blocks.append(fold_execution_context)
         fold_position = execution["positions"].to_numpy(dtype=float)
         total_stop_exits += int(execution["audit"]["stop_loss_exits"])
         total_target_exits += int(execution["audit"]["take_profit_exits"])
@@ -760,8 +834,8 @@ def ai_walk_forward_backtest(
         oos_turnover_blocks.append(np.asarray(fold_turnover, dtype=float))
         oos_position_blocks.append(np.asarray(fold_position, dtype=float))
         oos_carry_blocks.append(np.asarray(fold_carry, dtype=float))
-        if session_costs_bps is not None:
-            oos_session_cost_blocks.append(
+        if session_costs_bps is not None or execution_cost_context is not None:
+            oos_variable_cost_blocks.append(
                 execution["effective_transaction_cost_bps"].to_numpy(dtype=float)
             )
         # Preserve raw OHLC and the requested entry stream before stops or risk halts
@@ -781,6 +855,10 @@ def ai_walk_forward_backtest(
             "total_return": float(fold_equity[-1] - 1.0),
             "max_drawdown": float(fold_dd.min()),
             "trades": int(np.count_nonzero(fold_turnover)), "sharpe": fold_sharpe,
+            "execution_cost_model_complete": bool(fold_cost_complete),
+            "execution_cost_model_status": execution["audit"].get(
+                "per_bar_execution_cost_model_status"
+            ),
         })
     if not fold_metrics or not oos_net_blocks:
         raise RuntimeError("No valid chronological out-of-sample folds could be evaluated")
@@ -796,8 +874,8 @@ def ai_walk_forward_backtest(
     turnover = pd.Series(np.concatenate(oos_turnover_blocks), dtype=float)
     position = pd.Series(np.concatenate(oos_position_blocks), dtype=float)
     carry = np.concatenate(oos_carry_blocks)
-    session_variable_costs = (
-        np.concatenate(oos_session_cost_blocks) if oos_session_cost_blocks else None
+    variable_execution_costs = (
+        np.concatenate(oos_variable_cost_blocks) if oos_variable_cost_blocks else None
     )
     equity = (1 + net).cumprod()
     peak = equity.cummax()
@@ -810,7 +888,7 @@ def ai_walk_forward_backtest(
         bars_per_year=annualization,
         stress_multiplier=cost_stress_multiplier,
         fixed_cost_drag=carry,
-        variable_cost_bps_per_bar=session_variable_costs,
+        variable_cost_bps_per_bar=variable_execution_costs,
     )
     dsr_report = _research_trial_dsr_report(
         net.to_numpy(),
@@ -841,7 +919,50 @@ def ai_walk_forward_backtest(
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
-        session_costs_bps=session_costs_bps,
+        session_costs_bps=session_costs_bps if execution_cost_context is None else None,
+        execution_cost_context_blocks=(
+            oos_execution_cost_context_blocks
+            if execution_cost_context is not None
+            and len(oos_execution_cost_context_blocks) == len(fold_metrics)
+            and all(fold_execution_cost_complete)
+            else None
+        ),
+        candidate_execution_cost_namespace="ai-walk-forward:benchmark",
+    )
+    label_cost_complete = label_execution_cost_audit.get(
+        "execution_cost_model_complete"
+    ) is True
+    fold_costs_complete = (
+        execution_cost_context is not None
+        and bool(fold_execution_cost_complete)
+        and all(fold_execution_cost_complete)
+    )
+    benchmark_costs_complete = (
+        benchmark_report.get("execution_cost_model_complete") is True
+    )
+    execution_cost_model_complete = (
+        execution_cost_context is not None
+        and label_cost_complete
+        and fold_costs_complete
+        and benchmark_costs_complete
+    )
+    if execution_cost_context is None:
+        execution_cost_model_status = "STATIC_OR_SESSION_COSTS_NO_VERIFIED_CONTEXT"
+    elif not label_cost_complete:
+        execution_cost_model_status = "INCOMPLETE_AI_LABEL_EXECUTION_COSTS"
+    elif not fold_costs_complete:
+        execution_cost_model_status = "INCOMPLETE_AI_OOS_FOLD_EXECUTION_COSTS"
+    elif not benchmark_costs_complete:
+        execution_cost_model_status = "INCOMPLETE_AI_BENCHMARK_EXECUTION_COSTS"
+    else:
+        execution_cost_model_status = "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+    execution_cost_model_fingerprint = (
+        str(execution_cost_context.get("model_fingerprint") or "")
+        if isinstance(execution_cost_context, dict) else None
+    )
+    per_bar_execution_context_sha256 = (
+        str(execution_cost_context.get("context_sha256") or "")
+        if isinstance(execution_cost_context, dict) else None
     )
     return {
         "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
@@ -863,8 +984,30 @@ def ai_walk_forward_backtest(
         "trade_boundary_overlap_bars": 0,
         "folds": fold_metrics,
         "cost_stress_ok": bool(cost_report.get("stress_ok")) and carry_evidence_complete if cost_report.get("status") == "OK" else False,
-        "session_cost_model_complete": session_variable_costs is not None,
-        "session_costs_bps": dict(session_costs_bps) if session_variable_costs is not None else None,
+        "session_cost_model_complete": (
+            execution_cost_context is None
+            and session_costs_bps is not None
+            and variable_execution_costs is not None
+        ),
+        "session_costs_bps": (
+            dict(session_costs_bps)
+            if execution_cost_context is None and variable_execution_costs is not None
+            else None
+        ),
+        "execution_cost_model_complete": bool(execution_cost_model_complete),
+        "execution_cost_model_status": execution_cost_model_status,
+        "execution_cost_model_fingerprint": execution_cost_model_fingerprint,
+        "per_bar_execution_context_sha256": per_bar_execution_context_sha256,
+        "execution_cost_calibration_status": (
+            "VERIFIED" if execution_cost_context is not None else "MISSING_VENUE_CALIBRATION_EVIDENCE"
+        ),
+        "execution_cost_calibration_evidence_id": (
+            execution_cost_context.get("evidence_id")
+            if isinstance(execution_cost_context, dict) else None
+        ),
+        "execution_cost_failure_reasons": execution_cost_failure_reasons,
+        "slippage_model_complete": bool(execution_cost_model_complete),
+        "slippage_model_status": execution_cost_model_status,
         "cost_stress_multiplier": float(stress_multiplier),
         "carry_rate_configured": bool(carry_rate_configured),
         "carry_evidence_source": carry_evidence_source or None,
@@ -875,9 +1018,6 @@ def ai_walk_forward_backtest(
         "intrabar_stop_target_model_complete": False,
         "slippage_model_complete": False,
         "slippage_model_status": "STATIC_BPS_NOT_VOLUME_VOLATILITY_CALIBRATED",
-        "execution_cost_model_complete": False,
-        "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
-        "execution_cost_calibration_evidence_id": None,
         "execution_model": "OHLC_INTRABAR_ATR_STOP_TAKE_PROFIT_NEXT_OPEN",
         "execution_stop_target_audit": {
             "stop_loss_exits": int(total_stop_exits),
