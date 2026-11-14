@@ -303,6 +303,7 @@ def regime_conditioned_strategy_performance(
                 "execution_cost_failure_reasons",
             ):
                 metrics[audit_key] = returns.attrs.get(audit_key)
+            metrics.update(_execution_cost_context_audit(execution_cost_context))
             result[strategy][regime] = metrics
     return result
 
@@ -580,14 +581,7 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
                 for name in STRATEGIES
             )
         ),
-        "execution_cost_model_fingerprint": (
-            execution_cost_context.get("model_fingerprint")
-            if isinstance(execution_cost_context, dict) else None
-        ),
-        "per_bar_execution_context_sha256": (
-            execution_cost_context.get("context_sha256")
-            if isinstance(execution_cost_context, dict) else None
-        ),
+        **_execution_cost_context_audit(execution_cost_context),
         "policy": {"switch_min_advantage": float(switch_min_advantage),
                    "switch_test": "PAIRED_NEWEY_WEST_HAC",
                    "execution_cost_model_version": EXECUTION_COST_MODEL_VERSION,
