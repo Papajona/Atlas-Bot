@@ -1101,9 +1101,13 @@ def fixed_signal_walk_forward_oos(
     session_cost_schedule_applied = (
         session_cost_values is not None
         and (
-            bool(session_costs_applied)
-            if session_costs_applied is not None
-            else effective_cost_values is session_cost_values
+            # With no precomputed per-bar series, the session schedule is the
+            # selected pricing branch. A stale/explicit False audit must not
+            # contradict the cost series actually applied to candidate returns.
+            effective_cost_values is session_cost_values
+            # When a precomputed series is supplied, its audit flag distinguishes
+            # session-derived costs from signed per-bar execution costs.
+            or session_costs_applied is True
         )
     )
     net = costed_execution_returns(
