@@ -60,6 +60,16 @@ def test_metric_path_label_uses_mount_path_for_static_assets():
     assert monitoring.metric_path_label(unmatched_request) == "unmatched"
 
 
+def test_static_asset_request_metrics_use_mount_label():
+    client = TestClient(main.app)
+    response = client.get("/static/app.css")
+    assert response.status_code == 200
+    request_labels = {key for key in monitoring.REQUESTS._metrics}
+    latency_labels = {key for key in monitoring.REQUEST_LATENCY._metrics}
+    assert ("GET", "/static", "200") in request_labels
+    assert ("GET", "/static") in latency_labels
+
+
 def test_request_id_is_sanitised():
     client = TestClient(main.app)
     good = "req-12345678.abc_DEF"

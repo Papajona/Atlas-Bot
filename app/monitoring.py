@@ -36,12 +36,17 @@ def metric_path_label(request: Request) -> str:
     # Starlette Mount matches before setting scope["route"], unlike APIRoute.
     # Recover the server-defined mount path so static-file requests do not get
     # mixed into the "unmatched" bucket used for real 404/scanner traffic.
+    # The scope is re-matched after dispatch, when root_path already holds the
+    # consumed mount prefix. Match against a copy with root_path cleared so the
+    # full original path is tested against the mount.
+    match_scope = dict(request.scope)
+    match_scope["root_path"] = ""
     mount_paths = []
     for candidate in getattr(request.app, "routes", ()):
         if not isinstance(candidate, Mount):
             continue
         try:
-            match, _child_scope = candidate.matches(request.scope)
+            match, _child_scope = candidate.matches(match_scope)
         except (KeyError, TypeError, ValueError):
             continue
         mount_path = getattr(candidate, "path", None)
