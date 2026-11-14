@@ -456,7 +456,7 @@ def oos_benchmark_comparison(
         market: np.ndarray,
         signal: np.ndarray,
         atr: np.ndarray,
-        execution_context: dict[str, object] | None,
+        execution_context: Mapping[str, object] | None,
         execution_namespace: str,
     ):
         if bracket_configured:
@@ -464,7 +464,7 @@ def oos_benchmark_comparison(
                 make_execution_cost_provider(
                     execution_context, namespace=execution_namespace
                 )
-                if isinstance(execution_context, dict) else None
+                if isinstance(execution_context, Mapping) else None
             )
             simulated = simulate_execution_aware_strategy(
                 frame, signal, atr,
@@ -496,7 +496,7 @@ def oos_benchmark_comparison(
         turnover = np.abs(signal - previous)
         if len(turnover):
             turnover[-1] += abs(float(signal[-1]))
-        if isinstance(execution_context, dict):
+        if isinstance(execution_context, Mapping):
             transaction_drag = np.zeros(len(signal), dtype=float)
             for bar_position, (prior, current) in enumerate(zip(previous, signal, strict=True)):
                 transaction_drag[bar_position] += _event_cost_drag(
@@ -624,7 +624,7 @@ def oos_benchmark_comparison(
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
         buy_hold_turnover += float(turnover.sum())
-        if isinstance(execution_context, dict):
+        if isinstance(execution_context, Mapping):
             entry_cost, entry_reason = execution_cost_for_event(
                 execution_context,
                 bar_position=0,
