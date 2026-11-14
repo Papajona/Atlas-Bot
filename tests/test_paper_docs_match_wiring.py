@@ -58,6 +58,6 @@ def test_active_platform_and_autonomous_customer_runtime_call_the_calibrated_mod
 
 def test_readiness_doc_distinguishes_market_context_from_calibrated_fill_model() -> None:
     doc = (ROOT / "docs" / "PAPER_TESTING_READINESS_2026-10-15.md").read_text(encoding="utf-8")
-    assert "The calibrated estimator is now wired into" in doc
-    assert "manual customer API advancement remains heuristic" in doc
+    assert "Calibrated fill-model integration is now implemented" in doc
+    assert "Manual customer API advancement remains a separate" in doc
     assert "Partial calibration configuration fails closed" in doc
