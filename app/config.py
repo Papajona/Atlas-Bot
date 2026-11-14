@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     customer_deficit_limit_usdt: float = 100.0  # USDT; threshold marker for deficit escalation (any deficit halts live trading)
     # Keep LightGBM/OpenMP within the two-CPU Cloud Run API/worker allocation by default.
     ml_threads: int = max(1, min(2, os.cpu_count() or 1))
+    # /readyz single-flight cache TTL in seconds (0 disables) and whether failed readiness returns HTTP 503.
+    readyz_cache_seconds: float = 5.0
+    readyz_fail_when_not_ready: bool = True
 
     @field_validator("ml_threads")
     @classmethod
