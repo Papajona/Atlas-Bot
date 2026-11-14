@@ -105,8 +105,8 @@ def _settings(tmp_path):
     )
 
 
-def _research_frame():
-    index = pd.date_range("2026-01-01T00:00:00Z", periods=24, freq="h")
+def _research_frame(periods: int = 24):
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=periods, freq="h")
     close = 100.0 + np.arange(len(index), dtype=float) * 0.1
     frame = pd.DataFrame(
         {
@@ -788,3 +788,76 @@ def test_execution_event_accepts_integral_numeric_bar_indices(bar_position):
     )
     assert cost == 0.0
     assert reason is None
+
+
+
+def test_benchmark_uses_verified_mapping_for_all_execution_pricing_paths(tmp_path, monkeypatch):
+    from app import research_execution_costs
+    from app.research_validation import oos_benchmark_comparison
+
+    source_frame = _research_frame(periods=64)
+    settings = _settings(tmp_path)
+    settings.research_order_notional_usd = 10.0
+    evidence = _research_cost_evidence(source_frame, settings, attach_to_frame=False)
+    full_context, audit = build_research_execution_cost_context(
+        source_frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+        calibration_evidence=evidence,
+    )
+    assert full_context is not None
+    assert audit["execution_cost_model_complete"] is True
+    assert is_verified_research_execution_cost_context(full_context)
+    assert not isinstance(full_context, dict)
+
+    fold = source_frame.iloc[-32:].copy()
+    context = slice_research_execution_context(full_context, fold.index)
+    assert context is not None
+    assert is_verified_research_execution_cost_context(context)
+
+    calls = []
+    original_event_cost = research_execution_costs.execution_cost_for_event
+
+    def record_event_cost(received_context, **kwargs):
+        assert received_context is context
+        calls.append(str(kwargs["namespace"]))
+        return original_event_cost(received_context, **kwargs)
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", record_event_cost
+    )
+    signal = np.zeros(len(fold), dtype=float)
+    signal[6:18] = 1.0
+    atr = np.ones(len(fold), dtype=float)
+    candidate = np.zeros(len(fold), dtype=float)
+
+    bracketed = oos_benchmark_comparison(
+        [fold], [signal], [candidate], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        stop_atr=5.0, take_profit_atr=5.0,
+        random_trials=2, seed=41,
+        execution_cost_context_blocks=[context],
+        candidate_execution_cost_namespace="mapping:bracketed:candidate",
+    )
+    assert bracketed["status"] == "OK"
+    assert bracketed["execution_cost_model_complete"] is True
+    assert any(name.startswith("mapping:bracketed:candidate") for name in calls)
+    assert any(name.startswith("benchmark:random:") for name in calls)
+    assert any(name.startswith("benchmark:buy-and-hold:") for name in calls)
+
+    calls.clear()
+    unbracketed = oos_benchmark_comparison(
+        [fold], [signal], [candidate], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        random_trials=2, seed=43,
+        execution_cost_context_blocks=[context],
+        candidate_execution_cost_namespace="mapping:unbracketed:candidate",
+    )
+    assert unbracketed["status"] == "OK"
+    assert unbracketed["execution_cost_model_complete"] is True
+    assert any(name.startswith("mapping:unbracketed:candidate") for name in calls)
+    assert any(name.startswith("benchmark:random:") for name in calls)
+    assert any(name.startswith("benchmark:buy-and-hold:") for name in calls)
