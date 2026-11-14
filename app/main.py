@@ -43,7 +43,10 @@ from .groq_ai import groq_trade_context_review
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_trial_archive import archive_research_trials
-from .research_execution_costs import build_research_execution_cost_context
+from .research_execution_costs import (
+    build_research_execution_cost_context,
+    is_verified_research_execution_cost_context,
+)
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
@@ -3971,7 +3974,8 @@ def _strategy_router_validation_gate(
         context.get("execution_cost_calibration_evidence_id") or context.get("evidence_id") or ""
     ).strip()
     context_verified = (
-        str(context.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        is_verified_research_execution_cost_context(current_execution_cost_context)
+        and str(context.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
         and bool(context_evidence_id)
     )
     calibration_verified = (
