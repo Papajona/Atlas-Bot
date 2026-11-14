@@ -685,7 +685,6 @@ def ai_walk_forward_backtest(
     aligned = df.reindex(X.index)
     from .research_execution_costs import (
         ResearchExecutionCostError,
-        is_verified_research_execution_cost_context,
         make_execution_cost_provider,
         slice_research_execution_context,
     )
