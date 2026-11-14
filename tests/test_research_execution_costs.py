@@ -449,6 +449,44 @@ def test_session_cost_completeness_reflects_the_schedule_used_after_per_bar_reje
     assert _session_cost_schedule_was_applied(context, {}, None) is False
 
 
+def test_session_cost_report_status_uses_the_matching_simulator_audit():
+    from app.research_engine import _set_session_cost_report_status
+
+    schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+    fallback_audit = {
+        "per_bar_execution_cost_model_status": "FALLBACK_AFTER_EVENT_REJECTION"
+    }
+    # The report itself does not carry the simulator-only status key. The caller
+    # must associate it with the actual candidate audit.
+    fallback_report = {"cost_analysis": {}}
+    assert _set_session_cost_report_status(
+        fallback_report, {"model_fingerprint": "a" * 64},
+        fallback_audit, schedule,
+    ) is True
+    assert fallback_report["session_cost_model_complete"] is True
+    assert fallback_report["session_costs_bps"] == schedule
+    assert fallback_report["cost_analysis"]["session_cost_model_complete"] is True
+    assert fallback_report["cost_analysis"]["session_costs_bps"] == schedule
+
+    verified_audit = {
+        "per_bar_execution_cost_model_status": "VERIFIED_PER_BAR_EXECUTION_COSTS"
+    }
+    verified_report = {"cost_analysis": {}}
+    assert _set_session_cost_report_status(
+        verified_report, {"model_fingerprint": "b" * 64},
+        verified_audit, schedule,
+    ) is False
+    assert verified_report["session_cost_model_complete"] is False
+    assert verified_report["session_costs_bps"] is None
+    assert verified_report["cost_analysis"]["session_cost_model_complete"] is False
+    assert verified_report["cost_analysis"]["session_costs_bps"] is None
+
+
 def test_execution_simulator_prices_ordinary_transition_to_flat_as_exit():
     index = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h")
     frame = pd.DataFrame(
