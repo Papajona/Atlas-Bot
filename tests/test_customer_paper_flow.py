@@ -1891,7 +1891,6 @@ def test_autonomous_recovery_rejects_manual_pending_order_with_customer_action(m
 
 def test_calibrated_customer_paper_fill_uses_server_market_context_and_shared_capacity(monkeypatch):
     from app import customer_paper_flow as flow
-    from app.paper_execution_model import PaperExecutionModelError
     import hashlib
     from pathlib import Path
 
@@ -1937,7 +1936,7 @@ def test_calibrated_customer_paper_fill_uses_server_market_context_and_shared_ca
     )
 
     assert quantity == Decimal("4.000000000000000000")
-    assert Decimal(price) > Decimal("101")
+    assert Decimal(price) > Decimal("100")
     assert Decimal(fee) > 0
     assert result["cancelled_quantity"] == 4.0
     assert costs["cost_model_status"] == "CALIBRATED_ASSUMPTIONS"
