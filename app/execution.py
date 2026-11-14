@@ -19,6 +19,11 @@ from .risk_governor import evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .execution_costs import market_impact_bps
+from .paper_execution_model import (
+    PaperExecutionModelError,
+    configured_paper_execution_settings,
+    estimate_paper_fill,
+)
 from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
                   PaperOrderState, PaperBarState, PaperFillEvent, LiveExecutionLease, utcnow)
 from .trading_core import PROFILES
@@ -1226,6 +1231,7 @@ async def advance_platform_paper_orders(
     symbol: str,
     timeframe: str,
     asset: str,
+    market_context: dict[str, Any] | None = None,
 ) -> dict:
     """Advance platform paper orders once on a fresh completed bar, with persisted idempotency.
 
@@ -1233,6 +1239,7 @@ async def advance_platform_paper_orders(
     markets can age/cancel paper orders but cannot fill them using OTC or unknown volume.
     This model is a deterministic simulator, not an exchange matching engine.
     """
+    calibrated_settings = configured_paper_execution_settings(settings)
     if df is None or len(df) < 2 or not {"open", "high", "low", "close", "volume"}.issubset(set(getattr(df, "columns", ()))):
         return {"status": "INSUFFICIENT_DATA", "orders_seen": 0, "fills": 0}
     try:
@@ -1293,7 +1300,12 @@ async def advance_platform_paper_orders(
     )
     bar_identity = "|".join((exchange.lower(), symbol, timeframe, bar_at.isoformat()))
     bar_key = hashlib.sha256(bar_identity.encode("utf-8")).hexdigest()
-    participation = min(1.0, max(0.0, float(settings.paper_max_bar_volume_participation)))
+    participation_setting = (
+        calibrated_settings["max_participation_rate"]
+        if calibrated_settings is not None
+        else settings.paper_max_bar_volume_participation
+    )
+    participation = min(1.0, max(0.0, float(participation_setting)))
     capacity = bar_volume * participation if verified_liquidity else 0.0
     queue_probability = min(1.0, max(0.0, float(settings.paper_queue_fill_probability)))
     rejection_probability = min(1.0, max(0.0, float(settings.paper_rejection_probability)))
@@ -1484,7 +1496,7 @@ async def advance_platform_paper_orders(
                     outcome = "WAIT_UNVERIFIED_LIQUIDITY" if not verified_liquidity else "WAIT_NO_CAPACITY"
                     reason = "verified crypto spot base-asset volume is required for a fill"
                     counts["waiting_for_liquidity"] += 1
-                elif not is_triggered_exit and _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|REJECT") < rejection_probability:
+                elif calibrated_settings is None and not is_triggered_exit and _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|REJECT") < rejection_probability:
                     outcome = "REJECTED"
                     reason = "deterministic rejection heuristic; not venue-calibrated"
                     trade.status = "REJECTED"
@@ -1492,7 +1504,7 @@ async def advance_platform_paper_orders(
                     trade.remaining_quantity = 0.0
                     order_state.status = "REJECTED"
                     counts["rejected"] += 1
-                elif _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|QUEUE") >= queue_probability:
+                elif calibrated_settings is None and _paper_hash_fraction(f"{trade.client_order_id}|{bar_key}|QUEUE") >= queue_probability:
                     outcome = "QUEUE_MISS"
                     reason = "deterministic queue-miss heuristic; not venue-calibrated"
                     counts["queue_misses"] += 1
@@ -1509,23 +1521,6 @@ async def advance_platform_paper_orders(
                         counts["waiting_for_liquidity"] += 1
                     else:
                         profile = PROFILES.get(str(asset).lower(), PROFILES["crypto"])
-                        participation_rate = min(
-                            1.0,
-                            max(0.0, float(fill_quantity) / max(bar_volume, 1e-18)),
-                        )
-                        try:
-                            impact = market_impact_bps(
-                                volatility_bps=volatility * 10_000.0,
-                                participation_rate=participation_rate,
-                                impact_coefficient=impact_coefficient,
-                                max_market_impact_bps=max_impact_bps,
-                            )
-                        except ValueError as exc:
-                            outcome = "INVALID_EXECUTION_COST_CONTEXT"
-                            reason = str(exc)[:200]
-                            fill_quantity = Decimal("0")
-                            impact = 0.0
-                        slippage_bps = max(0.0, float(profile.slippage_bps) + impact)
                         reference_price = close_price
                         if is_triggered_exit:
                             try:
@@ -1534,11 +1529,8 @@ async def advance_platform_paper_orders(
                                 if not math.isfinite(level) or level <= 0:
                                     raise ValueError("invalid persisted protective trigger level")
                                 if trigger_type == "STOP_LOSS":
-                                    # Model opening gaps adversely. A stop that was triggered on
-                                    # an earlier bar does not magically fill at its stop level.
                                     reference_price = min(level, open_price) if trade.side == "sell" else max(level, open_price)
                                 elif trigger_type == "TAKE_PROFIT":
-                                    # Do not assume favorable price improvement beyond the target.
                                     reference_price = level
                                 else:
                                     raise ValueError("unknown protective exit trigger type")
@@ -1547,25 +1539,114 @@ async def advance_platform_paper_orders(
                                 reason = str(exc)[:200]
                                 fill_quantity = Decimal("0")
                                 reference_price = close_price
-                        price_multiplier = (
-                            1.0 + slippage_bps / 10_000.0
-                            if trade.side == "buy" else 1.0 - slippage_bps / 10_000.0
-                        )
-                        fill_price = (
-                            Decimal("0") if outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT"}
-                            else Decimal(str(reference_price * price_multiplier))
-                        )
-                        if outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT"}:
-                            # Preserve the original diagnostic outcome and reason. A
-                            # deliberately zero price must not be reclassified as a
-                            # generic invalid-fill-price event.
+
+                        execution_model_record = None
+                        calibrated_result = None
+                        if outcome != "INVALID_EXIT_CONTEXT" and calibrated_settings is not None:
+                            try:
+                                supplied_context = dict(market_context or {})
+                                if (
+                                    str(supplied_context.get("market_type") or "").lower() != "spot"
+                                    or str(supplied_context.get("exchange") or "").lower() != str(exchange).lower()
+                                    or str(supplied_context.get("symbol") or "") != str(symbol)
+                                ):
+                                    raise PaperExecutionModelError(
+                                        "fresh server market context does not match the active spot market"
+                                    )
+                                model_context = {
+                                    "exchange": str(exchange).lower(),
+                                    "symbol": str(symbol),
+                                    "market_type": "spot",
+                                    "tradable_volume_units": bar_volume,
+                                    "spread_bps": supplied_context.get("spread_bps"),
+                                    "recent_volatility_bps": supplied_context.get("recent_volatility_bps"),
+                                    "bar_duration_ms": supplied_context.get("bar_duration_ms"),
+                                }
+                                model_reference_price = (
+                                    supplied_context.get("reference_price")
+                                    if not is_triggered_exit
+                                    else reference_price
+                                )
+                                calibrated_result = estimate_paper_fill(
+                                    order_key=f"{trade.client_order_id}|{bar_key}",
+                                    side=str(trade.side).lower(),
+                                    requested_quantity=str(requested_remaining),
+                                    reference_price=model_reference_price,
+                                    market_context=model_context,
+                                    available_capacity_units=str(available),
+                                    **calibrated_settings,
+                                )
+                            except (PaperExecutionModelError, TypeError, ValueError, OverflowError) as exc:
+                                outcome = "INVALID_EXECUTION_COST_CONTEXT"
+                                reason = str(exc)[:200]
+                                fill_quantity = Decimal("0")
+                            else:
+                                execution_model_record = {
+                                    key: calibrated_result.get(key)
+                                    for key in (
+                                        "model", "execution_cost_model_version", "evidence_source",
+                                        "evidence_id", "order_key_sha256", "model_status",
+                                        "simulated_latency_ms", "rejection_draw", "latency_quantile_draw",
+                                        "market_impact_bps", "latency_impact_bps",
+                                        "total_slippage_bps", "realized_participation_rate",
+                                        "validation_grade",
+                                    )
+                                    if key in calibrated_result
+                                }
+                                if calibrated_result.get("simulated_rejection"):
+                                    outcome = "REJECTED"
+                                    reason = "SHA-pinned calibrated paper model simulated venue rejection"
+                                    trade.status = "REJECTED"
+                                    trade.error = reason
+                                    trade.remaining_quantity = 0.0
+                                    order_state.status = "REJECTED"
+                                    counts["rejected"] += 1
+                                    fill_quantity = Decimal("0")
+                                else:
+                                    fill_quantity = Decimal(str(calibrated_result["filled_quantity"]))
+                                    fill_price = Decimal(str(calibrated_result["fill_price"]))
+                                    slippage_bps = float(calibrated_result["total_slippage_bps"])
+                                    reason = "fill priced by SHA-pinned calibrated paper execution model"
+
+                        if calibrated_settings is None and outcome != "INVALID_EXIT_CONTEXT":
+                            participation_rate = min(
+                                1.0,
+                                max(0.0, float(fill_quantity) / max(bar_volume, 1e-18)),
+                            )
+                            try:
+                                impact = market_impact_bps(
+                                    volatility_bps=volatility * 10_000.0,
+                                    participation_rate=participation_rate,
+                                    impact_coefficient=impact_coefficient,
+                                    max_market_impact_bps=max_impact_bps,
+                                )
+                            except ValueError as exc:
+                                outcome = "INVALID_EXECUTION_COST_CONTEXT"
+                                reason = str(exc)[:200]
+                                fill_quantity = Decimal("0")
+                                impact = 0.0
+                            profile_slippage = max(0.0, float(profile.slippage_bps) + impact)
+                            slippage_bps = profile_slippage
+                        if outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT", "REJECTED"}:
                             fill_price = Decimal("0")
                             fill_quantity = Decimal("0")
-                        elif fill_price <= 0:
-                            outcome = "INVALID_FILL_PRICE"
-                            reason = "adverse cost model produced a non-positive fill price"
-                            fill_quantity = Decimal("0")
+                        elif calibrated_result is not None:
+                            if fill_price <= 0:
+                                outcome = "INVALID_FILL_PRICE"
+                                reason = "calibrated paper model produced a non-positive fill price"
+                                fill_quantity = Decimal("0")
                         else:
+                            price_multiplier = (
+                                1.0 + slippage_bps / 10_000.0
+                                if trade.side == "buy" else 1.0 - slippage_bps / 10_000.0
+                            )
+                            fill_price = Decimal(str(reference_price * price_multiplier))
+                            if fill_price <= 0:
+                                outcome = "INVALID_FILL_PRICE"
+                                reason = "adverse cost model produced a non-positive fill price"
+                                fill_quantity = Decimal("0")
+
+                        if fill_quantity > 0 and fill_price > 0:
                             old_filled = Decimal(str(trade.filled_quantity or 0.0))
                             old_average = Decimal(str(trade.average_fill_price or 0.0))
                             new_filled = old_filled + fill_quantity
@@ -1590,12 +1671,26 @@ async def advance_platform_paper_orders(
                             bar_state.consumed = float(Decimal(str(bar_state.consumed or 0.0)) + fill_quantity)
                             remaining_after = Decimal(str(trade.remaining_quantity or 0.0))
                             counts["fills"] += 1
+                            cancelled_remainder = (
+                                calibrated_result is not None
+                                and Decimal(str(calibrated_result.get("cancelled_quantity") or "0")) > 0
+                            )
                             if remaining_after <= Decimal("0.000000000001"):
                                 trade.remaining_quantity = 0.0
                                 trade.status = "FILLED"
                                 order_state.status = "FILLED"
                                 outcome = "FILLED"
-                                reason = "completed-bar fill; costs are unvalidated heuristics"
+                                if calibrated_result is None:
+                                    reason = "completed-bar fill; costs are unvalidated heuristics"
+                                else:
+                                    reason = "completed-bar fill using SHA-pinned calibrated paper model"
+                            elif cancelled_remainder:
+                                trade.remaining_quantity = 0.0
+                                trade.status = "CANCELED"
+                                order_state.status = "CANCELED"
+                                outcome = "PARTIAL_FILL_REMAINDER_CANCELED"
+                                reason = "calibrated model capped the fill and canceled the unfilled remainder"
+                                counts["partial_fills"] += 1
                             else:
                                 trade.status = "PARTIAL"
                                 order_state.status = "PARTIAL"
@@ -1607,6 +1702,7 @@ async def advance_platform_paper_orders(
                                 "bar_at": bar_at.isoformat(), "quantity": str(fill_quantity),
                                 "fill_price": str(fill_price), "fee": str(fee_decimal),
                                 "slippage_bps": round(slippage_bps, 6), "outcome": outcome,
+                                "execution_model": execution_model_record,
                             })
 
             # TTL counts only fresh completed bars after submission, including bars with
@@ -1637,7 +1733,12 @@ async def advance_platform_paper_orders(
                 fill_price=float(fill_price),
                 fee=float(fee_decimal),
                 slippage_bps=float(slippage_bps),
-                reason=reason[:1000],
+                reason=(
+                    reason + (
+                        "; execution_model=" + json.dumps(execution_model_record, sort_keys=True, separators=(",", ":"))
+                        if "execution_model_record" in locals() and execution_model_record else ""
+                    )
+                )[:1000],
             )
             db.add(event)
             audit_events.append({
