@@ -609,7 +609,7 @@ def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
     from app import research_execution_costs as costs_module
     from app.research_validation import oos_benchmark_comparison
 
-    source_frame = _research_frame(periods=128)
+    source_frame = _research_frame(periods=192)
     settings = _settings(tmp_path)
     settings.research_order_notional_usd = 10.0
     evidence = _research_cost_evidence(source_frame, settings, attach_to_frame=False)
@@ -625,9 +625,10 @@ def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
     assert full_context is not None
     assert audit["execution_cost_model_complete"] is True
 
+    # Both folds begin after the signed context's 20-bar volume warm-up.
     folds = [
-        source_frame.iloc[:64].copy(),
-        source_frame.iloc[64:].copy(),
+        source_frame.iloc[32:96].copy(),
+        source_frame.iloc[96:160].copy(),
     ]
     contexts = [
         slice_research_execution_context(full_context, frame.index)
