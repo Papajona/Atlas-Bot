@@ -224,6 +224,37 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
         base_slippage_bps=2.0,
         cost_stress_multiplier=2.0,
     )
+    from app.main import _strategy_router_validation_gate
+
+    verified_validation = {
+        "status": "OK",
+        "total_return": 0.12,
+        "folds": [
+            {"total_return": 0.04, "execution_cost_model_complete": True},
+            {"total_return": 0.03, "execution_cost_model_complete": True},
+            {"total_return": 0.05, "execution_cost_model_complete": True},
+        ],
+        "execution_cost_model_complete": True,
+        "execution_cost_model_status": "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY",
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_verified": True,
+        "execution_cost_calibration_evidence_id": context["execution_cost_calibration_evidence_id"],
+        "execution_cost_model_fingerprint": context["model_fingerprint"],
+        "per_bar_execution_context_sha256": context["context_sha256"],
+        "execution_cost_dataset_sha256": context["dataset_sha256"],
+    }
+    gate = _strategy_router_validation_gate(
+        verified_validation,
+        required_folds=3,
+        required_positive_fold_ratio=0.5,
+        current_dataset_sha256=context["dataset_sha256"],
+        current_execution_cost_context=context,
+    )
+    assert gate["passed"] is True
+    assert gate["execution_cost_calibration_verified"] is True
+    assert gate["execution_cost_validation_matches_current_context"] is True
+    assert gate["execution_cost_dataset_matches_current_data"] is True
+
     assert np.isnan(context["volume_units"][0])
     assert context["volume_units"][21] == pytest.approx(100.0)
     assert context["spread_bps"][21] == pytest.approx(4.0)
