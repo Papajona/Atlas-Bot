@@ -1886,3 +1886,74 @@ def test_autonomous_recovery_rejects_manual_pending_order_with_customer_action(m
     assert "Cancel or advance it through the manual paper-order API" in message
     assert "will not take ownership" in message
 
+
+
+
+def test_calibrated_customer_paper_fill_uses_server_market_context_and_shared_capacity(monkeypatch):
+    from app import customer_paper_flow as flow
+    from app.paper_execution_model import PaperExecutionModelError
+    import hashlib
+    from pathlib import Path
+
+    evidence_path = Path(__file__).parent / "fixtures" / "paper_execution_calibration_test.json"
+    evidence_id = "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    calibration = {
+        "base_slippage_bps": 2.0,
+        "max_participation_rate": 0.10,
+        "impact_coefficient": 0.5,
+        "rejection_probability": 0.0,
+        "latency_min_ms": 10.0,
+        "latency_median_ms": 20.0,
+        "latency_p95_ms": 50.0,
+        "latency_max_ms": 100.0,
+        "latency_impact_coefficient": 0.5,
+        "evidence_source": "venue-paper-fill-study",
+        "evidence_path": str(evidence_path),
+        "evidence_id": evidence_id,
+        "allow_test_fixture": True,
+    }
+    market = {
+        "market_context": {
+            "exchange": "fakeexchange",
+            "symbol": "BTC/USDT",
+            "bar_duration_ms": 3600000,
+            "recent_volatility_bps": 200.0,
+        },
+        "base_volume": Decimal("100"),
+        "spread_bps": Decimal("4"),
+        "bid": Decimal("99"),
+        "ask": Decimal("101"),
+        "quote_timestamp": "2026-11-14T12:00:00+00:00",
+        "data_sha256": "b" * 64,
+    }
+
+    quantity, price, fee, costs, result = flow._estimate_calibrated_customer_paper_fill(
+        "BUY",
+        Decimal("8"),
+        market,
+        order_key="customer-order-1|bar-1",
+        available_capacity=Decimal("4"),
+        calibration=calibration,
+    )
+
+    assert quantity == Decimal("4.000000000000000000")
+    assert Decimal(price) > Decimal("101")
+    assert Decimal(fee) > 0
+    assert result["cancelled_quantity"] == 4.0
+    assert costs["cost_model_status"] == "CALIBRATED_ASSUMPTIONS"
+    assert costs["execution_model"]["evidence_id"] == evidence_id
+
+
+def test_calibrated_customer_paper_fill_rejects_missing_server_context():
+    from app import customer_paper_flow as flow
+    from app.paper_execution_model import PaperExecutionModelError
+
+    with pytest.raises(PaperExecutionModelError, match="server customer-paper market context"):
+        flow._estimate_calibrated_customer_paper_fill(
+            "BUY",
+            Decimal("1"),
+            {"base_volume": Decimal("10")},
+            order_key="missing-context",
+            available_capacity=Decimal("1"),
+            calibration={},
+        )
