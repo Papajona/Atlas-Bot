@@ -491,3 +491,194 @@ def test_multi_timeframe_resampling_uses_open_timestamp_buckets_without_boundary
     assert bars.iloc[1]["close"] == 195.25
     assert bars.iloc[1]["volume"] == 48.0
 
+
+
+
+def test_triple_barrier_prices_label_entry_and_exit_with_per_bar_execution_evidence(monkeypatch):
+    from app import research_execution_costs
+    from app.trading_core import triple_barrier
+
+    index = pd.date_range("2026-01-01", periods=6, freq="h", tz="UTC")
+    close = pd.Series([100.0] * len(index), index=index)
+    opened = pd.Series([100.0] * len(index), index=index)
+    high = pd.Series([101.0] * len(index), index=index)
+    low = pd.Series([99.0] * len(index), index=index)
+    atr = pd.Series([1.0] * len(index), index=index)
+    context = {
+        "index": index,
+        "spread_bps": np.ones(len(index)),
+        "volume_units": np.full(len(index), 100_000.0),
+        "volatility_bps": np.full(len(index), 10.0),
+        "model_fingerprint": "a" * 64,
+        "context_sha256": "b" * 64,
+    }
+    priced_events = []
+
+    def price_event(_context, **kwargs):
+        priced_events.append(kwargs)
+        return 0.25, None
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", price_event
+    )
+    labels = triple_barrier(
+        close,
+        pd.Series([0.01] * len(index), index=index),
+        high,
+        low,
+        max_hold=2,
+        entry_open=opened,
+        entry_atr=atr,
+        stop_atr=5.0,
+        take_profit_atr=5.0,
+        execution_cost_context=context,
+        execution_cost_namespace="test-ai-labels",
+    )
+
+    assert labels.iloc[: len(index) - 2].notna().all()
+    assert labels.attrs["execution_cost_model_complete"] is True
+    assert labels.attrs["execution_cost_model_fingerprint"] == "a" * 64
+    assert labels.attrs["per_bar_execution_context_sha256"] == "b" * 64
+    assert labels.attrs["execution_cost_label_event_pairs_priced"] > 0
+    assert {event["side"] for event in priced_events} == {"buy", "sell"}
+    assert all(event["bar_position"] > 0 for event in priced_events)
+
+
+def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_benchmarks(monkeypatch):
+    from app import research_execution_costs, trading_core
+
+    _install_fast_walk_forward_model(monkeypatch)
+    frame = sample_df(1800)
+    context = {
+        "index": frame.index,
+        "spread_bps": np.full(len(frame), 1.5),
+        "volume_units": np.full(len(frame), 100_000.0),
+        "volatility_bps": np.full(len(frame), 20.0),
+        "model_fingerprint": "c" * 64,
+        "context_sha256": "d" * 64,
+        "evidence_id": "fixture:verified-calibration",
+    }
+    seen = {"provider_namespaces": [], "provider_indices": []}
+
+    def labels_with_verified_costs(close, vol, high, low, **kwargs):
+        label_context = kwargs.get("execution_cost_context")
+        assert label_context is not None
+        assert label_context["index"].equals(close.index)
+        seen["label_namespace"] = kwargs.get("execution_cost_namespace")
+        result = pd.Series(
+            np.resize(np.array([-1.0, 0.0, 1.0]), len(close)),
+            index=close.index,
+            dtype=float,
+        )
+        result.attrs["execution_cost_model_complete"] = True
+        result.attrs["execution_cost_model_status"] = "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+        result.attrs["execution_cost_failure_reasons"] = {}
+        result.attrs["execution_cost_label_event_pairs_priced"] = len(close)
+        return result
+
+    def provider_for_fold(fold_context, *, namespace):
+        seen["provider_namespaces"].append(namespace)
+        seen["provider_indices"].append(fold_context["index"])
+        return lambda *_args: 0.25
+
+    def benchmark_spy(*_args, **kwargs):
+        contexts = kwargs.get("execution_cost_context_blocks")
+        seen["benchmark_context_count"] = len(contexts or [])
+        return {
+            "status": "OK",
+            "execution_cost_model_complete": bool(contexts)
+            and all(isinstance(item, dict) for item in contexts),
+        }
+
+    monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
+    monkeypatch.setattr(
+        research_execution_costs, "make_execution_cost_provider", provider_for_fold
+    )
+    monkeypatch.setattr(trading_core, "oos_benchmark_comparison", benchmark_spy)
+
+    result = trading_core.ai_walk_forward_backtest(
+        frame,
+        asset="crypto",
+        folds=4,
+        min_train=500,
+        execution_cost_context=context,
+    )
+
+    assert seen["label_namespace"] == "ai-walk-forward:labels"
+    assert len(seen["provider_namespaces"]) == 4
+    assert len(seen["provider_indices"]) == 4
+    assert seen["benchmark_context_count"] == 4
+    assert result["execution_cost_model_complete"] is True
+    assert result["execution_cost_model_status"] == (
+        "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+    )
+    assert result["execution_cost_model_fingerprint"] == "c" * 64
+    assert result["per_bar_execution_context_sha256"] == "d" * 64
+    assert result["execution_cost_calibration_evidence_id"] == (
+        "fixture:verified-calibration"
+    )
+
+
+def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection(monkeypatch):
+    from app import research_execution_costs, trading_core
+
+    _install_fast_walk_forward_model(monkeypatch)
+    frame = sample_df(1800)
+    context = {
+        "index": frame.index,
+        "spread_bps": np.full(len(frame), 1.5),
+        "volume_units": np.full(len(frame), 100_000.0),
+        "volatility_bps": np.full(len(frame), 20.0),
+        "model_fingerprint": "e" * 64,
+        "context_sha256": "f" * 64,
+        "evidence_id": "fixture:verified-calibration",
+    }
+
+    def labels_with_verified_costs(close, vol, high, low, **kwargs):
+        result = pd.Series(
+            np.resize(np.array([-1.0, 0.0, 1.0]), len(close)),
+            index=close.index,
+            dtype=float,
+        )
+        result.attrs["execution_cost_model_complete"] = True
+        result.attrs["execution_cost_failure_reasons"] = {}
+        result.attrs["execution_cost_label_event_pairs_priced"] = len(close)
+        return result
+
+    def rejected_provider(_fold_context, *, namespace):
+        def reject_event(*_args):
+            raise research_execution_costs.ResearchExecutionCostError(
+                "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+            )
+        return reject_event
+
+    def benchmark_spy(*_args, **kwargs):
+        assert kwargs.get("execution_cost_context_blocks") is None
+        return {"status": "OK", "execution_cost_model_complete": False}
+
+    monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
+    monkeypatch.setattr(
+        research_execution_costs, "make_execution_cost_provider", rejected_provider
+    )
+    monkeypatch.setattr(trading_core, "oos_benchmark_comparison", benchmark_spy)
+
+    result = trading_core.ai_walk_forward_backtest(
+        frame,
+        asset="crypto",
+        folds=4,
+        min_train=500,
+        execution_cost_context=context,
+    )
+
+    assert result["execution_cost_model_complete"] is False
+    assert result["execution_cost_model_status"] == (
+        "INCOMPLETE_AI_OOS_FOLD_EXECUTION_COSTS"
+    )
+    assert (
+        result["execution_cost_failure_reasons"]["ORDER_PARTICIPATION_LIMIT_EXCEEDED"]
+        == 4
+    )
+    assert all(
+        fold["execution_cost_model_complete"] is False
+        for fold in result["folds"]
+    )
