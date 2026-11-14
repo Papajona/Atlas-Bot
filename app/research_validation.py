@@ -843,14 +843,19 @@ def oos_benchmark_comparison(
         "buy_and_hold_turnover": buy_hold_turnover,
         "buy_and_hold_session_cost_model_complete": (
             session_costs_bps is not None
-            and any(context is None for context in context_blocks)
+            and all(context is None for context in context_blocks)
         ),
         "buy_and_hold_session_costs_bps": (
             dict(session_costs_bps)
             if session_costs_bps is not None
-            and any(context is None for context in context_blocks)
+            and all(context is None for context in context_blocks)
             else None
         ),
+        "buy_and_hold_session_fallback_folds": [
+            block_index
+            for block_index, context in enumerate(context_blocks)
+            if session_costs_bps is not None and context is None
+        ],
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
