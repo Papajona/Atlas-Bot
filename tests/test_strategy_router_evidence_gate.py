@@ -202,3 +202,53 @@ def test_ai_walk_forward_requires_evidence_id_even_for_an_authentic_context():
     assert attestation["verified"] is False
     assert attestation["status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
     assert attestation["evidence_id"] is None
+
+def test_forex_and_commodity_router_gate_preserves_existing_performance_only_start_path():
+    result = _strategy_router_validation_gate(
+        _verified_validation(),
+        required_folds=3,
+        required_positive_fold_ratio=0.5,
+        current_dataset_sha256="",
+        current_execution_cost_context=None,
+        require_verified_execution_context=False,
+    )
+
+    assert result["passed"] is True
+    assert result["execution_cost_gate_mode"] == "PERFORMANCE_ONLY_OUTSIDE_SUPPORTED_CRYPTO_SPOT_DOMAIN"
+    assert result["execution_cost_gate_scope"] == "UNSUPPORTED_ASSET_OR_VENUE_FOR_SIGNED_PER_BAR_BUILDER"
+    assert result["execution_cost_calibration_verified"] is False
+    assert result["execution_cost_model_complete"] is False
+
+
+def test_signed_per_bar_router_gate_is_limited_to_attestable_crypto_spot_data():
+    import pandas as pd
+    from app.main import _requires_signed_per_bar_router_context
+
+    forex = pd.DataFrame({"close": [1.0]})
+    forex.attrs["data_provenance"] = {
+        "source": "oanda_candles",
+        "asset_class": "forex",
+        "market_type": "otc",
+        "volume_unit": "tick",
+        "volume_unit_verified": False,
+    }
+    commodity = pd.DataFrame({"close": [100.0]})
+    commodity.attrs["data_provenance"] = {
+        "source": "deriv_ohlcv",
+        "asset_class": "commodity",
+        "market_type": "spot",
+        "volume_unit": "contract",
+        "volume_unit_verified": False,
+    }
+    crypto_spot = pd.DataFrame({"close": [100.0]})
+    crypto_spot.attrs["data_provenance"] = {
+        "source": "ccxt_ohlcv",
+        "asset_class": "crypto",
+        "market_type": "spot",
+        "volume_unit": "base_asset",
+        "volume_unit_verified": True,
+    }
+
+    assert _requires_signed_per_bar_router_context("forex", forex) is False
+    assert _requires_signed_per_bar_router_context("commodity", commodity) is False
+    assert _requires_signed_per_bar_router_context("crypto", crypto_spot) is True
