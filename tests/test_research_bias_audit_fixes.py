@@ -338,14 +338,73 @@ def test_benchmark_controls_use_signed_per_event_costs_and_fail_closed_without_c
         for call in calls
     )
 
-    incomplete = oos_benchmark_comparison(
+    static_fallback = oos_benchmark_comparison(
         [frame], [signal], [candidate_net], [atr],
         transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
         stop_atr=5.0, take_profit_atr=5.0, random_trials=2, seed=23,
         execution_cost_context_blocks=[None],
     )
-    assert incomplete["status"] == "INCOMPLETE"
-    assert incomplete["execution_cost_model_complete"] is False
+    assert static_fallback["status"] == "OK"
+    assert static_fallback["execution_cost_model_complete"] is False
+    assert static_fallback["gate_passed"] is False
+
+    invalid = oos_benchmark_comparison(
+        [frame], [signal], [candidate_net], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        stop_atr=5.0, take_profit_atr=5.0, random_trials=2, seed=23,
+        execution_cost_context_blocks=["invalid-context"],
+    )
+    assert invalid["status"] == "INCOMPLETE"
+    assert invalid["execution_cost_model_complete"] is False
+
+
+def test_benchmark_replays_mixed_calibrated_and_static_fallback_folds(monkeypatch):
+    from app import research_execution_costs
+
+    first = _ohlcv(32)
+    second = _ohlcv(32)
+    second.index = pd.date_range("2026-02-01T00:00:00Z", periods=32, freq="h")
+    signal = np.zeros(32, dtype=float)
+    signal[6:18] = 1.0
+    atr = np.ones(32, dtype=float)
+    candidate = np.zeros(32, dtype=float)
+    context = {
+        "index": first.index,
+        "model_fingerprint": "a" * 64,
+        "context_sha256": "b" * 64,
+    }
+    priced_contexts = []
+
+    def event_cost(received_context, **kwargs):
+        assert received_context is context
+        priced_contexts.append(received_context)
+        return 6.5, None
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", event_cost
+    )
+    report = oos_benchmark_comparison(
+        [first, second],
+        [signal, signal],
+        [candidate, candidate],
+        [atr, atr],
+        transaction_cost_bps=12.0,
+        carry_bps_per_bar=0.0,
+        stop_atr=5.0,
+        take_profit_atr=5.0,
+        random_trials=2,
+        seed=29,
+        execution_cost_context_blocks=[context, None],
+        candidate_execution_cost_namespace="ai-walk-forward",
+    )
+
+    assert report["status"] == "OK"
+    assert report["execution_cost_model_complete"] is False
+    assert report["execution_cost_model_status"] == "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+    assert report["gate_passed"] is False
+    assert report["candidate_execution_model"].startswith("INDEPENDENT_FOLD_SIMULATION")
+    assert priced_contexts
+    assert all(item is context for item in priced_contexts)
 
 
 def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
