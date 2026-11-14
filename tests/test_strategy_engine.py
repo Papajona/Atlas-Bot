@@ -541,6 +541,10 @@ def test_triple_barrier_prices_label_entry_and_exit_with_per_bar_execution_evide
     assert labels.attrs["per_bar_execution_context_sha256"] == "b" * 64
     assert labels.attrs["execution_cost_label_event_pairs_priced"] > 0
     assert {event["side"] for event in priced_events} == {"buy", "sell"}
+    assert {event["namespace"] for event in priced_events} == {
+        "test-ai-labels:ENTRY",
+        "test-ai-labels:EXIT",
+    }
     assert all(event["bar_position"] > 0 for event in priced_events)
 
 
@@ -584,6 +588,7 @@ def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_
     def benchmark_spy(*_args, **kwargs):
         contexts = kwargs.get("execution_cost_context_blocks")
         seen["benchmark_context_count"] = len(contexts or [])
+        seen["benchmark_namespace"] = kwargs.get("candidate_execution_cost_namespace")
         return {
             "status": "OK",
             "execution_cost_model_complete": bool(contexts)
@@ -604,10 +609,11 @@ def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_
         execution_cost_context=context,
     )
 
-    assert seen["label_namespace"] == "ai-walk-forward:labels"
-    assert len(seen["provider_namespaces"]) == 4
+    assert seen["label_namespace"] == "ai-walk-forward"
+    assert seen["provider_namespaces"] == ["ai-walk-forward"] * 4
     assert len(seen["provider_indices"]) == 4
     assert seen["benchmark_context_count"] == 4
+    assert seen["benchmark_namespace"] == "ai-walk-forward"
     assert result["execution_cost_model_complete"] is True
     assert result["execution_cost_model_status"] == (
         "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
@@ -645,15 +651,24 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         result.attrs["execution_cost_label_event_pairs_priced"] = len(close)
         return result
 
+    provider_count = {"value": 0}
+
     def rejected_provider(_fold_context, *, namespace):
-        def reject_event(*_args):
-            raise research_execution_costs.ResearchExecutionCostError(
-                "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
-            )
-        return reject_event
+        provider_count["value"] += 1
+        if provider_count["value"] == 1:
+            def reject_event(*_args):
+                raise research_execution_costs.ResearchExecutionCostError(
+                    "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+                )
+            return reject_event
+        return lambda *_args: 0.25
 
     def benchmark_spy(*_args, **kwargs):
-        assert kwargs.get("execution_cost_context_blocks") is None
+        contexts = kwargs.get("execution_cost_context_blocks")
+        assert isinstance(contexts, list)
+        assert len(contexts) == 4
+        assert contexts[0] is None
+        assert all(isinstance(item, dict) for item in contexts[1:])
         return {"status": "OK", "execution_cost_model_complete": False}
 
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
@@ -676,9 +691,8 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
     )
     assert (
         result["execution_cost_failure_reasons"]["ORDER_PARTICIPATION_LIMIT_EXCEEDED"]
-        == 4
+        == 1
     )
-    assert all(
-        fold["execution_cost_model_complete"] is False
-        for fold in result["folds"]
-    )
+    assert [fold["execution_cost_model_complete"] for fold in result["folds"]] == [
+        False, True, True, True
+    ]
