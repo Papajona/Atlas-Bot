@@ -105,7 +105,7 @@ def triple_barrier(
     stop_atr: float | None = None,
     take_profit_atr: float | None = None,
     round_trip_cost_bps: float | pd.Series = 0.0,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     execution_cost_namespace: str = "ai-triple-barrier",
 ) -> pd.Series:
     """Create forward labels with the same execution-cost evidence as OOS simulation.
@@ -639,7 +639,7 @@ def ai_walk_forward_backtest(
     max_hold_bars: int | None = None,
     research_trial_evidence_verified: bool = False,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
 ) -> dict:
     """Chronological OOS backtest using explicit annualization and execution-cost assumptions."""
     try:
