@@ -1485,6 +1485,7 @@ async def advance_platform_paper_orders(
             fill_price = Decimal("0")
             fee_decimal = Decimal("0")
             slippage_bps = 0.0
+            execution_model_record = None
 
             if (preexisting_protective_trigger or active_exit_entry_ids) and not is_triggered_exit:
                 outcome = "WAIT_PROTECTIVE_TRIGGER"
