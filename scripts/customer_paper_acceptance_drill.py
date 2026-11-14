@@ -484,6 +484,7 @@ async def _phase_two(
         customer_id=customer_id,
         fill_id=reversal_fill["fill_id"],
         idempotency_key=f"{run_key}:reversal",
+        group_mark_prices_loader=load_current_group_marks,
     )
     _require(reversed_result.get("status") == "APPENDED", "compensating fill reversal was not appended")
     _set_operation("phase_two.verify_reversal_idempotency")
@@ -491,6 +492,7 @@ async def _phase_two(
         customer_id=customer_id,
         fill_id=reversal_fill["fill_id"],
         idempotency_key=f"{run_key}:reversal",
+        group_mark_prices_loader=load_current_group_marks,
     )
     _require(reversal_replay.get("status") == "REPLAYED", "reversal retry did not replay the immutable reversal")
 
