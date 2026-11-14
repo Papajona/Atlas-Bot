@@ -45,6 +45,14 @@ class Settings(BaseSettings):
             raise ValueError("ML_THREADS must be between 1 and 2 for the deployed CPU budget")
         return value
 
+    @field_validator("readyz_cache_seconds")
+    @classmethod
+    def _validate_readyz_cache_seconds(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError("READYZ_CACHE_SECONDS must be finite and non-negative")
+        return parsed
+
     @field_validator("paper_fill_latency_bars", "paper_order_ttl_bars")
     @classmethod
     def _validate_paper_bar_counts(cls, value: int) -> int:

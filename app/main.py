@@ -7534,12 +7534,47 @@ async def healthz():
     return {
         "status": "degraded" if degraded else "ok",
         "release": {"version": settings.release_version or settings.app_version, "sha": settings.release_sha or None, "image_digest": settings.image_digest or None},
-        "worker_loops": worker_health,
+        # Expose only coarse status; internal error details stay in protected logs/telemetry.
+        "worker_loops": {
+            name: {"status": state.get("status"), "restart_count": state.get("restart_count", 0)}
+            for name, state in worker_health.items()
+        },
     }
+
+
+_readyz_cache: dict[str, Any] = {"at": 0.0, "payload": None}
+_readyz_lock = asyncio.Lock()
 
 
 @app.get("/readyz")
 async def readyz():
+    """Cached readiness probe; staging/production failures must be non-2xx."""
+    ttl = max(0.0, float(settings.readyz_cache_seconds or 0.0))
+
+    def _fresh():
+        cached = _readyz_cache["payload"]
+        if ttl and cached is not None and (time.monotonic() - _readyz_cache["at"]) < ttl:
+            return cached
+        return None
+
+    payload = _fresh()
+    if payload is None:
+        async with _readyz_lock:
+            payload = _fresh()
+            if payload is None:
+                payload = await _compute_readyz()
+                _readyz_cache["payload"] = payload
+                _readyz_cache["at"] = time.monotonic()
+
+    enforce = (
+        settings.readyz_fail_when_not_ready
+        and str(settings.environment).lower() in {"staging", "production"}
+    )
+    status_code = 503 if enforce and payload.get("ready") is not True else 200
+    return JSONResponse(payload, status_code=status_code, headers={"Cache-Control": "no-store"})
+
+
+async def _compute_readyz() -> dict[str, Any]:
     checks = {}
     try:
         async with SessionLocal() as db:

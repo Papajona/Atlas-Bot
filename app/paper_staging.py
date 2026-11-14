@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+from string import Template
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -153,7 +154,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
     """Permit only read-only access to the two existing tables required for paper auth/kill switch."""
     try:
         async with engine.connect() as conn:
-            row = (await conn.execute(text(f"""
+            row = (await conn.execute(text(Template("""
                 SELECT current_database(), current_user, session_user,
                        current_setting('transaction_read_only') AS transaction_read_only,
                        r.rolcanlogin, r.rolsuper, r.rolcreaterole, r.rolcreatedb,
@@ -163,7 +164,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
                          JOIN pg_roles member_role ON member_role.oid=m.member
                          JOIN pg_roles grantor_role ON grantor_role.oid=m.grantor
                          WHERE m.roleid=r.oid
-                           AND {_UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE}
+                           AND ${UNSAFE_MEMBERSHIP_PREDICATE}
                        ) AS member_count,
                        has_schema_privilege(current_user, 'public', 'USAGE') AS public_usage,
                        has_schema_privilege(current_user, 'public', 'CREATE') AS public_create,
@@ -208,7 +209,7 @@ async def _primary_reader_preflight() -> dict[str, Any]:
                          WHERE n.nspname='public' AND c.relkind IN ('r','p')
                            AND c.relowner = r.oid) AS owned_public_tables
                 FROM pg_roles r WHERE r.rolname=current_user
-            """))).mappings().one()
+            """).substitute(UNSAFE_MEMBERSHIP_PREDICATE=_UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE)))).mappings().one()
     except Exception:
         return {"status": "BLOCKED", "reason": "PRIMARY_READ_ONLY_IDENTITY_UNAVAILABLE"}
 
