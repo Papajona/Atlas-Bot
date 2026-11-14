@@ -34,7 +34,7 @@ def test_staging_preflight_run_is_uniquely_correlated_and_rechecked_before_succe
     assert "inputs.request_id || 'manual'" in preflight
     assert "request_id:" in preflight
     assert '-f "request_id=$request_id"' in deploy
-    assert 'gh run view "$preflight_run_id"' in deploy
+    assert 'gh_retry run view "$preflight_run_id"' in deploy
     assert "run_name" in deploy
     assert "select(.displayTitle == $expected)" in deploy
     tracked_poll = deploy.index('gh run view "$preflight_run_id"')
