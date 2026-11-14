@@ -293,33 +293,32 @@ def oos_benchmark_comparison(
         else [None] * len(ohlc_blocks)
     )
     execution_cost_fallback_reasons = list(_execution_cost_fallback_reasons)
+    prepass_fallback_reasons: dict[int, str] = {}
 
-    def _retry_with_session_fallback_for_fold(block_index: int, reason: str) -> dict:
-        """Recompute every benchmark leg after downgrading one unpriceable fold.
+    def _retry_with_session_fallback_for_folds(rejections: Mapping[int, str]) -> dict:
+        """Downgrade all rejected folds together, then recompute aligned diagnostics once.
 
-        A control event that exceeds the signed per-bar participation ceiling must
-        not erase the benchmark report. Downgrade only that fold to the independently
-        verified session schedule (or the documented static fallback), then rerun
-        candidate, buy-and-hold and random controls together so their cost assumptions
-        remain aligned. The fallback remains diagnostic-only and cannot pass the gate.
+        The first pass scans candidate, buy-and-hold, and every random-control leg
+        across all still-verified folds. Once every rejected fold is known, one retry
+        prices all those folds with the same verified session schedule (or static
+        diagnostic costs). This avoids one full recursive benchmark run per failure.
         """
-        if block_index < 0 or block_index >= len(context_blocks) or context_blocks[block_index] is None:
-            return {
-                "status": "INCOMPLETE",
-                "reason": reason,
-                "execution_cost_model_complete": False,
-                "execution_cost_model_status": "INCOMPLETE_CONTROL_EXECUTION_COSTS",
-                "execution_cost_model_failure": list(execution_cost_fallback_reasons) + [reason],
-                "execution_cost_model_fallback_used": bool(execution_cost_fallback_reasons),
-                "gate_passed": False,
-            }
         fallback_contexts = list(context_blocks)
-        fallback_contexts[block_index] = None
+        reasons = list(execution_cost_fallback_reasons)
+        for block_index, reason in sorted(rejections.items()):
+            if (
+                block_index < 0
+                or block_index >= len(fallback_contexts)
+                or fallback_contexts[block_index] is None
+            ):
+                continue
+            fallback_contexts[block_index] = None
+            reasons.append(f"fold_{block_index}:{reason}")
         fallback = oos_benchmark_comparison(
-            ohlc_blocks,
-            entry_signal_blocks,
-            candidate_net_blocks,
-            entry_atr_blocks,
+            frame_blocks,
+            signals,
+            candidate_blocks,
+            None if entry_atr_blocks is None else atr_blocks,
             transaction_cost_bps=transaction_cost_bps,
             carry_bps_per_bar=carry_bps_per_bar,
             stop_atr=stop_atr,
@@ -334,10 +333,7 @@ def oos_benchmark_comparison(
             session_costs_bps=session_costs_bps,
             execution_cost_context_blocks=fallback_contexts,
             candidate_execution_cost_namespace=candidate_execution_cost_namespace,
-            _execution_cost_fallback_reasons=tuple(
-                execution_cost_fallback_reasons
-                + [f"fold_{block_index}:{reason}"]
-            ),
+            _execution_cost_fallback_reasons=tuple(reasons),
         )
         # Never let a fallback-priced result satisfy the verified per-bar gate.
         fallback["execution_cost_model_complete"] = False
@@ -347,9 +343,9 @@ def oos_benchmark_comparison(
             else "INCOMPLETE_STATIC_FALLBACK"
         )
         fallback["execution_cost_model_failure"] = list(
-            fallback.get("execution_cost_model_failure") or []
+            fallback.get("execution_cost_model_failure") or reasons
         )
-        fallback["execution_cost_model_fallback_used"] = True
+        fallback["execution_cost_model_fallback_used"] = bool(reasons)
         fallback["gate_passed"] = False
         return fallback
     try:
@@ -627,10 +623,10 @@ def oos_benchmark_comparison(
                 candidate_execution_cost_namespace,
             )
         except ResearchExecutionCostError as exc:
-            return _retry_with_session_fallback_for_fold(
-                block_index,
-                f"benchmark_candidate_execution_cost_unavailable:{exc}",
+            prepass_fallback_reasons[block_index] = (
+                f"benchmark_candidate_execution_cost_unavailable:{exc}"
             )
+            continue
         except (TypeError, ValueError, OverflowError, FloatingPointError):
             return {"status": "INVALID_DATA", "reason": "candidate_fold_execution_invalid"}
         candidate_fold_values.extend(np.asarray(net, dtype=float).tolist())
@@ -680,6 +676,8 @@ def oos_benchmark_comparison(
     for block_index, (frame, market, execution_context) in enumerate(zip(
         frame_blocks, market_blocks, context_blocks, strict=True
     )):
+        if block_index in prepass_fallback_reasons:
+            continue
         turnover = np.zeros(len(market), dtype=float)
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
@@ -703,10 +701,10 @@ def oos_benchmark_comparison(
             )
             if entry_cost is None or exit_cost is None:
                 reason = entry_reason or exit_reason or "BUY_AND_HOLD_EXECUTION_COST_UNAVAILABLE"
-                return _retry_with_session_fallback_for_fold(
-                    block_index,
-                    f"benchmark_buy_and_hold_execution_cost_unavailable:{reason}",
+                prepass_fallback_reasons[block_index] = (
+                    f"benchmark_buy_and_hold_execution_cost_unavailable:{reason}"
                 )
+                continue
             transaction_drag = np.zeros(len(market), dtype=float)
             transaction_drag[0] += float(entry_cost) / 10_000.0
             transaction_drag[-1] += float(exit_cost) / 10_000.0
@@ -762,16 +760,20 @@ def oos_benchmark_comparison(
                 (shifted != 0.0)
                 & ((previous_requested == 0.0) | (np.sign(shifted) != np.sign(previous_requested)))
             ))
+            # Keep RNG advancement stable, but do not re-probe a fold already
+            # known to require session/static fallback during this pre-pass.
+            if block_index in prepass_fallback_reasons:
+                continue
             try:
                 net, turnover, executed, exits, audited_exits = _simulate_signal(
                     frame, market, shifted, atr, execution_context,
                     f"benchmark:random:{trial_index}:fold:{block_index}",
                 )
             except ResearchExecutionCostError as exc:
-                return _retry_with_session_fallback_for_fold(
-                    block_index,
-                    f"benchmark_random_control_execution_cost_unavailable:{exc}",
+                prepass_fallback_reasons[block_index] = (
+                    f"benchmark_random_control_execution_cost_unavailable:{exc}"
                 )
+                continue
             except (TypeError, ValueError, OverflowError, FloatingPointError):
                 return {"status": "INVALID_DATA", "reason": "random_control_fold_execution_invalid"}
             previous_executed = np.r_[0.0, executed[:-1]]
@@ -791,6 +793,9 @@ def oos_benchmark_comparison(
         random_requested_exposure_bars.append(requested_exposure_bars)
         random_requested_entry_counts.append(requested_entry_count)
 
+    if prepass_fallback_reasons:
+        return _retry_with_session_fallback_for_folds(prepass_fallback_reasons)
+
     valid_nonzero_shifts = [
         shift for offsets in valid_shift_offsets for shift in offsets if shift != 0
     ]
@@ -802,15 +807,16 @@ def oos_benchmark_comparison(
         "execution_cost_model_status": (
             "VERIFIED_PER_BAR_EXECUTION_COSTS"
             if benchmark_cost_complete
-            else "INCOMPLETE_SESSION_OR_STATIC_FALLBACK"
+            else "INCOMPLETE_SESSION_FALLBACK"
+            if execution_cost_fallback_reasons and session_costs_bps is not None
+            else "INCOMPLETE_STATIC_FALLBACK"
+            if execution_cost_fallback_reasons
+            else "INCOMPLETE_SESSION_BENCHMARK_COSTS"
             if session_costs_bps is not None
             else "INCOMPLETE_STATIC_BENCHMARK_COSTS"
         ),
         "execution_cost_model_failure": execution_cost_fallback_reasons or None,
-        "execution_cost_model_fallback_used": bool(
-            execution_cost_fallback_reasons
-            or (not benchmark_cost_complete and session_costs_bps is not None)
-        ),
+        "execution_cost_model_fallback_used": bool(execution_cost_fallback_reasons),
         "execution_cost_model_namespace": candidate_execution_cost_namespace,
         "candidate_net_return": candidate_return,
         "candidate_stream_net_return": candidate_stream_return,
