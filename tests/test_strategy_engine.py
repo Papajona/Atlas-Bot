@@ -675,12 +675,17 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
             return reject_event
         return lambda *_args: 0.25
 
+    benchmark_fallback_audit = {}
+
     def benchmark_spy(*_args, **kwargs):
         contexts = kwargs.get("execution_cost_context_blocks")
         assert isinstance(contexts, list)
         assert len(contexts) == 4
         assert contexts[0] is None
         assert all(isinstance(item, Mapping) for item in contexts[1:])
+        benchmark_fallback_audit["reasons"] = kwargs.get(
+            "_execution_cost_fallback_reasons"
+        )
         return {"status": "OK", "execution_cost_model_complete": False}
 
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
@@ -708,6 +713,9 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
     assert [fold["execution_cost_model_complete"] for fold in result["folds"]] == [
         False, True, True, True
     ]
+    assert benchmark_fallback_audit["reasons"] == (
+        "fold_0:candidate_session_cost_fallback_after_event_rejection:ORDER_PARTICIPATION_LIMIT_EXCEEDED",
+    )
 
 
 
