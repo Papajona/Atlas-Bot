@@ -66,13 +66,23 @@ def test_static_asset_request_metrics_use_mount_label():
     request_series = monitoring.REQUESTS.labels("GET", "/static", "200")
     latency_series = monitoring.REQUEST_LATENCY.labels("GET", "/static")
     request_count_before = request_series._value.get()
-    latency_count_before = latency_series._count.get()
 
+    def latency_observation_count():
+        for metric in monitoring.REQUEST_LATENCY.collect():
+            for sample in metric.samples:
+                if (
+                    sample.name == "trader_http_request_duration_seconds_count"
+                    and sample.labels == {"method": "GET", "path": "/static"}
+                ):
+                    return sample.value
+        return 0
+
+    latency_count_before = latency_observation_count()
     response = client.get("/static/app.css")
 
     assert response.status_code == 200
     assert request_series._value.get() == request_count_before + 1
-    assert latency_series._count.get() == latency_count_before + 1
+    assert latency_observation_count() == latency_count_before + 1
 
 
 def test_request_id_is_sanitised():
