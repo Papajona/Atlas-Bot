@@ -274,6 +274,22 @@ def _apply_protective_halts(
     }
 
 
+def _session_cost_schedule_was_applied(
+    execution_cost_context: Mapping[str, object] | None,
+    execution_audit: Mapping[str, object],
+    session_costs_bps: dict[str, float] | None,
+) -> bool:
+    """Report session costs only when the returned candidate stream used them."""
+    return bool(
+        session_costs_bps is not None
+        and (
+            execution_cost_context is None
+            or execution_audit.get("per_bar_execution_cost_model_status")
+            == "FALLBACK_AFTER_EVENT_REJECTION"
+        )
+    )
+
+
 def _benchmark_execution_inputs(
     execution_cost_context: Mapping[str, object] | None,
     execution_audit: dict,
@@ -288,10 +304,10 @@ def _benchmark_execution_inputs(
     """
     if execution_audit.get("per_bar_execution_cost_model_status") == "FALLBACK_AFTER_EVENT_REJECTION":
         return None, session_costs_bps
-    return (
-        execution_cost_context,
-        None if execution_cost_context is not None else session_costs_bps,
-    )
+    # Keep the separately verified schedule available as a fold-local fallback.
+    # The per-bar context remains authoritative unless an individual benchmark
+    # event exceeds its participation ceiling and that fold is downgraded.
+    return execution_cost_context, session_costs_bps
 
 
 def _protected_component_position(
@@ -990,8 +1006,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     ens_cost["execution_cost_model_fingerprint"] = ensemble_audit.get("execution_cost_model_fingerprint")
     ens_cost["per_bar_execution_context_sha256"] = ensemble_audit.get("per_bar_execution_context_sha256")
     ens_cost["per_bar_execution_cost_failure"] = ensemble_audit.get("per_bar_execution_cost_failure")
-    ens_cost["session_cost_model_complete"] = (
-        applied_session_costs is not None and execution_cost_context is None
+    ens_cost["session_cost_model_complete"] = _session_cost_schedule_was_applied(
+        execution_cost_context, ensemble_audit, session_costs_bps
     )
     ens_cost["session_costs_bps"] = session_costs_bps
     ens_cost["session_costs_reason"] = cost_validation.get("session_costs_reason")
@@ -1119,8 +1135,8 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             or execution_context_audit.get("per_bar_execution_context_sha256")
         )
         cost_target["execution_cost_model_reason"] = execution_context_audit.get("reason")
-        cost_target["session_cost_model_complete"] = (
-            applied_session_costs is not None and execution_cost_context is None
+        cost_target["session_cost_model_complete"] = _session_cost_schedule_was_applied(
+            execution_cost_context, cost_target, session_costs_bps
         )
         cost_target["session_costs_bps"] = session_costs_bps
         cost_target["session_costs_reason"] = cost_validation.get("session_costs_reason")
