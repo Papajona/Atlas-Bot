@@ -420,7 +420,143 @@ def test_benchmark_cost_context_is_disabled_after_candidate_event_rejection():
     assert fallback_context is None
     assert fallback_sessions is session_schedule
     assert verified_context is context
-    assert verified_sessions is None
+    # Keep the separately verified schedule ready for a per-fold control fallback.
+    assert verified_sessions is session_schedule
+
+
+def test_session_cost_completeness_reflects_the_schedule_used_after_per_bar_rejection():
+    from app.research_engine import _session_cost_schedule_was_applied
+
+    context = {"model_fingerprint": "a" * 64}
+    schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    assert _session_cost_schedule_was_applied(
+        context,
+        {"per_bar_execution_cost_model_status": "FALLBACK_AFTER_EVENT_REJECTION"},
+        schedule,
+    ) is True
+    assert _session_cost_schedule_was_applied(
+        context,
+        {"per_bar_execution_cost_model_status": "VERIFIED_PER_BAR_EXECUTION_COSTS"},
+        schedule,
+    ) is False
+    assert _session_cost_schedule_was_applied(None, {}, schedule) is True
+    assert _session_cost_schedule_was_applied(context, {}, None) is False
+
+
+def test_execution_simulator_prices_ordinary_transition_to_flat_as_exit():
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h")
+    frame = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 100.0],
+            "high": [101.0, 101.0, 101.0],
+            "low": [99.0, 99.0, 99.0],
+            "close": [100.0, 100.0, 100.0],
+        },
+        index=index,
+    )
+    calls = []
+
+    def cost_provider(bar_position, turnover, reference_price, side, event_type):
+        calls.append((bar_position, turnover, reference_price, side, event_type))
+        return {"ENTRY": 10.0, "EXIT": 20.0, "ADJUST": 15.0}[event_type]
+
+    simulate_execution_aware_strategy(
+        frame,
+        pd.Series([0.5, 0.0, 0.0], index=index),
+        pd.Series([10.0, 10.0, 10.0], index=index),
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=0.0,
+        transaction_cost_provider=cost_provider,
+    )
+
+    assert [call[4] for call in calls] == ["ENTRY", "EXIT"]
+
+
+@pytest.mark.parametrize(
+    "failing_namespace",
+    ["benchmark:random:", "benchmark:buy-and-hold:"],
+)
+def test_benchmark_control_cost_rejection_falls_back_and_preserves_diagnostics(
+    tmp_path, monkeypatch, failing_namespace
+):
+    from app import research_execution_costs as costs_module
+    from app.research_validation import oos_benchmark_comparison
+
+    source_frame = _research_frame(periods=64)
+    settings = _settings(tmp_path)
+    settings.research_order_notional_usd = 10.0
+    evidence = _research_cost_evidence(source_frame, settings, attach_to_frame=False)
+    full_context, audit = build_research_execution_cost_context(
+        source_frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+        calibration_evidence=evidence,
+    )
+    assert full_context is not None
+    assert audit["execution_cost_model_complete"] is True
+
+    fold = source_frame.iloc[-32:].copy()
+    context = slice_research_execution_context(full_context, fold.index)
+    assert context is not None
+    calls = []
+    original_event_cost = costs_module.execution_cost_for_event
+
+    def reject_selected_control(received_context, **kwargs):
+        namespace = str(kwargs["namespace"])
+        calls.append(namespace)
+        if failing_namespace in namespace:
+            return None, "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+        return original_event_cost(received_context, **kwargs)
+
+    monkeypatch.setattr(
+        costs_module, "execution_cost_for_event", reject_selected_control
+    )
+    signal = np.zeros(len(fold), dtype=float)
+    signal[4:14] = 0.5
+    atr = np.ones(len(fold), dtype=float)
+    candidate_net = np.zeros(len(fold), dtype=float)
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    result = oos_benchmark_comparison(
+        [fold],
+        [signal],
+        [candidate_net],
+        [atr],
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=43,
+        session_costs_bps=session_schedule,
+        execution_cost_context_blocks=[context],
+        candidate_execution_cost_namespace="research:benchmark-fallback-test",
+    )
+
+    assert any(failing_namespace in name for name in calls)
+    assert result["status"] == "OK"
+    assert result["execution_cost_model_complete"] is False
+    assert result["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
+    assert result["execution_cost_model_fallback_used"] is True
+    assert any(failing_namespace in reason for reason in result["execution_cost_model_failure"])
+    assert result["gate_passed"] is False
+    assert result["candidate_net_return"] is not None
+    assert result["buy_and_hold_net_return"] is not None
+    assert result["matched_random_entry_median_net_return"] is not None
+    assert result["random_trials"] == 2
+    assert result["buy_and_hold_session_cost_model_complete"] is True
 
 
 def test_rejects_ohlcv_mutation_after_provenance_was_attached(tmp_path):
