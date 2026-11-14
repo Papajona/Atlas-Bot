@@ -694,17 +694,14 @@ def ai_walk_forward_backtest(
             y.attrs.get("execution_cost_label_event_pairs_priced", 0) or 0
         ),
     }
-    valid = y.notna()
-    X, aligned = X.loc[valid], aligned.loc[valid]
-    y = y.loc[valid]
-    # The OOS fold indices now address the filtered label matrix. Keep the
-    # execution ATR series on that exact same index so no fold can silently
-    # reuse a pre-filter bar (or pass a warm-up NaN to a non-zero position).
-    entry_atr_for_label = entry_atr_for_label.loc[valid]
-    # Use an explicitly expanding chronological split with a full label-horizon purge
-    # between every train/test boundary. sklearn.TimeSeriesSplit makes early training
-    # folds shorter than min_train, silently skipping them (for example, 1,799 bars
-    # with min_train=800 and five splits yields only three usable folds).
+    # Keep the original feature/price timeline intact. Labels can be unavailable
+    # when signed per-bar execution pricing rejects an event; such rows are excluded
+    # from model fitting only, never from the OOS OHLC timeline or next-open timing.
+    valid_label_mask = y.notna()
+    entry_atr_for_label = entry_atr_for_label.reindex(X.index)
+    # Use expanding chronological splits on the uncompressed feature timeline.
+    # The label horizon is purged in original bar units, and only valid labels within
+    # each training window are eligible to fit the model.
     minimum_test_bars = 20
     gap = hold_horizon
     required_bars = int(min_train) + int(folds) * minimum_test_bars + (2 * int(folds) - 1) * gap
@@ -740,9 +737,12 @@ def ai_walk_forward_backtest(
     total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
     for fold in split_specs:
-        tr = np.arange(fold.train_start, fold.train_end, dtype=int)
+        train_window = np.arange(fold.train_start, fold.train_end, dtype=int)
         te = np.arange(fold.test_start, fold.test_end, dtype=int)
-        if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy())) < 2:
+        # Filter labels only inside the chronological training window. Test rows
+        # remain contiguous original bars, including rows whose labels were unpriced.
+        tr = train_window[valid_label_mask.iloc[train_window].to_numpy(dtype=bool)]
+        if len(tr) < min_train or len(np.unique((y.iloc[tr] + 1).to_numpy(dtype=int))) < 2:
             continue
         m = LGBMClassifier(objective="multiclass", class_weight="balanced",
                            n_estimators=300, max_depth=3, learning_rate=0.05,
