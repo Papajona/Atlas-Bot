@@ -463,11 +463,21 @@ def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_de
     assert "cancel-in-progress: false" in deploy
     assert "Keep the parent run alive" in deploy
     assert "gate_wait_seconds=7200" in deploy
+    assert 'cat > "$RUNNER_TEMP/atlas-gh-retry.sh"' in deploy
+    assert 'echo "ATLAS_GH_RETRY_HELPER=$RUNNER_TEMP/atlas-gh-retry.sh" >> "$GITHUB_ENV"' in deploy
+    assert deploy.count('source "$ATLAS_GH_RETRY_HELPER"') == 3
+    assert "max_attempts=6" in deploy
+    assert "HTTP (429|5[0-9][0-9])" in deploy
+    assert "gh_retry run list" in deploy
+    assert "gh_retry run view" in deploy
+    assert "gh api " not in deploy
+    assert "gh run list " not in deploy
+    assert "gh run view " not in deploy
 
     deploy_step = deploy.split(
         "      - name: Deploy restricted paper-only Cloud Run service", 1
     )[1].split("\n      - name:", 1)[0]
-    guard = deploy_step.index('current_main_sha="$(gh api')
+    guard = deploy_step.index('current_main_sha="$(gh_retry api')
     comparison = deploy_step.index('if [[ "$current_main_sha" != "$GITHUB_SHA" ]]', guard)
     image = deploy_step.index('IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")', comparison)
     mutation = deploy_step.index('gcloud run deploy "$STAGING_SERVICE"', image)
@@ -477,7 +487,7 @@ def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_de
     post_deploy_guard = deploy.split(
         "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
     )[1].split("\n      - name:", 1)[0]
-    assert 'current_main_sha="$(gh api' in post_deploy_guard
+    assert 'current_main_sha="$(gh_retry api' in post_deploy_guard
     assert 'if [[ "$current_main_sha" != "$GITHUB_SHA" ]]' in post_deploy_guard
     assert "main advanced during staging deployment" in post_deploy_guard
 
@@ -503,7 +513,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
         assert f'"{required_workflow}"' in deploy
     assert "gh workflow run staging-identity-preflight.yml" in deploy
     assert '-f "request_id=$request_id"' in deploy
-    assert 'gh run view "$preflight_run_id"' in deploy
+    assert 'gh_retry run view "$preflight_run_id"' in deploy
     assert "Dispatch and require customer-paper acceptance on this exact deployment" in deploy
     assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
     assert '-f "target_sha=$GITHUB_SHA"' in deploy
@@ -514,7 +524,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert 'acceptance_wait_seconds=5400' in deploy
     assert 'acceptance_poll_interval_seconds=30' in deploy
     assert 'timeout-minutes: 300' in deploy
-    assert 'gh run view "$acceptance_run_id"' in deploy
+    assert 'gh_retry run view "$acceptance_run_id"' in deploy
     assert "PASS: customer-paper acceptance run" in deploy
     acceptance_dispatch = deploy.split(
         "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
