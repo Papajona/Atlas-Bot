@@ -101,9 +101,28 @@ SELECT jsonb_build_object(
       'public_tables_missing_dml', (
         SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')
           AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
                AND has_table_privilege(r.rolname,c.oid,'UPDATE')
                AND has_table_privilege(r.rolname,c.oid,'DELETE'))
+      ),
+      'research_tables_privilege_mismatch', (
+        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND c.relname IN ('research_trial_ledger_head', 'research_holdout_registry')
+          AND NOT (
+            (c.relname='research_trial_ledger_head'
+              AND has_table_privilege(r.rolname,c.oid,'SELECT')
+              AND has_table_privilege(r.rolname,c.oid,'UPDATE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
+              AND NOT has_table_privilege(r.rolname,c.oid,'DELETE'))
+            OR
+            (c.relname='research_holdout_registry'
+              AND has_table_privilege(r.rolname,c.oid,'SELECT')
+              AND has_table_privilege(r.rolname,c.oid,'INSERT')
+              AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'DELETE'))
+          )
       ),
       'public_sequences_missing_usage', (
         SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -310,7 +329,7 @@ def audit(args: argparse.Namespace) -> dict:
         failures.append("runtime role lacks public schema USAGE")
     if truthy(role.get("public_schema_create")):
         failures.append("runtime role must not have CREATE on the public schema")
-    for key in ("public_tables_missing_select", "public_tables_missing_dml", "public_sequences_missing_usage"):
+    for key in ("public_tables_missing_select", "public_tables_missing_dml", "research_tables_privilege_mismatch", "public_sequences_missing_usage"):
         try:
             count = int(role.get(key, -1))
         except (TypeError, ValueError):

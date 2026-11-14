@@ -150,9 +150,28 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
           'tables_missing_dml', (
             SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relkind IN ('r','p')
+              AND c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')
               AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
                    AND has_table_privilege(r.rolname,c.oid,'UPDATE')
                    AND has_table_privilege(r.rolname,c.oid,'DELETE'))
+          ),
+          'research_tables_privilege_mismatch', (
+            SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relkind IN ('r','p')
+              AND c.relname IN ('research_trial_ledger_head', 'research_holdout_registry')
+              AND NOT (
+                (c.relname='research_trial_ledger_head'
+                  AND has_table_privilege(r.rolname,c.oid,'SELECT')
+                  AND has_table_privilege(r.rolname,c.oid,'UPDATE')
+                  AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
+                  AND NOT has_table_privilege(r.rolname,c.oid,'DELETE'))
+                OR
+                (c.relname='research_holdout_registry'
+                  AND has_table_privilege(r.rolname,c.oid,'SELECT')
+                  AND has_table_privilege(r.rolname,c.oid,'INSERT')
+                  AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
+                  AND NOT has_table_privilege(r.rolname,c.oid,'DELETE'))
+              )
           ),
           'sequences_missing_usage', (
             SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -319,7 +338,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
             failures.append(f"runtime role has forbidden capability: {key}")
     if role.get("login") is not True or role.get("bypass_rls") is not True or role.get("schema_usage") is not True:
         failures.append("runtime role login/schema/bypass capabilities do not meet policy")
-    for key in ("owns_tables", "memberships", "tables_missing_select", "tables_missing_dml", "sequences_missing_usage"):
+    for key in ("owns_tables", "memberships", "tables_missing_select", "tables_missing_dml", "research_tables_privilege_mismatch", "sequences_missing_usage"):
         try:
             count = int(role.get(key, -1))
         except (TypeError, ValueError):
