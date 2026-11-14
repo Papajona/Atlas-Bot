@@ -398,7 +398,7 @@ def triple_barrier(
     )
     result.attrs["per_bar_execution_context_sha256"] = (
         execution_cost_context.get("context_sha256")
-        if isinstance(execution_cost_context, dict) else None
+        if isinstance(execution_cost_context, Mapping) else None
     )
     result.attrs["execution_cost_failure_reasons"] = execution_cost_failures
     result.attrs["execution_cost_label_event_pairs_priced"] = execution_cost_pairs_priced
@@ -1023,11 +1023,11 @@ def ai_walk_forward_backtest(
         execution_cost_model_status = "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
     execution_cost_model_fingerprint = (
         str(execution_cost_context.get("model_fingerprint") or "")
-        if isinstance(execution_cost_context, dict) else None
+        if isinstance(execution_cost_context, Mapping) else None
     )
     per_bar_execution_context_sha256 = (
         str(execution_cost_context.get("context_sha256") or "")
-        if isinstance(execution_cost_context, dict) else None
+        if isinstance(execution_cost_context, Mapping) else None
     )
     return {
         "bars": int(len(df)), "oos_bars": int(len(net)), "features": int(X.shape[1]), "validated_bars": int(pred_signal.notna().sum()),
