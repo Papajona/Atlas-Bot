@@ -57,6 +57,20 @@ def test_signal_id_and_client_order_id_are_deterministic():
     assert client_order_id(sid).startswith("ait-")
 
 
+def test_triple_barrier_training_labels_encode_as_classifier_classes():
+    from app.trading_core import _encode_triple_barrier_labels
+
+    labels = pd.Series([-1.0, 0.0, 1.0], index=["short", "flat", "long"])
+    encoded = _encode_triple_barrier_labels(labels)
+
+    assert encoded.tolist() == [0, 1, 2]
+    assert encoded.index.tolist() == ["short", "flat", "long"]
+    with pytest.raises(ValueError, match="finite and non-null"):
+        _encode_triple_barrier_labels(pd.Series([-1.0, np.nan, 1.0]))
+    with pytest.raises(ValueError, match="one of -1, 0, or 1"):
+        _encode_triple_barrier_labels(pd.Series([-1.0, 2.0]))
+
+
 def test_training_refuses_collapsed_target():
     from app.trading_core import train_model
     idx = pd.date_range("2025-01-01", periods=1400, freq="h", tz="UTC")

@@ -284,6 +284,19 @@ def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float
     return float(log_loss(y, aligned, labels=[0, 1, 2]))
 
 
+def _encode_triple_barrier_labels(labels: pd.Series) -> pd.Series:
+    """Validate and encode {-1, 0, 1} barrier labels as classifier classes {0, 1, 2}."""
+    if not isinstance(labels, pd.Series):
+        raise TypeError("triple-barrier labels must be a pandas Series")
+    values = pd.to_numeric(labels, errors="coerce")
+    numeric = values.to_numpy(dtype=float)
+    if values.isna().any() or not np.isfinite(numeric).all():
+        raise ValueError("triple-barrier labels must be finite and non-null")
+    if not values.isin((-1, 0, 1)).all():
+        raise ValueError("triple-barrier labels must be one of -1, 0, or 1")
+    return values.astype(int) + 1
+
+
 def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: int = 5, asset: str = "crypto") -> dict:
     # Fail before touching data: unsupported assets must not inherit crypto assumptions.
     if asset not in PROFILES:
@@ -303,7 +316,7 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     if len(X) < min_train + folds * (profile.max_hold + 20):
         raise RuntimeError(f"Not enough data for walk-forward training: {len(X)} samples")
 
-    encoded = y.astype(int) + 1  # -1,0,1 -> 0,1,2
+    encoded = _encode_triple_barrier_labels(y)
     tscv = TimeSeriesSplit(n_splits=folds, gap=profile.max_hold)
     scores = []
     models = []

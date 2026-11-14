@@ -28,7 +28,8 @@ Before any replay:
 - verify the raw-response and normalized-CSV SHA-256 values against the manifest;
 - verify completed-row count, duplicate-free ascending timestamps (including sub-second precision), instrument, granularity, and fixed request window;
 - compare the request window and instrument with the original experiment record;
-- confirm the exact code commit explicitly encodes triple-barrier training labels as `-1/0/1 → 0/1/2` in `train_model()` and maps prediction probabilities by the estimator's actual `classes_` values in `predict_latest()`;
-- run `pytest -q tests/test_core.py::test_predict_latest_maps_sparse_reordered_class_probabilities` against that exact commit and require a successful result. The regression covers reordered classes and an absent flat class; merely having the test in the repository is not evidence that it passed.
+- confirm the exact code commit maps triple-barrier training labels `-1/0/1 → 0/1/2` through `_encode_triple_barrier_labels()`, which is called by `train_model()`;
+- run `pytest -q tests/test_core.py::test_triple_barrier_training_labels_encode_as_classifier_classes` against that exact commit and require a successful result; this test verifies the training-label mapping;
+- separately confirm that `predict_latest()` maps probability columns by the estimator's actual `classes_` values, then run `pytest -q tests/test_core.py::test_predict_latest_maps_sparse_reordered_class_probabilities` against that exact commit and require a successful result. This second regression covers reordered classes and an absent flat class; it does not test training-label encoding. Merely having either test in the repository is not evidence that it passed.
 
 A new capture is a new dataset unless its provenance and exact content match the original. Matching 1,799 rows alone does not prove equivalence. Do not run performance calculations or report replay metrics until this gate passes.
