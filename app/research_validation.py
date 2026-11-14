@@ -263,11 +263,12 @@ def oos_benchmark_comparison(
             "execution_cost_model_complete": False,
         }
     if execution_cost_context_blocks is not None and any(
-        not isinstance(context, dict) for context in execution_cost_context_blocks
+        context is not None and not isinstance(context, dict)
+        for context in execution_cost_context_blocks
     ):
         return {
             "status": "INCOMPLETE",
-            "reason": "benchmark_execution_context_unavailable_for_one_or_more_folds",
+            "reason": "benchmark_execution_context_invalid_for_one_or_more_folds",
             "execution_cost_model_complete": False,
         }
     from .research_execution_costs import (
