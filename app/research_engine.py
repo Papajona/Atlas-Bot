@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from dataclasses import asdict
+from collections.abc import Mapping
 import math
 import numpy as np
 import pandas as pd
@@ -346,12 +347,12 @@ def _protected_component_position(
         execution["audit"]["per_bar_execution_cost_failure"] = str(exc)
     execution["audit"]["execution_cost_model_fingerprint"] = (
         execution_cost_context.get("model_fingerprint")
-        if isinstance(execution_cost_context, dict)
+        if isinstance(execution_cost_context, Mapping)
         else None
     )
     execution["audit"]["per_bar_execution_context_sha256"] = (
         execution_cost_context.get("context_sha256")
-        if isinstance(execution_cost_context, dict)
+        if isinstance(execution_cost_context, Mapping)
         else None
     )
     return (
