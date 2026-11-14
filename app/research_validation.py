@@ -953,10 +953,10 @@ def fixed_signal_walk_forward_oos(
     benchmark_cooldown_bars: int = 0,
     benchmark_random_trials: int = 100,
     session_costs_bps: dict[str, float] | None = None,
-    session_costs_applied: bool | None = None,
     transaction_cost_bps_per_bar: pd.Series | None = None,
     execution_cost_context: dict[str, object] | None = None,
     benchmark_execution_cost_namespace: str = "research:ensemble",
+    session_costs_applied: bool | None = None,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
