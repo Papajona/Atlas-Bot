@@ -645,7 +645,6 @@ def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_
 
 def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection(monkeypatch):
     from app import research_execution_costs, trading_core
-    from app.research_validation import oos_benchmark_comparison
 
     frame = sample_df(1800)
     context = _validator_issued_ai_execution_context(
@@ -710,18 +709,19 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         benchmark_inputs["execution_cost_context_blocks"] = kwargs.get(
             "execution_cost_context_blocks"
         )
-        kwargs["random_trials"] = 2
-        return oos_benchmark_comparison(*args, **kwargs)
+        return {
+            "status": "OK",
+            "execution_cost_model_complete": False,
+            "execution_cost_model_status": "INCOMPLETE_SESSION_FALLBACK",
+            "execution_cost_model_fallback_used": True,
+            "buy_and_hold_session_fallback_folds": [0],
+            "gate_passed": False,
+        }
 
     monkeypatch.setattr(trading_core, "LGBMClassifier", PatternModel)
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
     monkeypatch.setattr(
         research_execution_costs, "make_execution_cost_provider", rejected_provider
-    )
-    monkeypatch.setattr(
-        research_execution_costs,
-        "execution_cost_for_event",
-        lambda _context, **_kwargs: (0.25, None),
     )
     monkeypatch.setattr(
         trading_core, "oos_benchmark_comparison", benchmark_with_small_random_sample
