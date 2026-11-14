@@ -327,8 +327,11 @@ def test_benchmark_controls_use_signed_per_event_costs_and_fail_closed_without_c
     )
 
     assert report["status"] == "OK"
-    assert report["execution_cost_model_complete"] is True
-    assert report["gate_passed"] in {True, False}
+    # A caller-created priceable mapping may price the diagnostic control, but
+    # cannot attest the benchmark's venue calibration or mark it complete.
+    assert report["execution_cost_model_complete"] is False
+    assert report["execution_cost_model_status"] == "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+    assert report["gate_passed"] is False
     assert any(
         call["namespace"].startswith("benchmark:buy-and-hold:")
         for call in calls
