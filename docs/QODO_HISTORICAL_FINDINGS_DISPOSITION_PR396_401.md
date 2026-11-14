@@ -112,6 +112,17 @@ Original Qodo review [#401](https://github.com/Papajona/Atlas-Bot/pull/401), com
 | 17 | Old latency interpolation helper left behind | Qodo marked resolved | Duplicate helper removed. |
 | 18 | Benchmark numbers vanish when a fill is too large | Implemented in current main | Candidate fallback removes the rejected per-bar context from benchmark inputs and retains the verified session schedule. Test: `test_benchmark_cost_context_is_disabled_after_candidate_event_rejection`. |
 
+## Follow-up review of PR406 itself
+
+Qodo's review comment `6876549905` on the earlier PR406 head `5c65b2834015a06d434f6550439c03ff4a4e54f0` raised two further status-consistency findings. These are additional review observations on PR406, not changes to the historical finding totals for PR396–401.
+
+| Qodo finding | Maintainer disposition | Evidence |
+|---|---|---|
+| `2058abdb-cc66-40be-b462-3734faeec4c9` — Session-priced candidates appear unverified | Fixed in this follow-up | The final report assembly now pairs each ensemble/component OOS report with its own simulator audit instead of passing the report dictionary as the audit. `_set_session_cost_report_status()` updates top-level and nested cost analysis from that audit. Regression: `tests/test_research_execution_costs.py::test_session_cost_report_status_uses_the_matching_simulator_audit`. |
+| `967e5bef-327c-4517-85f1-0d2b5dc8a2b6` — Verified runs show conflicting cost flags | Fixed in this follow-up | `fixed_signal_walk_forward_oos()` receives the candidate's explicit `session_costs_applied` flag. Schedule availability for a possible benchmark fallback no longer makes a verified per-bar candidate appear session-priced; top-level and nested flags now agree. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source`. |
+
+Qodo's separate fixer comment `6876551111` said no findings were within its configured fix scope. That is a Qodo configuration response, not a statement about Atlas code status and not a merge or release decision. The original Qodo review comment remains historical; this maintainer disposition records the code fix without claiming the external catalog or old bot-authored comment was edited.
+
 ## Maintainer result
 
 - PR396's historical active findings are fixed by merged PR398.
