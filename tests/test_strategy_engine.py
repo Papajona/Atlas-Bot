@@ -643,6 +643,37 @@ def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_
     )
 
 
+def test_ai_fallback_audit_indices_ignore_skipped_training_splits():
+    from app.trading_core import _ai_oos_candidate_fallback_reason
+
+    benchmark_blocks = []
+    reasons = []
+
+    # Split 0 is skipped for insufficient training labels and contributes no
+    # OOS block. The next rejected split is therefore benchmark block 0.
+    reasons.append(
+        _ai_oos_candidate_fallback_reason(
+            len(benchmark_blocks), "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+        )
+    )
+    benchmark_blocks.append(np.zeros(4, dtype=float))
+
+    # Split 2 is skipped after one materialized OOS block. A later rejected
+    # split must remain aligned to block 1, not its original split_specs index.
+    reasons.append(
+        _ai_oos_candidate_fallback_reason(
+            len(benchmark_blocks), "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+        )
+    )
+
+    assert reasons == [
+        "fold_0:candidate_session_cost_fallback_after_event_rejection:"
+        "ORDER_PARTICIPATION_LIMIT_EXCEEDED",
+        "fold_1:candidate_session_cost_fallback_after_event_rejection:"
+        "ORDER_PARTICIPATION_LIMIT_EXCEEDED",
+    ]
+
+
 def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection(monkeypatch):
     from app import research_execution_costs, trading_core
 
