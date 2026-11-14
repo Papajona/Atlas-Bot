@@ -707,15 +707,21 @@ def test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry(
     assert result["buy_and_hold_session_costs_bps"] is None
     assert result["buy_and_hold_session_fallback_folds"] == [0, 1]
 
-    # The first pass prices the candidate once per verified fold; the one
-    # fallback pass uses no per-bar context for either rejected fold.
-    for context in contexts:
+    # Rejected folds are priced once with signed context before being
+    # downgraded; the unaffected fold is priced again during the single retry.
+    for context in contexts[:2]:
         candidate_event_calls = [
             namespace for received, namespace in calls
             if received is context
             and namespace.startswith("candidate-two-pass-regression:")
         ]
         assert len(candidate_event_calls) == 2
+    unaffected_candidate_event_calls = [
+        namespace for received, namespace in calls
+        if received is contexts[2]
+        and namespace.startswith("candidate-two-pass-regression:")
+    ]
+    assert len(unaffected_candidate_event_calls) == 4
 
 
 def test_session_only_benchmark_is_not_reported_as_a_fallback():
