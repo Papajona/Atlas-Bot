@@ -43,6 +43,7 @@ from .groq_ai import groq_trade_context_review
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
 from .research_trial_archive import archive_research_trials
+from .research_execution_costs import build_research_execution_cost_context
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
 from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
@@ -3929,6 +3930,92 @@ def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> p
 
 
 
+def _attach_router_execution_cost_evidence(df: pd.DataFrame, req: Any) -> pd.DataFrame:
+    """Attach an optional signed calibration document without changing market provenance."""
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("execution-cost evidence can only be attached to a pandas DataFrame")
+    document = getattr(req, "execution_cost_calibration_evidence", None)
+    if document is None:
+        return df
+    result = df.copy(deep=False)
+    result.attrs["execution_cost_calibration_evidence"] = document
+    return result
+
+
+def _strategy_router_validation_gate(
+    validation: dict[str, Any],
+    *,
+    required_folds: int,
+    required_positive_fold_ratio: float,
+    current_dataset_sha256: str,
+) -> dict[str, Any]:
+    """Keep adaptive strategy promotion closed without current signed per-bar cost proof."""
+    folds = [
+        row for row in (validation.get("folds") or [])
+        if isinstance(row, dict)
+    ]
+    fold_returns = [
+        float(row.get("total_return", 0.0))
+        for row in folds
+    ]
+    positive_ratio = (
+        sum(value > 0.0 for value in fold_returns) / len(fold_returns)
+        if fold_returns else 0.0
+    )
+    evidence_id = str(
+        validation.get("execution_cost_calibration_evidence_id") or ""
+    ).strip()
+    calibration_verified = (
+        str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        and validation.get("execution_cost_calibration_verified") is True
+        and bool(evidence_id)
+    )
+    per_bar_costs_verified = (
+        validation.get("execution_cost_model_complete") is True
+        and validation.get("execution_cost_model_status")
+        == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+        and all(row.get("execution_cost_model_complete") is True for row in folds)
+    )
+    current_dataset_matches = (
+        bool(current_dataset_sha256)
+        and str(validation.get("execution_cost_dataset_sha256") or "").strip().lower()
+        == str(current_dataset_sha256).strip().lower()
+    )
+    research_performance_passed = (
+        validation.get("status") == "OK"
+        and len(folds) >= int(required_folds)
+        and float(validation.get("total_return", -1.0)) >= 0.0
+        and positive_ratio >= float(required_positive_fold_ratio)
+        and (min(fold_returns) if fold_returns else -1.0) >= -0.20
+    )
+    passed = bool(
+        research_performance_passed
+        and calibration_verified
+        and per_bar_costs_verified
+        and current_dataset_matches
+    )
+    reasons = []
+    if not research_performance_passed:
+        reasons.append("ROUTER_WALK_FORWARD_PERFORMANCE_GATE_FAILED")
+    if not calibration_verified:
+        reasons.append("SIGNED_VENUE_CALIBRATION_EVIDENCE_NOT_VERIFIED")
+    if not per_bar_costs_verified:
+        reasons.append("PER_BAR_EXECUTION_COSTS_INCOMPLETE")
+    if not current_dataset_matches:
+        reasons.append("EXECUTION_COST_EVIDENCE_DATASET_MISMATCH")
+    return {
+        "passed": passed,
+        "positive_fold_ratio": positive_ratio,
+        "folds": len(folds),
+        "required_positive_fold_ratio": float(required_positive_fold_ratio),
+        "execution_cost_calibration_verified": calibration_verified,
+        "execution_cost_calibration_evidence_id": evidence_id or None,
+        "execution_cost_model_complete": per_bar_costs_verified,
+        "execution_cost_dataset_matches_current_data": current_dataset_matches,
+        "rejection_reasons": reasons,
+    }
+
+
 def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if df is None or len(df) < settings.min_bars:
@@ -5837,6 +5924,26 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
 
     try:
         df = await _fetch_customer_oanda_data(profile.id, req) if req.asset in {"forex", "commodity"} else await asyncio.to_thread(market_data, req)
+        df = _attach_router_execution_cost_evidence(df, req)
+        try:
+            router_execution_cost_context, router_execution_cost_audit = await asyncio.to_thread(
+                build_research_execution_cost_context,
+                df,
+                settings=settings,
+                taker_bps=float(settings.research_taker_bps),
+                base_slippage_bps=float(settings.research_slippage_bps),
+                cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
+                asset=req.asset,
+            )
+        except Exception as exc:  # noqa: BLE001
+            router_execution_cost_context = None
+            router_execution_cost_audit = {
+                "status": "INCOMPLETE",
+                "reason": f"EXECUTION_COST_CONTEXT_BUILD_ERROR:{type(exc).__name__}",
+                "execution_cost_model_complete": False,
+                "execution_cost_calibration_status": "UNVERIFIED",
+                "execution_cost_calibration_evidence_id": None,
+            }
         data_safe, data_reasons = (
         _customer_paper_market_data_quality(df, req.timeframe, req.asset)
         if needs_customer_paper else _market_data_quality(df, req.timeframe, req.asset)
@@ -5977,6 +6084,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     min_trades=settings.adaptive_strategy_min_trades, costs_bps=settings.adaptive_strategy_cost_bps,
                     online_scores=online_scores, online_weight=settings.adaptive_strategy_online_weight,
                     blend_enabled=settings.adaptive_strategy_blend_enabled, blend_top_n=settings.adaptive_strategy_blend_top_n,
+                    execution_cost_context=router_execution_cost_context,
                 )
                 # Validate the router as a whole, not just the component strategies.
                 # Cache the expensive walk-forward evidence on the bot and refresh it with
@@ -6000,21 +6108,21 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         switch_min_advantage=settings.adaptive_strategy_switch_min_advantage,
                         min_regime_bars=settings.adaptive_strategy_min_regime_bars,
                         decision_stride=settings.adaptive_strategy_policy_validation_stride_bars,
+                        execution_cost_context=router_execution_cost_context,
                     )
                     router_json = {"validated_at": datetime.now(timezone.utc).isoformat(), "validation": router_validation}
                 else:
                     router_validation = router_json.get("validation") or {"status": "NOT_YET_VALIDATED"}
-                fold_returns = [float(x.get("total_return", 0.0)) for x in (router_validation.get("folds") or [])]
-                positive_ratio = (sum(x > 0 for x in fold_returns) / len(fold_returns)) if fold_returns else 0.0
-                router_validation_gate = {
-                    "passed": bool(router_validation.get("status") == "OK" and len(fold_returns) >= settings.adaptive_strategy_router_folds
-                                   and float(router_validation.get("total_return", -1.0)) >= 0.0
-                                   and positive_ratio >= settings.adaptive_strategy_router_required_positive_fold_ratio
-                                   and (min(fold_returns) if fold_returns else -1.0) >= -0.20),
-                    "positive_fold_ratio": positive_ratio,
-                    "folds": len(fold_returns),
-                    "required_positive_fold_ratio": settings.adaptive_strategy_router_required_positive_fold_ratio,
-                }
+                current_dataset_sha256 = str(
+                    (getattr(df, "attrs", {}).get("data_provenance") or {}).get("sha256") or ""
+                )
+                router_validation_gate = _strategy_router_validation_gate(
+                    router_validation,
+                    required_folds=settings.adaptive_strategy_router_folds,
+                    required_positive_fold_ratio=settings.adaptive_strategy_router_required_positive_fold_ratio,
+                    current_dataset_sha256=current_dataset_sha256,
+                )
+                router["execution_cost_context_audit"] = router_execution_cost_audit
                 router["validation"] = router_validation
                 router["validation_gate"] = router_validation_gate
                 if not router_validation_gate["passed"] and not paper_mode:
