@@ -84,6 +84,8 @@ def test_restore_audit_enforces_migration_0059_research_table_acl_contract():
     # The ledger head is SELECT/UPDATE only; the holdout registry is SELECT/INSERT only.
     assert "has_table_privilege(r.rolname,c.oid,'UPDATE')" in QUERY
     assert "has_table_privilege(r.rolname,c.oid,'INSERT')" in QUERY
+    assert QUERY.count("has_table_privilege(r.rolname,c.oid,'TRIGGER')") == 2
+    assert QUERY.count("has_table_privilege(r.rolname,c.oid,'REFERENCES')") == 2
     assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in QUERY
     assert "migration 0059 least-privilege grant contract" in Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
 
