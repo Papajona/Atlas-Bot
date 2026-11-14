@@ -7,12 +7,13 @@ import asyncio
 import pathlib
 import re
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from app import main, monitoring
+from app import main, monitoring, paper_staging
 from app.config import Settings
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -33,6 +34,68 @@ def test_metric_labels_use_route_template_not_raw_path():
     assert after - before <= 4
     assert "unmatched" in labels
     assert not any("does-not-exist" in label for label in labels)
+
+
+def test_metric_path_label_uses_mount_path_for_static_assets():
+    mounted_request = SimpleNamespace(
+        scope={
+            "type": "http",
+            "path": "/static/assets/dashboard.js",
+            # Middleware sees the already-consumed mount prefix here.
+            "root_path": "/static",
+            "path_params": {},
+        },
+        app=main.app,
+    )
+    unmatched_request = SimpleNamespace(
+        scope={
+            "type": "http",
+            "path": "/not-a-mounted-resource/opaque",
+            "root_path": "",
+            "path_params": {},
+        },
+        app=main.app,
+    )
+
+    assert monitoring.metric_path_label(mounted_request) == "/static"
+    assert monitoring.metric_path_label(unmatched_request) == "unmatched"
+
+    # A reverse proxy may contribute an app-root prefix before the static
+    # mount is consumed. Preserve that prefix while removing only /static.
+    prefixed_mounted_request = SimpleNamespace(
+        scope={
+            "type": "http",
+            "path": "/gateway/static/assets/dashboard.js",
+            "root_path": "/gateway/static",
+            "app_root_path": "/gateway",
+            "path_params": {},
+        },
+        app=main.app,
+    )
+    assert monitoring.metric_path_label(prefixed_mounted_request) == "/static"
+
+
+def test_static_asset_request_metrics_use_mount_label():
+    client = TestClient(main.app)
+    request_series = monitoring.REQUESTS.labels("GET", "/static", "200")
+    request_count_before = request_series._value.get()
+
+    def latency_observation_count():
+        for metric in monitoring.REQUEST_LATENCY.collect():
+            for sample in metric.samples:
+                if (
+                    sample.name == "trader_http_request_duration_seconds_count"
+                    and sample.labels == {"method": "GET", "path": "/static"}
+                ):
+                    return sample.value
+        return 0
+
+    latency_count_before = latency_observation_count()
+    response = client.get("/static/app.css")
+
+    assert response.status_code == 200
+    assert request_series._value.get() == request_count_before + 1
+    assert latency_observation_count() == latency_count_before + 1
 
 
 def test_request_id_is_sanitised():
@@ -165,6 +228,46 @@ def test_primary_reader_preflight_uses_static_sql():
     assert "member_role.rolname='postgres'" in body
     assert "grantor_role.rolname='supabase_admin'" in body
     assert "m.admin_option" in body
+
+
+def test_primary_reader_allowlist_matches_postgres_behavioral_fixture():
+    source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
+    preflight_start = source.index("async def _primary_reader_preflight")
+    body = source[preflight_start:preflight_start + 12000]
+    query_start = body.index('text("""') + len('text("""')
+    query_end = body.index('"""', query_start)
+    query = body[query_start:query_end]
+
+    predicate_start = query.index("NOT (", query.index("AS memberships"))
+    open_paren = query.index("(", predicate_start)
+    depth = 0
+    in_string = False
+    predicate_end = None
+    index = open_paren
+    while index < len(query):
+        char = query[index]
+        if char == "'":
+            if in_string and index + 1 < len(query) and query[index + 1] == "'":
+                index += 2
+                continue
+            in_string = not in_string
+        elif not in_string:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    predicate_end = index + 1
+                    break
+        index += 1
+
+    assert predicate_end is not None, "production membership predicate must be balanced"
+    production_predicate = query[predicate_start:predicate_end]
+    def normalize(value):
+        return re.sub(r"\s+", " ", value).strip()
+    assert normalize(production_predicate) == normalize(
+        paper_staging._UNSAFE_SUPABASE_MANAGED_MEMBERSHIP_PREDICATE
+    )
 
 
 def test_ci_scans_medium_severity_and_pins_runners():
