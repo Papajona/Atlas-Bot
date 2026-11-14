@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
+from .paper_execution_model import configured_paper_execution_settings
 from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
@@ -9248,12 +9249,19 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
     try:
         df = await asyncio.to_thread(market_data, req.model_copy(update={"days": 5}))
         price = float(df.close.iloc[-1])
+        calibration_configured = configured_paper_execution_settings(settings)
+        paper_market_context = (
+            await asyncio.to_thread(_server_paper_market_context, req, df)
+            if calibration_configured is not None
+            else None
+        )
         paper_processing = await advance_platform_paper_orders(
             df,
             exchange=req.exchange,
             symbol=req.symbol,
             timeframe=req.timeframe,
             asset=req.asset,
+            market_context=paper_market_context,
         )
         if paper_processing.get("status") in {"STALE_BAR", "BAR_NOT_COMPLETE", "DATA_PROVENANCE_INVALID", "BAR_PROVENANCE_CONFLICT", "INVALID_BAR_PRICE"}:
             raise RiskBlocked("Paper execution refused stale, incomplete, or unverified market data")
