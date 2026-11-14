@@ -143,18 +143,43 @@ review disposition. Qodo remains advisory; code changes and exact-head
 verification determine application status.
 
 
-## PR407 — readiness and telemetry follow-up
+## PR407 / PR409 — readiness and telemetry dispositions
 
-Qodo's latest review comment on [PR407](https://github.com/Papajona/Atlas-Bot/pull/407) reports four findings and marks all four resolved:
+The Qodo review comment on [PR407](https://github.com/Papajona/Atlas-Bot/pull/407),
+`6876964279`, is tied to exact PR407 head
+`f2d90f979e759532475411e8d063743b2a9feb3c`. It contains six findings:
+findings 1, 2, 3 and 6 were marked resolved in that review; findings 4 and 5
+were still active in that historical snapshot. Both active code issues were
+fixed in merged PR409, whose merge commit is
+`a8a7e58d176e868ef15f08cf60892f24e02615c0`.
 
-| Qodo finding | Qodo disposition | Code/test evidence |
+| PR407 Qodo finding | Disposition | Code/test evidence |
 |---|---|---|
-| Readiness TTL and fail-closed settings were undeclared on `Settings` | Resolved against `52855ab` | `app/config.py` declares `readyz_cache_seconds=5.0` and `readyz_fail_when_not_ready=True`; regression checks defaults and the finite/non-negative validator. |
-| The defaults-test parametrization broke test collection | Resolved against `57b5ebb` | The defaults test is undecorated; the invalid-TTL parametrization is attached to `test_readyz_cache_ttl_must_be_finite_and_non_negative`. |
-| The readiness settings test failed in CI | Qodo marked resolved | The latest PR407 Qodo comment records the resolution; exact-head Atlas CI is still required for independent verification. |
-| SQL template change hid the query from Bandit | Qodo marked resolved | The latest PR407 Qodo comment records the resolution; Production Core and security verification remain required. |
+| The readiness settings test fails in CI | Qodo-marked resolved at `21a1184` | The defaults test removes the test-environment `READYZ_CACHE_SECONDS` override before constructing Settings, so it tests the declared 5-second default. |
+| Tests fail before readiness checks run | Qodo-marked resolved at `57b5ebb` | The stray parameterization is removed from the defaults test and attached to the invalid-TTL test that accepts the `invalid` argument. |
+| The app crashes on startup | Qodo-marked resolved at `52855ab` | `readyz_cache_seconds` and `readyz_fail_when_not_ready` are declared on Settings and consumed by the readiness validator/route. |
+| Membership allowlist tests no longer cover production SQL | Fixed in merged PR409; the original PR407 Qodo snapshot remains historical | `app/paper_staging.py` retains literal static SQL. `tests/test_ops_hardening_2026_11_14.py::test_primary_reader_allowlist_matches_postgres_behavioral_fixture` extracts the production membership predicate and checks equality with the predicate used by the PostgreSQL behavioral fixture. |
+| Static asset traffic is counted as unmatched | Fixed in merged PR409; the associated static-mount Qodo follow-up is resolved | `metric_path_label()` rematches Starlette mounts on a copied ASGI scope. Regressions: `test_metric_path_label_uses_mount_path_for_static_assets` and `test_static_asset_request_metrics_use_mount_label`. The first also covers a `/gateway` parent prefix. |
+| SQL template change hides the query from Bandit | Qodo-marked resolved in the PR407 review | The primary-reader query remains a literal static SQL template; security scanning continues to cover the production query. |
 
-PR408 is Qodo's automated cherry-pick/fixer PR for the readiness fields already added to PR407. It is closed and unmerged; it is not a separate Atlas code fix or a reason to merge the source PR.
+PR409's Qodo follow-up review comment `6877261749` was tied to its reviewed
+head `58ff26489c70651136451ff23f98be62f642df62`. Both findings in that review
+were marked resolved: ordinary static traffic is labelled `/static`
+(resolving commit `a0bee40`), and parent-prefixed static traffic preserves
+`app_root_path` (resolving commit `58ff264`). The final PR409 head
+`58ffc7fff3b624df3c45ffabe3746e3dbf8412ba` also removed an unused test
+variable after strict Pyflakes caught it. PR409's exact-head Atlas CI,
+mandatory PostgreSQL, Production Core, Android and browser/stress checks passed
+before merge; the main-branch paper-only staging/customer-paper acceptance run
+also passed.
+
+PR408 is Qodo's automated cherry-pick/fixer PR for readiness fields already
+added to PR407. It is closed and unmerged; it is not a separate Atlas code fix
+or a reason to merge the source PR. PR410 is the automated static-mount fixer
+sidecar; it is also closed and unmerged. Its unconditional clearing of
+`root_path` was not adopted; the merged PR409 fix preserves the original
+`app_root_path`.
+
 
 ## Maintainer result
 
@@ -163,7 +188,7 @@ PR408 is Qodo's automated cherry-pick/fixer PR for the readiness fields already 
 - PR399's only active item is fixed by merged PR405, which Qodo reviewed with zero material findings.
 - PR400's two historical active findings are implemented in current main with behavioral/PostgreSQL regressions.
 - PR401 findings #2, #5, #6 and #18 are implemented in current main; #18 is specifically covered by `test_benchmark_cost_context_is_disabled_after_candidate_event_rejection`. Findings #1 and #4 are fixed in the PR406 follow-up; #3 has an explicit EXIT-namespace behavioral regression.
-- PR406's latest published Qodo review (`6876549905`) is tied to exact head `70fef103dbebdc2ec32ae25efe981e858ca82f61`; all fourteen findings are marked resolved. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 was merged only after exact-head CI and PostgreSQL verification.
+- PR406's latest published Qodo review (`6876549905`) is tied to exact head `70fef103dbebdc2ec32ae25efe981e858ca82f61`; all fourteen findings in that snapshot were marked resolved. PR407's review had six findings: four were Qodo-marked resolved there, and the two historically active findings were fixed in merged PR409 with production-SQL parity and mounted-static regressions; PR409's two follow-up findings were Qodo-marked resolved.
 - PR402/#403 did not receive Qodo review comments because the bot's review quota was exhausted; their relevant risk-lock/reversal code and regressions were manually checked against current main.
 - PR408 is a Qodo auto-fix cherry-pick PR for the readiness settings already implemented on #407; it contains no separate Qodo review findings.
 - Historical Qodo labels do not determine Atlas application progress, block a verified merge, or control release.
