@@ -265,6 +265,41 @@ def test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source(
     assert result["cost_analysis"]["session_costs_bps"] == expected_schedule
 
 
+def test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback():
+    frame = _ohlcv(1400)
+    index = np.arange(len(frame))
+    signal = pd.Series(
+        np.where(index % 48 < 16, 0.0, 0.5),
+        index=frame.index,
+    )
+    schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    result = fixed_signal_walk_forward_oos(
+        frame,
+        signal,
+        costs_bps=2.0,
+        folds=3,
+        min_train=500,
+        session_costs_bps=schedule,
+        session_costs_applied=True,
+        execution_cost_fallback_used=True,
+        benchmark_entry_signal=signal,
+        benchmark_random_trials=2,
+    )
+
+    benchmark = result["benchmark_comparison"]
+    assert benchmark["status"] == "OK"
+    assert benchmark["execution_cost_model_complete"] is False
+    assert benchmark["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
+    assert benchmark["execution_cost_model_fallback_used"] is True
+    assert benchmark["gate_passed"] is False
+
+
 def test_promotion_gate_requires_inference_and_benchmarks_when_configured():
     folds = [{"total_return": 0.02} for _ in range(5)]
     candidate = {
