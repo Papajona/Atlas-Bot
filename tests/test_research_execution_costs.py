@@ -211,7 +211,7 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
     assert is_verified_research_execution_cost_context(context)
     with pytest.raises(TypeError):
         context["venue"] = "attacker-controlled-venue"
-    with pytest.raises(TypeError):
+    with pytest.raises((AttributeError, TypeError)):
         context.update({"model_fingerprint": "0" * 64})
     with pytest.raises(ValueError):
         context["spread_bps"][0] = 999.0
@@ -271,6 +271,13 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
     assert gate["execution_cost_calibration_verified"] is True
     assert gate["execution_cost_validation_matches_current_context"] is True
     assert gate["execution_cost_dataset_matches_current_data"] is True
+
+    from app.trading_core import _ai_execution_cost_context_attestation
+    assert _ai_execution_cost_context_attestation(context) == {
+        "verified": True,
+        "status": "VERIFIED",
+        "evidence_id": context["execution_cost_calibration_evidence_id"],
+    }
 
     from app.main import _router_validation_cache_matches_execution_context
 
