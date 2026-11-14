@@ -169,6 +169,8 @@ def test_provider_reconciliation_query_enforces_migration_0059_research_table_ac
     assert "'research_holdout_registry_acl_valid'" in query
     assert "has_table_privilege(r.rolname,c.oid,'UPDATE')" in query
     assert "has_table_privilege(r.rolname,c.oid,'INSERT')" in query
+    assert query.count("has_table_privilege(r.rolname,c.oid,'TRIGGER')") == 2
+    assert query.count("has_table_privilege(r.rolname,c.oid,'REFERENCES')") == 2
     assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in query
     assert "migration 0059 least-privilege grant contract" in Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
 
