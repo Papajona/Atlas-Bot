@@ -265,6 +265,39 @@ def test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source(
     assert result["cost_analysis"]["session_costs_bps"] == expected_schedule
 
 
+def test_fixed_signal_oos_reports_session_schedule_when_selected_without_precomputed_series():
+    frame = _ohlcv(1400)
+    signal = pd.Series(
+        np.where(np.arange(len(frame)) % 48 < 24, 0.5, -0.5),
+        index=frame.index,
+    )
+    schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    # The schedule is the selected pricing source because no precomputed
+    # per-bar transaction-cost series was supplied. A stale explicit False
+    # audit flag must not make the report contradict the returns.
+    result = fixed_signal_walk_forward_oos(
+        frame,
+        signal,
+        costs_bps=2.0,
+        folds=3,
+        min_train=500,
+        session_costs_bps=schedule,
+        session_costs_applied=False,
+    )
+
+    assert result["status"] == "OK"
+    assert result["session_cost_model_complete"] is True
+    assert result["cost_analysis"]["session_cost_model_complete"] is True
+    assert result["session_costs_bps"] == schedule
+    assert result["cost_analysis"]["session_costs_bps"] == schedule
+
+
 def test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback():
     from app.research_validation import purged_walk_forward_splits
 
