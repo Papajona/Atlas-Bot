@@ -61,7 +61,7 @@ The uploaded source ZIP does not carry Git history. The GitHub source SHA above,
 | F-03 | Medium | Main `/readyz` caused repeated dependency checks. | Fixed in patch: a five-second, per-process single-flight cache; TTL zero disables it. This is not a distributed cache and each instance still performs its own check per TTL window. |
 | F-04 | Medium | Caller-supplied request IDs were echoed/logged without bounds. | Fixed in patch: allow only 8–64 ASCII letters, digits, dot, underscore or hyphen; otherwise generate a UUID. Cap logged path length at 256 characters. |
 | F-05 | Low | Public health response exposed worker error types/timestamps. | Fixed in patch: expose coarse worker status/restart count only. Keep release version, SHA and image digest because the release verifier consumes these fields. |
-| F-06 | Low | Bandit ran at high severity only; paper-staging SQL used an f-string with a module-owned predicate. | Fixed in patch: use a static `string.Template` with only the module-owned predicate substituted, and run Bandit at `-ll` in CI, Production Core and `verify_release.sh`. |
+| F-06 | Low | Bandit ran at high severity only; paper-staging SQL used an f-string with a module-owned predicate. | Fixed in patch: the runtime preflight now uses a fully static SQL literal with the allowlist predicate inlined; the behavioral test fixture is separate. Bandit runs at `-ll` in CI, Production Core and `verify_release.sh`. |
 | F-07 | Low | CI runners were not consistent with Production Core. | Fixed in patch: pin Python and Android jobs to `ubuntu-24.04`. |
 | F-08 | High for paper validity | Calibrated paper estimator is not called by active platform/customer paper order-fill paths. | **Open.** Do not represent paper results as validation-grade. |
 | F-09 | High for performance claims | Original OANDA data identity, complete-trial DSR, survivorship and carry evidence remain unresolved. | **Open.** Follow the sign-off matrix. |
@@ -82,7 +82,7 @@ The patch changes:
 - `app/main.py`: wraps existing readiness computation in a short cache, returns HTTP 503 for failed readiness in staging/production, and trims worker details in public `/healthz`.
 - `app/monitoring.py`: validates request IDs, uses route-template metric labels, bounds method labels and caps the logged path.
 - `app/config.py`: adds readiness settings and finite/non-negative TTL validation.
-- `app/paper_staging.py`: replaces the SQL f-string with a static template and module-owned predicate.
+- `app/paper_staging.py`: replaces the SQL f-string with a fully static query and an inline, narrowly scoped Supabase membership allowlist predicate.
 - `.github/workflows/ci.yml`, `.github/workflows/production-verification.yml`, `scripts/verify_release.sh`: runs Bandit at medium severity; pins the CI Python/Android runners.
 - `.env.example`, `tests/conftest.py`, `tests/test_ops_hardening_2026_11_14.py`: documents settings and adds regression coverage.
 - This review document: corrects the staging SHA, status count and verification limits.
