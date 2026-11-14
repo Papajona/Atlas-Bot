@@ -711,6 +711,99 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
 
 
 
+
+def test_ai_walk_forward_benchmark_control_rejection_uses_verified_session_schedule(monkeypatch):
+    from app import research_execution_costs, trading_core
+
+    frame = sample_df(1800)
+    context = _validator_issued_ai_execution_context(
+        frame, model_fingerprint="9" * 64, context_sha256="8" * 64
+    )
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+
+    class PatternModel:
+        classes_ = np.array([0, 1, 2], dtype=int)
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def fit(self, features, labels):
+            assert len(features) == len(labels)
+            return self
+
+        def predict_proba(self, features):
+            # Intermittent entries leave legal earlier/later shifts for the
+            # independent benchmark controls instead of creating a continuous
+            # exposure stream with no timing-preserving randomization.
+            probabilities = np.tile(
+                np.array([[0.10, 0.80, 0.10]], dtype=float),
+                (len(features), 1),
+            )
+            active = (np.arange(len(features)) % 60) < 20
+            probabilities[active] = np.array([0.05, 0.10, 0.85])
+            return probabilities
+
+    def labels_with_verified_costs(close, _vol, _high, _low, **_kwargs):
+        result = pd.Series(
+            np.resize(np.array([-1.0, 0.0, 1.0]), len(close)),
+            index=close.index,
+            dtype=float,
+        )
+        result.attrs["execution_cost_model_complete"] = True
+        result.attrs["execution_cost_failure_reasons"] = {}
+        result.attrs["execution_cost_label_event_pairs_priced"] = len(close)
+        return result
+
+    monkeypatch.setattr(trading_core, "LGBMClassifier", PatternModel)
+    monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
+    monkeypatch.setattr(
+        research_execution_costs,
+        "make_execution_cost_provider",
+        lambda _context, *, namespace: (lambda *_args: 0.25),
+    )
+
+    original_event_cost = research_execution_costs.execution_cost_for_event
+
+    def reject_buy_and_hold_only(event_context, **kwargs):
+        if str(kwargs.get("namespace") or "").startswith("benchmark:buy-and-hold:"):
+            return None, "SYNTHETIC_BUY_AND_HOLD_CONTROL_REJECTION"
+        return original_event_cost(event_context, **kwargs)
+
+    monkeypatch.setattr(
+        research_execution_costs,
+        "execution_cost_for_event",
+        reject_buy_and_hold_only,
+    )
+
+    result = trading_core.ai_walk_forward_backtest(
+        frame,
+        asset="crypto",
+        folds=4,
+        min_train=500,
+        execution_cost_context=context,
+        session_costs_bps=session_schedule,
+    )
+
+    assert [fold["execution_cost_model_complete"] for fold in result["folds"]] == [
+        True, True, True, True
+    ]
+    benchmark = result["benchmark_comparison"]
+    assert benchmark["status"] == "OK"
+    assert benchmark["execution_cost_model_complete"] is False
+    assert benchmark["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
+    assert benchmark["execution_cost_model_fallback_used"] is True
+    assert benchmark["buy_and_hold_session_fallback_folds"] == [0, 1, 2, 3]
+    assert "SYNTHETIC_BUY_AND_HOLD_CONTROL_REJECTION" in " ".join(
+        benchmark["execution_cost_model_failure"]
+    )
+    assert benchmark["gate_passed"] is False
+
+
 def test_ai_walk_forward_keeps_unpriced_labels_on_original_oos_timeline(monkeypatch):
     from app import trading_core
     from app.research_validation import purged_walk_forward_splits
