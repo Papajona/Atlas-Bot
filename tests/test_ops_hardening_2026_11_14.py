@@ -41,7 +41,8 @@ def test_metric_path_label_uses_mount_path_for_static_assets():
         scope={
             "type": "http",
             "path": "/static/assets/dashboard.js",
-            "root_path": "",
+            # Middleware sees the already-consumed mount prefix here.
+            "root_path": "/static",
             "path_params": {},
         },
         app=main.app,
@@ -58,6 +59,20 @@ def test_metric_path_label_uses_mount_path_for_static_assets():
 
     assert monitoring.metric_path_label(mounted_request) == "/static"
     assert monitoring.metric_path_label(unmatched_request) == "unmatched"
+
+
+def test_static_asset_request_metrics_use_mount_label():
+    client = TestClient(main.app)
+    request_series = monitoring.REQUESTS.labels("GET", "/static", "200")
+    latency_series = monitoring.REQUEST_LATENCY.labels("GET", "/static")
+    request_count_before = request_series._value.get()
+    latency_count_before = latency_series._count.get()
+
+    response = client.get("/static/app.css")
+
+    assert response.status_code == 200
+    assert request_series._value.get() == request_count_before + 1
+    assert latency_series._count.get() == latency_count_before + 1
 
 
 def test_request_id_is_sanitised():
