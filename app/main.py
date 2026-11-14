@@ -3981,16 +3981,22 @@ def _strategy_router_validation_gate(
         and bool(evidence_id)
         and evidence_id == context_evidence_id
     )
+    current_model_fingerprint = str(context.get("model_fingerprint") or "").strip()
+    current_context_sha256 = str(context.get("context_sha256") or "").strip()
+    validation_context_matches = (
+        bool(current_model_fingerprint and current_context_sha256)
+        and str(validation.get("execution_cost_model_fingerprint") or "").strip()
+        == current_model_fingerprint
+        and str(validation.get("per_bar_execution_context_sha256") or "").strip()
+        == current_context_sha256
+    )
     per_bar_costs_verified = (
         context_verified
         and validation.get("execution_cost_model_complete") is True
         and validation.get("execution_cost_model_status")
         == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
         and all(row.get("execution_cost_model_complete") is True for row in folds)
-        and str(validation.get("execution_cost_model_fingerprint") or "")
-        == str(context.get("model_fingerprint") or "")
-        and str(validation.get("per_bar_execution_context_sha256") or "")
-        == str(context.get("context_sha256") or "")
+        and validation_context_matches
     )
     current_dataset_matches = (
         bool(current_dataset_sha256)
@@ -4019,6 +4025,8 @@ def _strategy_router_validation_gate(
         reasons.append("SIGNED_VENUE_CALIBRATION_EVIDENCE_NOT_VERIFIED")
     if not per_bar_costs_verified:
         reasons.append("PER_BAR_EXECUTION_COSTS_INCOMPLETE")
+    if not validation_context_matches:
+        reasons.append("ROUTER_VALIDATION_CONTEXT_DOES_NOT_MATCH_CURRENT_SIGNATURE")
     if not current_dataset_matches:
         reasons.append("EXECUTION_COST_EVIDENCE_DATASET_MISMATCH")
     return {
@@ -4029,6 +4037,7 @@ def _strategy_router_validation_gate(
         "execution_cost_calibration_verified": calibration_verified,
         "execution_cost_calibration_evidence_id": evidence_id or None,
         "execution_cost_model_complete": per_bar_costs_verified,
+        "execution_cost_validation_matches_current_context": validation_context_matches,
         "execution_cost_dataset_matches_current_data": current_dataset_matches,
         "rejection_reasons": reasons,
     }
