@@ -552,7 +552,9 @@ def test_benchmark_control_cost_rejection_falls_back_and_preserves_diagnostics(
     assert result["execution_cost_model_complete"] is False
     assert result["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
     assert result["execution_cost_model_fallback_used"] is True
-    assert any(failing_namespace in reason for reason in result["execution_cost_model_failure"])
+    assert "ORDER_PARTICIPATION_LIMIT_EXCEEDED" in " ".join(
+        result["execution_cost_model_failure"]
+    )
     assert result["gate_passed"] is False
     assert result["candidate_net_return"] is not None
     assert result["buy_and_hold_net_return"] is not None
