@@ -706,14 +706,27 @@ def ai_walk_forward_backtest(
     # each training window are eligible to fit the model.
     minimum_test_bars = 20
     gap = hold_horizon
-    required_bars = int(min_train) + int(folds) * minimum_test_bars + (2 * int(folds) - 1) * gap
+    valid_training_positions = np.flatnonzero(valid_label_mask.to_numpy(dtype=bool))
+    if len(valid_training_positions) < int(min_train):
+        raise RuntimeError("Insufficient valid execution-priced labels for AI walk-forward training")
+    # The initial feature warm-up and any rejected labels occupy real bars. Move the
+    # first train boundary far enough to retain min_train valid labels without ever
+    # compressing later OOS test timelines.
+    minimum_train_timeline_bars = int(valid_training_positions[int(min_train) - 1]) + 1
+    required_bars = (
+        minimum_train_timeline_bars
+        + int(folds) * minimum_test_bars
+        + (2 * int(folds) - 1) * gap
+    )
     if folds < 2 or min_train < 1 or len(X) < required_bars:
         raise RuntimeError("Insufficient data for requested purged AI walk-forward folds")
-    test_size = (len(X) - int(min_train) - (2 * int(folds) - 1) * gap) // int(folds)
+    test_size = (
+        len(X) - minimum_train_timeline_bars - (2 * int(folds) - 1) * gap
+    ) // int(folds)
     split_specs = purged_walk_forward_splits(
         len(X),
         folds=int(folds),
-        min_train=int(min_train),
+        min_train=minimum_train_timeline_bars,
         test_size=int(test_size),
         purge=gap,
         embargo=gap,
