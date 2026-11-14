@@ -3989,7 +3989,7 @@ def _router_validation_cache_matches_execution_context(
     validation: dict[str, Any],
     *,
     current_dataset_sha256: str,
-    current_execution_cost_context: dict[str, Any] | None,
+    current_execution_cost_context: Mapping[str, Any] | None,
 ) -> bool:
     """Reject cached router reports unless every signed evidence predicate still matches."""
     checks = _router_execution_cost_evidence_checks(
@@ -4019,7 +4019,7 @@ def _strategy_router_validation_gate(
     required_folds: int,
     required_positive_fold_ratio: float,
     current_dataset_sha256: str,
-    current_execution_cost_context: dict[str, Any] | None,
+    current_execution_cost_context: Mapping[str, Any] | None,
     require_verified_execution_context: bool = True,
 ) -> dict[str, Any]:
     """Gate supported crypto spot routing on signed costs; preserve other asset gates."""
