@@ -209,9 +209,22 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
 
     assert context is not None
     assert is_verified_research_execution_cost_context(context)
+    with pytest.raises(TypeError):
+        context["venue"] = "attacker-controlled-venue"
+    with pytest.raises(TypeError):
+        context.update({"model_fingerprint": "0" * 64})
+    with pytest.raises(ValueError):
+        context["spread_bps"][0] = 999.0
+    with pytest.raises(ValueError):
+        context["spread_bps"].setflags(write=True)
+
     sliced_context = slice_research_execution_context(context, frame.index[1:])
     assert sliced_context is not None
     assert is_verified_research_execution_cost_context(sliced_context)
+    with pytest.raises(TypeError):
+        sliced_context["venue"] = "changed-after-slice"
+    with pytest.raises(ValueError):
+        sliced_context["volume_units"][0] = 0.0
     assert audit["status"] == "READY"
     assert audit["execution_cost_model_complete"] is True
     assert audit["execution_cost_calibration_status"] == "VERIFIED"
