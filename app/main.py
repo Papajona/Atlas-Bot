@@ -3934,42 +3934,68 @@ def _attach_research_evidence(df: pd.DataFrame, req: ResearchMarketRequest) -> p
 
 
 
+def _router_execution_cost_evidence_checks(
+    validation: dict[str, Any],
+    context: Mapping[str, Any] | None,
+    current_dataset_sha256: str,
+) -> dict[str, bool]:
+    """Evaluate shared signed-cost evidence predicates for cache and promotion gates."""
+    if not isinstance(validation, Mapping):
+        validation = {}
+    verified_context = is_verified_research_execution_cost_context(context)
+    values = context if verified_context else {}
+    evidence_id = str(
+        values.get("execution_cost_calibration_evidence_id") or values.get("evidence_id") or ""
+    ).strip()
+    folds = [row for row in (validation.get("folds") or []) if isinstance(row, Mapping)]
+    context_match = bool(
+        verified_context
+        and str(values.get("model_fingerprint") or "").strip()
+        and str(values.get("context_sha256") or "").strip()
+        and str(validation.get("execution_cost_model_fingerprint") or "").strip()
+        == str(values.get("model_fingerprint") or "").strip()
+        and str(validation.get("per_bar_execution_context_sha256") or "").strip()
+        == str(values.get("context_sha256") or "").strip()
+    )
+    dataset_match = bool(
+        current_dataset_sha256
+        and str(validation.get("execution_cost_dataset_sha256") or "").strip().lower()
+        == str(current_dataset_sha256).strip().lower()
+        and str(values.get("dataset_sha256") or "").strip().lower()
+        == str(current_dataset_sha256).strip().lower()
+    )
+    calibration = bool(
+        verified_context
+        and str(values.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        and evidence_id
+        and str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        and validation.get("execution_cost_calibration_verified") is True
+        and str(validation.get("execution_cost_calibration_evidence_id") or "").strip() == evidence_id
+    )
+    per_bar = bool(
+        verified_context
+        and validation.get("execution_cost_model_complete") is True
+        and validation.get("execution_cost_model_status")
+        == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+        and bool(folds)
+        and all(row.get("execution_cost_model_complete") is True for row in folds)
+        and context_match
+    )
+    return {"calibration": calibration, "per_bar": per_bar,
+            "context_match": context_match, "dataset_match": dataset_match}
+
+
 def _router_validation_cache_matches_execution_context(
     validation: dict[str, Any],
     *,
     current_dataset_sha256: str,
     current_execution_cost_context: dict[str, Any] | None,
 ) -> bool:
-    """Reject a cached router walk-forward report after its signed data changes."""
-    context = current_execution_cost_context
-    if not is_verified_research_execution_cost_context(context):
-        return False
-    if not isinstance(validation, dict):
-        return False
-    evidence_id = str(
-        context.get("execution_cost_calibration_evidence_id") or context.get("evidence_id") or ""
-    ).strip()
-    folds = [row for row in (validation.get("folds") or []) if isinstance(row, dict)]
-    return bool(
-        evidence_id
-        and str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
-        and validation.get("execution_cost_calibration_verified") is True
-        and str(validation.get("execution_cost_calibration_evidence_id") or "").strip() == evidence_id
-        and validation.get("execution_cost_model_complete") is True
-        and validation.get("execution_cost_model_status")
-        == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
-        and all(row.get("execution_cost_model_complete") is True for row in folds)
-        and len(folds) > 0
-        and str(validation.get("execution_cost_model_fingerprint") or "").strip()
-        == str(context.get("model_fingerprint") or "").strip()
-        and str(validation.get("per_bar_execution_context_sha256") or "").strip()
-        == str(context.get("context_sha256") or "").strip()
-        and bool(current_dataset_sha256)
-        and str(validation.get("execution_cost_dataset_sha256") or "").strip().lower()
-        == str(current_dataset_sha256).strip().lower()
-        and str(context.get("dataset_sha256") or "").strip().lower()
-        == str(current_dataset_sha256).strip().lower()
+    """Reject cached router reports unless every signed evidence predicate still matches."""
+    checks = _router_execution_cost_evidence_checks(
+        validation, current_execution_cost_context, current_dataset_sha256
     )
+    return all(checks.values())
 
 
 def _requires_signed_per_bar_router_context(asset: str, df: pd.DataFrame) -> bool:
@@ -4009,49 +4035,13 @@ def _strategy_router_validation_gate(
         sum(value > 0.0 for value in fold_returns) / len(fold_returns)
         if fold_returns else 0.0
     )
-    context = current_execution_cost_context if isinstance(current_execution_cost_context, Mapping) else {}
-    evidence_id = str(
-        validation.get("execution_cost_calibration_evidence_id") or ""
-    ).strip()
-    context_evidence_id = str(
-        context.get("execution_cost_calibration_evidence_id") or context.get("evidence_id") or ""
-    ).strip()
-    context_verified = (
-        is_verified_research_execution_cost_context(current_execution_cost_context)
-        and str(context.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
-        and bool(context_evidence_id)
+    evidence_checks = _router_execution_cost_evidence_checks(
+        validation, current_execution_cost_context, current_dataset_sha256
     )
-    calibration_verified = (
-        context_verified
-        and str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
-        and validation.get("execution_cost_calibration_verified") is True
-        and bool(evidence_id)
-        and evidence_id == context_evidence_id
-    )
-    current_model_fingerprint = str(context.get("model_fingerprint") or "").strip()
-    current_context_sha256 = str(context.get("context_sha256") or "").strip()
-    validation_context_matches = (
-        bool(current_model_fingerprint and current_context_sha256)
-        and str(validation.get("execution_cost_model_fingerprint") or "").strip()
-        == current_model_fingerprint
-        and str(validation.get("per_bar_execution_context_sha256") or "").strip()
-        == current_context_sha256
-    )
-    per_bar_costs_verified = (
-        context_verified
-        and validation.get("execution_cost_model_complete") is True
-        and validation.get("execution_cost_model_status")
-        == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
-        and all(row.get("execution_cost_model_complete") is True for row in folds)
-        and validation_context_matches
-    )
-    current_dataset_matches = (
-        bool(current_dataset_sha256)
-        and str(validation.get("execution_cost_dataset_sha256") or "").strip().lower()
-        == str(current_dataset_sha256).strip().lower()
-        and str(context.get("dataset_sha256") or "").strip().lower()
-        == str(current_dataset_sha256).strip().lower()
-    )
+    calibration_verified = evidence_checks["calibration"]
+    validation_context_matches = evidence_checks["context_match"]
+    per_bar_costs_verified = evidence_checks["per_bar"]
+    current_dataset_matches = evidence_checks["dataset_match"]
     research_performance_passed = (
         validation.get("status") == "OK"
         and len(folds) >= int(required_folds)
@@ -6025,10 +6015,13 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 calibration_evidence=getattr(req, "execution_cost_calibration_evidence", None),
             )
         except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).exception(
+                "execution cost context build failed for %s %s", req.asset, req.symbol
+            )
             router_execution_cost_context = None
             router_execution_cost_audit = {
                 "status": "INCOMPLETE",
-                "reason": f"EXECUTION_COST_CONTEXT_BUILD_ERROR:{type(exc).__name__}",
+                "reason": f"EXECUTION_COST_CONTEXT_BUILD_ERROR:{type(exc).__name__}:{str(exc)[:240]}",
                 "execution_cost_model_complete": False,
                 "execution_cost_calibration_status": "UNVERIFIED",
                 "execution_cost_calibration_evidence_id": None,
@@ -6229,8 +6222,13 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 router["validation"] = router_validation
                 router["validation_gate"] = router_validation_gate
                 if not router_validation_gate["passed"] and not paper_mode:
-                    router = {"status": "VALIDATION_FAILED", "reason": "strategy_router_oos_gate_failed",
-                              "validation": router_validation, "validation_gate": router_validation_gate}
+                    router = {
+                    "status": "VALIDATION_FAILED",
+                    "reason": "strategy_router_oos_gate_failed",
+                    "validation": router_validation,
+                    "validation_gate": router_validation_gate,
+                    "execution_cost_context_audit": router_execution_cost_audit,
+                }
 
         if router.get("status") == "OK" and router.get("strategy") not in {"none", ""}:
             execution_strategy = "ensemble" if len(router.get("blend") or []) > 1 else str(router["strategy"])
