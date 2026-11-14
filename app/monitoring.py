@@ -7,6 +7,7 @@ import uuid
 from prometheus_client import Counter, Gauge, Histogram, generate_latest, CONTENT_TYPE_LATEST
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
+from starlette.routing import Match, Mount
 
 logger = logging.getLogger("ai_trader")
 REQUESTS = Counter("trader_http_requests_total", "HTTP requests", ["method", "path", "status"])
@@ -26,10 +27,27 @@ def safe_request_id(candidate: str | None) -> str:
 
 
 def metric_path_label(request: Request) -> str:
-    """Use a server-defined route template, never an attacker-controlled raw path."""
+    """Label routes and mounted applications without using attacker-controlled paths."""
     route = request.scope.get("route")
     template = getattr(route, "path", None)
-    return template if isinstance(template, str) and template else "unmatched"
+    if isinstance(template, str) and template:
+        return template
+
+    # Starlette Mount matches before setting scope["route"], unlike APIRoute.
+    # Recover the server-defined mount path so static-file requests do not get
+    # mixed into the "unmatched" bucket used for real 404/scanner traffic.
+    mount_paths = []
+    for candidate in getattr(request.app, "routes", ()):
+        if not isinstance(candidate, Mount):
+            continue
+        try:
+            match, _child_scope = candidate.matches(request.scope)
+        except (KeyError, TypeError, ValueError):
+            continue
+        mount_path = getattr(candidate, "path", None)
+        if match is Match.FULL and isinstance(mount_path, str) and mount_path:
+            mount_paths.append(mount_path)
+    return max(mount_paths, key=len) if mount_paths else "unmatched"
 
 
 
