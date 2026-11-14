@@ -25,7 +25,7 @@ def test_customer_paper_staging_selects_latest_manual_exact_commit_before_checki
     attestation_gate = workflow.rsplit(production_condition, 1)[1].split(
         "\n                fi", 1
     )[0]
-    assert 'verification_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"' in attestation_gate
+    assert 'verification_json="$(gh_retry run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"' in attestation_gate
     assert 'native_outcome="$(jq -r' in attestation_gate
     assert '.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion' in attestation_gate
     assert '"$native_outcome" != "success"' in attestation_gate
