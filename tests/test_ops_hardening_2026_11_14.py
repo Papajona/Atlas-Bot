@@ -142,7 +142,8 @@ def test_readyz_body_still_carries_safety_checks():
         assert f'checks["{name}"]' in block
 
 
-def test_readyz_settings_are_declared_and_fail_closed_by_default():
+def test_readyz_settings_are_declared_and_fail_closed_by_default(monkeypatch):
+    monkeypatch.delenv("READYZ_CACHE_SECONDS", raising=False)
     settings = Settings(environment="test")
     assert settings.readyz_cache_seconds == 5.0
     assert settings.readyz_fail_when_not_ready is True
@@ -154,13 +155,16 @@ def test_readyz_cache_ttl_must_be_finite_and_non_negative(invalid):
         Settings(environment="test", readyz_cache_seconds=invalid)
 
 
-def test_primary_reader_preflight_uses_static_sql_template():
+def test_primary_reader_preflight_uses_static_sql():
     source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
     start = source.index("async def _primary_reader_preflight")
     body = source[start:start + 12000]
-    assert 'text(f"""' not in body
-    assert "Template(" in body
-    assert "substitute(UNSAFE_MEMBERSHIP_PREDICATE=" in body
+    assert 'text("""' in body
+    assert "Template(" not in body
+    assert "substitute(" not in body
+    assert "member_role.rolname='postgres'" in body
+    assert "grantor_role.rolname='supabase_admin'" in body
+    assert "m.admin_option" in body
 
 
 def test_ci_scans_medium_severity_and_pins_runners():
