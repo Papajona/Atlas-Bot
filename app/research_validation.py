@@ -835,9 +835,15 @@ def oos_benchmark_comparison(
         "random_control_shift_max": max(valid_nonzero_shifts) if valid_nonzero_shifts else None,
         "random_control_exposure_matching": "EXACT_REQUESTED_EXPOSURE_BARS_AND_ENTRY_COUNT",
         "buy_and_hold_turnover": buy_hold_turnover,
-        "buy_and_hold_session_cost_model_complete": session_costs_bps is not None,
+        "buy_and_hold_session_cost_model_complete": (
+            session_costs_bps is not None
+            and any(context is None for context in context_blocks)
+        ),
         "buy_and_hold_session_costs_bps": (
-            dict(session_costs_bps) if session_costs_bps is not None else None
+            dict(session_costs_bps)
+            if session_costs_bps is not None
+            and any(context is None for context in context_blocks)
+            else None
         ),
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
