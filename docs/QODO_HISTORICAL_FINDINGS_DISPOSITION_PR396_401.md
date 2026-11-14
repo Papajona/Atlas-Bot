@@ -115,16 +115,17 @@ Original Qodo review [#401](https://github.com/Papajona/Atlas-Bot/pull/401), com
 ## PR406 — Qodo follow-up review (2026-11-14)
 
 The latest Qodo review comment `6876549905` is tied to the exact PR406 head
-`d55df9fe06e0994066721f78742703f7ecdffb60`. Its current report contains twelve
-findings, and all twelve are marked resolved. The rows below record that latest
-report once. The session-status finding IDs
+`22cce9bae3b15d31b0ecc6d038432eb42607b0b8`. Its current report contains fourteen
+findings: twelve are marked resolved, and two new documentation findings (#8 and #9)
+are corrected in this update. The rows below record the twelve previously reviewed
+findings once. The session-status finding IDs
 `2058abdb-cc66-40be-b462-3734faeec4c9` and
 `967e5bef-327c-4517-85f1-0d2b5dc8a2b6` are each listed once.
 
 | Qodo finding | Disposition | Code/test evidence |
 |---|---|---|
 | AI walk-forward cost rejections show as normal | Qodo-marked resolved in commit `61c2f7d` | The AI caller records each candidate rejection with its OOS fold index and reason, then forwards those records to the benchmark fallback audit. Regressions: `tests/test_strategy_engine.py::test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection` and `tests/test_research_execution_costs.py::test_benchmark_reports_upstream_candidate_fold_fallback_reason`. |
-| AI walk-forward benchmark falls back to flat costs | Qodo-marked resolved at `1537122` | The caller now passes the separately verified session schedule unconditionally. Per-bar contexts remain authoritative for successful folds; a downgraded control fold uses the verified session schedule rather than flat diagnostic costs. Regression: `tests/test_strategy_engine.py::test_ai_walk_forward_benchmark_control_rejection_uses_verified_session_schedule`. |
+| AI walk-forward benchmark falls back to flat costs | Qodo-marked resolved at `1537122` | The caller now passes the separately verified session schedule unconditionally. Per-bar contexts remain authoritative for successful folds; a downgraded control fold uses the verified session schedule rather than flat diagnostic costs. Regression: `tests/test_strategy_engine.py::test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection`. |
 | Session-priced returns appear unverified | Qodo-marked resolved at `7e4aecc` | The status derives from the selected pricing source: if no precomputed per-bar transaction-cost series is supplied, the session schedule is the selected candidate pricing branch even when an explicit audit flag is false. When a precomputed series is supplied, its audit flag still distinguishes session-derived from signed per-bar pricing. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_reports_session_schedule_when_selected_without_precomputed_series`. |
 | Session-only runs list every fold as a fallback | Qodo-marked resolved at `fba86bb` | The fallback-fold set is populated only from actual `fold_N` rejection reasons or the explicit upstream candidate-fallback marker. Regressions: `test_session_only_benchmark_is_not_reported_as_a_fallback` and `test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback`. |
 | Benchmark fallback fails for generator inputs | Qodo-marked resolved at `304dd0a` | The benchmark materializes reusable fold arrays and reuses them for the single retry rather than re-reading consumed generators. The control-rejection regression covers generator-backed signal, candidate-return and ATR inputs. |
@@ -161,7 +162,7 @@ PR408 is Qodo's automated cherry-pick/fixer PR for the readiness fields already 
 - PR399's only active item is fixed by merged PR405, which Qodo reviewed with zero material findings.
 - PR400's two historical active findings are implemented in current main with behavioral/PostgreSQL regressions.
 - PR401 findings #2, #5 and #6 are implemented in current main; #1 and #4 are fixed in the PR406 follow-up; #3 now has an explicit EXIT-namespace behavioral regression on PR406 head `4393fa51`; #18 is covered by the same batched benchmark-fallback implementation.
-- PR406's ten latest Qodo findings were marked resolved in its published review on exact head `e540ad4660f31b88b22c607747b0dd08d21ad498`. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 remains subject to exact-head CI and PostgreSQL verification.
+- PR406's latest published Qodo review (`6876549905`) is tied to exact head `22cce9bae3b15d31b0ecc6d038432eb42607b0b8`: twelve reviewed findings are marked resolved, with two new ledger-documentation findings corrected above. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 was merged only after exact-head CI and PostgreSQL verification.
 - PR402/#403 did not receive Qodo review comments because the bot's review quota was exhausted; their relevant risk-lock/reversal code and regressions were manually checked against current main.
 - PR408 is a Qodo auto-fix cherry-pick PR for the readiness settings already implemented on #407; it contains no separate Qodo review findings.
 - Historical Qodo labels do not determine Atlas application progress, block a verified merge, or control release.
