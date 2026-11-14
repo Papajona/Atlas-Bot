@@ -672,7 +672,10 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
                 np.array([[0.10, 0.80, 0.10]], dtype=float),
                 (len(features), 1),
             )
-            active = (np.arange(len(features)) % 60) < 20
+            phase = np.arange(len(features)) % 100
+            # Keep active windows away from both fold boundaries so the benchmark
+            # can construct multiple non-circular, exposure-preserving shifts.
+            active = (phase >= 30) & (phase < 45)
             probabilities[active] = np.array([0.05, 0.10, 0.85])
             return probabilities
 
