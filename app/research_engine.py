@@ -835,11 +835,12 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Use a full SHA-256 fingerprint so config variants cannot silently collide
     # because a short fingerprint was truncated to only 32 bits.
     ai_profile = AI_PROFILES.get(str(asset).strip().lower())
-    configured_ai_carry = settings.research_carry_bps_per_bar
+    # Fingerprint the exact assumptions passed to ai_walk_forward_backtest, not
+    # the asset profile defaults. These caller-supplied values can differ by venue
+    # (notably forex) and must not reuse an older trial identity.
     ai_carry_bps = float(
         getattr(ai_profile, "carry_bps_per_bar", 0.0)
-        if configured_ai_carry is None
-        else configured_ai_carry
+        if carry is None else carry
     )
     ai_trial_config = {
         "strategy_config": asdict(cfg),
@@ -850,10 +851,29 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             "threshold": float(ai_threshold),
             "bars_per_year": int(getattr(ai_profile, "bars_per_year", annualization_factor) or annualization_factor),
             "max_hold_bars": int(getattr(ai_profile, "max_hold", research_hold_horizon) or research_hold_horizon or 1),
-            "taker_bps": float(getattr(ai_profile, "taker_bps", 0.0)),
-            "slippage_bps": float(getattr(ai_profile, "slippage_bps", 0.0)),
+            "taker_bps": float(taker_bps),
+            "slippage_bps": float(slippage_bps),
             "carry_bps_per_bar": ai_carry_bps,
-            "cost_stress_multiplier": 2.0,
+            "carry_evidence_source": carry_evidence_source or None,
+            "carry_evidence_id": carry_evidence_id or None,
+            "cost_stress_multiplier": float(cost_mult),
+            "session_costs_bps": (
+                {str(key): float(value) for key, value in sorted(session_costs_bps.items())}
+                if session_costs_bps is not None else None
+            ),
+            "execution_cost_context_available": execution_cost_context is not None,
+            "execution_cost_model_fingerprint": execution_context_audit.get(
+                "execution_cost_model_fingerprint"
+            ) or model_fingerprint,
+            "per_bar_execution_context_sha256": execution_context_audit.get(
+                "per_bar_execution_context_sha256"
+            ),
+            "execution_cost_calibration_status": execution_context_audit.get(
+                "execution_cost_calibration_status"
+            ),
+            "execution_cost_calibration_evidence_id": execution_context_audit.get(
+                "execution_cost_calibration_evidence_id"
+            ),
         },
         "execution": {
             "stop_atr": float(settings.strategy_stop_atr),
