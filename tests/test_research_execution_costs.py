@@ -255,6 +255,30 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
     assert gate["execution_cost_validation_matches_current_context"] is True
     assert gate["execution_cost_dataset_matches_current_data"] is True
 
+    from app.main import _router_validation_cache_matches_execution_context
+
+    cached_router_validation = {
+        **verified_validation,
+        "execution_cost_model_complete": True,
+        "execution_cost_model_status": "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY",
+        "execution_cost_dataset_sha256": context["dataset_sha256"],
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_verified": True,
+        "execution_cost_calibration_evidence_id": context["execution_cost_calibration_evidence_id"],
+        "execution_cost_model_fingerprint": context["model_fingerprint"],
+        "per_bar_execution_context_sha256": context["context_sha256"],
+    }
+    assert _router_validation_cache_matches_execution_context(
+        cached_router_validation,
+        current_dataset_sha256=context["dataset_sha256"],
+        current_execution_cost_context=context,
+    ) is True
+    assert _router_validation_cache_matches_execution_context(
+        cached_router_validation,
+        current_dataset_sha256="d" * 64,
+        current_execution_cost_context=context,
+    ) is False
+
     assert np.isnan(context["volume_units"][0])
     assert context["volume_units"][21] == pytest.approx(100.0)
     assert context["spread_bps"][21] == pytest.approx(4.0)
