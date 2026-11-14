@@ -540,6 +540,9 @@ def test_router_position_cost_series_splits_sign_reversal(monkeypatch):
         (1.5, 1.0, 100.0),
         (1, True, 100.0),
         (1, 1.0, False),
+        (np.True_, 1.0, 100.0),
+        (1, np.True_, 100.0),
+        (1, 1.0, np.False_),
     ],
 )
 def test_execution_event_rejects_boolean_or_fractional_indices_and_quantities(
