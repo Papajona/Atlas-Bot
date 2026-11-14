@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Any
+from collections.abc import Mapping
 import logging
 import traceback
 import contextlib
@@ -4008,7 +4009,7 @@ def _strategy_router_validation_gate(
         sum(value > 0.0 for value in fold_returns) / len(fold_returns)
         if fold_returns else 0.0
     )
-    context = current_execution_cost_context if isinstance(current_execution_cost_context, dict) else {}
+    context = current_execution_cost_context if isinstance(current_execution_cost_context, Mapping) else {}
     evidence_id = str(
         validation.get("execution_cost_calibration_evidence_id") or ""
     ).strip()
