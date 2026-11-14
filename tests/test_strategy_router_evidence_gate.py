@@ -131,9 +131,8 @@ def test_customer_bot_request_rejects_oversized_or_nonfinite_execution_evidence(
     with pytest.raises(ValidationError):
         CustomerBotStartRequest(execution_cost_calibration_evidence={"nonfinite": float("nan")})
 
-def test_router_evidence_attachment_preserves_immutable_market_provenance():
+def test_customer_evidence_is_kept_off_market_dataframe_metadata():
     import pandas as pd
-    from app.main import _attach_router_execution_cost_evidence
 
     frame = pd.DataFrame({"close": [100.0]})
     provenance = {"sha256": "d" * 64, "exchange": "binance"}
@@ -141,10 +140,8 @@ def test_router_evidence_attachment_preserves_immutable_market_provenance():
     evidence = {"evidence_type": "venue_execution_cost_calibration"}
     request = CustomerBotStartRequest(execution_cost_calibration_evidence=evidence)
 
-    attached = _attach_router_execution_cost_evidence(frame, request)
-    assert attached is not frame
-    assert attached.attrs["data_provenance"] == provenance
-    assert attached.attrs["execution_cost_calibration_evidence"] == evidence
+    assert request.execution_cost_calibration_evidence == evidence
+    assert frame.attrs == {"data_provenance": provenance}
     assert "execution_cost_calibration_evidence" not in frame.attrs
 
 
