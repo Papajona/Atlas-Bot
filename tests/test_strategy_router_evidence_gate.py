@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from app.main import _strategy_router_validation_gate
+from app.main import (
+    _router_validation_cache_matches_execution_context,
+    _strategy_router_validation_gate,
+)
 from app.schemas import CustomerBotStartRequest
 
 
@@ -154,3 +157,11 @@ def test_router_validation_must_match_exact_per_bar_context_hash():
     assert result["passed"] is False
     assert result["execution_cost_validation_matches_current_context"] is False
     assert "ROUTER_VALIDATION_CONTEXT_DOES_NOT_MATCH_CURRENT_SIGNATURE" in result["rejection_reasons"]
+
+def test_router_validation_cache_is_invalidated_for_plain_or_mismatched_context():
+    plain_context = _verified_context()
+    assert _router_validation_cache_matches_execution_context(
+        _verified_validation(),
+        current_dataset_sha256="c" * 64,
+        current_execution_cost_context=plain_context,
+    ) is False
