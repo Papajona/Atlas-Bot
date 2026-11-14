@@ -3948,6 +3948,7 @@ def _strategy_router_validation_gate(
     required_folds: int,
     required_positive_fold_ratio: float,
     current_dataset_sha256: str,
+    current_execution_cost_context: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Keep adaptive strategy promotion closed without current signed per-bar cost proof."""
     folds = [
@@ -3962,23 +3963,40 @@ def _strategy_router_validation_gate(
         sum(value > 0.0 for value in fold_returns) / len(fold_returns)
         if fold_returns else 0.0
     )
+    context = current_execution_cost_context if isinstance(current_execution_cost_context, dict) else {}
     evidence_id = str(
         validation.get("execution_cost_calibration_evidence_id") or ""
     ).strip()
+    context_evidence_id = str(
+        context.get("execution_cost_calibration_evidence_id") or context.get("evidence_id") or ""
+    ).strip()
+    context_verified = (
+        str(context.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        and bool(context_evidence_id)
+    )
     calibration_verified = (
-        str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        context_verified
+        and str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
         and validation.get("execution_cost_calibration_verified") is True
         and bool(evidence_id)
+        and evidence_id == context_evidence_id
     )
     per_bar_costs_verified = (
-        validation.get("execution_cost_model_complete") is True
+        context_verified
+        and validation.get("execution_cost_model_complete") is True
         and validation.get("execution_cost_model_status")
         == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
         and all(row.get("execution_cost_model_complete") is True for row in folds)
+        and str(validation.get("execution_cost_model_fingerprint") or "")
+        == str(context.get("model_fingerprint") or "")
+        and str(validation.get("per_bar_execution_context_sha256") or "")
+        == str(context.get("context_sha256") or "")
     )
     current_dataset_matches = (
         bool(current_dataset_sha256)
         and str(validation.get("execution_cost_dataset_sha256") or "").strip().lower()
+        == str(current_dataset_sha256).strip().lower()
+        and str(context.get("dataset_sha256") or "").strip().lower()
         == str(current_dataset_sha256).strip().lower()
     )
     research_performance_passed = (
@@ -6121,6 +6139,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     required_folds=settings.adaptive_strategy_router_folds,
                     required_positive_fold_ratio=settings.adaptive_strategy_router_required_positive_fold_ratio,
                     current_dataset_sha256=current_dataset_sha256,
+                    current_execution_cost_context=router_execution_cost_context,
                 )
                 router["execution_cost_context_audit"] = router_execution_cost_audit
                 router["validation"] = router_validation
