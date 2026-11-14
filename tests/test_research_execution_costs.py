@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
@@ -546,6 +547,7 @@ def test_router_position_cost_series_splits_sign_reversal(monkeypatch):
     [
         (True, 1.0, 100.0),
         (1.5, 1.0, 100.0),
+        (Decimal("1.0000000000000000001"), 1.0, 100.0),
         (1, True, 100.0),
         (1, 1.0, False),
         (np.True_, 1.0, 100.0),
@@ -678,7 +680,7 @@ def test_missing_execution_context_uses_static_cost_without_event_loop(monkeypat
 
 @pytest.mark.parametrize(
     "bar_position",
-    [2, 2.0, np.int64(2), np.float64(2.0)],
+    [2, 2.0, np.int64(2), np.float64(2.0), Decimal("2.0"), "2", "2.0"],
 )
 def test_execution_event_accepts_integral_numeric_bar_indices(bar_position):
     from app.research_execution_costs import execution_cost_for_event
