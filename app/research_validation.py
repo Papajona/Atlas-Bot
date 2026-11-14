@@ -801,6 +801,34 @@ def oos_benchmark_comparison(
     ]
     random_median = float(np.median(random_returns))
     random_p95 = float(np.quantile(random_returns, 0.95))
+
+    # A missing per-bar context means session-only pricing, not necessarily a
+    # fallback. Publish only folds with an actual rejection recorded in the
+    # fallback-reason ledger; an upstream candidate rejection applies to every
+    # session-priced OOS fold because that candidate stream was downgraded globally.
+    buy_hold_session_fallback_folds: set[int] = set()
+    for reason in execution_cost_fallback_reasons:
+        if reason == "candidate_session_cost_fallback_after_event_rejection":
+            buy_hold_session_fallback_folds.update(
+                index
+                for index, context in enumerate(context_blocks)
+                if context is None
+            )
+            continue
+        prefix, separator, _detail = reason.partition(":")
+        if separator and prefix.startswith("fold_"):
+            try:
+                fallback_index = int(prefix.removeprefix("fold_"))
+            except ValueError:
+                continue
+            if 0 <= fallback_index < len(context_blocks):
+                buy_hold_session_fallback_folds.add(fallback_index)
+
+    published_session_fallback_folds = sorted(
+        index
+        for index in buy_hold_session_fallback_folds
+        if session_costs_bps is not None and context_blocks[index] is None
+    )
     return {
         "status": "OK",
         "execution_cost_model_complete": bool(benchmark_cost_complete),
@@ -851,11 +879,7 @@ def oos_benchmark_comparison(
             and all(context is None for context in context_blocks)
             else None
         ),
-        "buy_and_hold_session_fallback_folds": [
-            block_index
-            for block_index, context in enumerate(context_blocks)
-            if session_costs_bps is not None and context is None
-        ],
+        "buy_and_hold_session_fallback_folds": published_session_fallback_folds,
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
