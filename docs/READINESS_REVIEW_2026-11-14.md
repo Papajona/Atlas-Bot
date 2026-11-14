@@ -42,7 +42,7 @@ The uploaded source ZIP does not carry Git history. The GitHub source SHA above,
 | Configuration safety/defaults | Strong source controls; live trading, customer-live and payouts remain off by default | Preserve safe flags |
 | CI/test design/supply chain | Hash-locked dependencies and mandatory PostgreSQL/no-skip workflow are present | All required checks must pass on exact PR head |
 | Main app probes/telemetry | Seven issues addressed by this patch; runtime still needs verification | Deploy and probe exact patched SHA |
-| Paper execution fidelity | **Gap.** The standalone calibrated estimator is used in research-cost code, but not by active platform/customer paper fill paths | Customer-facing paper blocked |
+| Paper execution fidelity | Calibrated estimator wired into platform and autonomous customer-paper fill paths in PR #414; exact-head CI/mandatory PostgreSQL verification pending. Manual customer API advancement remains heuristic without historical quote evidence. | Customer paper remains non-validation-grade until independently sourced calibration evidence is configured and verified. |
 | Research evidence | **Gap.** Original OANDA dataset identity, complete-trial DSR, survivorship and carry evidence remain blocked in the sign-off matrix | No performance claims |
 | Paper-only staging identity | Prior PASS only for `445e9d1...`; current candidate not yet reverified | Re-run exact-SHA preflight |
 | Backup/restore | No real restore drill recorded | Production blocked |
@@ -63,7 +63,7 @@ The uploaded source ZIP does not carry Git history. The GitHub source SHA above,
 | F-05 | Low | Public health response exposed worker error types/timestamps. | Fixed in patch: expose coarse worker status/restart count only. Keep release version, SHA and image digest because the release verifier consumes these fields. |
 | F-06 | Low | Bandit ran at high severity only; paper-staging SQL used an f-string with a module-owned predicate. | Fixed in patch: the runtime preflight now uses a fully static SQL literal with the allowlist predicate inlined; the behavioral test fixture is separate. Bandit runs at `-ll` in CI, Production Core and `verify_release.sh`. |
 | F-07 | Low | CI runners were not consistent with Production Core. | Fixed in patch: pin Python and Android jobs to `ubuntu-24.04`. |
-| F-08 | High for paper validity | Calibrated paper estimator is not called by active platform/customer paper order-fill paths. | **Open.** Do not represent paper results as validation-grade. |
+| F-08 | High for paper validity | Calibrated paper estimator was not called by active platform/customer paper order-fill paths. | **Code repair in PR #414:** platform and autonomous customer-paper paths now call the SHA-pinned estimator, persist model evidence, replay immutable decisions and enforce shared bar capacity. Exact-head CI and mandatory PostgreSQL checks must pass before merge. Manual customer API advancement remains a separate OHLCV-only heuristic path because historical bid/ask evidence is unavailable. Do not represent paper results as validation-grade. |
 | F-09 | High for performance claims | Original OANDA data identity, complete-trial DSR, survivorship and carry evidence remain unresolved. | **Open.** Follow the sign-off matrix. |
 | F-10 | Medium | Large modules and router concentration. | **Open**, non-blocking for this patch. |
 | F-11 | Medium | Training/backtest API-tier capacity needs runtime/load verification. | **Verify** on the intended deployment before moving work to a queue/worker. |
@@ -98,18 +98,13 @@ Rollout:
 
 ## 6. Paper fill-model gap (F-08)
 
-The codebase contains `app/paper_execution_model.py`; the source review and existing readiness documentation indicate that it is not wired into the active platform or customer paper fill paths. `app/research_execution_costs.py` uses the estimator for research-cost analysis, which is not equivalent to active-order fill integration.
+The codebase contains `app/paper_execution_model.py`. PR #414 wires its SHA-pinned estimator into the active platform paper fill path (`app/execution.py`) and autonomous customer-paper path (`app/customer_paper_flow.py`). The platform path supplies server-verified closed-spot context from `_server_paper_market_context`; the autonomous customer path supplies a validated server quote plus completed-spot-bar context. Both pass remaining shared bar capacity, and partial fills/cancelled remainder follow the model result. Customer fills persist the model digest and deterministic decision metadata in the immutable fill, journal and order-event records so same-bar retries replay the original decision. Platform fill audit events carry the same evidence record.
 
-Safe integration requires, at minimum:
+Runtime calibration settings are all-or-nothing and test fixtures are forbidden in runtime. A configured run must verify artifact SHA-256, source dataset SHA-256, venue/symbol scope, observation counts and exact parameter parity. Partial calibration configuration fails closed. The model remains explicitly `INCOMPLETE_EXECUTION_MODEL` because queue position/depth and intrabar latency remain unmodelled.
 
-1. Build market context server-side from the same validated completed candles used by the simulator (tradable volume, spread, recent volatility and bar duration); never accept cost inputs from clients.
-2. Preserve current order idempotency and append-only customer ledger semantics.
-3. Persist fill-model decisions and the calibration-evidence SHA-256 with the existing order idempotency key.
-4. Derive stochastic latency/rejection choices deterministically from that key so restarts replay consistently.
-5. Test participation caps, residual cancellation, restart replay and cost parity.
-6. Run the mandatory PostgreSQL ledger/concurrency suites with no skips.
+The manual customer API advancement route remains an OHLCV historical replay path without historical bid/ask data; it is not represented as calibrated. Its fills remain diagnostic-only until exact timestamped quote evidence or a shared calibrated execution route is supplied.
 
-Calibration for the currently approved posture must use archived venue evidence and/or exchange sandbox/testnet observations. **No real-money fills are proposed or authorized by this review.** Customer-facing paper remains NOT READY until active-path integration, calibration provenance and exact-SHA PostgreSQL verification are complete. Paper reports must not be presented as validation-grade before then.
+PR #414 adds regression coverage for runtime calibration configuration, shared-capacity enforcement and customer-path estimator context. **Exact-head CI, the mandatory PostgreSQL suite and Production Core checks must pass before merge.** Calibration must still use genuine venue evidence, not generated fixtures. **No real-money fills are proposed or authorized by this review.** Paper reports must not be presented as validation-grade.
 
 ## 7. Stage gates
 
