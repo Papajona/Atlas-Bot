@@ -18,6 +18,6 @@ if [[ "${DATABASE_URL}" == postgresql* ]]; then
   export ATLAS_POSTGRES_URL="${DATABASE_URL}"
   python -m pytest -q tests/test_postgres_concurrency_3_10_39.py
 fi
-python -m bandit -r app -lll -f json -o bandit-report.json
+python -m bandit -r app -ll -f json -o bandit-report.json
 python -m pip_audit -r requirements.txt --strict --ignore-vuln PYSEC-2026-1325 -f json -o pip-audit-report.json
 python -m scripts.check_native_ai

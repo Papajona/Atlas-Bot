@@ -6,6 +6,8 @@ import signal
 os.environ.setdefault("ENVIRONMENT", "development")
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test_trading.db")
 os.environ.setdefault("BACKGROUND_RECONCILIATION_ENABLED", "false")
+# Disable process-local readiness caching in tests unless a test explicitly opts in.
+os.environ.setdefault("READYZ_CACHE_SECONDS", "0")
 os.environ.setdefault("ADMIN_TOKEN", "test-admin-token-for-pytest-only")
 
 

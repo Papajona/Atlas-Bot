@@ -38,12 +38,25 @@ class Settings(BaseSettings):
     # Keep LightGBM/OpenMP within the two-CPU Cloud Run API/worker allocation by default.
     ml_threads: int = max(1, min(2, os.cpu_count() or 1))
 
+    # /readyz cache is process-local; zero disables caching for explicit diagnostics.
+    readyz_cache_seconds: float = 5.0
+    # A failed readiness result must fail deployment probes in staging/production.
+    readyz_fail_when_not_ready: bool = True
+
     @field_validator("ml_threads")
     @classmethod
     def _validate_ml_threads(cls, value: int) -> int:
         if value < 1 or value > 2:
             raise ValueError("ML_THREADS must be between 1 and 2 for the deployed CPU budget")
         return value
+
+    @field_validator("readyz_cache_seconds")
+    @classmethod
+    def _validate_readyz_cache_seconds(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError("READYZ_CACHE_SECONDS must be finite and non-negative")
+        return parsed
 
     @field_validator("paper_fill_latency_bars", "paper_order_ttl_bars")
     @classmethod
