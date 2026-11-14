@@ -991,11 +991,11 @@ def ai_walk_forward_backtest(
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
-        session_costs_bps=(
-            session_costs_bps
-            if execution_cost_context is None or not all(fold_execution_cost_complete)
-            else None
-        ),
+        # Keep the separately verified session schedule available to benchmark
+        # controls even when every candidate fold used signed per-bar costs.
+        # The per-bar context remains authoritative for successful folds; the
+        # schedule is selected only for folds downgraded after a control rejection.
+        session_costs_bps=session_costs_bps,
         execution_cost_context_blocks=(
             oos_execution_cost_context_blocks
             if execution_cost_context is not None
