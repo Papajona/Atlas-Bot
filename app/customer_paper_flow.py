@@ -711,7 +711,11 @@ async def _fill_open_order(
             "bar_capacity": budget.get("capacity"),
             "fill": prior_fill,
             "order_status_after_ttl": current.get("status") if ttl_expired else None,
-            "cost_model": {"cost_model_status": "REPLAYED_FROM_IMMUTABLE_LEDGER"},
+            "cost_model": {
+                "cost_model_status": "REPLAYED_FROM_IMMUTABLE_LEDGER",
+                "execution_model": prior_execution_model,
+            },
+            "execution_model": prior_execution_model,
             "recovered_pending_order": True,
         }
 
