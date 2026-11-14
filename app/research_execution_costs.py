@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+from decimal import Decimal, InvalidOperation
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -22,6 +23,30 @@ from .research_evidence import canonical_sha256, validate_execution_cost_calibra
 PER_BAR_CONTEXT_SCHEMA = "atlas-per-bar-execution-context-v1"
 _VOLUME_WINDOW_BARS = 20
 _ALLOWED_USD_QUOTE_ASSETS = {"USD", "USDT", "USDC", "BUSD", "FDUSD", "DAI"}
+_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN = object()
+
+
+class _VerifiedResearchExecutionCostContext(dict[str, Any]):
+    """In-process marker proving the signed calibration builder validated this mapping."""
+
+    __slots__ = ("_verification_token",)
+
+    def __init__(self, values: Mapping[str, Any], *, _token: object) -> None:
+        if _token is not _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN:
+            raise TypeError("verified execution contexts can only be created by the validator")
+        super().__init__(values)
+        self._verification_token = _token
+
+
+def is_verified_research_execution_cost_context(context: Any) -> bool:
+    """Return true only for a context produced by the signed calibration validator."""
+    return (
+        type(context) is _VerifiedResearchExecutionCostContext
+        and getattr(context, "_verification_token", None)
+        is _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN
+    )
+
+
 _PARAMETER_NAMES = (
     "base_slippage_bps", "max_participation_rate", "impact_coefficient",
     "rejection_probability", "latency_min_ms", "latency_median_ms",
@@ -336,7 +361,10 @@ def build_research_execution_cost_context(
         "venue": venue, "market_type": market_type,
         "symbol": symbol, "timeframe": timeframe,
     }
-    return context, {
+    verified_context = _VerifiedResearchExecutionCostContext(
+        context, _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN
+    )
+    return verified_context, {
         "status": "READY", "reason": "SIGNED_PER_BAR_CONTEXT_AND_PAPER_MODEL_VERIFIED",
         "execution_cost_model_complete": True, "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": evidence_id or None,
@@ -363,6 +391,10 @@ def slice_research_execution_context(context: Mapping[str, Any] | None, index: p
         if len(values) != len(source_index):
             return None
         sliced[name] = values[positions]
+    if is_verified_research_execution_cost_context(context):
+        return _VerifiedResearchExecutionCostContext(
+            sliced, _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN
+        )
     return sliced
 
 
@@ -382,13 +414,23 @@ def execution_cost_for_event(
     ):
         return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     try:
-        position = int(bar_position)
-        numeric_position = float(bar_position)
+        if isinstance(bar_position, str):
+            exact_position = Decimal(bar_position.strip())
+            if (
+                not exact_position.is_finite()
+                or exact_position != exact_position.to_integral_value()
+            ):
+                return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+            position = int(exact_position)
+        else:
+            position = int(bar_position)
+            # Compare before float coercion: Decimal('1.0000000000000000001')
+            # rounds to 1.0 as a float but is not an integral bar index.
+            if not bool(bar_position == position):
+                return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
         amount = float(turnover)
         price = float(reference_price)
-    except (TypeError, ValueError, OverflowError):
-        return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
-    if not math.isfinite(numeric_position) or numeric_position != float(position):
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
         return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     if position < 0 or position >= len(context.get("index", [])):
         return None, "EXECUTION_EVENT_BAR_OUT_OF_RANGE"
