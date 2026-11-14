@@ -3971,6 +3971,21 @@ def _router_validation_cache_matches_execution_context(
     )
 
 
+def _requires_signed_per_bar_router_context(asset: str, df: pd.DataFrame) -> bool:
+    """Limit the new signed per-bar gate to the crypto-spot domain it can verify."""
+    provenance = getattr(df, "attrs", {}).get("data_provenance", {})
+    if not isinstance(provenance, dict):
+        return False
+    return bool(
+        str(asset or "").strip().lower() == "crypto"
+        and str(provenance.get("source") or "") == "ccxt_ohlcv"
+        and str(provenance.get("market_type") or "").strip().lower() == "spot"
+        and str(provenance.get("asset_class") or "").strip().lower() == "crypto"
+        and str(provenance.get("volume_unit") or "").strip().lower() == "base_asset"
+        and provenance.get("volume_unit_verified") is True
+    )
+
+
 def _strategy_router_validation_gate(
     validation: dict[str, Any],
     *,
@@ -3978,8 +3993,9 @@ def _strategy_router_validation_gate(
     required_positive_fold_ratio: float,
     current_dataset_sha256: str,
     current_execution_cost_context: dict[str, Any] | None,
+    require_verified_execution_context: bool = True,
 ) -> dict[str, Any]:
-    """Keep adaptive strategy promotion closed without current signed per-bar cost proof."""
+    """Gate supported crypto spot routing on signed costs; preserve other asset gates."""
     folds = [
         row for row in (validation.get("folds") or [])
         if isinstance(row, dict)
@@ -4042,25 +4058,40 @@ def _strategy_router_validation_gate(
         and positive_ratio >= float(required_positive_fold_ratio)
         and (min(fold_returns) if fold_returns else -1.0) >= -0.20
     )
-    passed = bool(
-        research_performance_passed
-        and calibration_verified
+    signed_execution_gate_passed = bool(
+        calibration_verified
         and per_bar_costs_verified
         and current_dataset_matches
+        and validation_context_matches
+    )
+    passed = (
+        bool(research_performance_passed and signed_execution_gate_passed)
+        if require_verified_execution_context
+        else bool(research_performance_passed)
     )
     reasons = []
     if not research_performance_passed:
         reasons.append("ROUTER_WALK_FORWARD_PERFORMANCE_GATE_FAILED")
-    if not calibration_verified:
-        reasons.append("SIGNED_VENUE_CALIBRATION_EVIDENCE_NOT_VERIFIED")
-    if not per_bar_costs_verified:
-        reasons.append("PER_BAR_EXECUTION_COSTS_INCOMPLETE")
-    if not validation_context_matches:
-        reasons.append("ROUTER_VALIDATION_CONTEXT_DOES_NOT_MATCH_CURRENT_SIGNATURE")
-    if not current_dataset_matches:
-        reasons.append("EXECUTION_COST_EVIDENCE_DATASET_MISMATCH")
+    if require_verified_execution_context:
+        if not calibration_verified:
+            reasons.append("SIGNED_VENUE_CALIBRATION_EVIDENCE_NOT_VERIFIED")
+        if not per_bar_costs_verified:
+            reasons.append("PER_BAR_EXECUTION_COSTS_INCOMPLETE")
+        if not validation_context_matches:
+            reasons.append("ROUTER_VALIDATION_CONTEXT_DOES_NOT_MATCH_CURRENT_SIGNATURE")
+        if not current_dataset_matches:
+            reasons.append("EXECUTION_COST_EVIDENCE_DATASET_MISMATCH")
     return {
         "passed": passed,
+        "execution_cost_gate_mode": (
+            "SIGNED_PER_BAR_REQUIRED" if require_verified_execution_context
+            else "PERFORMANCE_ONLY_OUTSIDE_SUPPORTED_CRYPTO_SPOT_DOMAIN"
+        ),
+        "execution_cost_gate_scope": (
+            "SIGNED_CRYPTO_SPOT_PER_BAR" if require_verified_execution_context
+            else "UNSUPPORTED_ASSET_OR_VENUE_FOR_SIGNED_PER_BAR_BUILDER"
+        ),
+        "signed_execution_gate_passed": signed_execution_gate_passed,
         "positive_fold_ratio": positive_ratio,
         "folds": len(folds),
         "required_positive_fold_ratio": float(required_positive_fold_ratio),
@@ -6189,6 +6220,9 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     required_positive_fold_ratio=settings.adaptive_strategy_router_required_positive_fold_ratio,
                     current_dataset_sha256=current_dataset_sha256,
                     current_execution_cost_context=router_execution_cost_context,
+                    require_verified_execution_context=_requires_signed_per_bar_router_context(
+                        req.asset, df
+                    ),
                 )
                 router["execution_cost_context_audit"] = router_execution_cost_audit
                 router["validation"] = router_validation
