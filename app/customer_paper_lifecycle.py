@@ -891,6 +891,7 @@ async def record_customer_paper_fill(
     quantity: str | int | Decimal,
     price: str | int | Decimal,
     fee_amount: str | int | Decimal = "0",
+    execution_model: Mapping[str, Any] | None = None,
     enforce_market_bar_budget: bool = False,
     group_mark_prices: Mapping[tuple[str, str, str], object] | None = None,
     group_mark_prices_loader: Callable[
@@ -913,6 +914,7 @@ async def record_customer_paper_fill(
     fill_price = _input_decimal(price, "price", positive=True)
     requested_fee = _input_decimal(fee_amount, "fee_amount", non_negative=True)
     fee = requested_fee
+    execution_model_metadata = _metadata(execution_model) if execution_model is not None else None
     # Obtain a validated group mark only after the full ledger readiness
     # preflight. A mark fetched before preflight can age beyond the five-second
     # limit while database identity and RLS checks run.
@@ -1016,6 +1018,8 @@ async def record_customer_paper_fill(
                         "bar_key": normalized_bar_key, "quantity": _fmt(requested_amount), "price": _fmt(fill_price),
                         "fee_amount": _fmt(requested_fee), "currency": currency,
                     }
+                    if execution_model_metadata is not None:
+                        payload["execution_model"] = execution_model_metadata
                     digest = _canonical_sha(payload)
                     existing = (await conn.execute(text(
                         """
@@ -1346,7 +1350,14 @@ async def record_customer_paper_fill(
                         "quantity_after": quantity_after, "average_entry_after": average_after, "cost_basis_after": cost_after,
                         "realized_pnl_before": realized_before, "realized_pnl_after": realized_after,
                         "payload_sha256": digest,
-                        "metadata": json.dumps({"bar_key": normalized_bar_key, "input_sha256": digest}, sort_keys=True, separators=(",", ":")),
+                        "metadata": json.dumps(
+                            {
+                                "bar_key": normalized_bar_key,
+                                "input_sha256": digest,
+                                **({"execution_model": execution_model_metadata} if execution_model_metadata is not None else {}),
+                            },
+                            sort_keys=True, separators=(",", ":"),
+                        ),
                     })).first()
                     if filled_row is None:
                         raise CustomerPaperIdempotencyConflict("fill idempotency key raced with a concurrent request")
@@ -1375,7 +1386,11 @@ async def record_customer_paper_fill(
                         conn, customer_id=customer_id, idempotency_key=f"fill:{fill_key}",
                         event_type="SIMULATED_FILL", currency=currency, lines=journal_lines,
                         reference=fill_id,
-                        metadata={"fill_id": fill_id, "order_id": order_id, "symbol": symbol, "side": side, "payload_sha256": digest},
+                        metadata={
+                            "fill_id": fill_id, "order_id": order_id, "symbol": symbol,
+                            "side": side, "payload_sha256": digest,
+                            **({"execution_model": execution_model_metadata} if execution_model_metadata is not None else {}),
+                        },
                     )
                     await conn.execute(text(
                         """
@@ -1402,13 +1417,17 @@ async def record_customer_paper_fill(
                         conn, customer_id=customer_id, order_id=order_id,
                         event_key=f"fill-state:{fill_key}", event_type=next_state,
                         filled_quantity=filled_after,
-                        metadata={"fill_id": fill_id, "bar_key": normalized_bar_key, "journal_id": journal_id},
+                        metadata={
+                            "fill_id": fill_id, "bar_key": normalized_bar_key, "journal_id": journal_id,
+                            **({"execution_model": execution_model_metadata} if execution_model_metadata is not None else {}),
+                        },
                     )
                 return {
                     "status": "APPENDED", "fill_id": fill_id, "journal_id": journal_id,
                     "order_id": order_id, "idempotency_key": fill_key, "order_status": next_state,
                     "filled_quantity": _fmt(filled_after), "position_quantity": _fmt(quantity_after),
                     "average_entry_price": _fmt(average_after), "realized_pnl": _fmt(realized),
+                    **({"execution_model": execution_model_metadata} if execution_model_metadata is not None else {}),
                 }
 
             finally:
