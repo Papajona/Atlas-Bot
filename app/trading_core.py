@@ -230,7 +230,9 @@ def triple_barrier(
                 )
             entry_side = "buy" if direction == "long" else "sell"
             exit_side = "sell" if direction == "long" else "buy"
-            event_namespace = f"{execution_cost_namespace}:label:{i}:{direction}"
+            # Namespace is shared with the OOS simulator so the deterministic
+            # latency draw for an equivalent order is identical in labels and returns.
+            event_namespace = execution_cost_namespace
             entry_cost, entry_reason = execution_cost_for_event(
                 execution_cost_context,
                 bar_position=entry_i,
@@ -682,7 +684,7 @@ def ai_walk_forward_backtest(
         take_profit_atr=float(settings.strategy_take_profit_atr),
         round_trip_cost_bps=label_round_trip_costs,
         execution_cost_context=label_execution_context,
-        execution_cost_namespace="ai-walk-forward:labels",
+        execution_cost_namespace="ai-walk-forward",
     )
     label_execution_cost_audit = {
         "execution_cost_model_complete": y.attrs.get("execution_cost_model_complete") is True,
@@ -771,7 +773,7 @@ def ai_walk_forward_backtest(
                 raise ValueError("research execution context cannot be aligned to an AI OOS fold")
             fold_cost_provider = make_execution_cost_provider(
                 fold_execution_context,
-                namespace=f"ai-walk-forward:fold:{len(fold_metrics)}",
+                namespace="ai-walk-forward",
             )
         try:
             execution = simulate_execution_aware_strategy(
@@ -819,8 +821,13 @@ def ai_walk_forward_backtest(
             execution["audit"]["per_bar_execution_cost_failure"] = reason
             fold_cost_complete = False
         fold_execution_cost_complete.append(fold_cost_complete)
-        if fold_execution_context is not None:
-            oos_execution_cost_context_blocks.append(fold_execution_context)
+        if execution_cost_context is not None:
+            # Preserve the actual per-fold execution basis: successful folds retain
+            # their signed context, while a rejected fold is benchmarked on the same
+            # static/session fallback used for its reported candidate returns.
+            oos_execution_cost_context_blocks.append(
+                fold_execution_context if fold_cost_complete else None
+            )
         fold_position = execution["positions"].to_numpy(dtype=float)
         total_stop_exits += int(execution["audit"]["stop_loss_exits"])
         total_target_exits += int(execution["audit"]["take_profit_exits"])
@@ -929,10 +936,9 @@ def ai_walk_forward_backtest(
             oos_execution_cost_context_blocks
             if execution_cost_context is not None
             and len(oos_execution_cost_context_blocks) == len(fold_metrics)
-            and all(fold_execution_cost_complete)
             else None
         ),
-        candidate_execution_cost_namespace="ai-walk-forward:benchmark",
+        candidate_execution_cost_namespace="ai-walk-forward",
     )
     label_cost_complete = label_execution_cost_audit.get(
         "execution_cost_model_complete"
