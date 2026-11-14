@@ -852,7 +852,7 @@ async def get_customer_paper_fill_for_bar(
             row = (await conn.execute(text(
                 """
                 SELECT f.id, f.idempotency_key, f.quantity, f.price, f.fee_amount, f.bar_key,
-                       f.order_id
+                       f.order_id, f.metadata_json
                 FROM customer_paper.fills AS f
                 JOIN customer_paper.orders AS o
                   ON o.id=f.order_id AND o.customer_id=f.customer_id
@@ -877,6 +877,11 @@ async def get_customer_paper_fill_for_bar(
             "quantity": _fmt(Decimal(row["quantity"])),
             "price": _fmt(Decimal(row["price"])),
             "fee_amount": _fmt(Decimal(row["fee_amount"])),
+            "execution_model": (
+                (row["metadata_json"] if isinstance(row["metadata_json"], Mapping)
+                 else json.loads(row["metadata_json"] or "{}")).get("execution_model")
+                if row["metadata_json"] is not None else None
+            ),
         }
     finally:
         await engine.dispose()
