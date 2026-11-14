@@ -162,6 +162,40 @@ def test_oos_financing_completeness_requires_traceable_source_and_evidence_id():
 
 
 
+def test_ordinary_signal_close_uses_exit_event_namespace():
+    frame = _ohlc(
+        opens=[100.0, 100.0],
+        highs=[101.0, 101.0],
+        lows=[99.0, 99.0],
+    )
+    positions = pd.Series([1.0, 0.0], index=frame.index)
+    atr = pd.Series([2.0, 2.0], index=frame.index)
+    events = []
+
+    def record_event(bar_position, turnover, reference_price, side, event_type):
+        events.append((bar_position, turnover, reference_price, side, event_type))
+        return 0.0
+
+    result = simulate_execution_aware_strategy(
+        frame,
+        positions,
+        atr,
+        stop_atr=2.0,
+        take_profit_atr=3.0,
+        transaction_cost_bps=0.0,
+        carry_bps_per_bar=0.0,
+        transaction_cost_provider=record_event,
+    )
+
+    # The simulator returns streams plus an audit; it does not expose an HTTP-style status.
+    assert result["audit"]["per_bar_execution_cost_model_status"] == "EVENT_LEVEL_PROVIDER_APPLIED"
+    assert [(event[0], event[3], event[4]) for event in events] == [
+        (0, "buy", "ENTRY"),
+        (1, "sell", "EXIT"),
+    ]
+    assert [event[1] for event in events] == pytest.approx([1.0, 1.0])
+
+
 def test_last_evaluated_bar_liquidates_at_observed_close_and_charges_exit():
     frame = _ohlc(
         opens=[100.0],

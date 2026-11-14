@@ -391,8 +391,13 @@ def simulate_execution_aware_strategy(
                     entry_cost_bps = entry_cost_drag_override * 10_000.0 / entry_turnover
                 else:
                     entry_side = "buy" if actual - previous_position > 0.0 else "sell"
+                    event_type = (
+                        "ENTRY" if previous_position == 0.0
+                        else "EXIT" if actual == 0.0
+                        else "ADJUST"
+                    )
                     entry_cost_bps = float(transaction_cost_provider(
-                        i, entry_turnover, float(opens[i]), entry_side, "ENTRY"
+                        i, entry_turnover, float(opens[i]), entry_side, event_type
                     ))
             if exit_turnover > 0.0:
                 if exit_fill_price is None:

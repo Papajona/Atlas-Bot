@@ -239,6 +239,7 @@ def oos_benchmark_comparison(
     session_costs_bps: dict[str, float] | None = None,
     execution_cost_context_blocks: list[Mapping[str, object] | None] | None = None,
     candidate_execution_cost_namespace: str = "research:ensemble",
+    _execution_cost_fallback_reasons: tuple[str, ...] = (),
 ) -> dict:
     """Compare candidate returns with OHLC-derived buy-and-hold and fresh-entry controls.
 
@@ -286,11 +287,67 @@ def oos_benchmark_comparison(
             for context in execution_cost_context_blocks
         )
     )
-    context_blocks = (
+    context_blocks = list(
         execution_cost_context_blocks
         if execution_cost_context_blocks is not None
         else [None] * len(ohlc_blocks)
     )
+    execution_cost_fallback_reasons = list(_execution_cost_fallback_reasons)
+    prepass_fallback_reasons: dict[int, str] = {}
+
+    def _retry_with_session_fallback_for_folds(rejections: Mapping[int, str]) -> dict:
+        """Downgrade all rejected folds together, then recompute aligned diagnostics once.
+
+        The first pass scans candidate, buy-and-hold, and every random-control leg
+        across all still-verified folds. Once every rejected fold is known, one retry
+        prices all those folds with the same verified session schedule (or static
+        diagnostic costs). This avoids one full recursive benchmark run per failure.
+        """
+        fallback_contexts = list(context_blocks)
+        reasons = list(execution_cost_fallback_reasons)
+        for block_index, reason in sorted(rejections.items()):
+            if (
+                block_index < 0
+                or block_index >= len(fallback_contexts)
+                or fallback_contexts[block_index] is None
+            ):
+                continue
+            fallback_contexts[block_index] = None
+            reasons.append(f"fold_{block_index}:{reason}")
+        fallback = oos_benchmark_comparison(
+            frame_blocks,
+            signals,
+            candidate_blocks,
+            None if entry_atr_blocks is None else atr_blocks,
+            transaction_cost_bps=transaction_cost_bps,
+            carry_bps_per_bar=carry_bps_per_bar,
+            stop_atr=stop_atr,
+            take_profit_atr=take_profit_atr,
+            drawdown_limit=drawdown_limit,
+            daily_loss_limit=daily_loss_limit,
+            loss_event_threshold=loss_event_threshold,
+            cooldown_bars=cooldown_bars,
+            loss_lookback_bars=loss_lookback_bars,
+            random_trials=random_trials,
+            seed=seed,
+            session_costs_bps=session_costs_bps,
+            execution_cost_context_blocks=fallback_contexts,
+            candidate_execution_cost_namespace=candidate_execution_cost_namespace,
+            _execution_cost_fallback_reasons=tuple(reasons),
+        )
+        # Never let a fallback-priced result satisfy the verified per-bar gate.
+        fallback["execution_cost_model_complete"] = False
+        fallback["execution_cost_model_status"] = (
+            "INCOMPLETE_SESSION_FALLBACK"
+            if session_costs_bps is not None
+            else "INCOMPLETE_STATIC_FALLBACK"
+        )
+        fallback["execution_cost_model_failure"] = list(
+            fallback.get("execution_cost_model_failure") or reasons
+        )
+        fallback["execution_cost_model_fallback_used"] = bool(reasons)
+        fallback["gate_passed"] = False
+        return fallback
     try:
         cost_rate = float(transaction_cost_bps) / 10000.0
         carry_rate = None if carry_bps_per_bar is None else float(carry_bps_per_bar) / 10000.0
@@ -566,11 +623,10 @@ def oos_benchmark_comparison(
                 candidate_execution_cost_namespace,
             )
         except ResearchExecutionCostError as exc:
-            return {
-                "status": "INCOMPLETE",
-                "reason": f"benchmark_candidate_execution_cost_unavailable:{exc}",
-                "execution_cost_model_complete": False,
-            }
+            prepass_fallback_reasons[block_index] = (
+                f"benchmark_candidate_execution_cost_unavailable:{exc}"
+            )
+            continue
         except (TypeError, ValueError, OverflowError, FloatingPointError):
             return {"status": "INVALID_DATA", "reason": "candidate_fold_execution_invalid"}
         candidate_fold_values.extend(np.asarray(net, dtype=float).tolist())
@@ -620,6 +676,8 @@ def oos_benchmark_comparison(
     for block_index, (frame, market, execution_context) in enumerate(zip(
         frame_blocks, market_blocks, context_blocks, strict=True
     )):
+        if block_index in prepass_fallback_reasons:
+            continue
         turnover = np.zeros(len(market), dtype=float)
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
@@ -643,11 +701,10 @@ def oos_benchmark_comparison(
             )
             if entry_cost is None or exit_cost is None:
                 reason = entry_reason or exit_reason or "BUY_AND_HOLD_EXECUTION_COST_UNAVAILABLE"
-                return {
-                    "status": "INCOMPLETE",
-                    "reason": f"benchmark_buy_and_hold_execution_cost_unavailable:{reason}",
-                    "execution_cost_model_complete": False,
-                }
+                prepass_fallback_reasons[block_index] = (
+                    f"benchmark_buy_and_hold_execution_cost_unavailable:{reason}"
+                )
+                continue
             transaction_drag = np.zeros(len(market), dtype=float)
             transaction_drag[0] += float(entry_cost) / 10_000.0
             transaction_drag[-1] += float(exit_cost) / 10_000.0
@@ -703,17 +760,20 @@ def oos_benchmark_comparison(
                 (shifted != 0.0)
                 & ((previous_requested == 0.0) | (np.sign(shifted) != np.sign(previous_requested)))
             ))
+            # Keep RNG advancement stable, but do not re-probe a fold already
+            # known to require session/static fallback during this pre-pass.
+            if block_index in prepass_fallback_reasons:
+                continue
             try:
                 net, turnover, executed, exits, audited_exits = _simulate_signal(
                     frame, market, shifted, atr, execution_context,
                     f"benchmark:random:{trial_index}:fold:{block_index}",
                 )
             except ResearchExecutionCostError as exc:
-                return {
-                    "status": "INCOMPLETE",
-                    "reason": f"benchmark_random_control_execution_cost_unavailable:{exc}",
-                    "execution_cost_model_complete": False,
-                }
+                prepass_fallback_reasons[block_index] = (
+                    f"benchmark_random_control_execution_cost_unavailable:{exc}"
+                )
+                continue
             except (TypeError, ValueError, OverflowError, FloatingPointError):
                 return {"status": "INVALID_DATA", "reason": "random_control_fold_execution_invalid"}
             previous_executed = np.r_[0.0, executed[:-1]]
@@ -733,18 +793,58 @@ def oos_benchmark_comparison(
         random_requested_exposure_bars.append(requested_exposure_bars)
         random_requested_entry_counts.append(requested_entry_count)
 
+    if prepass_fallback_reasons:
+        return _retry_with_session_fallback_for_folds(prepass_fallback_reasons)
+
     valid_nonzero_shifts = [
         shift for offsets in valid_shift_offsets for shift in offsets if shift != 0
     ]
     random_median = float(np.median(random_returns))
     random_p95 = float(np.quantile(random_returns, 0.95))
+
+    # A missing per-bar context means session-only pricing, not necessarily a
+    # fallback. Publish only folds with an actual rejection recorded in the
+    # fallback-reason ledger; an upstream candidate rejection applies to every
+    # session-priced OOS fold because that candidate stream was downgraded globally.
+    buy_hold_session_fallback_folds: set[int] = set()
+    for reason in execution_cost_fallback_reasons:
+        if reason == "candidate_session_cost_fallback_after_event_rejection":
+            buy_hold_session_fallback_folds.update(
+                index
+                for index, context in enumerate(context_blocks)
+                if context is None
+            )
+            continue
+        prefix, separator, _detail = reason.partition(":")
+        if separator and prefix.startswith("fold_"):
+            try:
+                fallback_index = int(prefix.removeprefix("fold_"))
+            except ValueError:
+                continue
+            if 0 <= fallback_index < len(context_blocks):
+                buy_hold_session_fallback_folds.add(fallback_index)
+
+    published_session_fallback_folds = sorted(
+        index
+        for index in buy_hold_session_fallback_folds
+        if session_costs_bps is not None and context_blocks[index] is None
+    )
     return {
         "status": "OK",
         "execution_cost_model_complete": bool(benchmark_cost_complete),
         "execution_cost_model_status": (
             "VERIFIED_PER_BAR_EXECUTION_COSTS"
-            if benchmark_cost_complete else "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+            if benchmark_cost_complete
+            else "INCOMPLETE_SESSION_FALLBACK"
+            if execution_cost_fallback_reasons and session_costs_bps is not None
+            else "INCOMPLETE_STATIC_FALLBACK"
+            if execution_cost_fallback_reasons
+            else "INCOMPLETE_SESSION_BENCHMARK_COSTS"
+            if session_costs_bps is not None
+            else "INCOMPLETE_STATIC_BENCHMARK_COSTS"
         ),
+        "execution_cost_model_failure": execution_cost_fallback_reasons or None,
+        "execution_cost_model_fallback_used": bool(execution_cost_fallback_reasons),
         "execution_cost_model_namespace": candidate_execution_cost_namespace,
         "candidate_net_return": candidate_return,
         "candidate_stream_net_return": candidate_stream_return,
@@ -769,10 +869,17 @@ def oos_benchmark_comparison(
         "random_control_shift_max": max(valid_nonzero_shifts) if valid_nonzero_shifts else None,
         "random_control_exposure_matching": "EXACT_REQUESTED_EXPOSURE_BARS_AND_ENTRY_COUNT",
         "buy_and_hold_turnover": buy_hold_turnover,
-        "buy_and_hold_session_cost_model_complete": session_costs_bps is not None,
-        "buy_and_hold_session_costs_bps": (
-            dict(session_costs_bps) if session_costs_bps is not None else None
+        "buy_and_hold_session_cost_model_complete": (
+            session_costs_bps is not None
+            and all(context is None for context in context_blocks)
         ),
+        "buy_and_hold_session_costs_bps": (
+            dict(session_costs_bps)
+            if session_costs_bps is not None
+            and all(context is None for context in context_blocks)
+            else None
+        ),
+        "buy_and_hold_session_fallback_folds": published_session_fallback_folds,
         "benchmark_market_return_source": "OHLC_OPEN_TO_OPEN_WITH_TERMINAL_CLOSE",
         "random_control_execution_model": "INDEPENDENT_NONCIRCULAR_ENTRY_SHIFT_WITH_FLAT_START_AND_TERMINAL_LIQUIDATION",
         "equal_weight_basket": {"status": "UNAVAILABLE_SINGLE_SYMBOL_INPUT"},
@@ -884,6 +991,8 @@ def fixed_signal_walk_forward_oos(
     transaction_cost_bps_per_bar: pd.Series | None = None,
     execution_cost_context: dict[str, object] | None = None,
     benchmark_execution_cost_namespace: str = "research:ensemble",
+    session_costs_applied: bool | None = None,
+    execution_cost_fallback_used: bool = False,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -989,6 +1098,18 @@ def fixed_signal_walk_forward_oos(
     elif session_cost_values is not None:
         effective_cost_values = session_cost_values
         transaction_cost_values = session_cost_values
+    session_cost_schedule_applied = (
+        session_cost_values is not None
+        and (
+            # With no precomputed per-bar series, the session schedule is the
+            # selected pricing branch. A stale/explicit False audit must not
+            # contradict the cost series actually applied to candidate returns.
+            effective_cost_values is session_cost_values
+            # When a precomputed series is supplied, its audit flag distinguishes
+            # session-derived costs from signed per-bar execution costs.
+            or session_costs_applied is True
+        )
+    )
     net = costed_execution_returns(
         position, ret, transaction_cost_bps=transaction_cost_values,
         carry_bps_per_bar=carry, exit_mask=exit_flags,
@@ -1083,8 +1204,12 @@ def fixed_signal_walk_forward_oos(
     cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
     cost_analysis["financing_cost_model_complete"] = cost_complete
-    cost_analysis["session_cost_model_complete"] = session_cost_values is not None
-    cost_analysis["session_costs_bps"] = dict(session_costs_bps) if session_cost_values is not None else None
+    cost_analysis["session_cost_model_complete"] = session_cost_schedule_applied
+    cost_analysis["session_costs_bps"] = (
+        dict(session_costs_bps)
+        if session_cost_schedule_applied and session_costs_bps is not None
+        else None
+    )
     cost_analysis["effective_transaction_cost_series_applied"] = (
         transaction_cost_bps_per_bar is not None
     )
@@ -1155,6 +1280,10 @@ def fixed_signal_walk_forward_oos(
             session_costs_bps=session_costs_bps,
             execution_cost_context_blocks=oos_execution_cost_context_blocks,
             candidate_execution_cost_namespace=benchmark_execution_cost_namespace,
+            _execution_cost_fallback_reasons=(
+                ("candidate_session_cost_fallback_after_event_rejection",)
+                if execution_cost_fallback_used else ()
+            ),
         )
     return {
         "status": "OK",
@@ -1185,8 +1314,12 @@ def fixed_signal_walk_forward_oos(
         "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
         "execution_cost_calibration_evidence_id": None,
         "carry_bps_per_bar": carry,
-        "session_cost_model_complete": session_cost_values is not None,
-        "session_costs_bps": dict(session_costs_bps) if session_cost_values is not None else None,
+        "session_cost_model_complete": session_cost_schedule_applied,
+        "session_costs_bps": (
+            dict(session_costs_bps)
+            if session_cost_schedule_applied and session_costs_bps is not None
+            else None
+        ),
         "effective_transaction_cost_series_applied": transaction_cost_bps_per_bar is not None,
     }
 
