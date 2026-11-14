@@ -162,7 +162,7 @@ PR408 is Qodo's automated cherry-pick/fixer PR for the readiness fields already 
 - All PR397 and PR398 Qodo findings were marked resolved in their published reviews.
 - PR399's only active item is fixed by merged PR405, which Qodo reviewed with zero material findings.
 - PR400's two historical active findings are implemented in current main with behavioral/PostgreSQL regressions.
-- PR401 findings #2, #5 and #6 are implemented in current main; #1 and #4 are fixed in the PR406 follow-up; #3 now has an explicit EXIT-namespace behavioral regression on PR406 head `4393fa51`; #18 is covered by the same batched benchmark-fallback implementation.
+- PR401 findings #2, #5, #6 and #18 are implemented in current main; #18 is specifically covered by `test_benchmark_cost_context_is_disabled_after_candidate_event_rejection`. Findings #1 and #4 are fixed in the PR406 follow-up; #3 has an explicit EXIT-namespace behavioral regression.
 - PR406's latest published Qodo review (`6876549905`) is tied to exact head `70fef103dbebdc2ec32ae25efe981e858ca82f61`; all fourteen findings are marked resolved. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 was merged only after exact-head CI and PostgreSQL verification.
 - PR402/#403 did not receive Qodo review comments because the bot's review quota was exhausted; their relevant risk-lock/reversal code and regressions were manually checked against current main.
 - PR408 is a Qodo auto-fix cherry-pick PR for the readiness settings already implemented on #407; it contains no separate Qodo review findings.
