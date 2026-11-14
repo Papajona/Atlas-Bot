@@ -370,6 +370,16 @@ def execution_cost_for_event(
     """Calculate one-side taker fee plus calibrated spread, impact and latency."""
     if not isinstance(context, Mapping):
         return None, "EXECUTION_CONTEXT_UNAVAILABLE"
+    # Do not silently coerce booleans or fractional bar indices into valid
+    # execution events. Such coercion can price an order against the wrong bar.
+    if isinstance(bar_position, (bool, np.bool_)) or not isinstance(
+        bar_position, (int, np.integer)
+    ):
+        return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+    if isinstance(turnover, (bool, np.bool_)) or isinstance(
+        reference_price, (bool, np.bool_)
+    ):
+        return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     try:
         position = int(bar_position)
         amount = float(turnover)
