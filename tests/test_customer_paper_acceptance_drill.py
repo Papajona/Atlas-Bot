@@ -312,7 +312,7 @@ def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_pre
     assert 'acceptance_poll_interval_seconds=30' in deploy
     assert 'while true; do' in deploy
     assert 'timeout-minutes: 300' in deploy
-    assert 'gh run view "$acceptance_run_id"' in deploy
+    assert 'gh_retry run view "$acceptance_run_id"' in deploy
     assert "PASS: customer-paper acceptance run" in deploy
     assert "BLOCKED: customer-paper acceptance run" in deploy
 

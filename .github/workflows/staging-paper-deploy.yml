@@ -54,10 +54,36 @@ jobs:
           gate_poll_interval_seconds=30
           gate_started_at="$(date +%s)"
 
+          # Share the bounded GitHub API retry helper with later steps in this job.
+          cat > "$RUNNER_TEMP/atlas-gh-retry.sh" <<'ATLAS_GH_RETRY'
+          gh_retry() {
+            local attempt=1 max_attempts=6 delay=2 output rc
+            while (( attempt <= max_attempts )); do
+              if output="$(gh "$@" 2>&1)"; then
+                printf '%s\n' "$output"
+                return 0
+              else
+                rc=$?
+              fi
+              if (( attempt == max_attempts )) || ! grep -Eqi 'HTTP (429|5[0-9][0-9])|status code: (429|5[0-9][0-9])|Bad Gateway|Service Unavailable|Gateway Timeout|temporarily unavailable|connection reset|timed out' <<< "$output"; then
+                printf '%s\n' "$output" >&2
+                return "$rc"
+              fi
+              echo "Transient GitHub API read failure (attempt $attempt/$max_attempts); retrying in ${delay}s." >&2
+              sleep "$delay"
+              attempt=$((attempt + 1))
+              if (( delay < 30 )); then delay=$((delay * 2)); fi
+            done
+            return 1
+          }
+          ATLAS_GH_RETRY
+          source "$RUNNER_TEMP/atlas-gh-retry.sh"
+          echo "ATLAS_GH_RETRY_HELPER=$RUNNER_TEMP/atlas-gh-retry.sh" >> "$GITHUB_ENV"
+
           # The required CI jobs have 20-45 minute limits; allow two hours for
           # queue delay and completion before this paper-only deployment is blocked.
           while true; do
-            current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+            current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
             if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
               echo "stale=true" >> "$GITHUB_OUTPUT"
               echo "SKIP: main advanced to $current_main_sha while this staging run waited for CI; releasing the staging concurrency slot without deploying stale commit $GITHUB_SHA."
@@ -76,7 +102,7 @@ jobs:
                 # Accept a manual run or the push-triggered offline Production Core
                 # Verification for this exact main commit. PR and scheduled runs remain
                 # ineligible; the Native AI offline step is checked below in both cases.
-                run_json="$(gh run list \
+                run_json="$(gh_retry run list \
                   --repo "$GITHUB_REPOSITORY" \
                   --workflow "$workflow" \
                   --commit "$GITHUB_SHA" \
@@ -84,7 +110,7 @@ jobs:
                   --json databaseId,headSha,headBranch,event,status,conclusion \
                   --jq '[.[] | select(.headBranch == "main" and (.event == "workflow_dispatch" or .event == "push") and .headSha == "'"$GITHUB_SHA"'")] | sort_by(.databaseId) | last // {}')"
               else
-                run_json="$(gh run list \
+                run_json="$(gh_retry run list \
                   --repo "$GITHUB_REPOSITORY" \
                   --workflow "$workflow" \
                   --commit "$GITHUB_SHA" \
@@ -107,7 +133,7 @@ jobs:
                   exit 1
                 fi
                 if [[ "$workflow" == "production-verification.yml" ]]; then
-                  verification_json="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"
+                  verification_json="$(gh_retry run view "$run_id" --repo "$GITHUB_REPOSITORY" --json headSha,headBranch,event,status,conclusion,jobs)"
                   native_outcome="$(jq -r '[.jobs[].steps[] | select(.name == "Atlas Native AI offline verification (no provider calls)") | .conclusion][0] // ""' <<< "$verification_json")"
                   verification_event="$(jq -r '.event // ""' <<< "$verification_json")"
                   if [[ "$(jq -r '.headSha // ""' <<< "$verification_json")" != "$GITHUB_SHA" \
@@ -196,7 +222,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          source "$ATLAS_GH_RETRY_HELPER"
+          current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
             echo "BLOCKED: main advanced before Cloud Run deployment; refusing to replace staging with stale commit $GITHUB_SHA."
             exit 1
@@ -266,7 +293,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          source "$ATLAS_GH_RETRY_HELPER"
+          current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
             echo "BLOCKED: main advanced during staging deployment; refusing to certify a different commit."
             exit 1
@@ -283,7 +311,7 @@ jobs:
           # Discover only the run carrying this dispatch's unique request ID.
           preflight_run_id=0
           for attempt in $(seq 1 90); do
-            run_list="$(gh run list \
+            run_list="$(gh_retry run list \
               --repo "$GITHUB_REPOSITORY" \
               --workflow "staging-identity-preflight.yml" \
               --event workflow_dispatch \
@@ -311,7 +339,7 @@ jobs:
 
           # From this point onward, poll the same run ID, never the newest same-SHA run.
           for attempt in $(seq 1 90); do
-            run_json="$(gh run view "$preflight_run_id" \
+            run_json="$(gh_retry run view "$preflight_run_id" \
               --repo "$GITHUB_REPOSITORY" \
               --json databaseId,headSha,status,conclusion,displayTitle)"
             run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
@@ -335,7 +363,7 @@ jobs:
               fi
 
               # Re-check after preflight completion, immediately before certifying readiness.
-              if ! current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"; then
+              if ! current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"; then
                 echo "BLOCKED: unable to re-read main after the staging preflight; deployment readiness is not certified."
                 exit 1
               fi
@@ -359,7 +387,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          current_main_sha="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          source "$ATLAS_GH_RETRY_HELPER"
+          current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
           if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
             echo "BLOCKED: main advanced before customer-paper acceptance dispatch."
             exit 1
@@ -388,7 +417,7 @@ jobs:
             fi
 
             if [[ "$acceptance_run_id" -eq 0 ]]; then
-              run_list="$(gh run list \
+              run_list="$(gh_retry run list \
                 --repo "$GITHUB_REPOSITORY" \
                 --workflow "customer-paper-staging-acceptance.yml" \
                 --event workflow_dispatch \
@@ -406,7 +435,7 @@ jobs:
                 acceptance_run_id="$candidate_id"
               fi
             else
-              run_json="$(gh run view "$acceptance_run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,headBranch,status,conclusion,displayTitle)"
+              run_json="$(gh_retry run view "$acceptance_run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,headBranch,status,conclusion,displayTitle)"
               run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
               run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
               run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
