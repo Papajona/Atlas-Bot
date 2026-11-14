@@ -3945,6 +3945,44 @@ def _attach_router_execution_cost_evidence(df: pd.DataFrame, req: Any) -> pd.Dat
     return result
 
 
+def _router_validation_cache_matches_execution_context(
+    validation: dict[str, Any],
+    *,
+    current_dataset_sha256: str,
+    current_execution_cost_context: dict[str, Any] | None,
+) -> bool:
+    """Reject a cached router walk-forward report after its signed data changes."""
+    context = current_execution_cost_context
+    if not is_verified_research_execution_cost_context(context):
+        return False
+    if not isinstance(validation, dict):
+        return False
+    evidence_id = str(
+        context.get("execution_cost_calibration_evidence_id") or context.get("evidence_id") or ""
+    ).strip()
+    folds = [row for row in (validation.get("folds") or []) if isinstance(row, dict)]
+    return bool(
+        evidence_id
+        and str(validation.get("execution_cost_calibration_status") or "").strip().upper() == "VERIFIED"
+        and validation.get("execution_cost_calibration_verified") is True
+        and str(validation.get("execution_cost_calibration_evidence_id") or "").strip() == evidence_id
+        and validation.get("execution_cost_model_complete") is True
+        and validation.get("execution_cost_model_status")
+        == "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY"
+        and all(row.get("execution_cost_model_complete") is True for row in folds)
+        and len(folds) > 0
+        and str(validation.get("execution_cost_model_fingerprint") or "").strip()
+        == str(context.get("model_fingerprint") or "").strip()
+        and str(validation.get("per_bar_execution_context_sha256") or "").strip()
+        == str(context.get("context_sha256") or "").strip()
+        and bool(current_dataset_sha256)
+        and str(validation.get("execution_cost_dataset_sha256") or "").strip().lower()
+        == str(current_dataset_sha256).strip().lower()
+        and str(context.get("dataset_sha256") or "").strip().lower()
+        == str(current_dataset_sha256).strip().lower()
+    )
+
+
 def _strategy_router_validation_gate(
     validation: dict[str, Any],
     *,
@@ -6122,6 +6160,10 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 # the same cadence as model research.
                 router_json = json.loads(bot_row.strategy_selection_json or "{}") if bot_row and bot_row.strategy_selection_json else {}
                 validated_at = router_json.get("validated_at")
+                current_dataset_sha256 = str(
+                    (getattr(df, "attrs", {}).get("data_provenance") or {}).get("sha256") or ""
+                )
+                cached_validation = router_json.get("validation")
                 refresh_router = True
                 if validated_at:
                     try:
@@ -6131,6 +6173,15 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                         refresh_router = (datetime.now(timezone.utc) - dt).total_seconds() > settings.adaptive_retrain_hours * 3600
                     except Exception:
                         refresh_router = True
+                if (
+                    router_execution_cost_context is not None
+                    and not _router_validation_cache_matches_execution_context(
+                        cached_validation if isinstance(cached_validation, dict) else {},
+                        current_dataset_sha256=current_dataset_sha256,
+                        current_execution_cost_context=router_execution_cost_context,
+                    )
+                ):
+                    refresh_router = True
                 if refresh_router and len(df) >= settings.adaptive_strategy_router_min_train + 250:
                     router_validation = await asyncio.to_thread(
                         policy_walk_forward_backtest, df, router_cfg, asset=req.asset,
@@ -6144,9 +6195,6 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     router_json = {"validated_at": datetime.now(timezone.utc).isoformat(), "validation": router_validation}
                 else:
                     router_validation = router_json.get("validation") or {"status": "NOT_YET_VALIDATED"}
-                current_dataset_sha256 = str(
-                    (getattr(df, "attrs", {}).get("data_provenance") or {}).get("sha256") or ""
-                )
                 router_validation_gate = _strategy_router_validation_gate(
                     router_validation,
                     required_folds=settings.adaptive_strategy_router_folds,
