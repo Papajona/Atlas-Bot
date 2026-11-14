@@ -868,6 +868,13 @@ async def get_customer_paper_fill_for_bar(
             })).mappings().first()
         if row is None:
             return None
+        stored_metadata = row["metadata_json"]
+        if isinstance(stored_metadata, str):
+            try:
+                stored_metadata = json.loads(stored_metadata)
+            except (TypeError, ValueError):
+                stored_metadata = {}
+        stored_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
         return {
             "status": "REPLAYED",
             "fill_id": str(row["id"]),
@@ -877,11 +884,7 @@ async def get_customer_paper_fill_for_bar(
             "quantity": _fmt(Decimal(row["quantity"])),
             "price": _fmt(Decimal(row["price"])),
             "fee_amount": _fmt(Decimal(row["fee_amount"])),
-            "execution_model": (
-                (row["metadata_json"] if isinstance(row["metadata_json"], Mapping)
-                 else json.loads(row["metadata_json"] or "{}")).get("execution_model")
-                if row["metadata_json"] is not None else None
-            ),
+            "execution_model": stored_metadata.get("execution_model"),
         }
     finally:
         await engine.dispose()
