@@ -307,6 +307,7 @@ def test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback()
     assert benchmark["execution_cost_model_complete"] is False
     assert benchmark["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
     assert benchmark["execution_cost_model_fallback_used"] is True
+    assert benchmark["buy_and_hold_session_fallback_folds"] == [0, 1, 2]
     assert benchmark["gate_passed"] is False
 
 
