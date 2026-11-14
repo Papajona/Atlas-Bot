@@ -243,3 +243,77 @@ def test_regime_filter_keeps_annualization_from_full_source_cadence(monkeypatch)
     assert expected > 8000
     assert result["ensemble"]["RANGE"]["annualization_factor"] == expected
     assert result["ensemble"]["TREND_UP"]["annualization_factor"] == expected
+
+def test_strategy_router_returns_propagate_verified_venue_calibration_identity(monkeypatch):
+    from types import SimpleNamespace
+    from app import strategy_router as router
+
+    frame = _df(16)
+    context = {
+        "index": frame.index,
+        "model_fingerprint": "a" * 64,
+        "context_sha256": "b" * 64,
+        "dataset_sha256": "c" * 64,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": "venue-calibration-2026-001",
+        "venue": "example-exchange",
+        "market_type": "spot",
+        "symbol": "BTC/USD",
+        "timeframe": "1h",
+    }
+    monkeypatch.setattr(
+        router, "purged_walk_forward_splits",
+        lambda *args, **kwargs: [SimpleNamespace(test_start=3, test_end=10)],
+    )
+    monkeypatch.setattr(
+        router, "strategy_signals",
+        lambda df, cfg, asset="crypto": pd.DataFrame(
+            {**{name: np.ones(len(df)) for name in router.STRATEGIES},
+             "realized_vol": np.ones(len(df))},
+            index=df.index,
+        ),
+    )
+    monkeypatch.setattr(
+        router, "classify_regime",
+        lambda df, asset="crypto": pd.Series("RANGE", index=df.index),
+    )
+    monkeypatch.setattr(router, "_precompute_router_execution_costs", lambda *a, **k: {})
+    monkeypatch.setattr(router, "slice_research_execution_context", lambda ctx, index: ctx)
+    monkeypatch.setattr(router, "regime_conditioned_strategy_performance", lambda *a, **k: {})
+    monkeypatch.setattr(
+        router, "execution_cost_series_for_positions",
+        lambda ctx, position, *_a, **_k: (
+            pd.Series(0.0, index=position.index),
+            {"execution_cost_model_complete": True, "execution_cost_failure_reasons": {}},
+        ),
+    )
+
+    regime_result = router.router_walk_forward_backtest(
+        frame, StrategyConfig(signal_threshold=0.0), folds=1, min_train=1,
+        min_trades=0, execution_cost_context=context,
+    )
+    assert regime_result["execution_cost_calibration_status"] == "VERIFIED"
+    assert regime_result["execution_cost_calibration_verified"] is True
+    assert regime_result["execution_cost_calibration_evidence_id"] == "venue-calibration-2026-001"
+    assert regime_result["execution_cost_venue"] == "example-exchange"
+    assert regime_result["execution_cost_model_fingerprint"] == "a" * 64
+    assert regime_result["per_bar_execution_context_sha256"] == "b" * 64
+
+    monkeypatch.setattr(router, "execution_cost_for_event", lambda *a, **k: (0.0, None))
+    monkeypatch.setattr(router, "online_strategy_scores", lambda *a, **k: {})
+    monkeypatch.setattr(
+        router, "select_strategy",
+        lambda *a, **k: {"status": "OK", "strategy": "trend", "signal": 1.0, "action": "HOLD"},
+    )
+    policy_result = router.policy_walk_forward_backtest(
+        frame,
+        StrategyConfig(signal_threshold=0.0, target_vol_annual=1.0, max_leverage=1.0),
+        folds=1, min_train=1, min_trades=0, decision_stride=1,
+        execution_cost_context=context,
+    )
+    assert policy_result["execution_cost_calibration_status"] == "VERIFIED"
+    assert policy_result["execution_cost_calibration_verified"] is True
+    assert policy_result["execution_cost_calibration_evidence_id"] == "venue-calibration-2026-001"
+    assert policy_result["execution_cost_venue"] == "example-exchange"
+    assert policy_result["execution_cost_model_fingerprint"] == "a" * 64
+    assert policy_result["per_bar_execution_context_sha256"] == "b" * 64
