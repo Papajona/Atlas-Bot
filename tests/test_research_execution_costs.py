@@ -533,6 +533,35 @@ def test_router_position_cost_series_splits_sign_reversal(monkeypatch):
     assert audit["execution_cost_model_complete"] is True
 
 
+@pytest.mark.parametrize(
+    "bar_position,turnover,reference_price",
+    [
+        (True, 1.0, 100.0),
+        (1.5, 1.0, 100.0),
+        (1, True, 100.0),
+        (1, 1.0, False),
+    ],
+)
+def test_execution_event_rejects_boolean_or_fractional_indices_and_quantities(
+    bar_position, turnover, reference_price
+):
+    from app.research_execution_costs import execution_cost_for_event
+
+    context = {
+        "index": pd.date_range("2026-01-01T00:00:00Z", periods=2, freq="h"),
+    }
+    cost, reason = execution_cost_for_event(
+        context,
+        bar_position=bar_position,
+        turnover=turnover,
+        reference_price=reference_price,
+        side="buy",
+        namespace="invalid-input-test",
+    )
+    assert cost is None
+    assert reason == "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+
+
 def test_strategy_router_return_stream_uses_per_event_research_costs(monkeypatch):
     from app import strategy_router
 
