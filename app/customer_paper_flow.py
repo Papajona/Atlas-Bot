@@ -421,12 +421,9 @@ def _estimate_calibrated_customer_paper_fill(
     supplied = market.get("market_context")
     if not isinstance(supplied, Mapping):
         raise PaperExecutionModelError("server customer-paper market context is unavailable")
-    timeframe = str(supplied.get("timeframe") or "")
-    timeframe_seconds = _TIMEFRAME_SECONDS.get(timeframe)
-    if timeframe_seconds is None:
-        # The context builder is authoritative; the persisted order timeframe is
-        # also checked against the same supported timeframe list before this call.
-        raise PaperExecutionModelError("market context lacks a supported bar duration")
+    timeframe_ms = _finite_decimal(supplied.get("bar_duration_ms"), "bar_duration_ms")
+    if timeframe_ms <= 0:
+        raise PaperExecutionModelError("market context lacks a positive bar duration")
     bid = _finite_decimal(market.get("bid"), "bid")
     ask = _finite_decimal(market.get("ask"), "ask")
     if bid <= 0 or ask < bid:
@@ -438,7 +435,7 @@ def _estimate_calibrated_customer_paper_fill(
         "tradable_volume_units": str(market.get("base_volume")),
         "spread_bps": str(market.get("spread_bps")),
         "recent_volatility_bps": supplied.get("recent_volatility_bps"),
-        "bar_duration_ms": supplied.get("bar_duration_ms") or timeframe_seconds * 1000,
+        "bar_duration_ms": str(timeframe_ms),
     }
     midpoint = (bid + ask) / Decimal("2")
     estimated = estimate_paper_fill(
@@ -852,7 +849,9 @@ async def _fill_open_order(
                 Decimal(str(state["remaining_quantity"])) - remaining,
             )
             if execution_model_record is not None:
+                execution_model_record["filled_quantity"] = str(remaining)
                 execution_model_record["cancelled_quantity"] = str(calibrated_cancelled_quantity)
+                execution_model_record["full_fill"] = calibrated_cancelled_quantity == 0
                 costs["execution_model"] = execution_model_record
 
     group_mark_prices_loader = None
@@ -886,7 +885,15 @@ async def _fill_open_order(
             quantity=format(remaining, "f"),
             price=fill_price,
             fee_amount=fee,
-            execution_model=execution_model_record,
+            execution_model=(
+                {
+                    **execution_model_record,
+                    "filled_quantity": str(remaining),
+                    "cancelled_quantity": str(calibrated_cancelled_quantity),
+                    "full_fill": calibrated_cancelled_quantity == 0,
+                }
+                if execution_model_record is not None else None
+            ),
             enforce_market_bar_budget=True,
             group_mark_prices=group_mark_prices,
             group_mark_prices_loader=group_mark_prices_loader,
