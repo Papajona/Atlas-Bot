@@ -791,6 +791,7 @@ def ai_walk_forward_backtest(
     oos_variable_cost_blocks: list[np.ndarray] = []
     oos_execution_cost_context_blocks: list[dict[str, object]] = []
     fold_execution_cost_complete: list[bool] = []
+    fold_execution_cost_fallback_reasons: list[str] = []
     execution_cost_failure_reasons: dict[str, int] = dict(
         label_execution_cost_audit["execution_cost_failure_reasons"]
     )
@@ -799,7 +800,7 @@ def ai_walk_forward_backtest(
     oos_entry_atr_blocks: list[np.ndarray] = []
     total_stop_exits = total_target_exits = total_gap_exits = total_ambiguous_bars = 0
     pred_signal = pd.Series(np.nan, index=X.index)
-    for fold in split_specs:
+    for fold_index, fold in enumerate(split_specs):
         train_window = np.arange(fold.train_start, fold.train_end, dtype=int)
         te = np.arange(fold.test_start, fold.test_end, dtype=int)
         # Filter labels only inside the chronological training window. Test rows
@@ -861,6 +862,9 @@ def ai_walk_forward_backtest(
         except ResearchExecutionCostError as exc:
             reason = str(exc)[:240] or "RESEARCH_EXECUTION_EVENT_COST_UNAVAILABLE"
             execution_cost_failure_reasons[reason] = execution_cost_failure_reasons.get(reason, 0) + 1
+            fold_execution_cost_fallback_reasons.append(
+                f"fold_{fold_index}:candidate_session_cost_fallback_after_event_rejection:{reason}"
+            )
             # A rejected calibrated event invalidates the whole fold's calibrated cost
             # stream. Re-run the fold wholly on its configured diagnostic cost basis;
             # never mix calibrated and static costs inside a single return series.
@@ -991,11 +995,11 @@ def ai_walk_forward_backtest(
         loss_event_threshold=settings.strategy_stoploss_guard_trades,
         cooldown_bars=settings.strategy_stoploss_guard_bars,
         seed=20261026,
-        session_costs_bps=(
-            session_costs_bps
-            if execution_cost_context is None or not all(fold_execution_cost_complete)
-            else None
-        ),
+        # Keep the separately verified session schedule available to benchmark
+        # controls even when every candidate fold used signed per-bar costs.
+        # The per-bar context remains authoritative for successful folds; the
+        # schedule is selected only for folds downgraded after a control rejection.
+        session_costs_bps=session_costs_bps,
         execution_cost_context_blocks=(
             oos_execution_cost_context_blocks
             if execution_cost_context is not None
@@ -1003,6 +1007,7 @@ def ai_walk_forward_backtest(
             else None
         ),
         candidate_execution_cost_namespace="ai-walk-forward",
+        _execution_cost_fallback_reasons=tuple(fold_execution_cost_fallback_reasons),
     )
     label_cost_complete = (
         execution_context_verified

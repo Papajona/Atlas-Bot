@@ -645,12 +645,19 @@ def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_
 
 def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_rejection(monkeypatch):
     from app import research_execution_costs, trading_core
+    from app.research_validation import oos_benchmark_comparison
 
     _install_fast_walk_forward_model(monkeypatch)
     frame = sample_df(1800)
     context = _validator_issued_ai_execution_context(
         frame, model_fingerprint="e" * 64, context_sha256="f" * 64
     )
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
 
     def labels_with_verified_costs(close, vol, high, low, **kwargs):
         result = pd.Series(
@@ -675,28 +682,52 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
             return reject_event
         return lambda *_args: 0.25
 
-    def benchmark_spy(*_args, **kwargs):
-        contexts = kwargs.get("execution_cost_context_blocks")
-        assert isinstance(contexts, list)
-        assert len(contexts) == 4
-        assert contexts[0] is None
-        assert all(isinstance(item, Mapping) for item in contexts[1:])
-        return {"status": "OK", "execution_cost_model_complete": False}
+    benchmark_inputs = {}
+    def benchmark_with_small_random_sample(*args, **kwargs):
+        benchmark_inputs["fallback_reasons"] = tuple(
+            kwargs.get("_execution_cost_fallback_reasons", ())
+        )
+        benchmark_inputs["session_costs_bps"] = kwargs.get("session_costs_bps")
+        benchmark_inputs["execution_cost_context_blocks"] = kwargs.get(
+            "execution_cost_context_blocks"
+        )
+        # Keep this caller regression focused and deterministic; the benchmark
+        # function's fold retry and random-control behavior have dedicated tests.
+        kwargs["random_trials"] = 2
+        return oos_benchmark_comparison(*args, **kwargs)
 
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
     monkeypatch.setattr(
         research_execution_costs, "make_execution_cost_provider", rejected_provider
     )
-    monkeypatch.setattr(trading_core, "oos_benchmark_comparison", benchmark_spy)
+    monkeypatch.setattr(
+        trading_core, "oos_benchmark_comparison", benchmark_with_small_random_sample
+    )
 
     result = trading_core.ai_walk_forward_backtest(
         frame,
         asset="crypto",
         folds=4,
         min_train=500,
+        session_costs_bps=session_schedule,
         execution_cost_context=context,
     )
 
+    contexts = benchmark_inputs["execution_cost_context_blocks"]
+    assert isinstance(contexts, list)
+    assert len(contexts) == 4
+    assert contexts[0] is None
+    assert all(isinstance(item, Mapping) for item in contexts[1:])
+    assert benchmark_inputs["session_costs_bps"] == session_schedule
+    assert benchmark_inputs["fallback_reasons"] == (
+        "fold_0:candidate_session_cost_fallback_after_event_rejection:"
+        "ORDER_PARTICIPATION_LIMIT_EXCEEDED",
+    )
+    benchmark = result["benchmark_comparison"]
+    assert benchmark["execution_cost_model_complete"] is False
+    assert benchmark["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
+    assert benchmark["execution_cost_model_fallback_used"] is True
+    assert benchmark["buy_and_hold_session_fallback_folds"] == [0]
     assert result["execution_cost_model_complete"] is False
     assert result["execution_cost_model_status"] == (
         "INCOMPLETE_AI_OOS_FOLD_EXECUTION_COSTS"
@@ -708,8 +739,6 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
     assert [fold["execution_cost_model_complete"] for fold in result["folds"]] == [
         False, True, True, True
     ]
-
-
 
 def test_ai_walk_forward_keeps_unpriced_labels_on_original_oos_timeline(monkeypatch):
     from app import trading_core
