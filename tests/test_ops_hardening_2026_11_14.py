@@ -78,7 +78,6 @@ def test_metric_path_label_uses_mount_path_for_static_assets():
 def test_static_asset_request_metrics_use_mount_label():
     client = TestClient(main.app)
     request_series = monitoring.REQUESTS.labels("GET", "/static", "200")
-    latency_series = monitoring.REQUEST_LATENCY.labels("GET", "/static")
     request_count_before = request_series._value.get()
 
     def latency_observation_count():
