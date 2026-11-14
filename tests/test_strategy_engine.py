@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from collections.abc import Mapping
 from app.strategy_engine import StrategyConfig, strategy_signals, strategy_signal, strategy_backtest
 
 def sample_df(n=700):
@@ -548,20 +549,37 @@ def test_triple_barrier_prices_label_entry_and_exit_with_per_bar_execution_evide
     assert all(event["bar_position"] > 0 for event in priced_events)
 
 
+
+def _validator_issued_ai_execution_context(frame, *, model_fingerprint, context_sha256):
+    from app.research_execution_costs import (
+        _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN,
+        _VerifiedResearchExecutionCostContext,
+    )
+
+    return _VerifiedResearchExecutionCostContext(
+        {
+            "index": frame.index,
+            "spread_bps": np.full(len(frame), 1.5),
+            "volume_units": np.full(len(frame), 100_000.0),
+            "volatility_bps": np.full(len(frame), 20.0),
+            "model_fingerprint": model_fingerprint,
+            "context_sha256": context_sha256,
+            "evidence_id": "fixture:verified-calibration",
+            "execution_cost_calibration_evidence_id": "fixture:verified-calibration",
+            "execution_cost_calibration_status": "VERIFIED",
+        },
+        _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN,
+    )
+
+
 def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_benchmarks(monkeypatch):
     from app import research_execution_costs, trading_core
 
     _install_fast_walk_forward_model(monkeypatch)
     frame = sample_df(1800)
-    context = {
-        "index": frame.index,
-        "spread_bps": np.full(len(frame), 1.5),
-        "volume_units": np.full(len(frame), 100_000.0),
-        "volatility_bps": np.full(len(frame), 20.0),
-        "model_fingerprint": "c" * 64,
-        "context_sha256": "d" * 64,
-        "evidence_id": "fixture:verified-calibration",
-    }
+    context = _validator_issued_ai_execution_context(
+        frame, model_fingerprint="c" * 64, context_sha256="d" * 64
+    )
     seen = {"provider_namespaces": [], "provider_indices": []}
 
     def labels_with_verified_costs(close, vol, high, low, **kwargs):
@@ -592,7 +610,7 @@ def test_ai_walk_forward_applies_verified_execution_context_to_labels_folds_and_
         return {
             "status": "OK",
             "execution_cost_model_complete": bool(contexts)
-            and all(isinstance(item, dict) for item in contexts),
+            and all(isinstance(item, Mapping) for item in contexts),
         }
 
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
@@ -630,15 +648,9 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
 
     _install_fast_walk_forward_model(monkeypatch)
     frame = sample_df(1800)
-    context = {
-        "index": frame.index,
-        "spread_bps": np.full(len(frame), 1.5),
-        "volume_units": np.full(len(frame), 100_000.0),
-        "volatility_bps": np.full(len(frame), 20.0),
-        "model_fingerprint": "e" * 64,
-        "context_sha256": "f" * 64,
-        "evidence_id": "fixture:verified-calibration",
-    }
+    context = _validator_issued_ai_execution_context(
+        frame, model_fingerprint="e" * 64, context_sha256="f" * 64
+    )
 
     def labels_with_verified_costs(close, vol, high, low, **kwargs):
         result = pd.Series(
@@ -668,7 +680,7 @@ def test_ai_walk_forward_falls_back_for_whole_fold_after_calibrated_event_reject
         assert isinstance(contexts, list)
         assert len(contexts) == 4
         assert contexts[0] is None
-        assert all(isinstance(item, dict) for item in contexts[1:])
+        assert all(isinstance(item, Mapping) for item in contexts[1:])
         return {"status": "OK", "execution_cost_model_complete": False}
 
     monkeypatch.setattr(trading_core, "triple_barrier", labels_with_verified_costs)
