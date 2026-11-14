@@ -4042,6 +4042,15 @@ def _strategy_router_validation_gate(
     validation_context_matches = evidence_checks["context_match"]
     per_bar_costs_verified = evidence_checks["per_bar"]
     current_dataset_matches = evidence_checks["dataset_match"]
+    evidence_id = (
+        str(
+            current_execution_cost_context.get("execution_cost_calibration_evidence_id")
+            or current_execution_cost_context.get("evidence_id")
+            or ""
+        ).strip()
+        if is_verified_research_execution_cost_context(current_execution_cost_context)
+        else ""
+    )
     research_performance_passed = (
         validation.get("status") == "OK"
         and len(folds) >= int(required_folds)
