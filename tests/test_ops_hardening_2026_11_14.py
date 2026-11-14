@@ -60,6 +60,20 @@ def test_metric_path_label_uses_mount_path_for_static_assets():
     assert monitoring.metric_path_label(mounted_request) == "/static"
     assert monitoring.metric_path_label(unmatched_request) == "unmatched"
 
+    # A reverse proxy may contribute an app-root prefix before the static
+    # mount is consumed. Preserve that prefix while removing only /static.
+    prefixed_mounted_request = SimpleNamespace(
+        scope={
+            "type": "http",
+            "path": "/gateway/static/assets/dashboard.js",
+            "root_path": "/gateway/static",
+            "app_root_path": "/gateway",
+            "path_params": {},
+        },
+        app=main.app,
+    )
+    assert monitoring.metric_path_label(prefixed_mounted_request) == "/static"
+
 
 def test_static_asset_request_metrics_use_mount_label():
     client = TestClient(main.app)
