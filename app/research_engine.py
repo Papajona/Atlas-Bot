@@ -728,6 +728,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
         session_costs_applied=_session_cost_schedule_was_applied(
             execution_cost_context, ensemble_audit, session_costs_bps
         ),
+        execution_cost_fallback_used=(
+            ensemble_audit.get("per_bar_execution_cost_model_status")
+            == "FALLBACK_AFTER_EVENT_REJECTION"
+        ),
         transaction_cost_bps_per_bar=(
             ensemble_cost_bps
             if execution_cost_context is not None or session_costs_bps is not None
@@ -792,6 +796,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
             session_costs_bps=benchmark_session_costs,
             session_costs_applied=_session_cost_schedule_was_applied(
                 execution_cost_context, component_audit, session_costs_bps
+            ),
+            execution_cost_fallback_used=(
+                component_audit.get("per_bar_execution_cost_model_status")
+                == "FALLBACK_AFTER_EVENT_REJECTION"
             ),
             transaction_cost_bps_per_bar=(
                 component_cost_bps
@@ -870,6 +878,10 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
                 session_costs_bps=variant_benchmark_session_costs,
                 session_costs_applied=_session_cost_schedule_was_applied(
                     execution_cost_context, variant_audit, session_costs_bps
+                ),
+                execution_cost_fallback_used=(
+                    variant_audit.get("per_bar_execution_cost_model_status")
+                    == "FALLBACK_AFTER_EVENT_REJECTION"
                 ),
                 transaction_cost_bps_per_bar=(
                     variant_cost_bps
