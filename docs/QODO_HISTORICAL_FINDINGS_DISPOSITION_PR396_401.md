@@ -95,7 +95,7 @@ Original Qodo review [#401](https://github.com/Papajona/Atlas-Bot/pull/401), com
 |---:|---|---|---|
 | 1 | Session-priced fallbacks look unverified | Fixed in this follow-up | `session_cost_model_complete` reflects whether the candidate stream actually used the separately verified session schedule, including per-bar event-rejection fallback. Benchmark inputs retain that schedule for fold-local fallback. Test: `test_session_cost_completeness_reflects_the_schedule_used_after_per_bar_rejection`. |
 | 2 | Fractional bar indices price the wrong bar | Fixed in current main | `execution_cost_for_event()` rejects bools and fractional/precision-losing indices before selecting a signed evidence row. Test: `tests/test_research_execution_costs.py::test_execution_event_rejects_boolean_or_fractional_indices_and_quantities`; integral numeric indices have separate acceptance coverage. |
-| 3 | Position closes get different latency costs | Fixed in this follow-up | Ordinary transition from an open position to flat uses the EXIT event namespace; initial entries and adjustments remain distinct. Test: `test_execution_simulator_prices_ordinary_transition_to_flat_as_exit`. |
+| 3 | Position closes get different latency costs | Fixed in this follow-up | Ordinary transition from an open position to flat uses the EXIT event namespace; initial entries and adjustments remain distinct. Test: `tests/test_execution_aware_research.py::test_ordinary_signal_close_uses_exit_event_namespace`. |
 | 4 | Benchmark report vanishes when a control trade is too large | Fixed in this follow-up | If a candidate, buy-and-hold, or random-control event exceeds the signed per-bar limit, only the affected fold is downgraded to the verified session schedule (or static diagnostics), and all benchmark legs are recomputed. Diagnostics remain available while model completeness and promotion gate stay false. Test: `test_benchmark_control_cost_rejection_falls_back_and_preserves_diagnostics`. |
 | 5 | Signed session costs no longer bound to session model | Implemented in current main | Fingerprint contains `SESSION_COST_MODEL_VERSION`; test: `test_research_execution_fingerprint_binds_session_cost_algorithm`. Runbook requires signatures omitting this identifier to be re-signed and revalidated. |
 | 6 | Valid signed evidence is rejected | Implemented in current main | Fee-schedule/order-book source types use `.strip().lower()`; test: `test_signed_source_types_are_normalized_case_insensitively`. |
@@ -144,7 +144,10 @@ Qodo's fixer response on this review said no findings were inside its configured
 - All PR397 and PR398 Qodo findings were marked resolved in their published reviews.
 - PR399's only active item is fixed by merged PR405, which Qodo reviewed with zero material findings.
 - PR400's two historical active findings are implemented in current main with behavioral/PostgreSQL regressions.
-- PR401 findings #2, #5, #6 and #18 are implemented in current main. Findings #1, #3 and #4 are fixed in this follow-up and must pass exact-commit checks before they are called merged.
+- PR401 findings #2, #5 and #6 are implemented in current main; #1 and #4 are fixed in the PR406 follow-up; #3 now has an explicit EXIT-namespace behavioral regression on PR406 head `4393fa51`; #18 is covered by the same batched benchmark-fallback implementation.
+- PR406's five latest Qodo findings were marked resolved in its published review. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 remains subject to exact-head CI and PostgreSQL verification.
+- PR402/#403 did not receive Qodo review comments because the bot's review quota was exhausted; their relevant risk-lock/reversal code and regressions were manually checked against current main.
+- PR408 is a Qodo auto-fix cherry-pick PR for the readiness settings already implemented on #407; it contains no separate Qodo review findings.
 - Historical Qodo labels do not determine Atlas application progress, block a verified merge, or control release.
 
 **Live trading, live payouts, withdrawals, and customer-fund movement remain governed by independent safety and production-approval gates.**
