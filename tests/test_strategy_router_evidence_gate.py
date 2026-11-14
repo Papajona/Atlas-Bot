@@ -165,3 +165,43 @@ def test_router_validation_cache_is_invalidated_for_plain_or_mismatched_context(
         current_dataset_sha256="c" * 64,
         current_execution_cost_context=plain_context,
     ) is False
+
+def test_ai_walk_forward_does_not_attest_a_priceable_plain_cost_mapping():
+    from app.trading_core import _ai_execution_cost_context_attestation
+
+    claimed = _verified_context()
+    claimed.update({
+        "index": [],
+        "spread_bps": [],
+        "volume_units": [],
+        "volatility_bps": [],
+        "execution_cost_calibration_status": "VERIFIED",
+    })
+    attestation = _ai_execution_cost_context_attestation(claimed)
+
+    assert attestation == {
+        "verified": False,
+        "status": "UNATTESTED_EXECUTION_COST_CONTEXT",
+        "evidence_id": None,
+    }
+
+
+def test_ai_walk_forward_requires_evidence_id_even_for_an_authentic_context():
+    from app.research_execution_costs import (
+        _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN,
+        _VerifiedResearchExecutionCostContext,
+    )
+    from app.trading_core import _ai_execution_cost_context_attestation
+
+    context = _VerifiedResearchExecutionCostContext(
+        {
+            "execution_cost_calibration_status": "VERIFIED",
+            "evidence_id": "",
+        },
+        _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN,
+    )
+    attestation = _ai_execution_cost_context_attestation(context)
+
+    assert attestation["verified"] is False
+    assert attestation["status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
+    assert attestation["evidence_id"] is None
