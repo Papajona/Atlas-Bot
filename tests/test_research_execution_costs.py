@@ -135,7 +135,7 @@ def _research_frame():
     return frame
 
 
-def _research_cost_evidence(frame, settings):
+def _research_cost_evidence(frame, settings, *, attach_to_frame: bool = True):
     fingerprint = research_execution_model_fingerprint(
         settings,
         taker_bps=5.5,
@@ -186,13 +186,15 @@ def _research_cost_evidence(frame, settings):
     }
     signed, public_keys = _signed(document)
     settings.research_evidence_public_keys_json = public_keys
-    frame.attrs["execution_cost_calibration_evidence"] = signed
+    if attach_to_frame:
+        frame.attrs["execution_cost_calibration_evidence"] = signed
+    return signed
 
 
 def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tmp_path):
     frame = _research_frame()
     settings = _settings(tmp_path)
-    _research_cost_evidence(frame, settings)
+    evidence = _research_cost_evidence(frame, settings, attach_to_frame=False)
 
     context, audit = build_research_execution_cost_context(
         frame,
@@ -201,7 +203,9 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
         base_slippage_bps=2.0,
         cost_stress_multiplier=2.0,
         asset="crypto",
+        calibration_evidence=evidence,
     )
+    assert "execution_cost_calibration_evidence" not in frame.attrs
 
     assert context is not None
     assert is_verified_research_execution_cost_context(context)
