@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import math
+from decimal import Decimal, InvalidOperation
 from collections.abc import Callable, Mapping
 from typing import Any
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -22,6 +24,56 @@ from .research_evidence import canonical_sha256, validate_execution_cost_calibra
 PER_BAR_CONTEXT_SCHEMA = "atlas-per-bar-execution-context-v1"
 _VOLUME_WINDOW_BARS = 20
 _ALLOWED_USD_QUOTE_ASSETS = {"USD", "USDT", "USDC", "BUSD", "FDUSD", "DAI"}
+_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN = object()
+
+
+class _VerifiedResearchExecutionCostContext(Mapping[str, Any]):
+    """Authenticated, deeply read-only mapping from the signed calibration validator."""
+
+    __slots__ = ("_values", "_verification_token")
+
+    _ARRAY_FIELDS = frozenset({"spread_bps", "volume_units", "volatility_bps"})
+
+    def __init__(self, values: Mapping[str, Any], *, _token: object) -> None:
+        if _token is not _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN:
+            raise TypeError("verified execution contexts can only be created by the validator")
+        frozen: dict[str, Any] = {}
+        for key, value in values.items():
+            if key in self._ARRAY_FIELDS:
+                array = np.array(value, dtype=np.float64, copy=True)
+                # Bytes-backed NumPy arrays cannot have write access re-enabled.
+                frozen[key] = np.frombuffer(
+                    array.tobytes(order="C"), dtype=np.float64
+                ).reshape(array.shape)
+            elif key == "index" and isinstance(value, pd.Index):
+                frozen[key] = value.copy(deep=True)
+            else:
+                frozen[key] = value
+        object.__setattr__(self, "_values", MappingProxyType(frozen))
+        object.__setattr__(self, "_verification_token", _token)
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __setattr__(self, _name: str, _value: Any) -> None:
+        raise TypeError("verified research execution contexts are immutable")
+
+
+def is_verified_research_execution_cost_context(context: Any) -> bool:
+    """Return true only for a context produced by the signed calibration validator."""
+    return (
+        type(context) is _VerifiedResearchExecutionCostContext
+        and getattr(context, "_verification_token", None)
+        is _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN
+    )
+
+
 _PARAMETER_NAMES = (
     "base_slippage_bps", "max_participation_rate", "impact_coefficient",
     "rejection_probability", "latency_min_ms", "latency_median_ms",
@@ -112,7 +164,8 @@ def _valid_model_parameters(parameters: Mapping[str, Any]) -> tuple[dict[str, fl
 def build_research_execution_cost_context(
     df: pd.DataFrame, *, settings: Any, taker_bps: float,
     base_slippage_bps: float, cost_stress_multiplier: float, asset: str = "crypto",
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    calibration_evidence: Mapping[str, Any] | None = None,
+) -> tuple[Mapping[str, Any] | None, dict[str, Any]]:
     """Verify signed per-bar spreads and build causal volume/volatility inputs."""
     if not isinstance(df, pd.DataFrame) or df.empty:
         return None, {"status": "INCOMPLETE", "reason": "RESEARCH_DATAFRAME_MISSING",
@@ -124,7 +177,14 @@ def build_research_execution_cost_context(
     symbol = str(provenance.get("symbol") or "").strip()
     timeframe = str(provenance.get("timeframe") or "").strip()
     dataset_sha256 = str(provenance.get("sha256") or "").strip().lower()
-    document = df.attrs.get("execution_cost_calibration_evidence")
+    # Keep large signed documents outside DataFrame.attrs. pandas copies attrs
+    # onto derived objects, so passing this payload explicitly avoids multiplying
+    # a customer-controlled evidence document across rolling windows and folds.
+    document = (
+        calibration_evidence
+        if calibration_evidence is not None
+        else df.attrs.get("execution_cost_calibration_evidence")
+    )
     evidence_id = str(document.get("evidence_id") or "").strip() if isinstance(document, Mapping) else ""
     try:
         fingerprint = research_execution_model_fingerprint(
@@ -330,10 +390,16 @@ def build_research_execution_cost_context(
         "taker_bps": taker, **parsed_parameters,
         "order_notional_usd": order_notional, "dataset_sha256": dataset_sha256,
         "context_sha256": context_sha256, "model_fingerprint": fingerprint,
-        "evidence_id": evidence_id, "venue": venue, "market_type": market_type,
+        "evidence_id": evidence_id,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": evidence_id or None,
+        "venue": venue, "market_type": market_type,
         "symbol": symbol, "timeframe": timeframe,
     }
-    return context, {
+    verified_context = _VerifiedResearchExecutionCostContext(
+        context, _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN
+    )
+    return verified_context, {
         "status": "READY", "reason": "SIGNED_PER_BAR_CONTEXT_AND_PAPER_MODEL_VERIFIED",
         "execution_cost_model_complete": True, "execution_cost_calibration_status": "VERIFIED",
         "execution_cost_calibration_evidence_id": evidence_id or None,
@@ -343,7 +409,7 @@ def build_research_execution_cost_context(
     }
 
 
-def slice_research_execution_context(context: Mapping[str, Any] | None, index: pd.Index) -> dict[str, Any] | None:
+def slice_research_execution_context(context: Mapping[str, Any] | None, index: pd.Index) -> Mapping[str, Any] | None:
     """Return an exact index-aligned view of a previously verified full context."""
     if not isinstance(context, Mapping):
         return None
@@ -360,6 +426,10 @@ def slice_research_execution_context(context: Mapping[str, Any] | None, index: p
         if len(values) != len(source_index):
             return None
         sliced[name] = values[positions]
+    if is_verified_research_execution_cost_context(context):
+        return _VerifiedResearchExecutionCostContext(
+            sliced, _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN
+        )
     return sliced
 
 
@@ -370,11 +440,32 @@ def execution_cost_for_event(
     """Calculate one-side taker fee plus calibrated spread, impact and latency."""
     if not isinstance(context, Mapping):
         return None, "EXECUTION_CONTEXT_UNAVAILABLE"
+    # Reject booleans and fractional indices, while preserving integral numeric
+    # values (including 2.0) that the previous int() conversion accepted.
+    if isinstance(bar_position, (bool, np.bool_)):
+        return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+    if isinstance(turnover, (bool, np.bool_)) or isinstance(
+        reference_price, (bool, np.bool_)
+    ):
+        return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     try:
-        position = int(bar_position)
+        if isinstance(bar_position, str):
+            exact_position = Decimal(bar_position.strip())
+            if (
+                not exact_position.is_finite()
+                or exact_position != exact_position.to_integral_value()
+            ):
+                return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+            position = int(exact_position)
+        else:
+            position = int(bar_position)
+            # Compare before float coercion: Decimal('1.0000000000000000001')
+            # rounds to 1.0 as a float but is not an integral bar index.
+            if not bool(bar_position == position):
+                return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
         amount = float(turnover)
         price = float(reference_price)
-    except (TypeError, ValueError, OverflowError):
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
         return None, "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
     if position < 0 or position >= len(context.get("index", [])):
         return None, "EXECUTION_EVENT_BAR_OUT_OF_RANGE"

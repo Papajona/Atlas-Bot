@@ -1,6 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
+from collections.abc import Mapping
 import math
 import numpy as np
 import pandas as pd
@@ -236,7 +237,7 @@ def oos_benchmark_comparison(
     random_trials: int = 100,
     seed: int = 20261026,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context_blocks: list[dict[str, object] | None] | None = None,
+    execution_cost_context_blocks: list[Mapping[str, object] | None] | None = None,
     candidate_execution_cost_namespace: str = "research:ensemble",
 ) -> dict:
     """Compare candidate returns with OHLC-derived buy-and-hold and fresh-entry controls.
@@ -263,21 +264,27 @@ def oos_benchmark_comparison(
             "execution_cost_model_complete": False,
         }
     if execution_cost_context_blocks is not None and any(
-        not isinstance(context, dict) for context in execution_cost_context_blocks
+        context is not None and not isinstance(context, Mapping)
+        for context in execution_cost_context_blocks
     ):
         return {
             "status": "INCOMPLETE",
-            "reason": "benchmark_execution_context_unavailable_for_one_or_more_folds",
+            "reason": "benchmark_execution_context_invalid_for_one_or_more_folds",
             "execution_cost_model_complete": False,
         }
     from .research_execution_costs import (
         ResearchExecutionCostError,
         execution_cost_for_event,
+        is_verified_research_execution_cost_context,
         make_execution_cost_provider,
     )
     benchmark_cost_complete = (
         execution_cost_context_blocks is not None
-        and all(isinstance(context, dict) for context in execution_cost_context_blocks)
+        and bool(execution_cost_context_blocks)
+        and all(
+            is_verified_research_execution_cost_context(context)
+            for context in execution_cost_context_blocks
+        )
     )
     context_blocks = (
         execution_cost_context_blocks
@@ -449,7 +456,7 @@ def oos_benchmark_comparison(
         market: np.ndarray,
         signal: np.ndarray,
         atr: np.ndarray,
-        execution_context: dict[str, object] | None,
+        execution_context: Mapping[str, object] | None,
         execution_namespace: str,
     ):
         if bracket_configured:
@@ -457,7 +464,7 @@ def oos_benchmark_comparison(
                 make_execution_cost_provider(
                     execution_context, namespace=execution_namespace
                 )
-                if isinstance(execution_context, dict) else None
+                if isinstance(execution_context, Mapping) else None
             )
             simulated = simulate_execution_aware_strategy(
                 frame, signal, atr,
@@ -489,7 +496,7 @@ def oos_benchmark_comparison(
         turnover = np.abs(signal - previous)
         if len(turnover):
             turnover[-1] += abs(float(signal[-1]))
-        if isinstance(execution_context, dict):
+        if isinstance(execution_context, Mapping):
             transaction_drag = np.zeros(len(signal), dtype=float)
             for bar_position, (prior, current) in enumerate(zip(previous, signal, strict=True)):
                 transaction_drag[bar_position] += _event_cost_drag(
@@ -516,6 +523,21 @@ def oos_benchmark_comparison(
                         reason or "BENCHMARK_TERMINAL_EXIT_COST_UNAVAILABLE"
                     )
                 transaction_drag[-1] += abs(final_position) * float(exit_cost) / 10_000.0
+        elif session_costs_bps is not None:
+            # A fold with rejected calibration may still have a separately verified
+            # per-session schedule. Apply it per bar, including terminal liquidation,
+            # rather than reverting to the unrelated scalar cost rate.
+            from .market_sessions import session_cost_series
+            session_rates = session_cost_series(
+                pd.DatetimeIndex(frame.index), session_costs_bps
+            ).to_numpy(dtype=float)
+            if (
+                session_rates.shape != turnover.shape
+                or not np.isfinite(session_rates).all()
+                or np.any(session_rates < 0.0)
+            ):
+                raise ValueError("invalid per-session benchmark cost schedule")
+            transaction_drag = turnover * session_rates / 10_000.0
         else:
             transaction_drag = turnover * cost_rate
         net = signal * market - transaction_drag
@@ -602,7 +624,7 @@ def oos_benchmark_comparison(
         turnover[0] = 1.0  # enter from flat at fold open
         turnover[-1] += 1.0  # liquidate at the observed terminal close
         buy_hold_turnover += float(turnover.sum())
-        if isinstance(execution_context, dict):
+        if isinstance(execution_context, Mapping):
             entry_cost, entry_reason = execution_cost_for_event(
                 execution_context,
                 bar_position=0,

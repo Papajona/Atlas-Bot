@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
 from dataclasses import asdict
+from collections.abc import Mapping
 import math
 import numpy as np
 import pandas as pd
@@ -29,6 +30,57 @@ from .research_validation import (validate_ohlcv_frame, bootstrap_mean_ci,
 
 def _safe(x: float, default: float = 0.0) -> float:
     return float(x) if np.isfinite(x) else default
+
+
+def _ai_trial_evaluation_config(
+    *,
+    asset: str,
+    folds: int,
+    min_train: int,
+    threshold: float,
+    annualization_factor: float,
+    ai_profile: object,
+    research_hold_horizon: int | None,
+    taker_bps: float,
+    slippage_bps: float,
+    carry_bps: float | None,
+    carry_profile_bps: float,
+    cost_stress_multiplier: float,
+    session_costs_bps: dict[str, float] | None,
+    execution_cost_context: Mapping[str, object] | None,
+    execution_context_audit: dict[str, object],
+    model_fingerprint: str,
+) -> dict[str, object]:
+    """Describe stable AI trial assumptions, not dataset-bound evidence identities."""
+    return {
+        "asset": str(asset).strip().lower(),
+        "folds": int(folds),
+        "min_train": int(min_train),
+        "threshold": float(threshold),
+        "bars_per_year": int(
+            getattr(ai_profile, "bars_per_year", annualization_factor)
+            or annualization_factor
+        ),
+        "max_hold_bars": int(
+            getattr(ai_profile, "max_hold", research_hold_horizon)
+            or research_hold_horizon or 1
+        ),
+        "taker_bps": float(taker_bps),
+        "slippage_bps": float(slippage_bps),
+        "carry_bps_per_bar": float(
+            carry_profile_bps if carry_bps is None else carry_bps
+        ),
+        "cost_stress_multiplier": float(cost_stress_multiplier),
+        "session_costs_bps": (
+            {str(key): float(value) for key, value in sorted(session_costs_bps.items())}
+            if session_costs_bps is not None else None
+        ),
+        "execution_cost_context_available": execution_cost_context is not None,
+        "execution_cost_model_fingerprint": (
+            execution_context_audit.get("execution_cost_model_fingerprint")
+            or model_fingerprint
+        ),
+    }
 
 
 def _trial_accounting_fields(
@@ -223,7 +275,7 @@ def _apply_protective_halts(
 
 
 def _benchmark_execution_inputs(
-    execution_cost_context: dict[str, object] | None,
+    execution_cost_context: Mapping[str, object] | None,
     execution_audit: dict,
     session_costs_bps: dict[str, float] | None,
 ) -> tuple[dict[str, object] | None, dict[str, float] | None]:
@@ -251,7 +303,7 @@ def _protected_component_position(
     asset: str = "crypto",
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     execution_cost_namespace: str = "research",
 ):
     """Return one costed, execution-aware and risk-controlled return stream."""
@@ -295,12 +347,12 @@ def _protected_component_position(
         execution["audit"]["per_bar_execution_cost_failure"] = str(exc)
     execution["audit"]["execution_cost_model_fingerprint"] = (
         execution_cost_context.get("model_fingerprint")
-        if isinstance(execution_cost_context, dict)
+        if isinstance(execution_cost_context, Mapping)
         else None
     )
     execution["audit"]["per_bar_execution_context_sha256"] = (
         execution_cost_context.get("context_sha256")
-        if isinstance(execution_cost_context, dict)
+        if isinstance(execution_cost_context, Mapping)
         else None
     )
     return (
@@ -318,7 +370,7 @@ def _component_backtest(
     asset: str = "crypto",
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     execution_cost_namespace: str | None = None,
 ) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
@@ -835,26 +887,28 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     # Use a full SHA-256 fingerprint so config variants cannot silently collide
     # because a short fingerprint was truncated to only 32 bits.
     ai_profile = AI_PROFILES.get(str(asset).strip().lower())
-    configured_ai_carry = settings.research_carry_bps_per_bar
-    ai_carry_bps = float(
-        getattr(ai_profile, "carry_bps_per_bar", 0.0)
-        if configured_ai_carry is None
-        else configured_ai_carry
-    )
+    # Dataset hashes and calibration evidence IDs belong in the result audit,
+    # not the trial identity: refreshed data must not create a new AI trial.
     ai_trial_config = {
         "strategy_config": asdict(cfg),
-        "evaluation": {
-            "asset": str(asset).strip().lower(),
-            "folds": int(folds),
-            "min_train": int(min_train),
-            "threshold": float(ai_threshold),
-            "bars_per_year": int(getattr(ai_profile, "bars_per_year", annualization_factor) or annualization_factor),
-            "max_hold_bars": int(getattr(ai_profile, "max_hold", research_hold_horizon) or research_hold_horizon or 1),
-            "taker_bps": float(getattr(ai_profile, "taker_bps", 0.0)),
-            "slippage_bps": float(getattr(ai_profile, "slippage_bps", 0.0)),
-            "carry_bps_per_bar": ai_carry_bps,
-            "cost_stress_multiplier": 2.0,
-        },
+        "evaluation": _ai_trial_evaluation_config(
+            asset=asset,
+            folds=folds,
+            min_train=min_train,
+            threshold=ai_threshold,
+            annualization_factor=annualization_factor,
+            ai_profile=ai_profile,
+            research_hold_horizon=research_hold_horizon,
+            taker_bps=taker_bps,
+            slippage_bps=slippage_bps,
+            carry_bps=carry,
+            carry_profile_bps=float(getattr(ai_profile, "carry_bps_per_bar", 0.0)),
+            cost_stress_multiplier=cost_mult,
+            session_costs_bps=session_costs_bps,
+            execution_cost_context=execution_cost_context,
+            execution_context_audit=execution_context_audit,
+            model_fingerprint=model_fingerprint,
+        ),
         "execution": {
             "stop_atr": float(settings.strategy_stop_atr),
             "take_profit_atr": float(settings.strategy_take_profit_atr),
@@ -957,7 +1011,17 @@ def backtest_all_strategies(df: pd.DataFrame, cfg: StrategyConfig | None = None,
     if include_ai:
         try:
             ai_result = ai_walk_forward_backtest(
-                df, asset, folds, min_train, ai_threshold, session_costs_bps=session_costs_bps
+                df,
+                asset,
+                folds,
+                min_train,
+                ai_threshold,
+                cost_stress_multiplier=cost_mult,
+                taker_bps=taker_bps,
+                slippage_bps=slippage_bps,
+                carry_bps_per_bar=carry,
+                session_costs_bps=session_costs_bps,
+                execution_cost_context=execution_cost_context,
             )
         except Exception as exc:
             ai_result = {"strategy": "ai_walk_forward", "status": "INSUFFICIENT_DATA", "error": str(exc)}

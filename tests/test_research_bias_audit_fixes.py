@@ -327,8 +327,11 @@ def test_benchmark_controls_use_signed_per_event_costs_and_fail_closed_without_c
     )
 
     assert report["status"] == "OK"
-    assert report["execution_cost_model_complete"] is True
-    assert report["gate_passed"] in {True, False}
+    # A caller-created priceable mapping may price the diagnostic control, but
+    # cannot attest the benchmark's venue calibration or mark it complete.
+    assert report["execution_cost_model_complete"] is False
+    assert report["execution_cost_model_status"] == "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+    assert report["gate_passed"] is False
     assert any(
         call["namespace"].startswith("benchmark:buy-and-hold:")
         for call in calls
@@ -338,14 +341,73 @@ def test_benchmark_controls_use_signed_per_event_costs_and_fail_closed_without_c
         for call in calls
     )
 
-    incomplete = oos_benchmark_comparison(
+    static_fallback = oos_benchmark_comparison(
         [frame], [signal], [candidate_net], [atr],
         transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
         stop_atr=5.0, take_profit_atr=5.0, random_trials=2, seed=23,
         execution_cost_context_blocks=[None],
     )
-    assert incomplete["status"] == "INCOMPLETE"
-    assert incomplete["execution_cost_model_complete"] is False
+    assert static_fallback["status"] == "OK"
+    assert static_fallback["execution_cost_model_complete"] is False
+    assert static_fallback["gate_passed"] is False
+
+    invalid = oos_benchmark_comparison(
+        [frame], [signal], [candidate_net], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        stop_atr=5.0, take_profit_atr=5.0, random_trials=2, seed=23,
+        execution_cost_context_blocks=["invalid-context"],
+    )
+    assert invalid["status"] == "INCOMPLETE"
+    assert invalid["execution_cost_model_complete"] is False
+
+
+def test_benchmark_replays_mixed_calibrated_and_static_fallback_folds(monkeypatch):
+    from app import research_execution_costs
+
+    first = _ohlcv(32)
+    second = _ohlcv(32)
+    second.index = pd.date_range("2026-02-01T00:00:00Z", periods=32, freq="h")
+    signal = np.zeros(32, dtype=float)
+    signal[6:18] = 1.0
+    atr = np.ones(32, dtype=float)
+    candidate = np.zeros(32, dtype=float)
+    context = {
+        "index": first.index,
+        "model_fingerprint": "a" * 64,
+        "context_sha256": "b" * 64,
+    }
+    priced_contexts = []
+
+    def event_cost(received_context, **kwargs):
+        assert received_context is context
+        priced_contexts.append(received_context)
+        return 6.5, None
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", event_cost
+    )
+    report = oos_benchmark_comparison(
+        [first, second],
+        [signal, signal],
+        [candidate, candidate],
+        [atr, atr],
+        transaction_cost_bps=12.0,
+        carry_bps_per_bar=0.0,
+        stop_atr=5.0,
+        take_profit_atr=5.0,
+        random_trials=2,
+        seed=29,
+        execution_cost_context_blocks=[context, None],
+        candidate_execution_cost_namespace="ai-walk-forward",
+    )
+
+    assert report["status"] == "OK"
+    assert report["execution_cost_model_complete"] is False
+    assert report["execution_cost_model_status"] == "INCOMPLETE_STATIC_BENCHMARK_COSTS"
+    assert report["gate_passed"] is False
+    assert report["candidate_execution_model"].startswith("INDEPENDENT_FOLD_SIMULATION")
+    assert priced_contexts
+    assert all(item is context for item in priced_contexts)
 
 
 def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
@@ -370,3 +432,40 @@ def test_flat_bars_with_missing_atr_do_not_invalidate_benchmark_controls():
     assert report["candidate_requested_exposure_bars"] == 12
     assert report["random_control_requested_exposure_bars_median"] == 12.0
     assert report["random_trials"] == 20
+
+
+
+def test_no_bracket_benchmark_fallback_applies_session_costs_per_bar():
+    frame = _ohlcv(32)
+    signal = np.zeros(len(frame), dtype=float)
+    signal[6:18] = 1.0
+    candidate = np.zeros(len(frame), dtype=float)
+    schedule = {
+        "LONDON": 20.0,
+        "NEW_YORK": 20.0,
+        "NEW_YORK_LATE": 20.0,
+        "OTHER": 20.0,
+    }
+
+    session_priced = oos_benchmark_comparison(
+        [frame], [signal], [candidate],
+        transaction_cost_bps=1.0,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=41,
+        session_costs_bps=schedule,
+        execution_cost_context_blocks=[None],
+    )
+    scalar_priced = oos_benchmark_comparison(
+        [frame], [signal], [candidate],
+        transaction_cost_bps=1.0,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=41,
+    )
+
+    assert session_priced["status"] == "OK"
+    assert session_priced["execution_cost_model_complete"] is False
+    assert session_priced["gate_passed"] is False
+    assert session_priced["candidate_net_return"] < scalar_priced["candidate_net_return"]
+    assert session_priced["buy_and_hold_session_cost_model_complete"] is True

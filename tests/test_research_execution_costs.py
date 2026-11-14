@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,7 +17,9 @@ from app.research_execution_costs import (
     build_research_execution_cost_context,
     execution_cost_for_event,
     execution_cost_series_for_positions,
+    is_verified_research_execution_cost_context,
     research_execution_model_fingerprint,
+    slice_research_execution_context,
 )
 
 
@@ -102,8 +105,8 @@ def _settings(tmp_path):
     )
 
 
-def _research_frame():
-    index = pd.date_range("2026-01-01T00:00:00Z", periods=24, freq="h")
+def _research_frame(periods: int = 24):
+    index = pd.date_range("2026-01-01T00:00:00Z", periods=periods, freq="h")
     close = 100.0 + np.arange(len(index), dtype=float) * 0.1
     frame = pd.DataFrame(
         {
@@ -132,7 +135,7 @@ def _research_frame():
     return frame
 
 
-def _research_cost_evidence(frame, settings):
+def _research_cost_evidence(frame, settings, *, attach_to_frame: bool = True):
     fingerprint = research_execution_model_fingerprint(
         settings,
         taker_bps=5.5,
@@ -183,13 +186,15 @@ def _research_cost_evidence(frame, settings):
     }
     signed, public_keys = _signed(document)
     settings.research_evidence_public_keys_json = public_keys
-    frame.attrs["execution_cost_calibration_evidence"] = signed
+    if attach_to_frame:
+        frame.attrs["execution_cost_calibration_evidence"] = signed
+    return signed
 
 
 def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tmp_path):
     frame = _research_frame()
     settings = _settings(tmp_path)
-    _research_cost_evidence(frame, settings)
+    evidence = _research_cost_evidence(frame, settings, attach_to_frame=False)
 
     context, audit = build_research_execution_cost_context(
         frame,
@@ -198,17 +203,111 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
         base_slippage_bps=2.0,
         cost_stress_multiplier=2.0,
         asset="crypto",
+        calibration_evidence=evidence,
     )
+    assert "execution_cost_calibration_evidence" not in frame.attrs
 
     assert context is not None
+    assert is_verified_research_execution_cost_context(context)
+    assert not isinstance(context, dict)
+    with pytest.raises(TypeError):
+        context["venue"] = "attacker-controlled-venue"
+    with pytest.raises(TypeError):
+        context._values["venue"] = "base-dict-bypass"
+    with pytest.raises(TypeError):
+        context._verification_token = object()
+    with pytest.raises((AttributeError, TypeError)):
+        context.update({"model_fingerprint": "0" * 64})
+    with pytest.raises(ValueError):
+        context["spread_bps"][0] = 999.0
+    with pytest.raises(ValueError):
+        context["spread_bps"].setflags(write=True)
+
+    sliced_context = slice_research_execution_context(context, frame.index[1:])
+    assert sliced_context is not None
+    assert is_verified_research_execution_cost_context(sliced_context)
+    with pytest.raises(TypeError):
+        sliced_context["venue"] = "changed-after-slice"
+    with pytest.raises(ValueError):
+        sliced_context["volume_units"][0] = 0.0
     assert audit["status"] == "READY"
     assert audit["execution_cost_model_complete"] is True
+    assert audit["execution_cost_calibration_status"] == "VERIFIED"
+    assert audit["execution_cost_calibration_evidence_id"] == "binance-btc-usdt-execution-calibration-v1"
+    assert context["execution_cost_calibration_status"] == "VERIFIED"
+    assert context["execution_cost_calibration_evidence_id"] == "binance-btc-usdt-execution-calibration-v1"
+    assert context["venue"] == "binance"
+    assert context["market_type"] == "spot"
+    assert context["symbol"] == "BTC/USDT"
+    assert context["timeframe"] == "1h"
     assert context["model_fingerprint"] == research_execution_model_fingerprint(
         settings,
         taker_bps=5.5,
         base_slippage_bps=2.0,
         cost_stress_multiplier=2.0,
     )
+    from app.main import _strategy_router_validation_gate
+
+    verified_validation = {
+        "status": "OK",
+        "total_return": 0.12,
+        "folds": [
+            {"total_return": 0.04, "execution_cost_model_complete": True},
+            {"total_return": 0.03, "execution_cost_model_complete": True},
+            {"total_return": 0.05, "execution_cost_model_complete": True},
+        ],
+        "execution_cost_model_complete": True,
+        "execution_cost_model_status": "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY",
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_verified": True,
+        "execution_cost_calibration_evidence_id": context["execution_cost_calibration_evidence_id"],
+        "execution_cost_model_fingerprint": context["model_fingerprint"],
+        "per_bar_execution_context_sha256": context["context_sha256"],
+        "execution_cost_dataset_sha256": context["dataset_sha256"],
+    }
+    gate = _strategy_router_validation_gate(
+        verified_validation,
+        required_folds=3,
+        required_positive_fold_ratio=0.5,
+        current_dataset_sha256=context["dataset_sha256"],
+        current_execution_cost_context=context,
+    )
+    assert gate["passed"] is True
+    assert gate["execution_cost_calibration_verified"] is True
+    assert gate["execution_cost_validation_matches_current_context"] is True
+    assert gate["execution_cost_dataset_matches_current_data"] is True
+
+    from app.trading_core import _ai_execution_cost_context_attestation
+    assert _ai_execution_cost_context_attestation(context) == {
+        "verified": True,
+        "status": "VERIFIED",
+        "evidence_id": context["execution_cost_calibration_evidence_id"],
+    }
+
+    from app.main import _router_validation_cache_matches_execution_context
+
+    cached_router_validation = {
+        **verified_validation,
+        "execution_cost_model_complete": True,
+        "execution_cost_model_status": "VERIFIED_PER_BAR_SPREAD_VOLUME_PARTICIPATION_LATENCY",
+        "execution_cost_dataset_sha256": context["dataset_sha256"],
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_verified": True,
+        "execution_cost_calibration_evidence_id": context["execution_cost_calibration_evidence_id"],
+        "execution_cost_model_fingerprint": context["model_fingerprint"],
+        "per_bar_execution_context_sha256": context["context_sha256"],
+    }
+    assert _router_validation_cache_matches_execution_context(
+        cached_router_validation,
+        current_dataset_sha256=context["dataset_sha256"],
+        current_execution_cost_context=context,
+    ) is True
+    assert _router_validation_cache_matches_execution_context(
+        cached_router_validation,
+        current_dataset_sha256="d" * 64,
+        current_execution_cost_context=context,
+    ) is False
+
     assert np.isnan(context["volume_units"][0])
     assert context["volume_units"][21] == pytest.approx(100.0)
     assert context["spread_bps"][21] == pytest.approx(4.0)
@@ -533,6 +632,39 @@ def test_router_position_cost_series_splits_sign_reversal(monkeypatch):
     assert audit["execution_cost_model_complete"] is True
 
 
+@pytest.mark.parametrize(
+    "bar_position,turnover,reference_price",
+    [
+        (True, 1.0, 100.0),
+        (1.5, 1.0, 100.0),
+        (Decimal("1.0000000000000000001"), 1.0, 100.0),
+        (1, True, 100.0),
+        (1, 1.0, False),
+        (np.True_, 1.0, 100.0),
+        (1, np.True_, 100.0),
+        (1, 1.0, np.False_),
+    ],
+)
+def test_execution_event_rejects_boolean_or_fractional_indices_and_quantities(
+    bar_position, turnover, reference_price
+):
+    from app.research_execution_costs import execution_cost_for_event
+
+    context = {
+        "index": pd.date_range("2026-01-01T00:00:00Z", periods=2, freq="h"),
+    }
+    cost, reason = execution_cost_for_event(
+        context,
+        bar_position=bar_position,
+        turnover=turnover,
+        reference_price=reference_price,
+        side="buy",
+        namespace="invalid-input-test",
+    )
+    assert cost is None
+    assert reason == "EXECUTION_EVENT_NUMERIC_INPUT_INVALID"
+
+
 def test_strategy_router_return_stream_uses_per_event_research_costs(monkeypatch):
     from app import strategy_router
 
@@ -633,3 +765,99 @@ def test_missing_execution_context_uses_static_cost_without_event_loop(monkeypat
     assert audit["execution_cost_model_status"] == "STATIC_FALLBACK_NO_EXECUTION_CONTEXT"
     assert audit["_execution_cost_model_complete_by_bar"] == [False] * len(index)
     assert len(audit["_execution_cost_failure_reasons_by_bar"]) == len(index)
+
+
+
+@pytest.mark.parametrize(
+    "bar_position",
+    [2, 2.0, np.int64(2), np.float64(2.0), Decimal("2.0"), "2", "2.0"],
+)
+def test_execution_event_accepts_integral_numeric_bar_indices(bar_position):
+    from app.research_execution_costs import execution_cost_for_event
+
+    context = {
+        "index": pd.date_range("2026-01-01T00:00:00Z", periods=3, freq="h"),
+    }
+    cost, reason = execution_cost_for_event(
+        context,
+        bar_position=bar_position,
+        turnover=0.0,
+        reference_price=100.0,
+        side="buy",
+        namespace="integral-index-test",
+    )
+    assert cost == 0.0
+    assert reason is None
+
+
+
+def test_benchmark_uses_verified_mapping_for_all_execution_pricing_paths(tmp_path, monkeypatch):
+    from app import research_execution_costs
+    from app.research_validation import oos_benchmark_comparison
+
+    source_frame = _research_frame(periods=64)
+    settings = _settings(tmp_path)
+    settings.research_order_notional_usd = 10.0
+    evidence = _research_cost_evidence(source_frame, settings, attach_to_frame=False)
+    full_context, audit = build_research_execution_cost_context(
+        source_frame,
+        settings=settings,
+        taker_bps=5.5,
+        base_slippage_bps=2.0,
+        cost_stress_multiplier=2.0,
+        asset="crypto",
+        calibration_evidence=evidence,
+    )
+    assert full_context is not None
+    assert audit["execution_cost_model_complete"] is True
+    assert is_verified_research_execution_cost_context(full_context)
+    assert not isinstance(full_context, dict)
+
+    fold = source_frame.iloc[-32:].copy()
+    context = slice_research_execution_context(full_context, fold.index)
+    assert context is not None
+    assert is_verified_research_execution_cost_context(context)
+
+    calls = []
+    original_event_cost = research_execution_costs.execution_cost_for_event
+
+    def record_event_cost(received_context, **kwargs):
+        assert received_context is context
+        calls.append(str(kwargs["namespace"]))
+        return original_event_cost(received_context, **kwargs)
+
+    monkeypatch.setattr(
+        research_execution_costs, "execution_cost_for_event", record_event_cost
+    )
+    signal = np.zeros(len(fold), dtype=float)
+    signal[6:18] = 1.0
+    atr = np.ones(len(fold), dtype=float)
+    candidate = np.zeros(len(fold), dtype=float)
+
+    bracketed = oos_benchmark_comparison(
+        [fold], [signal], [candidate], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        stop_atr=5.0, take_profit_atr=5.0,
+        random_trials=2, seed=41,
+        execution_cost_context_blocks=[context],
+        candidate_execution_cost_namespace="mapping:bracketed:candidate",
+    )
+    assert bracketed["status"] == "OK"
+    assert bracketed["execution_cost_model_complete"] is True
+    assert any(name.startswith("mapping:bracketed:candidate") for name in calls)
+    assert any(name.startswith("benchmark:random:") for name in calls)
+    assert any(name.startswith("benchmark:buy-and-hold:") for name in calls)
+
+    calls.clear()
+    unbracketed = oos_benchmark_comparison(
+        [fold], [signal], [candidate], [atr],
+        transaction_cost_bps=12.0, carry_bps_per_bar=0.0,
+        random_trials=2, seed=43,
+        execution_cost_context_blocks=[context],
+        candidate_execution_cost_namespace="mapping:unbracketed:candidate",
+    )
+    assert unbracketed["status"] == "OK"
+    assert unbracketed["execution_cost_model_complete"] is True
+    assert any(name.startswith("mapping:unbracketed:candidate") for name in calls)
+    assert any(name.startswith("benchmark:random:") for name in calls)
+    assert any(name.startswith("benchmark:buy-and-hold:") for name in calls)
