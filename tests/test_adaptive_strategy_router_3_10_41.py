@@ -292,8 +292,10 @@ def test_strategy_router_returns_propagate_verified_venue_calibration_identity(m
         frame, StrategyConfig(signal_threshold=0.0), folds=1, min_train=1,
         min_trades=0, execution_cost_context=context,
     )
-    assert regime_result["execution_cost_calibration_status"] == "VERIFIED"
-    assert regime_result["execution_cost_calibration_verified"] is True
+    # This fixture is a caller-created mapping, not the signed validator's
+    # authenticated context object, so identity is diagnostic only.
+    assert regime_result["execution_cost_calibration_status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
+    assert regime_result["execution_cost_calibration_verified"] is False
     assert regime_result["execution_cost_calibration_evidence_id"] == "venue-calibration-2026-001"
     assert regime_result["execution_cost_venue"] == "example-exchange"
     assert regime_result["execution_cost_model_fingerprint"] == "a" * 64
@@ -311,8 +313,8 @@ def test_strategy_router_returns_propagate_verified_venue_calibration_identity(m
         folds=1, min_train=1, min_trades=0, decision_stride=1,
         execution_cost_context=context,
     )
-    assert policy_result["execution_cost_calibration_status"] == "VERIFIED"
-    assert policy_result["execution_cost_calibration_verified"] is True
+    assert policy_result["execution_cost_calibration_status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
+    assert policy_result["execution_cost_calibration_verified"] is False
     assert policy_result["execution_cost_calibration_evidence_id"] == "venue-calibration-2026-001"
     assert policy_result["execution_cost_venue"] == "example-exchange"
     assert policy_result["execution_cost_model_fingerprint"] == "a" * 64
@@ -349,8 +351,8 @@ def test_strategy_ranking_and_selector_expose_calibration_evidence(monkeypatch):
     )
     assert performance
     for regimes in performance.values():
-        assert regimes["RANGE"]["execution_cost_calibration_status"] == "VERIFIED"
-        assert regimes["RANGE"]["execution_cost_calibration_verified"] is True
+        assert regimes["RANGE"]["execution_cost_calibration_status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
+        assert regimes["RANGE"]["execution_cost_calibration_verified"] is False
         assert regimes["RANGE"]["execution_cost_calibration_evidence_id"] == "venue-calibration-router-002"
         assert regimes["RANGE"]["execution_cost_venue"] == "example-exchange"
         assert regimes["RANGE"]["execution_cost_model_fingerprint"] == "d" * 64
@@ -360,8 +362,8 @@ def test_strategy_ranking_and_selector_expose_calibration_evidence(monkeypatch):
         execution_cost_context=context,
     )
     assert selection["status"] == "OK"
-    assert selection["execution_cost_calibration_status"] == "VERIFIED"
-    assert selection["execution_cost_calibration_verified"] is True
+    assert selection["execution_cost_calibration_status"] == "UNATTESTED_EXECUTION_COST_CONTEXT"
+    assert selection["execution_cost_calibration_verified"] is False
     assert selection["execution_cost_calibration_evidence_id"] == "venue-calibration-router-002"
     assert selection["execution_cost_venue"] == "example-exchange"
     assert selection["execution_cost_model_fingerprint"] == "d" * 64
