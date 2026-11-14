@@ -470,6 +470,8 @@ def test_execution_simulator_prices_ordinary_transition_to_flat_as_exit():
         frame,
         pd.Series([0.5, 0.0, 0.0], index=index),
         pd.Series([10.0, 10.0, 10.0], index=index),
+        stop_atr=2.0,
+        take_profit_atr=2.0,
         transaction_cost_bps=7.5,
         carry_bps_per_bar=0.0,
         transaction_cost_provider=cost_provider,
