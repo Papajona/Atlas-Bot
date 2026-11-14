@@ -330,7 +330,10 @@ def build_research_execution_cost_context(
         "taker_bps": taker, **parsed_parameters,
         "order_notional_usd": order_notional, "dataset_sha256": dataset_sha256,
         "context_sha256": context_sha256, "model_fingerprint": fingerprint,
-        "evidence_id": evidence_id, "venue": venue, "market_type": market_type,
+        "evidence_id": evidence_id,
+        "execution_cost_calibration_status": "VERIFIED",
+        "execution_cost_calibration_evidence_id": evidence_id or None,
+        "venue": venue, "market_type": market_type,
         "symbol": symbol, "timeframe": timeframe,
     }
     return context, {
