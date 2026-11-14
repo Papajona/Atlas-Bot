@@ -370,3 +370,65 @@ def test_oos_gate_adapter_rejects_cost_report_without_financing_or_stop_target_e
         "intrabar_stop_target_model_complete": True,
     })
     assert report["cost_stress_ok"] is False
+
+
+
+def test_ai_trial_execution_fingerprint_uses_stable_cost_assumptions():
+    profile = trading_core.PROFILES["forex"]
+    common = {
+        "asset": "forex",
+        "folds": 4,
+        "min_train": 500,
+        "threshold": 0.07,
+        "annualization_factor": 252.0,
+        "ai_profile": profile,
+        "research_hold_horizon": profile.max_hold,
+        "taker_bps": 5.5,
+        "slippage_bps": 2.0,
+        "carry_bps": 0.12,
+        "carry_profile_bps": profile.carry_bps_per_bar,
+        "cost_stress_multiplier": 3.25,
+        "session_costs_bps": {
+            "LONDON": 1.0,
+            "NEW_YORK": 1.2,
+            "NEW_YORK_LATE": 1.5,
+            "OTHER": 2.0,
+        },
+        "execution_cost_context": {"dataset": "first"},
+        "model_fingerprint": "model-fingerprint",
+    }
+    first = research_engine._ai_trial_evaluation_config(
+        **common,
+        execution_context_audit={
+            "execution_cost_model_fingerprint": "model-fingerprint",
+            "per_bar_execution_context_sha256": "a" * 64,
+            "execution_cost_calibration_evidence_id": "dataset-evidence-one",
+        },
+    )
+    second = research_engine._ai_trial_evaluation_config(
+        **{**common, "execution_cost_context": {"dataset": "refreshed"}},
+        execution_context_audit={
+            "execution_cost_model_fingerprint": "model-fingerprint",
+            "per_bar_execution_context_sha256": "b" * 64,
+            "execution_cost_calibration_evidence_id": "dataset-evidence-two",
+        },
+    )
+
+    # New observations/evidence identifiers must not create a new strategy trial.
+    assert first == second
+    assert first["taker_bps"] == 5.5
+    assert first["slippage_bps"] == 2.0
+    assert first["carry_bps_per_bar"] == 0.12
+    assert first["cost_stress_multiplier"] == 3.25
+    assert first["execution_cost_model_fingerprint"] == "model-fingerprint"
+    assert "per_bar_execution_context_sha256" not in first
+    assert "execution_cost_calibration_evidence_id" not in first
+
+    # Actual execution-parameter changes do create a distinct trial identity.
+    changed_cost = research_engine._ai_trial_evaluation_config(
+        **{**common, "taker_bps": 6.0},
+        execution_context_audit={
+            "execution_cost_model_fingerprint": "changed-model-fingerprint",
+        },
+    )
+    assert changed_cost != first
