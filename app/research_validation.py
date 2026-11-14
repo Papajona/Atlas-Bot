@@ -1063,9 +1063,12 @@ def fixed_signal_walk_forward_oos(
         effective_cost_values = session_cost_values
         transaction_cost_values = session_cost_values
     session_cost_schedule_applied = (
-        bool(session_costs_applied)
-        if session_costs_applied is not None
-        else session_cost_values is not None and effective_cost_values is session_cost_values
+        session_cost_values is not None
+        and (
+            bool(session_costs_applied)
+            if session_costs_applied is not None
+            else effective_cost_values is session_cost_values
+        )
     )
     net = costed_execution_returns(
         position, ret, transaction_cost_bps=transaction_cost_values,
@@ -1163,7 +1166,9 @@ def fixed_signal_walk_forward_oos(
     cost_analysis["financing_cost_model_complete"] = cost_complete
     cost_analysis["session_cost_model_complete"] = session_cost_schedule_applied
     cost_analysis["session_costs_bps"] = (
-        dict(session_costs_bps) if session_cost_schedule_applied and session_costs_bps is not None else None
+        dict(session_costs_bps)
+        if session_cost_schedule_applied and session_costs_bps is not None
+        else None
     )
     cost_analysis["effective_transaction_cost_series_applied"] = (
         transaction_cost_bps_per_bar is not None
@@ -1267,7 +1272,9 @@ def fixed_signal_walk_forward_oos(
         "carry_bps_per_bar": carry,
         "session_cost_model_complete": session_cost_schedule_applied,
         "session_costs_bps": (
-            dict(session_costs_bps) if session_cost_schedule_applied and session_costs_bps is not None else None
+            dict(session_costs_bps)
+            if session_cost_schedule_applied and session_costs_bps is not None
+            else None
         ),
         "effective_transaction_cost_series_applied": transaction_cost_bps_per_bar is not None,
     }
