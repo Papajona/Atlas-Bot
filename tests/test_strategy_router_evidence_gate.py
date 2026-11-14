@@ -53,6 +53,7 @@ def test_router_gate_rejects_caller_supplied_verified_labels_without_validator_p
     assert result["passed"] is False
     assert result["execution_cost_calibration_verified"] is False
     assert result["execution_cost_model_complete"] is False
+    assert result["execution_cost_calibration_evidence_id"] is None
     assert "SIGNED_VENUE_CALIBRATION_EVIDENCE_NOT_VERIFIED" in result["rejection_reasons"]
 
 
@@ -252,3 +253,26 @@ def test_signed_per_bar_router_gate_is_limited_to_attestable_crypto_spot_data():
     assert _requires_signed_per_bar_router_context("forex", forex) is False
     assert _requires_signed_per_bar_router_context("commodity", commodity) is False
     assert _requires_signed_per_bar_router_context("crypto", crypto_spot) is True
+
+
+
+def test_router_gate_returns_evidence_id_only_from_validator_issued_context():
+    from app.research_execution_costs import (
+        _VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN,
+        _VerifiedResearchExecutionCostContext,
+    )
+
+    context = _VerifiedResearchExecutionCostContext(
+        _verified_context(),
+        _token=_VERIFIED_RESEARCH_EXECUTION_CONTEXT_TOKEN,
+    )
+    result = _strategy_router_validation_gate(
+        _verified_validation(),
+        required_folds=3,
+        required_positive_fold_ratio=0.5,
+        current_dataset_sha256="c" * 64,
+        current_execution_cost_context=context,
+    )
+
+    assert result["passed"] is True
+    assert result["execution_cost_calibration_evidence_id"] == "signed-venue-calibration-2026-001"
