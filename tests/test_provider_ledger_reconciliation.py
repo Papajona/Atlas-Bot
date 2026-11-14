@@ -1,4 +1,5 @@
 import csv
+from pathlib import Path
 
 import pytest
 
@@ -151,6 +152,25 @@ def test_statement_parser_rejects_duplicate_ids_and_invalid_status(tmp_path):
     )
     with pytest.raises(ValueError, match="Unrecognized provider status"):
         load_provider_statement(path)
+
+
+
+def test_provider_reconciliation_query_enforces_migration_0059_research_table_acls():
+    from datetime import datetime, timezone
+
+    query = build_query(
+        "sandbox-payout",
+        datetime(2026, 10, 14, tzinfo=timezone.utc),
+        datetime(2026, 10, 15, tzinfo=timezone.utc),
+    )
+
+    assert "c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')" in query
+    assert "'research_trial_ledger_head_acl_valid'" in query
+    assert "'research_holdout_registry_acl_valid'" in query
+    assert "has_table_privilege(r.rolname,c.oid,'UPDATE')" in query
+    assert "has_table_privilege(r.rolname,c.oid,'INSERT')" in query
+    assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in query
+    assert "migration 0059 least-privilege grant contract" in Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
 
 
 def test_query_window_requires_timezone_and_provider_is_restricted():

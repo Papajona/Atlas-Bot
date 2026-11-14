@@ -98,13 +98,41 @@ SELECT jsonb_build_object(
           AND NOT has_table_privilege(r.rolname,c.oid,'SELECT')
       ),
       'public_schema_create', has_schema_privilege(r.rolname, 'public', 'CREATE'),
+      -- Migration 0059 deliberately gives these two integrity tables narrower
+      -- grants. Keep the ordinary-table DML gate, then verify each restricted ACL
+      -- against the exact SELECT/UPDATE and SELECT/INSERT contract respectively.
       'public_tables_missing_dml', (
         SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')
           AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
                AND has_table_privilege(r.rolname,c.oid,'UPDATE')
                AND has_table_privilege(r.rolname,c.oid,'DELETE'))
       ),
+      'research_trial_ledger_head_acl_valid', coalesce((
+        SELECT bool_and(
+          has_table_privilege(r.rolname,c.oid,'SELECT')
+          AND has_table_privilege(r.rolname,c.oid,'UPDATE')
+          AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
+          AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
+          AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+        )
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname='research_trial_ledger_head'
+          AND c.relkind IN ('r','p')
+      ), false),
+      'research_holdout_registry_acl_valid', coalesce((
+        SELECT bool_and(
+          has_table_privilege(r.rolname,c.oid,'SELECT')
+          AND has_table_privilege(r.rolname,c.oid,'INSERT')
+          AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
+          AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
+          AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+        )
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname='research_holdout_registry'
+          AND c.relkind IN ('r','p')
+      ), false),
       'public_sequences_missing_usage', (
         SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind='S'
@@ -317,6 +345,9 @@ def audit(args: argparse.Namespace) -> dict:
             count = -1
         if count != 0:
             failures.append(f"{key} expected 0, observed {count}")
+    for key in ("research_trial_ledger_head_acl_valid", "research_holdout_registry_acl_valid"):
+        if not truthy(role.get(key)):
+            failures.append(f"{key} must be true under the migration 0059 least-privilege grant contract")
     revision = str(observed.get("revision") or "")
     if revision != expected_revision:
         failures.append(f"restored database revision must be exactly {expected_revision}")
@@ -384,7 +415,7 @@ def main() -> int:
     parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
     parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
     parser.add_argument("--expected-runtime-role", required=True)
-    parser.add_argument("--expected-revision", default="0054_audit_log_idempotency_key")
+    parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
     try:
