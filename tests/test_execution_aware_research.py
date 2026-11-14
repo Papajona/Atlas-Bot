@@ -187,7 +187,8 @@ def test_ordinary_signal_close_uses_exit_event_namespace():
         transaction_cost_provider=record_event,
     )
 
-    assert result["status"] == "OK"
+    # The simulator returns streams plus an audit; it does not expose an HTTP-style status.
+    assert result["audit"]["per_bar_execution_cost_model_status"] == "EVENT_LEVEL_PROVIDER_APPLIED"
     assert [(event[0], event[3], event[4]) for event in events] == [
         (0, "buy", "ENTRY"),
         (1, "sell", "EXIT"),
