@@ -74,6 +74,20 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
         assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in source
 
 
+
+def test_restore_audit_enforces_migration_0059_research_table_acl_contract():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')" in QUERY
+    assert "'research_trial_ledger_head_acl_valid'" in QUERY
+    assert "'research_holdout_registry_acl_valid'" in QUERY
+    # The ledger head is SELECT/UPDATE only; the holdout registry is SELECT/INSERT only.
+    assert "has_table_privilege(r.rolname,c.oid,'UPDATE')" in QUERY
+    assert "has_table_privilege(r.rolname,c.oid,'INSERT')" in QUERY
+    assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in QUERY
+    assert "migration 0059 least-privilege grant contract" in Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
+
+
 def test_restore_audit_rejects_missing_required_schema_objects():
     assert required_table_failures([]) == []
     assert required_table_failures(["research_trial_archive"]) == [

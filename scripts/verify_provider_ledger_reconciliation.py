@@ -147,13 +147,40 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
             WHERE n.nspname='public' AND c.relkind IN ('r','p')
               AND NOT has_table_privilege(r.rolname,c.oid,'SELECT')
           ),
+          -- The two migration-0059 research tables have deliberately restricted
+          -- grants; validate them separately instead of requiring broad DML access.
           'tables_missing_dml', (
             SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relkind IN ('r','p')
+              AND c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')
               AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
                    AND has_table_privilege(r.rolname,c.oid,'UPDATE')
                    AND has_table_privilege(r.rolname,c.oid,'DELETE'))
           ),
+          'research_trial_ledger_head_acl_valid', coalesce((
+            SELECT bool_and(
+              has_table_privilege(r.rolname,c.oid,'SELECT')
+              AND has_table_privilege(r.rolname,c.oid,'UPDATE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
+              AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+            )
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname='research_trial_ledger_head'
+              AND c.relkind IN ('r','p')
+          ), false),
+          'research_holdout_registry_acl_valid', coalesce((
+            SELECT bool_and(
+              has_table_privilege(r.rolname,c.oid,'SELECT')
+              AND has_table_privilege(r.rolname,c.oid,'INSERT')
+              AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
+              AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+            )
+            FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='public' AND c.relname='research_holdout_registry'
+              AND c.relkind IN ('r','p')
+          ), false),
           'sequences_missing_usage', (
             SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
             WHERE n.nspname='public' AND c.relkind='S'
@@ -326,6 +353,9 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
             count = -1
         if count != 0:
             failures.append(f"runtime role {key} expected 0, observed {count}")
+    for key in ("research_trial_ledger_head_acl_valid", "research_holdout_registry_acl_valid"):
+        if role.get(key) is not True:
+            failures.append(f"runtime role {key} must be true under the migration 0059 least-privilege grant contract")
 
     db_rows = db.get("withdrawals") or []
     matched, unresolved_no_id, reconciliation_failures = reconcile_rows(rows, db_rows, provider)
