@@ -203,6 +203,14 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
     assert context is not None
     assert audit["status"] == "READY"
     assert audit["execution_cost_model_complete"] is True
+    assert audit["execution_cost_calibration_status"] == "VERIFIED"
+    assert audit["execution_cost_calibration_evidence_id"] == "binance-btc-usdt-execution-calibration-v1"
+    assert context["execution_cost_calibration_status"] == "VERIFIED"
+    assert context["execution_cost_calibration_evidence_id"] == "binance-btc-usdt-execution-calibration-v1"
+    assert context["venue"] == "binance"
+    assert context["market_type"] == "spot"
+    assert context["symbol"] == "BTC/USDT"
+    assert context["timeframe"] == "1h"
     assert context["model_fingerprint"] == research_execution_model_fingerprint(
         settings,
         taker_bps=5.5,
