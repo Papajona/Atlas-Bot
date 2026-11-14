@@ -963,6 +963,7 @@ def fixed_signal_walk_forward_oos(
     execution_cost_context: dict[str, object] | None = None,
     benchmark_execution_cost_namespace: str = "research:ensemble",
     session_costs_applied: bool | None = None,
+    execution_cost_fallback_used: bool = False,
 ) -> dict:
     """Evaluate held-out returns with the same executable position/stop/carry stream.
 
@@ -1246,6 +1247,10 @@ def fixed_signal_walk_forward_oos(
             session_costs_bps=session_costs_bps,
             execution_cost_context_blocks=oos_execution_cost_context_blocks,
             candidate_execution_cost_namespace=benchmark_execution_cost_namespace,
+            _execution_cost_fallback_reasons=(
+                ("candidate_session_cost_fallback_after_event_rejection",)
+                if execution_cost_fallback_used else ()
+            ),
         )
     return {
         "status": "OK",
