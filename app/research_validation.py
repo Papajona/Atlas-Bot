@@ -953,6 +953,7 @@ def fixed_signal_walk_forward_oos(
     benchmark_cooldown_bars: int = 0,
     benchmark_random_trials: int = 100,
     session_costs_bps: dict[str, float] | None = None,
+    session_costs_applied: bool | None = None,
     transaction_cost_bps_per_bar: pd.Series | None = None,
     execution_cost_context: dict[str, object] | None = None,
     benchmark_execution_cost_namespace: str = "research:ensemble",
@@ -1061,6 +1062,11 @@ def fixed_signal_walk_forward_oos(
     elif session_cost_values is not None:
         effective_cost_values = session_cost_values
         transaction_cost_values = session_cost_values
+    session_cost_schedule_applied = (
+        bool(session_costs_applied)
+        if session_costs_applied is not None
+        else session_cost_values is not None and effective_cost_values is session_cost_values
+    )
     net = costed_execution_returns(
         position, ret, transaction_cost_bps=transaction_cost_values,
         carry_bps_per_bar=carry, exit_mask=exit_flags,
@@ -1155,8 +1161,10 @@ def fixed_signal_walk_forward_oos(
     cost_analysis["carry_evidence_source_present"] = bool(evidence_source)
     cost_analysis["carry_evidence_id_present"] = bool(evidence_id)
     cost_analysis["financing_cost_model_complete"] = cost_complete
-    cost_analysis["session_cost_model_complete"] = session_cost_values is not None
-    cost_analysis["session_costs_bps"] = dict(session_costs_bps) if session_cost_values is not None else None
+    cost_analysis["session_cost_model_complete"] = session_cost_schedule_applied
+    cost_analysis["session_costs_bps"] = (
+        dict(session_costs_bps) if session_cost_schedule_applied and session_costs_bps is not None else None
+    )
     cost_analysis["effective_transaction_cost_series_applied"] = (
         transaction_cost_bps_per_bar is not None
     )
@@ -1257,8 +1265,10 @@ def fixed_signal_walk_forward_oos(
         "execution_cost_calibration_status": "MISSING_VENUE_CALIBRATION_EVIDENCE",
         "execution_cost_calibration_evidence_id": None,
         "carry_bps_per_bar": carry,
-        "session_cost_model_complete": session_cost_values is not None,
-        "session_costs_bps": dict(session_costs_bps) if session_cost_values is not None else None,
+        "session_cost_model_complete": session_cost_schedule_applied,
+        "session_costs_bps": (
+            dict(session_costs_bps) if session_cost_schedule_applied and session_costs_bps is not None else None
+        ),
         "effective_transaction_cost_series_applied": transaction_cost_bps_per_bar is not None,
     }
 
