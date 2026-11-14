@@ -114,32 +114,30 @@ Original Qodo review [#401](https://github.com/Papajona/Atlas-Bot/pull/401), com
 
 ## PR406 — Qodo follow-up review (2026-11-14)
 
-The published Qodo review comment `6876549905` is tied to PR406 head
-`6bd8ebd789d0fcd706ddeb0d1a4a69e122d03755`. It is one review snapshot with nine
-findings: eight were marked resolved in that review and one ("Ledger gives one
-Qodo comment two meanings") remained active. The rows below are the single
-consolidated record for that review. Each finding appears once; in particular,
-the session-status finding IDs `2058abdb-cc66-40be-b462-3734faeec4c9` and
-`967e5bef-327c-4517-85f1-0d2b5dc8a2b6` are not repeated under a second review
-heading.
+The latest Qodo review comment `6876549905` is tied to the exact PR406 head
+`e540ad4660f31b88b22c607747b0dd08d21ad498`. Its current report contains ten
+findings, and all ten are marked resolved. The rows below record that latest
+report once. The session-status finding IDs
+`2058abdb-cc66-40be-b462-3734faeec4c9` and
+`967e5bef-327c-4517-85f1-0d2b5dc8a2b6` are each listed once.
 
 | Qodo finding | Disposition | Code/test evidence |
 |---|---|---|
-| Session-only runs list every fold as a fallback | Qodo-marked resolved at `fba86bb` | The fallback-fold set is populated only from actual `fold_N` rejection reasons or the explicit upstream candidate-fallback marker. Normal session-only runs publish no fallback folds. Regressions: `test_session_only_benchmark_is_not_reported_as_a_fallback` and `test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback`. |
+| Session-priced returns appear unverified | Qodo-marked resolved at `7e4aecc` | The status derives from the selected pricing source: if no precomputed per-bar transaction-cost series is supplied, the session schedule is the selected candidate pricing branch even when an explicit audit flag is false. When a precomputed series is supplied, its audit flag still distinguishes session-derived from signed per-bar pricing. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_reports_session_schedule_when_selected_without_precomputed_series`. |
+| Session-only runs list every fold as a fallback | Qodo-marked resolved at `fba86bb` | The fallback-fold set is populated only from actual `fold_N` rejection reasons or the explicit upstream candidate-fallback marker. Regressions: `test_session_only_benchmark_is_not_reported_as_a_fallback` and `test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback`. |
 | Benchmark fallback fails for generator inputs | Qodo-marked resolved at `304dd0a` | The benchmark materializes reusable fold arrays and reuses them for the single retry rather than re-reading consumed generators. The control-rejection regression covers generator-backed signal, candidate-return and ATR inputs. |
 | `2058abdb-cc66-40be-b462-3734faeec4c9` — Session-priced candidates appear unverified | Qodo-marked resolved at `2ff685a` | Each ensemble/component OOS report is paired with its matching simulator audit. `_set_session_cost_report_status()` updates top-level and nested `cost_analysis` from that audit. Regression: `tests/test_research_execution_costs.py::test_session_cost_report_status_uses_the_matching_simulator_audit`. |
-| `967e5bef-327c-4517-85f1-0d2b5dc8a2b6` — Verified runs show conflicting cost flags | Qodo-marked resolved at `2ff685a` | `fixed_signal_walk_forward_oos()` receives the candidate's explicit `session_costs_applied` flag. A schedule retained for possible benchmark fallback no longer makes a verified per-bar candidate appear session-priced. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source`. |
-| Ledger gives one Qodo comment two meanings | Fixed in this commit; not yet re-reviewed by Qodo | This section now records comment `6876549905` once, identifies its exact reviewed head, and merges the duplicated `2058abdb`/`967e5bef` rows into this one table. No post-commit Qodo status change is claimed. |
-| Disposition ledger contradicts itself on open findings | Qodo-marked resolved at `2142c1c` | The PR406 disposition summary and the fallback rows now use one consistent finding count and status. |
+| `967e5bef-327c-4517-85f1-0d2b5dc8a2b6` — Verified runs show conflicting cost flags | Qodo-marked resolved at `2ff685a` | `fixed_signal_walk_forward_oos()` receives the candidate's explicit audit flag when a precomputed series is supplied, so a schedule retained only for benchmark fallback is not reported as used by a verified per-bar candidate. Regression: `tests/test_research_bias_audit_fixes.py::test_fixed_signal_oos_session_cost_flags_match_the_candidate_pricing_source`. |
+| Ledger gives one Qodo comment two meanings | Qodo-marked resolved in the updated review | The ledger now records comment `6876549905` once, gives it one reviewed head and one finding table, and does not duplicate the two session-status IDs. |
+| Disposition ledger contradicts itself on open findings | Qodo-marked resolved at `2142c1c` | The PR406 disposition summary and its finding rows use one consistent count and status. |
 | Partial fallback reports buy-and-hold as session-priced | Qodo-marked resolved at `bc4b082` | Buy-and-hold completeness and the published session schedule require every fold to have used session pricing. The report separately lists actual fallback fold indices. Regression: `tests/test_research_execution_costs.py::test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry`. |
 | Each rejected fold reruns the whole benchmark | Qodo-marked resolved at `304dd0a` | Candidate, buy-and-hold and random-control rejections are collected across folds before one aligned retry, rather than recursively rerunning the whole benchmark for each rejected fold. Regression: `test_benchmark_fallback_downgrades_all_rejected_folds_in_one_retry`. |
 | Session-only runs are reported as fallbacks | Qodo-marked resolved at `304dd0a` | `execution_cost_model_fallback_used` is true only when an execution-cost rejection exists. Normal session-only pricing reports `INCOMPLETE_SESSION_BENCHMARK_COSTS`. Regressions: `test_session_only_benchmark_is_not_reported_as_a_fallback` and `test_fixed_signal_oos_marks_upstream_event_rejection_as_benchmark_fallback`. |
 
-Qodo's separate fixer response (`6876551111`) said no findings were within its
-configured automatic-fix scope. That is a fixer configuration response, not a
-review disposition or application gate. The Qodo review comment is an immutable
-historical snapshot; this ledger records the source fixes and does not claim to
-rewrite Qodo's external catalog or bot-authored comment.
+The separate Qodo fixer response (`6876551111`) is a fixer-scope message, not a
+review disposition. Qodo remains advisory; source changes and exact-head CI are
+the application verification gates.
+
 
 ## PR407 — readiness and telemetry follow-up
 
@@ -161,7 +159,7 @@ PR408 is Qodo's automated cherry-pick/fixer PR for the readiness fields already 
 - PR399's only active item is fixed by merged PR405, which Qodo reviewed with zero material findings.
 - PR400's two historical active findings are implemented in current main with behavioral/PostgreSQL regressions.
 - PR401 findings #2, #5 and #6 are implemented in current main; #1 and #4 are fixed in the PR406 follow-up; #3 now has an explicit EXIT-namespace behavioral regression on PR406 head `4393fa51`; #18 is covered by the same batched benchmark-fallback implementation.
-- PR406's five latest Qodo findings were marked resolved in its published review. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 remains subject to exact-head CI and PostgreSQL verification.
+- PR406's ten latest Qodo findings were marked resolved in its published review on exact head `e540ad4660f31b88b22c607747b0dd08d21ad498`. PR407's startup and test-collection findings were marked resolved in its follow-up review; PR407 remains subject to exact-head CI and PostgreSQL verification.
 - PR402/#403 did not receive Qodo review comments because the bot's review quota was exhausted; their relevant risk-lock/reversal code and regressions were manually checked against current main.
 - PR408 is a Qodo auto-fix cherry-pick PR for the readiness settings already implemented on #407; it contains no separate Qodo review findings.
 - Historical Qodo labels do not determine Atlas application progress, block a verified merge, or control release.
