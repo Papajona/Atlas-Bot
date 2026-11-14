@@ -757,6 +757,7 @@ def test_session_only_benchmark_is_not_reported_as_a_fallback():
     assert result["execution_cost_model_fallback_used"] is False
     assert result["execution_cost_model_failure"] is None
     assert result["buy_and_hold_session_cost_model_complete"] is True
+    assert result["buy_and_hold_session_fallback_folds"] == []
 
 
 def test_rejects_ohlcv_mutation_after_provenance_was_attached(tmp_path):
