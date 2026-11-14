@@ -209,8 +209,13 @@ def test_builds_verified_per_bar_spread_volume_volatility_and_latency_context(tm
 
     assert context is not None
     assert is_verified_research_execution_cost_context(context)
+    assert not isinstance(context, dict)
     with pytest.raises(TypeError):
         context["venue"] = "attacker-controlled-venue"
+    with pytest.raises(TypeError):
+        context._values["venue"] = "base-dict-bypass"
+    with pytest.raises(TypeError):
+        context._verification_token = object()
     with pytest.raises((AttributeError, TypeError)):
         context.update({"model_fingerprint": "0" * 64})
     with pytest.raises(ValueError):
