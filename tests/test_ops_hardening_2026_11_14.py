@@ -142,13 +142,13 @@ def test_readyz_body_still_carries_safety_checks():
         assert f'checks["{name}"]' in block
 
 
-@pytest.mark.parametrize("invalid", [-1, float("nan"), float("inf"), float("-inf")])
 def test_readyz_settings_are_declared_and_fail_closed_by_default():
     settings = Settings(environment="test")
     assert settings.readyz_cache_seconds == 5.0
     assert settings.readyz_fail_when_not_ready is True
 
 
+@pytest.mark.parametrize("invalid", [-1, float("nan"), float("inf"), float("-inf")])
 def test_readyz_cache_ttl_must_be_finite_and_non_negative(invalid):
     with pytest.raises(ValidationError):
         Settings(environment="test", readyz_cache_seconds=invalid)
