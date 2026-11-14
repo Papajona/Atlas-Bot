@@ -47,7 +47,7 @@ def _ai_trial_evaluation_config(
     carry_profile_bps: float,
     cost_stress_multiplier: float,
     session_costs_bps: dict[str, float] | None,
-    execution_cost_context: dict[str, object] | None,
+    execution_cost_context: Mapping[str, object] | None,
     execution_context_audit: dict[str, object],
     model_fingerprint: str,
 ) -> dict[str, object]:
@@ -275,7 +275,7 @@ def _apply_protective_halts(
 
 
 def _benchmark_execution_inputs(
-    execution_cost_context: dict[str, object] | None,
+    execution_cost_context: Mapping[str, object] | None,
     execution_audit: dict,
     session_costs_bps: dict[str, float] | None,
 ) -> tuple[dict[str, object] | None, dict[str, float] | None]:
@@ -303,7 +303,7 @@ def _protected_component_position(
     asset: str = "crypto",
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     execution_cost_namespace: str = "research",
 ):
     """Return one costed, execution-aware and risk-controlled return stream."""
@@ -370,7 +370,7 @@ def _component_backtest(
     asset: str = "crypto",
     carry_bps_per_bar: float | None = None,
     session_costs_bps: dict[str, float] | None = None,
-    execution_cost_context: dict[str, object] | None = None,
+    execution_cost_context: Mapping[str, object] | None = None,
     execution_cost_namespace: str | None = None,
 ) -> dict:
     """Cost-aware component backtest with forward-looking risk protections."""
