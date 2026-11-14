@@ -760,6 +760,50 @@ def test_session_only_benchmark_is_not_reported_as_a_fallback():
     assert result["buy_and_hold_session_fallback_folds"] == []
 
 
+
+def test_benchmark_reports_upstream_candidate_fold_fallback_reason():
+    from app.research_validation import oos_benchmark_comparison
+
+    frame = _research_frame(periods=64)
+    signal = np.zeros(len(frame), dtype=float)
+    signal[8:20] = 0.5
+    candidate_net = np.zeros(len(frame), dtype=float)
+    atr = np.ones(len(frame), dtype=float)
+    session_schedule = {
+        "LONDON": 1.0,
+        "NEW_YORK": 2.0,
+        "NEW_YORK_LATE": 3.0,
+        "OTHER": 4.0,
+    }
+    reason = (
+        "fold_0:candidate_session_cost_fallback_after_event_rejection:"
+        "ORDER_PARTICIPATION_LIMIT_EXCEEDED"
+    )
+
+    result = oos_benchmark_comparison(
+        [frame],
+        [signal],
+        [candidate_net],
+        [atr],
+        transaction_cost_bps=7.5,
+        carry_bps_per_bar=0.0,
+        random_trials=2,
+        seed=59,
+        session_costs_bps=session_schedule,
+        execution_cost_context_blocks=[None],
+        _execution_cost_fallback_reasons=(reason,),
+    )
+
+    assert result["status"] == "OK"
+    assert result["execution_cost_model_complete"] is False
+    assert result["execution_cost_model_status"] == "INCOMPLETE_SESSION_FALLBACK"
+    assert result["execution_cost_model_fallback_used"] is True
+    assert result["execution_cost_model_failure"] == [reason]
+    assert result["buy_and_hold_session_fallback_folds"] == [0]
+    assert result["buy_and_hold_session_cost_model_complete"] is True
+    assert result["gate_passed"] is False
+
+
 def test_rejects_ohlcv_mutation_after_provenance_was_attached(tmp_path):
     frame = _research_frame()
     settings = _settings(tmp_path)
