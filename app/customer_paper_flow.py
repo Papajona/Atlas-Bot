@@ -36,6 +36,7 @@ from .customer_paper_lifecycle import (
     list_open_customer_paper_orders,
     record_customer_paper_fill,
     expire_customer_paper_order,
+    reject_customer_paper_order,
     register_customer_paper_market_bar,
     submit_customer_paper_order,
 )
@@ -416,6 +417,7 @@ def _estimate_calibrated_customer_paper_fill(
     order_key: str,
     available_capacity: Decimal,
     calibration: Mapping,
+    allow_simulated_rejection: bool = True,
 ) -> tuple[Decimal, str, str, dict, dict]:
     """Apply the shared SHA-pinned estimator to a server-verified customer spot bar."""
     supplied = market.get("market_context")
@@ -445,6 +447,7 @@ def _estimate_calibrated_customer_paper_fill(
         reference_price=str(midpoint),
         market_context=context,
         available_capacity_units=str(available_capacity),
+        allow_simulated_rejection=allow_simulated_rejection,
         **dict(calibration),
     )
     if estimated.get("simulated_rejection"):
@@ -539,7 +542,15 @@ async def _fill_open_order(
     if state is None:
         raise CustomerPaperFlowBlocked("Pending order disappeared during recovery")
     if state.get("status") not in {"SUBMITTED", "PARTIALLY_FILLED"}:
-        return {"status": "NOT_OPEN", "client_order_id": client_id, "order_status": state.get("status")}
+        last_event = state.get("last_event_metadata") or {}
+        rejected = state.get("status") == "REJECTED"
+        return {
+            "status": "SIMULATED_VENUE_REJECTION_REPLAYED" if rejected else "NOT_OPEN",
+            "client_order_id": client_id,
+            "order_status": state.get("status"),
+            "execution_model": last_event.get("execution_model") if isinstance(last_event, Mapping) else None,
+            "rejection_evidence": last_event if rejected else None,
+        }
     meta = _json_mapping(order.get("metadata"))
     signal_bar = str(meta.get("signal_bar_timestamp") or "")
     submission_bar = str(meta.get("submission_bar_at") or signal_bar)
@@ -651,7 +662,12 @@ async def _fill_open_order(
         # then the no-position path above expires the stale remainder.
         remaining = min(remaining, held)
 
-    calibrated_settings = configured_paper_execution_settings(settings)
+    try:
+        calibrated_settings = configured_paper_execution_settings(settings)
+    except PaperExecutionModelError as exc:
+        raise CustomerPaperFlowBlocked(
+            "Paper execution calibration configuration is incomplete"
+        ) from exc
     participation_rate = (
         calibrated_settings["max_participation_rate"]
         if calibrated_settings is not None
@@ -685,7 +701,7 @@ async def _fill_open_order(
             Decimal(str(prior_execution_model.get("cancelled_quantity") or "0"))
             if isinstance(prior_execution_model, Mapping) else Decimal("0")
         )
-        if prior_cancelled > 0:
+        if prior_cancelled > 0 and not is_protective_exit:
             await _paper_call(
                 expire_customer_paper_order(
                     customer_id=customer_id,
@@ -752,19 +768,26 @@ async def _fill_open_order(
                 order_key=f"{client_id}|{bar_key}",
                 available_capacity=available_capacity,
                 calibration=calibrated_settings,
+                allow_simulated_rejection=not is_protective_exit,
             )
         except (PaperExecutionModelError, TypeError, ValueError, OverflowError) as exc:
             raise CustomerPaperFlowBlocked(
                 "SHA-pinned calibrated paper execution model rejected the market or evidence context"
             ) from exc
         if calibrated_estimate.get("simulated_rejection"):
+            rejection_metadata = {
+                "reason": "SHA-pinned calibrated paper model simulated venue rejection",
+                "bar_key": bar_key,
+                "execution_model": calibrated_estimate,
+            }
             await _paper_call(
-                expire_customer_paper_order(
+                reject_customer_paper_order(
                     customer_id=customer_id,
                     client_order_id=client_id,
                     idempotency_key="paper-model-reject-" + _sha(f"{client_id}|{bar_key}")[:40],
+                    metadata=rejection_metadata,
                 ),
-                "cancel paper order after calibrated simulated venue rejection",
+                "persist calibrated simulated venue rejection",
             )
             return {
                 "status": "SIMULATED_VENUE_REJECTION",
@@ -773,18 +796,25 @@ async def _fill_open_order(
                 "bar_key": bar_key,
                 "fill": {"status": "REJECTED"},
                 "cost_model": costs,
+                "execution_model": calibrated_estimate,
                 "recovered_pending_order": True,
             }
         if calibrated_fill_quantity <= 0:
             raise CustomerPaperFlowBlocked("Calibrated paper model produced no positive fill quantity")
         remaining = min(order_remaining, calibrated_fill_quantity)
-        calibrated_cancelled_quantity = max(
-            Decimal("0"), order_remaining - remaining
-        )
+        estimated_deferred_quantity = max(Decimal("0"), order_remaining - remaining)
         execution_model_record = dict(costs.get("execution_model") or {})
-        execution_model_record["cancelled_quantity"] = str(
-            calibrated_cancelled_quantity
-        )
+        if is_protective_exit:
+            calibrated_cancelled_quantity = Decimal("0")
+            execution_model_record["deferred_quantity"] = str(estimated_deferred_quantity)
+            execution_model_record["cancelled_quantity"] = "0"
+            execution_model_record["full_fill"] = estimated_deferred_quantity == 0
+            execution_model_record["rejection_applied"] = False
+        else:
+            calibrated_cancelled_quantity = estimated_deferred_quantity
+            execution_model_record["cancelled_quantity"] = str(calibrated_cancelled_quantity)
+            execution_model_record["full_fill"] = calibrated_cancelled_quantity == 0
+        costs["execution_model"] = execution_model_record
     else:
         try:
             fill_price, fee, costs = _fill_price_and_fee(side, remaining, market)
@@ -894,7 +924,7 @@ async def _fill_open_order(
                     **execution_model_record,
                     "filled_quantity": str(remaining),
                     "cancelled_quantity": str(calibrated_cancelled_quantity),
-                    "full_fill": calibrated_cancelled_quantity == 0,
+                    "full_fill": bool(execution_model_record.get("full_fill")),
                 }
                 if execution_model_record is not None else None
             ),
@@ -924,7 +954,11 @@ async def _fill_open_order(
                 "cost_model": costs,
             }
         raise
-    if calibrated_cancelled_quantity > 0 and str(result.get("status") or "").upper() in {"APPENDED", "REPLAYED"}:
+    if (
+        calibrated_cancelled_quantity > 0
+        and not is_protective_exit
+        and str(result.get("status") or "").upper() in {"APPENDED", "REPLAYED"}
+    ):
         await _paper_call(
             expire_customer_paper_order(
                 customer_id=customer_id,

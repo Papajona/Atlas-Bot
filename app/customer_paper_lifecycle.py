@@ -1031,7 +1031,7 @@ async def record_customer_paper_fill(
                     digest = _canonical_sha(payload)
                     existing = (await conn.execute(text(
                         """
-                        SELECT id, payload_sha256 FROM customer_paper.fills
+                        SELECT id, payload_sha256, metadata_json FROM customer_paper.fills
                         WHERE customer_id=:customer_id AND idempotency_key=:idempotency_key
                         """
                     ), {"customer_id": customer_id, "idempotency_key": fill_key})).first()
@@ -1040,7 +1040,14 @@ async def record_customer_paper_fill(
                             raise CustomerPaperIdempotencyConflict(
                                 "fill idempotency key already exists for a different fill payload"
                             )
-                        return {"status": "REPLAYED", "fill_id": str(existing[0]), "idempotency_key": fill_key}
+                        replay_metadata = _metadata(existing[2])
+                        return {
+                            "status": "REPLAYED",
+                            "fill_id": str(existing[0]),
+                            "idempotency_key": fill_key,
+                            **({"execution_model": replay_metadata["execution_model"]}
+                               if isinstance(replay_metadata.get("execution_model"), Mapping) else {}),
+                        }
 
                     duplicate_bar = (await conn.execute(text(
                         """
@@ -1111,6 +1118,15 @@ async def record_customer_paper_fill(
                             return {
                                 "status": "NO_LIQUIDITY", "order_id": order_id, "bar_key": normalized_bar_key,
                                 "available_quantity": _fmt(max(Decimal("0"), available)),
+                            }
+                        if amount < requested_amount and execution_model_metadata is not None:
+                            return {
+                                "status": "NO_LIQUIDITY",
+                                "order_id": order_id,
+                                "bar_key": normalized_bar_key,
+                                "available_quantity": _fmt(max(Decimal("0"), available)),
+                                "requested_quantity": _fmt(requested_amount),
+                                "reason": "shared bar capacity changed after calibrated fill estimation",
                             }
                         if amount < requested_amount:
                             fee = _money(requested_fee * amount / requested_amount, "pro-rated fill fee")
@@ -1220,6 +1236,15 @@ async def record_customer_paper_fill(
                                     "bar_key": normalized_bar_key,
                                     "existing_group_notional": _fmt(existing_group_notional),
                                     "cap_usd": _fmt(cap),
+                                }
+                            if amount < previous_amount and execution_model_metadata is not None:
+                                return {
+                                    "status": "NO_CORRELATION_GROUP_HEADROOM",
+                                    "order_id": order_id,
+                                    "bar_key": normalized_bar_key,
+                                    "existing_group_notional": _fmt(existing_group_notional),
+                                    "cap_usd": _fmt(cap),
+                                    "reason": "correlation-group capacity changed after calibrated fill estimation",
                                 }
                             if amount < previous_amount:
                                 fee = _money(
@@ -1491,11 +1516,12 @@ async def _close_customer_paper_order(
     client_order_id: str,
     idempotency_key: str,
     terminal_state: str,
+    metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     customer_id = _customer_id(customer_id)
     client_id = _key(client_order_id, "client_order_id", 180)
     key = _key(idempotency_key, "idempotency_key", 150)
-    if terminal_state not in {"CANCELLED", "EXPIRED"}:
+    if terminal_state not in {"CANCELLED", "EXPIRED", "REJECTED"}:
         raise ValueError("unsupported terminal paper-order state")
     await _assert_customer_paper_ready()
     engine = _paper_engine()
@@ -1514,12 +1540,17 @@ async def _close_customer_paper_order(
             )
             event_key = f"order-close:{key}"
             same_key = (await conn.execute(text(
-                "SELECT order_id, event_type FROM customer_paper.order_events WHERE customer_id=:customer_id AND event_key=:event_key"
+                "SELECT order_id, event_type, metadata_json FROM customer_paper.order_events WHERE customer_id=:customer_id AND event_key=:event_key"
             ), {"customer_id": customer_id, "event_key": event_key})).first()
             if same_key is not None:
                 if str(same_key[0]) != order_id or str(same_key[1]) != terminal_state:
                     raise CustomerPaperIdempotencyConflict("order-close idempotency key conflicts with existing event")
-                return {"status": "REPLAYED", "order_id": order_id, "state": terminal_state}
+                return {
+                    "status": "REPLAYED",
+                    "order_id": order_id,
+                    "state": terminal_state,
+                    "metadata": _metadata(same_key[2]),
+                }
             state = await _current_order_state(conn, customer_id, order_id)
             if state not in {"SUBMITTED", "PARTIALLY_FILLED"}:
                 raise CustomerPaperOrderConflict(f"order cannot transition from state {state}")
@@ -1529,9 +1560,20 @@ async def _close_customer_paper_order(
             await _insert_order_event(
                 conn, customer_id=customer_id, order_id=order_id, event_key=event_key,
                 event_type=terminal_state, filled_quantity=filled,
-                metadata={"remaining_quantity": _fmt(ordered_qty - filled)},
+                metadata={
+                    "remaining_quantity": _fmt(ordered_qty - filled),
+                    **(_metadata(metadata) if metadata is not None else {}),
+                },
             )
-        return {"status": "APPENDED", "order_id": order_id, "state": terminal_state}
+        return {
+            "status": "APPENDED",
+            "order_id": order_id,
+            "state": terminal_state,
+            "metadata": {
+                "remaining_quantity": _fmt(ordered_qty - filled),
+                **(_metadata(metadata) if metadata is not None else {}),
+            },
+        }
     finally:
         await engine.dispose()
 
@@ -1556,6 +1598,20 @@ async def expire_customer_paper_order(
     )
 
 
+async def reject_customer_paper_order(
+    *, customer_id: int, client_order_id: str, idempotency_key: str,
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Persist calibrated simulated rejection with its immutable execution evidence."""
+    return await _close_customer_paper_order(
+        customer_id=customer_id,
+        client_order_id=client_order_id,
+        idempotency_key=idempotency_key,
+        terminal_state="REJECTED",
+        metadata=metadata,
+    )
+
+
 async def get_customer_paper_order(*, customer_id: int, client_order_id: str) -> dict[str, Any] | None:
     """Read durable order status and fill progress for crash/restart recovery."""
     customer_id = _customer_id(customer_id)
@@ -1569,10 +1625,11 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
                 """
                 SELECT o.id, o.client_order_id, o.venue, o.market_type, o.symbol, o.side, o.order_type,
                        o.quantity, o.limit_price, o.currency, o.metadata_json, e.event_type AS status,
-                       COALESCE(f.filled_quantity,0) AS filled_quantity
+                       COALESCE(f.filled_quantity,0) AS filled_quantity,
+                       e.metadata_json AS last_event_metadata
                 FROM customer_paper.orders o
                 LEFT JOIN LATERAL (
-                    SELECT event_type FROM customer_paper.order_events
+                    SELECT event_type, metadata_json FROM customer_paper.order_events
                     WHERE customer_id=o.customer_id AND order_id=o.id ORDER BY id DESC LIMIT 1
                 ) e ON true
                 LEFT JOIN LATERAL (
@@ -1594,6 +1651,7 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
             except ValueError:
                 stored_metadata = {}
         safe_metadata = dict(stored_metadata) if isinstance(stored_metadata, Mapping) else {}
+        last_event_metadata = _metadata(row["last_event_metadata"])
         return {
             "order_id": str(row["id"]), "client_order_id": str(row["client_order_id"]),
             "venue": str(row["venue"]), "market_type": str(row["market_type"]),
@@ -1602,6 +1660,7 @@ async def get_customer_paper_order(*, customer_id: int, client_order_id: str) ->
             "remaining_quantity": _fmt(quantity - filled), "limit_price": _fmt(Decimal(limit)) if limit is not None else None,
             "currency": str(row["currency"]), "status": str(row["status"] or "UNKNOWN"),
             "metadata": safe_metadata,
+            "last_event_metadata": last_event_metadata,
         }
     finally:
         await engine.dispose()
