@@ -45,7 +45,7 @@ def _calibration(**overrides):
     }
 
 
-def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, calibration=None):
+def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, calibration=None, allow_simulated_rejection=True):
     inputs = _calibration(**(calibration or {}))
     base_slippage_bps = inputs.pop("base_slippage_bps")
     return estimate_paper_fill(
@@ -55,6 +55,7 @@ def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, cal
         reference_price=100.0,
         base_slippage_bps=base_slippage_bps,
         market_context=_context(**(context or {})),
+        allow_simulated_rejection=allow_simulated_rejection,
         **inputs,
     )
 
@@ -301,3 +302,27 @@ def test_calibrated_fill_respects_the_remaining_shared_bar_capacity():
     assert result["cancelled_quantity"] == 4.0
     assert result["full_fill"] is False
     assert result["available_capacity_units"] == 4.0
+
+
+def test_protective_exit_suppresses_rejection_but_retains_calibrated_probability(monkeypatch):
+    monkeypatch.setattr(
+        "app.paper_execution_model.deterministic_execution_draws",
+        lambda order_key: (0.0, 0.5),
+    )
+    rejected = _estimate(
+        1.0,
+        order_key="same-protective-exit-draw",
+        calibration={"rejection_probability": 1.0},
+    )
+    protected = _estimate(
+        1.0,
+        order_key="same-protective-exit-draw",
+        calibration={"rejection_probability": 1.0},
+        allow_simulated_rejection=False,
+    )
+    assert rejected["simulated_rejection"] is True
+    assert rejected["rejection_applied"] is True
+    assert protected["simulated_rejection"] is False
+    assert protected["rejection_applied"] is False
+    assert protected["rejection_probability"] == 1.0
+    assert protected["filled_quantity"] > 0

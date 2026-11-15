@@ -1956,3 +1956,93 @@ def test_calibrated_customer_paper_fill_rejects_missing_server_context():
             available_capacity=Decimal("1"),
             calibration={},
         )
+
+
+def test_calibrated_customer_protective_exit_defers_remainder_without_expiring(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, _order, market = _paper_fill_test_context()
+    state = {**state, "side": "SELL", "remaining_quantity": "2"}
+    first = pd.Timestamp.now(tz="UTC").floor("h")
+    second = first + pd.Timedelta(hours=1)
+    order = {
+        "client_order_id": "paper-protective-1",
+        "metadata": {
+            "signal_bar_timestamp": first.isoformat(),
+            "submission_bar_at": first.isoformat(),
+            "timeframe": "1h",
+            "exchange": "binance",
+            "market_type": "spot",
+            "order_role": "PROTECTIVE_EXIT",
+            "execution_owner": "autonomous_customer_bot",
+        },
+    }
+    market.update({
+        "bar_timestamp": second.isoformat(),
+        "quote_timestamp": (second + pd.Timedelta(seconds=2)).isoformat(),
+        "market_context": {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "bar_duration_ms": 3_600_000,
+            "recent_volatility_bps": 200.0,
+        },
+    })
+    captured = {}
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "2",
+    }]))
+    monkeypatch.setattr(
+        flow, "configured_paper_execution_settings",
+        lambda _settings: {"max_participation_rate": 0.1},
+    )
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "protective-bar",
+        "bar_at": market["bar_timestamp"],
+        "capacity": "0.5",
+        "available": "0.5",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+
+    async def estimate(*_args, **kwargs):
+        captured["allow_simulated_rejection"] = kwargs["allow_simulated_rejection"]
+        model = {
+            "simulated_rejection": False,
+            "rejection_applied": False,
+            "filled_quantity": 0.5,
+            "cancelled_quantity": 1.5,
+            "full_fill": False,
+            "fill_price": 120.0,
+            "total_slippage_bps": 1.0,
+        }
+        costs = {
+            "cost_model_status": "CALIBRATED_ASSUMPTIONS",
+            "fee_bps_assumption": "0",
+            "execution_model": model,
+        }
+        return Decimal("0.5"), "120", "0", costs, model
+
+    async def append_fill(**kwargs):
+        captured["execution_model"] = kwargs["execution_model"]
+        return {
+            "status": "APPENDED",
+            "fill_id": "protective-fill",
+            "filled_quantity": "0.5",
+            "order_status": "PARTIALLY_FILLED",
+        }
+
+    async def must_not_expire(**_kwargs):
+        raise AssertionError("protective exits must remain open while a residual position exists")
+
+    monkeypatch.setattr(flow, "_estimate_calibrated_customer_paper_fill", estimate)
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_fill)
+    monkeypatch.setattr(flow, "expire_customer_paper_order", must_not_expire)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1001, order=order, market=market, df=pd.DataFrame()
+    ))
+    assert result["fill"]["status"] == "APPENDED"
+    assert captured["allow_simulated_rejection"] is False
+    assert captured["execution_model"]["filled_quantity"] == "0.5"
+    assert captured["execution_model"]["deferred_quantity"] == "1.5"
+    assert captured["execution_model"]["cancelled_quantity"] == "0"
+    assert captured["execution_model"]["full_fill"] is False
