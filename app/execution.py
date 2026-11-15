@@ -1289,6 +1289,50 @@ async def advance_platform_paper_orders(
     except (TypeError, ValueError, OverflowError, KeyError, AttributeError) as exc:
         return {"status": "DATA_PROVENANCE_INVALID", "reason": str(exc)[:200], "orders_seen": 0, "fills": 0}
 
+    if calibrated_settings is not None:
+        try:
+            context = dict(market_context or {})
+            bid = float(context.get("bid"))
+            ask = float(context.get("ask"))
+            reference_price = float(context.get("reference_price"))
+            spread_bps = float(context.get("spread_bps"))
+            volatility_bps = float(context.get("recent_volatility_bps"))
+            duration_ms = float(context.get("bar_duration_ms"))
+            reported_quote_age = float(context.get("quote_age_seconds"))
+            quote_at = _paper_utc(context.get("quote_timestamp_utc"))
+            context_bar_at = _paper_utc(context.get("last_completed_bar_timestamp_utc"))
+            quote_age = (now - quote_at).total_seconds()
+            context_valid = (
+                str(context.get("context_source") or "") == "server_ccxt_closed_spot_ohlcv_and_ticker"
+                and str(context.get("market_type") or "").lower() == "spot"
+                and str(context.get("exchange") or "").lower() == str(exchange).lower()
+                and str(context.get("symbol") or "") == str(symbol)
+                and all(math.isfinite(value) for value in (
+                    bid, ask, reference_price, spread_bps, volatility_bps,
+                    duration_ms, reported_quote_age, quote_age,
+                ))
+                and bid > 0 and ask >= bid and reference_price > 0
+                and spread_bps >= 0 and volatility_bps >= 0
+                and duration_ms == bar_seconds * 1000
+                and -1.0 <= reported_quote_age <= 5.0
+                and -1.0 <= quote_age <= 5.0
+                and abs(reference_price - ((bid + ask) / 2.0)) <= max(1e-12, reference_price * 1e-9)
+                and abs(spread_bps - ((ask - bid) / ((ask + bid) / 2.0) * 10_000.0)) <= 1e-6
+                and context_bar_at == bar_at
+                and str(context.get("ohlcv_sha256") or "").lower() == data_sha256.lower()
+            )
+        except (TypeError, ValueError, OverflowError, KeyError, AttributeError):
+            context_valid = False
+        if not context_valid:
+            return {
+                "status": "WAITING_FOR_EXECUTION_CONTEXT",
+                "bar_at": bar_at.isoformat(),
+                "orders_seen": 0,
+                "attempts": 0,
+                "fills": 0,
+                "liquidity_verified": False,
+            }
+
     volume_unit = str(provenance.get("volume_unit") or "unknown")
     verified_liquidity = bool(
         str(asset).lower() == "crypto"
@@ -1397,7 +1441,12 @@ async def advance_platform_paper_orders(
                 "fills": 0,
                 "liquidity_verified": verified_liquidity,
             }
-
+        elif calibrated_settings is not None:
+            # Lower a stored bar cap when participation is reduced; never grow it mid-bar.
+            bar_state.capacity = min(
+                max(0.0, float(bar_state.capacity or 0.0)),
+                max(0.0, float(capacity)),
+            )
 
         # Inspect positions as they existed before this bar's simulated fills.
         # If an existing stop/target was touched, do not also execute ordinary
@@ -1575,6 +1624,7 @@ async def advance_platform_paper_orders(
                                     reference_price=model_reference_price,
                                     market_context=model_context,
                                     available_capacity_units=str(available),
+                                    allow_simulated_rejection=not is_triggered_exit,
                                     **calibrated_settings,
                                 )
                             except (PaperExecutionModelError, TypeError, ValueError, OverflowError) as exc:
@@ -1590,10 +1640,17 @@ async def advance_platform_paper_orders(
                                         "simulated_latency_ms", "rejection_draw", "latency_quantile_draw",
                                         "market_impact_bps", "latency_impact_bps",
                                         "total_slippage_bps", "realized_participation_rate",
-                                        "validation_grade",
+                                        "validation_grade", "filled_quantity", "cancelled_quantity",
+                                        "full_fill", "simulated_rejection", "rejection_applied",
                                     )
                                     if key in calibrated_result
                                 }
+                                if is_triggered_exit:
+                                    deferred_quantity = Decimal(str(calibrated_result.get("cancelled_quantity") or "0"))
+                                    execution_model_record["deferred_quantity"] = str(deferred_quantity)
+                                    execution_model_record["cancelled_quantity"] = "0"
+                                    execution_model_record["full_fill"] = deferred_quantity == 0
+                                    execution_model_record["rejection_applied"] = False
                                 if calibrated_result.get("simulated_rejection"):
                                     outcome = "REJECTED"
                                     reason = "SHA-pinned calibrated paper model simulated venue rejection"
@@ -1674,6 +1731,7 @@ async def advance_platform_paper_orders(
                             counts["fills"] += 1
                             cancelled_remainder = (
                                 calibrated_result is not None
+                                and not is_triggered_exit
                                 and Decimal(str(calibrated_result.get("cancelled_quantity") or "0")) > 0
                             )
                             if remaining_after <= Decimal("0.000000000001"):
@@ -1711,7 +1769,7 @@ async def advance_platform_paper_orders(
             if (
                 trade.status in {"OPEN", "PARTIAL"}
                 and order_state.bars_elapsed >= ttl_bars
-                and not is_protective_stop_exit
+                and not is_triggered_exit
             ):
                 trade.status = "CANCELED"
                 trade.remaining_quantity = 0.0

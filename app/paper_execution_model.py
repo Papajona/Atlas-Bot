@@ -325,6 +325,7 @@ def estimate_paper_fill(
     evidence_id: str,
     allow_test_fixture: bool = False,
     available_capacity_units: Any | None = None,
+    allow_simulated_rejection: bool = True,
 ) -> dict[str, Any]:
     """Estimate a bar-volume-capped fill with calibrated latency/rejection assumptions.
 
@@ -394,7 +395,7 @@ def estimate_paper_fill(
         p95_ms=p95_ms,
         maximum_ms=maximum_ms,
     )
-    simulated_rejection = rejection_draw < rejection_rate
+    simulated_rejection = bool(allow_simulated_rejection) and rejection_draw < rejection_rate
 
     # Never model an instant fill larger than the configured fraction of observed
     # tradable bar volume. Any residual quantity is explicitly cancelled.
@@ -426,6 +427,7 @@ def estimate_paper_fill(
         "bar_duration_ms": bar_duration_ms,
         "impact_coefficient": coefficient,
         "rejection_probability": rejection_rate,
+        "rejection_applied": bool(allow_simulated_rejection),
         "rejection_draw": rejection_draw,
         "latency_min_ms": minimum_ms,
         "latency_median_ms": median_ms,
