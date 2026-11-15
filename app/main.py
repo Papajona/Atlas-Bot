@@ -9255,6 +9255,13 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
             if calibration_configured is not None
             else None
         )
+        if calibration_configured is not None and paper_market_context is None:
+            return {
+                "mode": "PAPER",
+                "status": "WAITING_FOR_EXECUTION_CONTEXT",
+                "decision": "NO_TRADE",
+                "reason": "Fresh server-verified spot quote context is unavailable; no order attempt was consumed.",
+            }
         paper_processing = await advance_platform_paper_orders(
             df,
             exchange=req.exchange,
@@ -9263,6 +9270,13 @@ async def paper_step(req: MarketRequest, x_admin_token: str | None = Header(defa
             asset=req.asset,
             market_context=paper_market_context,
         )
+        if paper_processing.get("status") == "WAITING_FOR_EXECUTION_CONTEXT":
+            return {
+                "mode": "PAPER",
+                "status": "WAITING_FOR_EXECUTION_CONTEXT",
+                "decision": "NO_TRADE",
+                "paper_order_processing": paper_processing,
+            }
         if paper_processing.get("status") in {"STALE_BAR", "BAR_NOT_COMPLETE", "DATA_PROVENANCE_INVALID", "BAR_PROVENANCE_CONFLICT", "INVALID_BAR_PRICE"}:
             raise RiskBlocked("Paper execution refused stale, incomplete, or unverified market data")
         if int(paper_processing.get("protective_exit_orders_pending") or 0) > 0:

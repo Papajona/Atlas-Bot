@@ -61,3 +61,33 @@ def test_readiness_doc_distinguishes_market_context_from_calibrated_fill_model()
     assert "Calibrated fill-model integration is now implemented" in doc
     assert "Manual customer API advancement remains a separate" in doc
     assert "Partial calibration configuration fails closed" in doc
+
+
+def test_calibrated_platform_quote_preflight_precedes_order_cursor_advancement() -> None:
+    source = (ROOT / "app" / "execution.py").read_text(encoding="utf-8")
+    preflight = source.index('"status": "WAITING_FOR_EXECUTION_CONTEXT"')
+    advance = source.index("order_state.bars_elapsed = int(order_state.bars_elapsed or 0) + 1")
+    assert preflight < advance
+    assert "and context_bar_at == bar_at" in source
+
+
+def test_platform_protective_exit_is_not_rejected_or_ttl_cancelled_by_model() -> None:
+    source = (ROOT / "app" / "execution.py").read_text(encoding="utf-8")
+    assert "allow_simulated_rejection=not is_triggered_exit" in source
+    assert "and not is_triggered_exit" in source
+    assert 'execution_model_record["deferred_quantity"]' in source
+
+
+def test_customer_protective_exit_remainder_is_deferred_not_expired() -> None:
+    source = (ROOT / "app" / "customer_paper_flow.py").read_text(encoding="utf-8")
+    assert "allow_simulated_rejection=not is_protective_exit" in source
+    assert "and not is_protective_exit" in source
+    assert 'execution_model_record["deferred_quantity"]' in source
+    assert "Paper execution calibration configuration is incomplete" in source
+
+
+def test_customer_ledger_does_not_persist_clipped_calibrated_fill_metadata() -> None:
+    source = (ROOT / "app" / "customer_paper_lifecycle.py").read_text(encoding="utf-8")
+    assert "shared bar capacity changed after calibrated fill estimation" in source
+    assert "correlation-group capacity changed after calibrated fill estimation" in source
+    assert "SELECT id, payload_sha256, metadata_json FROM customer_paper.fills" in source
