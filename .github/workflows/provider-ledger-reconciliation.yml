@@ -40,8 +40,8 @@ jobs:
       EVIDENCE_BUCKET: ${{ vars.ATLAS_STAGING_EVIDENCE_BUCKET }}
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
       PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
-      STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
-      EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+      STAGING_AUDIT_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_AUDIT_DATABASE_SECRET }}
+      EXPECTED_AUDIT_DB_ROLE: ${{ vars.ATLAS_STAGING_AUDIT_DB_ROLE }}
       PROVIDER: ${{ inputs.provider }}
       STATEMENT_OBJECT: ${{ inputs.provider_statement_object }}
       FROM_UTC: ${{ inputs.from_utc }}
@@ -58,10 +58,11 @@ jobs:
           : "${EVIDENCE_BUCKET:?Set ATLAS_STAGING_EVIDENCE_BUCKET in staging}"
           : "${STAGING_SUPABASE_PROJECT_REF:?Set ATLAS_STAGING_SUPABASE_PROJECT_REF in staging}"
           : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the current project ref (same as staging for the free single-project setup)}"
-          : "${STAGING_DATABASE_SECRET:?Set ATLAS_STAGING_DATABASE_SECRET in staging}"
-          : "${EXPECTED_RUNTIME_DB_ROLE:?Set ATLAS_STAGING_RUNTIME_DB_ROLE in staging}"
+          : "${STAGING_AUDIT_DATABASE_SECRET:?Set ATLAS_STAGING_AUDIT_DATABASE_SECRET in staging}"
+          : "${EXPECTED_AUDIT_DB_ROLE:?Set ATLAS_STAGING_AUDIT_DB_ROLE in staging}"
           : "${PROVIDER:?Supply a provider name}"
           : "${STATEMENT_OBJECT:?Supply the provider statement object}"
+          [[ "$EXPECTED_AUDIT_DB_ROLE" == "atlas_audit_reader" ]] || { echo "BLOCKED: provider reconciliation must use atlas_audit_reader"; exit 1; }
           [[ "$PROVIDER" =~ ^[A-Za-z0-9_-]{1,40}$ ]] || { echo "BLOCKED: invalid provider name"; exit 1; }
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
           [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
@@ -86,9 +87,9 @@ jobs:
           umask 077
           gcloud storage cp "gs://$STATEMENT_BUCKET/$STATEMENT_OBJECT" "$RUNNER_TEMP/provider-statement.csv"
           test -s "$RUNNER_TEMP/provider-statement.csv"
-          gcloud secrets versions access latest --secret="$STAGING_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
-          test -s "$RUNNER_TEMP/atlas-staging-db-url"
-          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url"
+          gcloud secrets versions access latest --secret="$STAGING_AUDIT_DATABASE_SECRET" --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-audit-db-url"
+          test -s "$RUNNER_TEMP/atlas-staging-audit-db-url"
+          chmod 600 "$RUNNER_TEMP/atlas-staging-audit-db-url"
       - name: Install PostgreSQL client and locked Python dependencies
         run: |
           sudo apt-get update
@@ -104,13 +105,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-db-url")"
+          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-audit-db-url")"
           python scripts/verify_provider_ledger_reconciliation.py \
             --statement-csv "$RUNNER_TEMP/provider-statement.csv" \
             --provider "$PROVIDER" \
             --from-utc "$FROM_UTC" \
             --to-utc "$TO_UTC" \
-            --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
+            --expected-audit-role "$EXPECTED_AUDIT_DB_ROLE" \
             --expected-revision 0059_research_integrity_controls \
             --output "$RUNNER_TEMP/provider-ledger-reconciliation.json"
       - name: Archive restricted reconciliation report even if a mismatch is found
@@ -143,8 +144,8 @@ jobs:
           print("- The detailed restricted report is in the configured GCS evidence bucket; no raw statement/customer details were uploaded as an Actions artifact.")
           PY
           fi
-      - name: Remove staging credentials and raw statement from runner
+      - name: Remove audit database credentials and raw statement from runner
         if: always()
         shell: bash
         run: |
-          rm -f "$RUNNER_TEMP/atlas-staging-db-url" "$RUNNER_TEMP/provider-statement.csv"
+          rm -f "$RUNNER_TEMP/atlas-staging-audit-db-url" "$RUNNER_TEMP/provider-statement.csv"
