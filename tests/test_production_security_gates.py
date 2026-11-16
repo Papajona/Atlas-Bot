@@ -555,7 +555,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
     cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
     assert freshness_guard < cloud_run_change
-    assert 'GH_TOKEN: \${{ github.token }}' in deploy[deploy_step:cloud_run_change]
+    assert 'GH_TOKEN: ${{ github.token }}' in deploy[deploy_step:cloud_run_change]
     assert "timeout-minutes: 300" in deploy
 
 def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
