@@ -27,18 +27,21 @@ def _payload(*, request_id: str = REQUEST_ID, workflow: str = WORKFLOW) -> dict:
             "event=workflow_dispatch",
         )
     )
-    return {
-        "check_runs": [
-            {
+    return [
+        {
+            "total_count": 1,
+            "check_runs": [
+                {
                 "name": CHECK_RUN_NAME,
                 "external_id": request_id,
                 "head_sha": SHA,
                 "status": "in_progress",
                 "app": {"slug": "github-actions"},
                 "output": {"title": CHECK_RUN_NAME, "summary": summary},
-            }
-        ]
-    }
+                }
+            ]
+        }
+    ]
 
 
 def test_resolves_only_the_single_exact_nonce_receipt():
@@ -56,7 +59,12 @@ def test_resolves_only_the_single_exact_nonce_receipt():
 def test_absent_nonce_is_retryable_and_does_not_select_an_unrelated_run():
     with pytest.raises(LookupError):
         resolve_staging_dispatch_receipt(
-            {"check_runs": [_payload(request_id="different-nonce")["check_runs"][0]]},
+            [
+                {
+                    "total_count": 1,
+                    "check_runs": [_payload(request_id="different-nonce")[0]["check_runs"][0]],
+                }
+            ],
             request_id=REQUEST_ID,
             workflow_path=WORKFLOW,
             expected_sha=SHA,
@@ -65,7 +73,8 @@ def test_absent_nonce_is_retryable_and_does_not_select_an_unrelated_run():
 
 def test_rejects_duplicate_receipts_for_the_same_nonce():
     payload = _payload()
-    payload["check_runs"].append(copy.deepcopy(payload["check_runs"][0]))
+    payload[0]["check_runs"].append(copy.deepcopy(payload[0]["check_runs"][0]))
+    payload[0]["total_count"] = 2
     with pytest.raises(ValueError, match="multiple check runs"):
         resolve_staging_dispatch_receipt(
             payload,
@@ -77,13 +86,13 @@ def test_rejects_duplicate_receipts_for_the_same_nonce():
 
 def test_rejects_tampered_or_mismatched_receipt_identity():
     mutations = (
-        lambda p: p["check_runs"][0].update(head_sha="b" * 40),
-        lambda p: p["check_runs"][0]["app"].update(slug="untrusted-app"),
-        lambda p: p["check_runs"][0]["output"].update(title="unrelated check"),
-        lambda p: p["check_runs"][0]["output"].update(summary=p["check_runs"][0]["output"]["summary"].replace("head_branch=main", "head_branch=feature")),
-        lambda p: p["check_runs"][0]["output"].update(summary=p["check_runs"][0]["output"]["summary"].replace("event=workflow_dispatch", "event=push")),
-        lambda p: p["check_runs"][0]["output"].update(summary=p["check_runs"][0]["output"]["summary"].replace("run_id=43930000123", "run_id=0")),
-        lambda p: p["check_runs"][0]["output"].update(summary=p["check_runs"][0]["output"]["summary"].replace("run_attempt=1", "run_attempt=0")),
+        lambda p: p[0]["check_runs"][0].update(head_sha="b" * 40),
+        lambda p: p[0]["check_runs"][0]["app"].update(slug="untrusted-app"),
+        lambda p: p[0]["check_runs"][0]["output"].update(title="unrelated check"),
+        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("head_branch=main", "head_branch=feature")),
+        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("event=workflow_dispatch", "event=push")),
+        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("run_id=43930000123", "run_id=0")),
+        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("run_attempt=1", "run_attempt=0")),
     )
     for mutate in mutations:
         payload = _payload()
@@ -117,10 +126,54 @@ def test_rejects_wrong_workflow_and_duplicate_summary_fields():
         )
 
 
+
+def test_resolves_a_receipt_on_a_later_check_run_page():
+    later_page = _payload()[0]["check_runs"][0]
+    payload = [
+        {"total_count": 2, "check_runs": [{"name": "other check", "external_id": "other"}]},
+        {"total_count": 2, "check_runs": [later_page]},
+    ]
+    assert (
+        resolve_staging_dispatch_receipt(
+            payload,
+            request_id=REQUEST_ID,
+            workflow_path=WORKFLOW,
+            expected_sha=SHA,
+        )
+        == "43930000123"
+    )
+
+
+def test_rejects_duplicate_receipts_split_across_pages():
+    receipt = _payload()[0]["check_runs"][0]
+    payload = [
+        {"total_count": 2, "check_runs": [copy.deepcopy(receipt)]},
+        {"total_count": 2, "check_runs": [copy.deepcopy(receipt)]},
+    ]
+    with pytest.raises(ValueError, match="multiple check runs"):
+        resolve_staging_dispatch_receipt(
+            payload,
+            request_id=REQUEST_ID,
+            workflow_path=WORKFLOW,
+            expected_sha=SHA,
+        )
+
+
+def test_rejects_partial_paginated_api_results():
+    receipt = _payload()[0]["check_runs"][0]
+    with pytest.raises(ValueError, match="pagination is incomplete"):
+        resolve_staging_dispatch_receipt(
+            [{"total_count": 2, "check_runs": [receipt]}],
+            request_id=REQUEST_ID,
+            workflow_path=WORKFLOW,
+            expected_sha=SHA,
+        )
+
+
 def test_rejects_malformed_api_payload():
     with pytest.raises(ValueError, match="unexpected shape"):
         resolve_staging_dispatch_receipt(
-            {"runs": []},
+            [],
             request_id=REQUEST_ID,
             workflow_path=WORKFLOW,
             expected_sha=SHA,
