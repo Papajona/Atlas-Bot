@@ -66,7 +66,7 @@ def _secure_service_tables(bind) -> None:
                   AND NOT EXISTS (
                     SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid
                   )
-                  AND r.rolname NOT IN ('anon', 'authenticated')
+                  AND r.rolname NOT IN ('anon', 'authenticated', 'atlas_paper_reader')
             LOOP
                 EXECUTE format(
                     'GRANT SELECT, UPDATE ON TABLE public.research_trial_ledger_head TO %I',
@@ -77,6 +77,11 @@ def _secure_service_tables(bind) -> None:
                     role_name
                 );
             END LOOP;
+            -- The staging primary identity must not read or write research tables.
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'atlas_paper_reader') THEN
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_trial_ledger_head FROM atlas_paper_reader';
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_holdout_registry FROM atlas_paper_reader';
+            END IF;
         END
         $atlas_research_integrity_acl$;
     """))

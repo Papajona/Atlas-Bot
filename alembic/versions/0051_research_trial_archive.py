@@ -69,10 +69,15 @@ def upgrade():
                   AND NOT EXISTS (
                     SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid
                   )
-                  AND r.rolname NOT IN ('anon', 'authenticated')
+                  AND r.rolname NOT IN ('anon', 'authenticated', 'atlas_paper_reader')
             LOOP
                 EXECUTE format('GRANT SELECT, INSERT ON TABLE public.research_trial_archive TO %I', role_name);
             END LOOP;
+            -- The staging primary identity is restricted to customer_profiles/app_state.
+            -- Revoke any pre-existing grant; do not expose research data to this role.
+            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'atlas_paper_reader') THEN
+                EXECUTE 'REVOKE ALL PRIVILEGES ON TABLE public.research_trial_archive FROM atlas_paper_reader';
+            END IF;
         END
         $atlas_research_trial_acl$;
         """
