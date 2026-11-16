@@ -254,8 +254,8 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     if start >= end:
         raise ValueError("from_utc must be earlier than to_utc")
     rows = load_provider_statement(path)
-    if not args.expected_runtime_role.strip():
-        raise ValueError("An explicit staging runtime role is required")
+    if args.expected_audit_role != "atlas_audit_reader":
+        raise ValueError("Provider reconciliation requires the dedicated atlas_audit_reader identity")
 
     env, host = read_database_uri(
         args.database_url,
@@ -323,7 +323,7 @@ def main() -> int:
     parser.add_argument("--provider", required=True)
     parser.add_argument("--from-utc", required=True, help="UTC window for internal withdrawal creation, ISO-8601")
     parser.add_argument("--to-utc", required=True, help="Exclusive UTC window for internal withdrawal creation, ISO-8601")
-    parser.add_argument("--database-url", default="", help="Read-only direct staging DB URL; alternatively use DATABASE_URL")
+    parser.add_argument("--database-url", default="", help="Dedicated read-only audit database URL; alternatively use DATABASE_URL")
     parser.add_argument("--staging-ref", default="")
     parser.add_argument("--production-ref", default="")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
