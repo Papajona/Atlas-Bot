@@ -998,7 +998,6 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch):
                 last_processed_bar_at=None, bars_elapsed=0, status="OPEN",
             ))
             ordinary_entry_id = ordinary_entry.id
-            ordinary_client_id = ordinary_entry.client_order_id
             take_profit_client_id = take_profit.client_order_id
             entry_id = entry.id
 
