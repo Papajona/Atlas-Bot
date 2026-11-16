@@ -285,10 +285,6 @@ def required_table_failures(value: object) -> list[str]:
     return failures
 
 
-def truthy(value: object) -> bool:
-    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes", "on"}
-
-
 RESEARCH_INTEGRITY_QUERY = r"""
 SELECT jsonb_build_object(
   'research_trial_ledger_head_rows', (
