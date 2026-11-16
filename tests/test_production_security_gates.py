@@ -802,3 +802,70 @@ def test_production_deploy_blocks_database_behind_repository_alembic_head():
     assert "has_table_privilege(r.rolname, 'public.customer_ledger_accounts', 'UPDATE')" in audit
     assert "audit_insert.lower() != \"true\"" in audit
     assert "a read-only paper/staging identity cannot be used as the production API role" in audit
+
+
+def test_audit_reader_provisioning_is_strictly_read_only_and_separate_from_paper_reader():
+    sql = (ROOT / "scripts" / "provision_atlas_audit_reader.sql").read_text(encoding="utf-8")
+    assert "CREATE ROLE atlas_audit_reader" in sql
+    assert "LOGIN NOINHERIT BYPASSRLS" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM atlas_audit_reader" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM atlas_audit_reader" in sql
+    assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_audit_reader" in sql
+    assert "ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on" in sql
+    assert "GRANT SELECT ON TABLE" in sql
+    for forbidden in ("GRANT INSERT", "GRANT UPDATE", "GRANT DELETE", "GRANT TRUNCATE", "GRANT EXECUTE"):
+        assert forbidden not in sql
+    for migration in (
+        "0051_research_trial_archive.py",
+        "0056_audit_log_external_delivery.py",
+        "0057_customer_paper_submission_audit_retries.py",
+        "0059_research_integrity_controls.py",
+    ):
+        source = (ROOT / "alembic" / "versions" / migration).read_text(encoding="utf-8")
+        assert "'atlas_audit_reader'" in source
+
+
+def test_production_api_role_is_dedicated_and_does_not_receive_ddl_or_immutable_table_writes():
+    sql = (ROOT / "scripts" / "provision_atlas_api_runtime.sql").read_text(encoding="utf-8")
+    assert "CREATE ROLE atlas_api_runtime" in sql
+    assert "LOGIN NOINHERIT BYPASSRLS" in sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" in sql
+    assert "GRANT SELECT, UPDATE ON TABLE public.research_trial_ledger_head" in sql
+    assert "GRANT SELECT, INSERT ON TABLE public.research_holdout_registry" in sql
+    assert "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public" in sql
+    for forbidden in ("GRANT TRUNCATE", "GRANT REFERENCES", "GRANT TRIGGER", "GRANT EXECUTE", "GRANT CREATE"):
+        assert forbidden not in sql
+    workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
+    assert 'if role != "atlas_api_runtime"' in workflow
+    assert "a read-only paper/staging identity cannot be used as the production API role" in workflow
+
+
+def test_restore_and_provider_auditors_use_the_separate_read_only_identity():
+    restore = (ROOT / "scripts" / "verify_staging_restore.py").read_text(encoding="utf-8")
+    provider = (ROOT / "scripts" / "verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
+    restore_workflow = (ROOT / ".github" / "workflows" / "staging-restore-audit.yml").read_text(encoding="utf-8")
+    provider_workflow = (ROOT / ".github" / "workflows" / "provider-ledger-reconciliation.yml").read_text(encoding="utf-8")
+    assert 'AUDIT_ROLE_NAME = "atlas_audit_reader"' in restore
+    for check in (
+        "public_tables_with_write_privileges",
+        "public_sequences_with_privileges",
+        "public_functions_with_execute",
+        "unexpected_select",
+    ):
+        assert check in restore
+    assert "audit_role_failures(" in provider
+    for workflow in (restore_workflow, provider_workflow):
+        assert "ATLAS_STAGING_AUDIT_DATABASE_SECRET" in workflow
+        assert "ATLAS_STAGING_AUDIT_DB_ROLE" in workflow
+        assert '"atlas_audit_reader"' in workflow
+        assert "--expected-audit-role" in workflow
+    assert "STAGING_DATABASE_SECRET" not in restore_workflow
+    assert "STAGING_DATABASE_SECRET" not in provider_workflow
+
+
+def test_restore_audit_rejects_same_project_source_and_restore_target():
+    verifier = (ROOT / "scripts" / "verify_staging_restore.py").read_text(encoding="utf-8")
+    workflow = (ROOT / ".github" / "workflows" / "staging-restore-audit.yml").read_text(encoding="utf-8")
+    assert "full restore audit requires a distinct non-production target" in verifier
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+
