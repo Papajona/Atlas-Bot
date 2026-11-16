@@ -68,7 +68,10 @@ def test_database_audit_and_production_api_identities_are_separate_and_minimal()
     assert "CREATE ROLE atlas_api_runtime" in api_sql
     assert "ALTER ROLE atlas_api_runtime SET default_transaction_read_only = off" in api_sql
     assert "atlas_audit_reader" not in api_sql
-    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" in api_sql
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.%I TO atlas_api_runtime" in api_sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" not in api_sql
+    assert "has_table_privilege('atlas_api_runtime', c.oid, 'DELETE')" in api_sql
+    assert "has_function_privilege('atlas_api_runtime', p.oid, 'EXECUTE')" in api_sql
 
     runbook = (ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
     assert "atlas_audit_reader" in runbook
