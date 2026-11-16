@@ -2004,7 +2004,7 @@ def test_calibrated_customer_protective_exit_defers_remainder_without_expiring(m
     }))
     monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
 
-    async def estimate(*_args, **kwargs):
+    def estimate(*_args, **kwargs):
         captured["allow_simulated_rejection"] = kwargs["allow_simulated_rejection"]
         model = {
             "simulated_rejection": False,
