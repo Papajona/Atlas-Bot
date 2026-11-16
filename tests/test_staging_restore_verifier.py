@@ -138,7 +138,7 @@ def test_restore_audit_enforces_column_scoped_read_only_audit_identity():
         for failure in audit_role_failures(unsafe_role, "atlas_audit_reader", "on")
     )
     assert any(
-        "transaction is not running in a read-only" in failure
+        "audit connection is not running in a read-only PostgreSQL transaction" in failure
         for failure in audit_role_failures(good_role, "atlas_audit_reader", "off")
     )
     assert any(
