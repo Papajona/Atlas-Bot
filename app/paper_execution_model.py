@@ -195,6 +195,54 @@ def _calibration_evidence_matches(
     return False
 
 
+def configured_paper_execution_settings(settings: Any) -> dict[str, Any] | None:
+    """Return complete runtime calibration inputs, None only when wholly unconfigured.
+
+    Partial configuration is an error, not permission to silently fall back to heuristic fills.
+    Test-only calibration fixtures remain disallowed by every runtime caller.
+    """
+    names = (
+        "paper_impact_max_participation_rate",
+        "paper_impact_coefficient",
+        "paper_execution_rejection_probability",
+        "paper_execution_latency_min_ms",
+        "paper_execution_latency_median_ms",
+        "paper_execution_latency_p95_ms",
+        "paper_execution_latency_max_ms",
+        "paper_latency_impact_coefficient",
+        "paper_execution_evidence_source",
+        "paper_execution_evidence_path",
+        "paper_execution_evidence_id",
+    )
+    raw = {name: getattr(settings, name, None) for name in names}
+    configured = any(value is not None and str(value).strip() for value in raw.values())
+    if not configured:
+        return None
+    missing = [
+        name for name, value in raw.items()
+        if value is None or (isinstance(value, str) and not value.strip())
+    ]
+    if missing:
+        raise PaperExecutionModelError(
+            "paper execution calibration configuration is incomplete: " + ", ".join(missing)
+        )
+    return {
+        "base_slippage_bps": getattr(settings, "research_slippage_bps"),
+        "max_participation_rate": raw["paper_impact_max_participation_rate"],
+        "impact_coefficient": raw["paper_impact_coefficient"],
+        "rejection_probability": raw["paper_execution_rejection_probability"],
+        "latency_min_ms": raw["paper_execution_latency_min_ms"],
+        "latency_median_ms": raw["paper_execution_latency_median_ms"],
+        "latency_p95_ms": raw["paper_execution_latency_p95_ms"],
+        "latency_max_ms": raw["paper_execution_latency_max_ms"],
+        "latency_impact_coefficient": raw["paper_latency_impact_coefficient"],
+        "evidence_source": raw["paper_execution_evidence_source"],
+        "evidence_path": raw["paper_execution_evidence_path"],
+        "evidence_id": raw["paper_execution_evidence_id"],
+        "allow_test_fixture": False,
+    }
+
+
 def calibrated_model_available(
     market_context: Any,
     *,
@@ -276,6 +324,8 @@ def estimate_paper_fill(
     evidence_path: str,
     evidence_id: str,
     allow_test_fixture: bool = False,
+    available_capacity_units: Any | None = None,
+    allow_simulated_rejection: bool = True,
 ) -> dict[str, Any]:
     """Estimate a bar-volume-capped fill with calibrated latency/rejection assumptions.
 
@@ -345,11 +395,16 @@ def estimate_paper_fill(
         p95_ms=p95_ms,
         maximum_ms=maximum_ms,
     )
-    simulated_rejection = rejection_draw < rejection_rate
+    simulated_rejection = bool(allow_simulated_rejection) and rejection_draw < rejection_rate
 
     # Never model an instant fill larger than the configured fraction of observed
     # tradable bar volume. Any residual quantity is explicitly cancelled.
     capacity = volume * max_participation
+    if available_capacity_units is not None:
+        available_capacity = _finite(
+            available_capacity_units, "available_capacity_units", minimum=0.0
+        )
+        capacity = min(capacity, available_capacity)
     planned_fill = min(quantity, capacity)
     if not math.isfinite(planned_fill) or planned_fill <= 0:
         raise PaperExecutionModelError("market context provides no positive fill capacity")
@@ -368,9 +423,11 @@ def estimate_paper_fill(
         "recent_volatility_bps": volatility_bps,
         "tradable_volume_units": volume,
         "max_participation_rate": max_participation,
+        "available_capacity_units": capacity,
         "bar_duration_ms": bar_duration_ms,
         "impact_coefficient": coefficient,
         "rejection_probability": rejection_rate,
+        "rejection_applied": bool(allow_simulated_rejection),
         "rejection_draw": rejection_draw,
         "latency_min_ms": minimum_ms,
         "latency_median_ms": median_ms,

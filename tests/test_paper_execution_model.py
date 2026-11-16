@@ -45,7 +45,7 @@ def _calibration(**overrides):
     }
 
 
-def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, calibration=None):
+def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, calibration=None, allow_simulated_rejection=True):
     inputs = _calibration(**(calibration or {}))
     base_slippage_bps = inputs.pop("base_slippage_bps")
     return estimate_paper_fill(
@@ -55,6 +55,7 @@ def _estimate(quantity, *, side="buy", order_key="order-0001", context=None, cal
         reference_price=100.0,
         base_slippage_bps=base_slippage_bps,
         market_context=_context(**(context or {})),
+        allow_simulated_rejection=allow_simulated_rejection,
         **inputs,
     )
 
@@ -233,3 +234,95 @@ def test_test_fixture_is_accepted_only_with_explicit_development_override():
 def test_numeric_model_settings_cannot_drift_from_sha_pinned_calibration_parameters():
     with pytest.raises(PaperExecutionModelError, match="calibration artifact"):
         _estimate(1.0, calibration={"impact_coefficient": 0.7})
+
+
+
+def test_runtime_configuration_is_all_or_nothing_and_never_allows_test_fixtures():
+    from types import SimpleNamespace
+    from app.paper_execution_model import configured_paper_execution_settings
+
+    empty = SimpleNamespace(**{
+        "paper_impact_max_participation_rate": None,
+        "paper_impact_coefficient": None,
+        "paper_execution_rejection_probability": None,
+        "paper_execution_latency_min_ms": None,
+        "paper_execution_latency_median_ms": None,
+        "paper_execution_latency_p95_ms": None,
+        "paper_execution_latency_max_ms": None,
+        "paper_latency_impact_coefficient": None,
+        "paper_execution_evidence_source": "",
+        "paper_execution_evidence_path": "",
+        "paper_execution_evidence_id": "",
+        "research_slippage_bps": 2.0,
+    })
+    assert configured_paper_execution_settings(empty) is None
+
+    partial = SimpleNamespace(**{
+        **vars(empty),
+        "paper_impact_max_participation_rate": 0.1,
+    })
+    with pytest.raises(PaperExecutionModelError, match="configuration is incomplete"):
+        configured_paper_execution_settings(partial)
+
+    configured = SimpleNamespace(**{
+        **vars(empty),
+        "paper_impact_max_participation_rate": 0.1,
+        "paper_impact_coefficient": 0.5,
+        "paper_execution_rejection_probability": 0.0,
+        "paper_execution_latency_min_ms": 10.0,
+        "paper_execution_latency_median_ms": 20.0,
+        "paper_execution_latency_p95_ms": 50.0,
+        "paper_execution_latency_max_ms": 100.0,
+        "paper_latency_impact_coefficient": 0.5,
+        "paper_execution_evidence_source": "venue-study",
+        "paper_execution_evidence_path": "/evidence/calibration.json",
+        "paper_execution_evidence_id": "a" * 64,
+    })
+    result = configured_paper_execution_settings(configured)
+    assert result["base_slippage_bps"] == 2.0
+    assert result["max_participation_rate"] == 0.1
+    assert result["allow_test_fixture"] is False
+
+
+def test_calibrated_fill_respects_the_remaining_shared_bar_capacity():
+    result = estimate_paper_fill(
+        order_key="shared-capacity-order",
+        side="buy",
+        requested_quantity=8.0,
+        reference_price=100.0,
+        market_context=_context(),
+        available_capacity_units=4.0,
+        **{
+            key: value for key, value in _calibration().items()
+            if key not in {"allow_test_fixture"}
+        },
+        allow_test_fixture=True,
+    )
+    assert result["filled_quantity"] == 4.0
+    assert result["cancelled_quantity"] == 4.0
+    assert result["full_fill"] is False
+    assert result["available_capacity_units"] == 4.0
+
+
+def test_protective_exit_suppresses_rejection_but_retains_calibrated_probability(monkeypatch):
+    monkeypatch.setattr(
+        "app.paper_execution_model.deterministic_execution_draws",
+        lambda order_key: (0.0, 0.5),
+    )
+    rejected = _estimate(
+        1.0,
+        order_key="same-protective-exit-draw",
+        calibration={"rejection_probability": 1.0},
+    )
+    protected = _estimate(
+        1.0,
+        order_key="same-protective-exit-draw",
+        calibration={"rejection_probability": 1.0},
+        allow_simulated_rejection=False,
+    )
+    assert rejected["simulated_rejection"] is True
+    assert rejected["rejection_applied"] is True
+    assert protected["simulated_rejection"] is False
+    assert protected["rejection_applied"] is False
+    assert protected["rejection_probability"] == 1.0
+    assert protected["filled_quantity"] > 0

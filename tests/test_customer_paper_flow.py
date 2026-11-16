@@ -1886,3 +1886,163 @@ def test_autonomous_recovery_rejects_manual_pending_order_with_customer_action(m
     assert "Cancel or advance it through the manual paper-order API" in message
     assert "will not take ownership" in message
 
+
+
+
+def test_calibrated_customer_paper_fill_uses_server_market_context_and_shared_capacity(monkeypatch):
+    from app import customer_paper_flow as flow
+    import hashlib
+    from pathlib import Path
+
+    evidence_path = Path(__file__).parent / "fixtures" / "paper_execution_calibration_test.json"
+    evidence_id = "sha256:" + hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    calibration = {
+        "base_slippage_bps": 2.0,
+        "max_participation_rate": 0.10,
+        "impact_coefficient": 0.5,
+        "rejection_probability": 0.0,
+        "latency_min_ms": 10.0,
+        "latency_median_ms": 20.0,
+        "latency_p95_ms": 50.0,
+        "latency_max_ms": 100.0,
+        "latency_impact_coefficient": 0.5,
+        "evidence_source": "venue-paper-fill-study",
+        "evidence_path": str(evidence_path),
+        "evidence_id": evidence_id,
+        "allow_test_fixture": True,
+    }
+    market = {
+        "market_context": {
+            "exchange": "fakeexchange",
+            "symbol": "BTC/USDT",
+            "bar_duration_ms": 3600000,
+            "recent_volatility_bps": 200.0,
+        },
+        "base_volume": Decimal("100"),
+        "spread_bps": Decimal("4"),
+        "bid": Decimal("99"),
+        "ask": Decimal("101"),
+        "quote_timestamp": "2026-11-14T12:00:00+00:00",
+        "data_sha256": "b" * 64,
+    }
+
+    quantity, price, fee, costs, result = flow._estimate_calibrated_customer_paper_fill(
+        "BUY",
+        Decimal("8"),
+        market,
+        order_key="customer-order-1|bar-1",
+        available_capacity=Decimal("4"),
+        calibration=calibration,
+    )
+
+    assert quantity == Decimal("4.000000000000000000")
+    assert Decimal(price) > Decimal("100")
+    assert Decimal(fee) > 0
+    assert result["cancelled_quantity"] == 4.0
+    assert costs["cost_model_status"] == "CALIBRATED_ASSUMPTIONS"
+    assert costs["execution_model"]["evidence_id"] == evidence_id
+
+
+def test_calibrated_customer_paper_fill_rejects_missing_server_context():
+    from app import customer_paper_flow as flow
+    from app.paper_execution_model import PaperExecutionModelError
+
+    with pytest.raises(PaperExecutionModelError, match="server customer-paper market context"):
+        flow._estimate_calibrated_customer_paper_fill(
+            "BUY",
+            Decimal("1"),
+            {"base_volume": Decimal("10")},
+            order_key="missing-context",
+            available_capacity=Decimal("1"),
+            calibration={},
+        )
+
+
+def test_calibrated_customer_protective_exit_defers_remainder_without_expiring(monkeypatch):
+    import app.customer_paper_flow as flow
+
+    _, state, _order, market = _paper_fill_test_context()
+    state = {**state, "side": "SELL", "remaining_quantity": "2"}
+    first = pd.Timestamp.now(tz="UTC").floor("h")
+    second = first + pd.Timedelta(hours=1)
+    order = {
+        "client_order_id": "paper-protective-1",
+        "metadata": {
+            "signal_bar_timestamp": first.isoformat(),
+            "submission_bar_at": first.isoformat(),
+            "timeframe": "1h",
+            "exchange": "binance",
+            "market_type": "spot",
+            "order_role": "PROTECTIVE_EXIT",
+            "execution_owner": "autonomous_customer_bot",
+        },
+    }
+    market.update({
+        "bar_timestamp": second.isoformat(),
+        "quote_timestamp": (second + pd.Timedelta(seconds=2)).isoformat(),
+        "market_context": {
+            "exchange": "binance",
+            "symbol": "BTC/USDT",
+            "bar_duration_ms": 3_600_000,
+            "recent_volatility_bps": 200.0,
+        },
+    })
+    captured = {}
+    monkeypatch.setattr(flow, "get_customer_paper_order", _async_value(state))
+    monkeypatch.setattr(flow, "get_customer_paper_positions", _async_value([{
+        "venue": "binance", "symbol": "BTC/USDT", "quantity": "2",
+    }]))
+    monkeypatch.setattr(
+        flow, "configured_paper_execution_settings",
+        lambda _settings: {"max_participation_rate": 0.1},
+    )
+    monkeypatch.setattr(flow, "register_customer_paper_market_bar", _async_value({
+        "bar_key": "protective-bar",
+        "bar_at": market["bar_timestamp"],
+        "capacity": "0.5",
+        "available": "0.5",
+    }))
+    monkeypatch.setattr(flow, "get_customer_paper_fill_for_bar", _async_value(None))
+
+    def estimate(*_args, **kwargs):
+        captured["allow_simulated_rejection"] = kwargs["allow_simulated_rejection"]
+        model = {
+            "simulated_rejection": False,
+            "rejection_applied": False,
+            "filled_quantity": 0.5,
+            "cancelled_quantity": 1.5,
+            "full_fill": False,
+            "fill_price": 120.0,
+            "total_slippage_bps": 1.0,
+        }
+        costs = {
+            "cost_model_status": "CALIBRATED_ASSUMPTIONS",
+            "fee_bps_assumption": "0",
+            "execution_model": model,
+        }
+        return Decimal("0.5"), "120", "0", costs, model
+
+    async def append_fill(**kwargs):
+        captured["execution_model"] = kwargs["execution_model"]
+        return {
+            "status": "APPENDED",
+            "fill_id": "protective-fill",
+            "filled_quantity": "0.5",
+            "order_status": "PARTIALLY_FILLED",
+        }
+
+    async def must_not_expire(**_kwargs):
+        raise AssertionError("protective exits must remain open while a residual position exists")
+
+    monkeypatch.setattr(flow, "_estimate_calibrated_customer_paper_fill", estimate)
+    monkeypatch.setattr(flow, "record_customer_paper_fill", append_fill)
+    monkeypatch.setattr(flow, "expire_customer_paper_order", must_not_expire)
+    result = asyncio.run(flow._fill_open_order(
+        customer_id=1001, order=order, market=market, df=pd.DataFrame()
+    ))
+    assert result["fill"]["status"] == "APPENDED"
+    assert captured["allow_simulated_rejection"] is False
+    assert captured["execution_model"]["filled_quantity"] == "0.5"
+    assert captured["execution_model"]["deferred_quantity"] == "1.5"
+    assert captured["execution_model"]["cancelled_quantity"] == "0"
+    assert captured["execution_model"]["full_fill"] is False

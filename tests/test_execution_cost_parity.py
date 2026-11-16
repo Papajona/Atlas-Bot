@@ -197,7 +197,9 @@ def test_active_paper_and_multi_asset_paths_use_the_shared_impact_formula():
     assert "market_impact_bps(" in customer_paper
     assert "from .execution_costs import market_impact_bps" in platform_paper
     assert "market_impact_bps(" in platform_paper
-    assert 'outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT"}' in platform_paper
+    assert "allow_simulated_rejection=not is_triggered_exit" in platform_paper
+    assert 'outcome in {"INVALID_EXIT_CONTEXT", "INVALID_EXECUTION_COST_CONTEXT", "REJECTED"}' in platform_paper
+    assert "and not is_triggered_exit" in platform_paper
 
     shared = market_impact_bps(
         volatility_bps=200.0,
