@@ -530,8 +530,10 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
         "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
     )[1]
     assert not any(line.endswith(chr(92) * 2) for line in acceptance_dispatch.splitlines())
-    assert "select(.displayTitle == $expected)" in deploy
-    assert "uniquely correlated staging preflight run was not observed" in deploy
+    assert 'dispatch_url="$(grep -Eo "https://github\\\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in deploy
+    assert 'preflight_run_id="${dispatch_url##*/}"' in deploy
+    assert "select(.displayTitle == $expected)" not in deploy
+    assert "uniquely correlated staging preflight run was not observed" not in deploy
     assert "main advanced during staging preflight" in deploy
     gate_wait = deploy.split(
         "      - name: Wait for required CI gates to pass on this exact commit", 1
