@@ -78,48 +78,84 @@ ALTER ROLE atlas_audit_reader SET search_path = pg_catalog, public;
 COMMIT;
 
 -- Return capability metadata only; no credentials or customer data.
-SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
-       r.rolcreatedb, r.rolreplication, r.rolbypassrls,
-       has_schema_privilege(r.rolname,'public','USAGE') AS public_usage,
-       has_schema_privilege(r.rolname,'public','CREATE') AS public_create,
-       (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid) AS memberships,
-       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid) AS owned_public_tables,
-       (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
-        JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND a.attnum > 0 AND NOT a.attisdropped
-          AND has_column_privilege(r.rolname,c.oid,a.attnum,'SELECT')
-          AND NOT (
-            (c.relname='alembic_version' AND a.attname IN ('version_num'))
-            OR (c.relname='customer_ledger_accounts' AND a.attname IN ('available','trading_reserved','withdrawal_reserved'))
-            OR (c.relname='ledger_entries' AND a.attname IN ('debit','credit','amount'))
-            OR (c.relname='ledger_journals' AND a.attname IN ('id','entry_type','idempotency_key','reference_type','reference_id'))
-            OR (c.relname='ledger_journal_lines' AND a.attname IN ('id','journal_id','debit','credit'))
-            OR (c.relname='research_trial_archive' AND a.attname IN ('ledger_sequence','ledger_entry_sha256'))
-            OR (c.relname='research_trial_ledger_head' AND a.attname IN ('id','last_sequence','last_entry_sha256'))
-            OR (c.relname='research_holdout_registry' AND a.attname IN ('scope_sha256','source_sample_sha256','report_sha256','holdout_version','holdout_plan_json'))
-            OR (c.relname='withdrawals' AND a.attname IN ('created_at','request_id','provider_id','provider','amount','currency','status','provider_status'))
-          )) AS unexpected_select_columns,
-       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND (
-          has_table_privilege(r.rolname,c.oid,'INSERT') OR has_table_privilege(r.rolname,c.oid,'UPDATE')
-          OR has_table_privilege(r.rolname,c.oid,'DELETE') OR has_table_privilege(r.rolname,c.oid,'TRUNCATE')
-          OR has_table_privilege(r.rolname,c.oid,'REFERENCES') OR has_table_privilege(r.rolname,c.oid,'TRIGGER')
-          OR EXISTS (
-            SELECT 1 FROM pg_attribute a
-            WHERE a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped AND (
-              has_column_privilege(r.rolname,c.oid,a.attnum,'INSERT')
-              OR has_column_privilege(r.rolname,c.oid,a.attnum,'UPDATE')
-              OR has_column_privilege(r.rolname,c.oid,a.attnum,'REFERENCES')
-            )
-          )
-        )) AS writable_public_tables,
-       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind='S' AND (
-          has_sequence_privilege(r.rolname,c.oid,'USAGE') OR has_sequence_privilege(r.rolname,c.oid,'SELECT')
-          OR has_sequence_privilege(r.rolname,c.oid,'UPDATE')
-        )) AS accessible_public_sequences,
-       (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-        WHERE n.nspname='public' AND has_function_privilege(r.rolname,p.oid,'EXECUTE')) AS executable_public_functions
-FROM pg_roles r WHERE r.rolname='atlas_audit_reader';
+WITH allowed(table_name, column_name) AS (
+    VALUES
+      ('alembic_version','version_num'),
+      ('customer_ledger_accounts','available'),
+      ('customer_ledger_accounts','trading_reserved'),
+      ('customer_ledger_accounts','withdrawal_reserved'),
+      ('ledger_entries','debit'),('ledger_entries','credit'),('ledger_entries','amount'),
+      ('ledger_journals','id'),('ledger_journals','entry_type'),
+      ('ledger_journals','idempotency_key'),('ledger_journals','reference_type'),
+      ('ledger_journals','reference_id'),
+      ('ledger_journal_lines','id'),('ledger_journal_lines','journal_id'),
+      ('ledger_journal_lines','debit'),('ledger_journal_lines','credit'),
+      ('research_trial_archive','ledger_sequence'),('research_trial_archive','ledger_entry_sha256'),
+      ('research_trial_ledger_head','id'),('research_trial_ledger_head','last_sequence'),
+      ('research_trial_ledger_head','last_entry_sha256'),
+      ('research_holdout_registry','scope_sha256'),('research_holdout_registry','source_sample_sha256'),
+      ('research_holdout_registry','report_sha256'),('research_holdout_registry','holdout_version'),
+      ('research_holdout_registry','holdout_plan_json'),
+      ('withdrawals','created_at'),('withdrawals','request_id'),('withdrawals','provider_id'),
+      ('withdrawals','provider'),('withdrawals','amount'),('withdrawals','currency'),
+      ('withdrawals','status'),('withdrawals','provider_status')
+),
+observed AS (
+    SELECT r.*,
+      (SELECT count(*) FROM allowed a
+       LEFT JOIN pg_class c ON c.relnamespace='public'::regnamespace
+                           AND c.relname=a.table_name AND c.relkind IN ('r','p')
+       LEFT JOIN pg_attribute att ON att.attrelid=c.oid AND att.attname=a.column_name
+                                 AND att.attnum>0 AND NOT att.attisdropped
+       WHERE att.attnum IS NULL
+          OR NOT has_column_privilege(r.rolname,c.oid,att.attnum,'SELECT')
+      ) AS missing_allowed_select_columns,
+      (SELECT count(*) FROM pg_class c
+       JOIN pg_namespace n ON n.oid=c.relnamespace
+       JOIN pg_attribute att ON att.attrelid=c.oid
+       WHERE n.nspname='public' AND c.relkind IN ('r','p')
+         AND att.attnum>0 AND NOT att.attisdropped
+         AND has_column_privilege(r.rolname,c.oid,att.attnum,'SELECT')
+         AND NOT EXISTS (SELECT 1 FROM allowed a
+                         WHERE a.table_name=c.relname AND a.column_name=att.attname)
+      ) AS unexpected_select_columns,
+      (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       WHERE n.nspname='public' AND c.relkind IN ('r','p') AND (
+         has_table_privilege(r.rolname,c.oid,'INSERT')
+         OR has_table_privilege(r.rolname,c.oid,'UPDATE')
+         OR has_table_privilege(r.rolname,c.oid,'DELETE')
+         OR has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+         OR has_table_privilege(r.rolname,c.oid,'REFERENCES')
+         OR has_table_privilege(r.rolname,c.oid,'TRIGGER')
+         OR EXISTS (
+           SELECT 1 FROM pg_attribute att
+           WHERE att.attrelid=c.oid AND att.attnum>0 AND NOT att.attisdropped AND (
+             has_column_privilege(r.rolname,c.oid,att.attnum,'INSERT')
+             OR has_column_privilege(r.rolname,c.oid,att.attnum,'UPDATE')
+             OR has_column_privilege(r.rolname,c.oid,att.attnum,'REFERENCES')
+           )
+         )
+       )) AS writable_public_objects,
+      (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       WHERE n.nspname='public' AND c.relkind='S' AND (
+         has_sequence_privilege(r.rolname,c.oid,'USAGE')
+         OR has_sequence_privilege(r.rolname,c.oid,'SELECT')
+         OR has_sequence_privilege(r.rolname,c.oid,'UPDATE')
+       )) AS public_sequence_privileges,
+      (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+       WHERE n.nspname='public' AND has_function_privilege(r.rolname,p.oid,'EXECUTE')
+      ) AS public_function_execute_privileges,
+      (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid
+      ) AS owned_public_tables,
+      (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid) AS memberships
+    FROM pg_roles r
+    WHERE r.rolname='atlas_audit_reader'
+)
+SELECT rolname, rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, rolreplication,
+       rolbypassrls, has_schema_privilege(rolname,'public','USAGE') AS public_usage,
+       has_schema_privilege(rolname,'public','CREATE') AS public_create,
+       memberships, owned_public_tables, missing_allowed_select_columns,
+       unexpected_select_columns, writable_public_objects, public_sequence_privileges,
+       public_function_execute_privileges
+FROM observed;
