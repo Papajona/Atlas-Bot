@@ -1,41 +1,42 @@
-"""Regression tests for exact-SHA staging acceptance dispatch discovery.
-
-The dispatch is correlated by a unique run name containing the deployment SHA,
-run ID, attempt, and nonce. Discovery must not filter by the pre-dispatch SHA:
-if main advances during dispatch, the correlated run must be found and rejected
-immediately by its explicit head-SHA check rather than hidden until timeout.
-"""
+"""Regression tests for reusable, exact-SHA customer-paper acceptance gates."""
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _acceptance_dispatch_block() -> str:
-    workflow = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(
+def test_acceptance_is_a_reusable_workflow_called_only_after_identity_preflight():
+    deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(
         encoding="utf-8"
     )
-    marker = "      - name: Dispatch and require customer-paper acceptance on this exact deployment"
-    assert marker in workflow
-    return workflow.split(marker, 1)[1]
+    acceptance = (ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "      - name: Dispatch and require customer-paper acceptance on this exact deployment" not in deploy
+    assert "displayTitle" not in deploy
+    assert "gh workflow run" not in deploy
+    assert "workflow_call:" in acceptance
+    job = deploy.split("  customer-paper-acceptance:", 1)[1]
+    assert "needs:" in job
+    assert "verify-staging-identity" in job
+    assert "if: needs.verify-staging-identity.result == 'success'" in job
+    assert "uses: ./.github/workflows/customer-paper-staging-acceptance.yml" in job
+    assert "target_sha: ${{ github.sha }}" in job
+    assert "deployment_run_id: ${{ format('{0}', github.run_id) }}" in job
+    assert "deployment_run_attempt: ${{ format('{0}', github.run_attempt) }}" in job
 
 
-def test_acceptance_run_discovery_uses_unique_correlation_without_sha_filter():
-    block = _acceptance_dispatch_block()
-    discovery = block.split('run_list="$(gh_retry run list', 1)[1].split(')"', 1)[0]
+def test_acceptance_workflow_still_validates_exact_deployment_and_parent_preflight():
+    workflow = (ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml").read_text(
+        encoding="utf-8"
+    )
 
-    assert '--workflow "customer-paper-staging-acceptance.yml"' in discovery
-    assert "--event workflow_dispatch" in discovery
-    assert "--json databaseId,headSha,headBranch,displayTitle" in discovery
-    assert '--commit "$GITHUB_SHA"' not in discovery
-    assert 'select(.displayTitle == $expected)' in block
-
-
-def test_discovered_acceptance_run_is_still_rejected_when_sha_or_branch_differs():
-    block = _acceptance_dispatch_block()
-
-    assert 'candidate_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
-    assert 'candidate_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
-    assert 'if [[ "$candidate_sha" != "$GITHUB_SHA" || "$candidate_branch" != "main" ]]; then' in block
-    assert "BLOCKED: uniquely correlated acceptance run is not on exact main commit" in block
-    assert '|| "$run_name" != "$expected_run_name" ]]' in block
+    assert "identity_preflight_passed:" in workflow
+    assert 'IDENTITY_PREFLIGHT_PASSED: ${{ inputs.identity_preflight_passed || false }}' in workflow
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
+    assert 'test "$deployment_sha" = "$TARGET_SHA"' in workflow
+    assert 'test "$deployment_name" = "Deploy Paper-Only Atlas Staging"' in workflow
+    assert 'test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
+    assert 'test "$deployment_attempt_after" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
+    assert 'test "$preflight_outcome" = "success"' in workflow
