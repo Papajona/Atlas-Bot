@@ -222,3 +222,20 @@ def test_dispatch_workflow_shell_helpers_parse_before_the_runner_executes_them()
     parent = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
     wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
     _assert_bash_parses(wait_step)
+
+
+def test_generated_dispatch_helper_is_valid_shell():
+    parent = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
+    wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
+    outer_script = _run_script(wait_step)
+    marker = "cat > \"$RUNNER_TEMP/atlas-gh-retry.sh\" <<'ATLAS_GH_RETRY'\n"
+    assert outer_script.count(marker) == 1
+    helper_script = outer_script.split(marker, 1)[1].split("\nATLAS_GH_RETRY", 1)[0] + "\n"
+    result = subprocess.run(
+        ["bash", "-n"],
+        input=helper_script,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
