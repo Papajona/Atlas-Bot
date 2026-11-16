@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import copy
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -10,12 +12,13 @@ from scripts.resolve_staging_dispatch_receipt import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[1]
 REQUEST_ID = "atlas-43930000000-1-1731780000000000000"
 WORKFLOW = ".github/workflows/staging-identity-preflight.yml"
 SHA = "a" * 40
 
 
-def _payload(*, request_id: str = REQUEST_ID, workflow: str = WORKFLOW) -> dict:
+def _payload(*, request_id: str = REQUEST_ID, workflow: str = WORKFLOW) -> list[dict]:
     summary = "\n".join(
         (
             f"request_id={request_id}",
@@ -32,14 +35,14 @@ def _payload(*, request_id: str = REQUEST_ID, workflow: str = WORKFLOW) -> dict:
             "total_count": 1,
             "check_runs": [
                 {
-                "name": CHECK_RUN_NAME,
-                "external_id": request_id,
-                "head_sha": SHA,
-                "status": "in_progress",
-                "app": {"slug": "github-actions"},
-                "output": {"title": CHECK_RUN_NAME, "summary": summary},
+                    "name": CHECK_RUN_NAME,
+                    "external_id": request_id,
+                    "head_sha": SHA,
+                    "status": "in_progress",
+                    "app": {"slug": "github-actions"},
+                    "output": {"title": CHECK_RUN_NAME, "summary": summary},
                 }
-            ]
+            ],
         }
     ]
 
@@ -59,12 +62,7 @@ def test_resolves_only_the_single_exact_nonce_receipt():
 def test_absent_nonce_is_retryable_and_does_not_select_an_unrelated_run():
     with pytest.raises(LookupError):
         resolve_staging_dispatch_receipt(
-            [
-                {
-                    "total_count": 1,
-                    "check_runs": [_payload(request_id="different-nonce")[0]["check_runs"][0]],
-                }
-            ],
+            _payload(request_id="different-nonce"),
             request_id=REQUEST_ID,
             workflow_path=WORKFLOW,
             expected_sha=SHA,
@@ -89,10 +87,26 @@ def test_rejects_tampered_or_mismatched_receipt_identity():
         lambda p: p[0]["check_runs"][0].update(head_sha="b" * 40),
         lambda p: p[0]["check_runs"][0]["app"].update(slug="untrusted-app"),
         lambda p: p[0]["check_runs"][0]["output"].update(title="unrelated check"),
-        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("head_branch=main", "head_branch=feature")),
-        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("event=workflow_dispatch", "event=push")),
-        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("run_id=43930000123", "run_id=0")),
-        lambda p: p[0]["check_runs"][0]["output"].update(summary=p[0]["check_runs"][0]["output"]["summary"].replace("run_attempt=1", "run_attempt=0")),
+        lambda p: p[0]["check_runs"][0]["output"].update(
+            summary=p[0]["check_runs"][0]["output"]["summary"].replace(
+                "head_branch=main", "head_branch=feature"
+            )
+        ),
+        lambda p: p[0]["check_runs"][0]["output"].update(
+            summary=p[0]["check_runs"][0]["output"]["summary"].replace(
+                "event=workflow_dispatch", "event=push"
+            )
+        ),
+        lambda p: p[0]["check_runs"][0]["output"].update(
+            summary=p[0]["check_runs"][0]["output"]["summary"].replace(
+                "run_id=43930000123", "run_id=0"
+            )
+        ),
+        lambda p: p[0]["check_runs"][0]["output"].update(
+            summary=p[0]["check_runs"][0]["output"]["summary"].replace(
+                "run_attempt=1", "run_attempt=0"
+            )
+        ),
     )
     for mutate in mutations:
         payload = _payload()
@@ -116,7 +130,7 @@ def test_rejects_wrong_workflow_and_duplicate_summary_fields():
         )
 
     payload = _payload()
-    payload["check_runs"][0]["output"]["summary"] += "\nevent=workflow_dispatch"
+    payload[0]["check_runs"][0]["output"]["summary"] += "\nevent=workflow_dispatch"
     with pytest.raises(ValueError):
         resolve_staging_dispatch_receipt(
             payload,
@@ -124,7 +138,6 @@ def test_rejects_wrong_workflow_and_duplicate_summary_fields():
             workflow_path=WORKFLOW,
             expected_sha=SHA,
         )
-
 
 
 def test_resolves_a_receipt_on_a_later_check_run_page():
@@ -180,23 +193,16 @@ def test_rejects_malformed_api_payload():
         )
 
 
-from pathlib import Path
-import subprocess
-
-
-ROOT = Path(__file__).resolve().parents[1]
-
-
 def _workflow_step(workflow: str, name: str) -> str:
     marker = f"      - name: {name}"
     assert workflow.count(marker) == 1, f"expected exactly one workflow step named {name!r}"
     start = workflow.index(marker)
-    end = workflow.find("\\n      - name:", start + len(marker))
+    end = workflow.find("\n      - name:", start + len(marker))
     return workflow[start:] if end < 0 else workflow[start:end]
 
 
 def _run_script(step: str) -> str:
-    marker = "        run: |\\n"
+    marker = "        run: |\n"
     assert marker in step, "expected an executable run block"
     lines = step.split(marker, 1)[1].splitlines()
     code = []
@@ -208,7 +214,7 @@ def _run_script(step: str) -> str:
         else:
             break
     assert code, "workflow step has an empty run block"
-    return "\\n".join(code) + "\\n"
+    return "\n".join(code) + "\n"
 
 
 def _assert_bash_parses(step: str) -> None:
@@ -227,9 +233,10 @@ def test_no_url_dispatch_fallback_is_nonce_bound_for_both_child_workflows():
     assert "  checks: read" in parent
     wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
     assert "resolve_staging_dispatch_run_id()" in wait_step
+    assert "--paginate --slurp" in wait_step
     assert "check-runs?check_name=Atlas%20staging%20dispatch%20correlation" in wait_step
     assert "scripts/resolve_staging_dispatch_receipt.py" in wait_step
-    assert "(2, 87, 0)" in wait_step
+    assert "2.87.0" in wait_step and "sort -V" in wait_step
 
     preflight_dispatch = _workflow_step(
         parent, "Dispatch and require read-only staging identity preflight on this exact commit"
@@ -248,21 +255,26 @@ def test_child_workflows_publish_and_finalize_their_actual_nonce_receipt_steps()
             ".github/workflows/staging-identity-preflight.yml",
             "Publish nonce-bound workflow-run correlation receipt",
             "Finalize nonce-bound workflow-run correlation receipt",
-            "github.event.inputs.request_id",
         ),
         (
             ".github/workflows/customer-paper-staging-acceptance.yml",
             "Publish nonce-bound workflow-run correlation receipt",
             "Finalize nonce-bound workflow-run correlation receipt",
-            "inputs.dispatch_id",
         ),
     )
-    for relative_path, publish_name, finalize_name, _input_name in cases:
+    for relative_path, publish_name, finalize_name in cases:
         workflow = (ROOT / relative_path).read_text(encoding="utf-8")
         assert "  checks: write" in workflow
         publish = _workflow_step(workflow, publish_name)
         finalize = _workflow_step(workflow, finalize_name)
-        for field in ("external_id=\\"$REQUEST_ID\\"", "run_id=$GITHUB_RUN_ID", "run_attempt=$GITHUB_RUN_ATTEMPT", "head_sha=$GITHUB_SHA", "head_branch=$GITHUB_REF_NAME", "event=$GITHUB_EVENT_NAME"):
+        for field in (
+            'external_id="$REQUEST_ID"',
+            "run_id=$GITHUB_RUN_ID",
+            "run_attempt=$GITHUB_RUN_ATTEMPT",
+            "head_sha=$GITHUB_SHA",
+            "head_branch=$GITHUB_REF_NAME",
+            "event=$GITHUB_EVENT_NAME",
+        ):
             assert field in publish
         assert "gh api --method POST" in publish
         assert "gh api --method PATCH" in finalize
@@ -281,7 +293,7 @@ def test_generated_dispatch_helper_is_valid_shell():
     parent = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
     wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
     outer_script = _run_script(wait_step)
-    marker = "cat > \"$RUNNER_TEMP/atlas-gh-retry.sh\" <<'ATLAS_GH_RETRY'\n"
+    marker = """cat > "$RUNNER_TEMP/atlas-gh-retry.sh" <<'ATLAS_GH_RETRY'\n"""
     assert outer_script.count(marker) == 1
     helper_script = outer_script.split(marker, 1)[1].split("\nATLAS_GH_RETRY", 1)[0] + "\n"
     result = subprocess.run(
