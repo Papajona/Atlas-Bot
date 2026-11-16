@@ -830,7 +830,10 @@ def test_production_api_role_is_dedicated_and_does_not_receive_ddl_or_immutable_
     sql = (ROOT / "scripts" / "provision_atlas_api_runtime.sql").read_text(encoding="utf-8")
     assert "CREATE ROLE atlas_api_runtime" in sql
     assert "LOGIN NOINHERIT BYPASSRLS" in sql
-    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" in sql
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.%I TO atlas_api_runtime" in sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" not in sql
+    assert "has_table_privilege('atlas_api_runtime', c.oid, 'DELETE')" in sql
+    assert "has_function_privilege('atlas_api_runtime', p.oid, 'EXECUTE')" in sql
     assert "GRANT SELECT, UPDATE ON TABLE public.research_trial_ledger_head" in sql
     assert "GRANT SELECT, INSERT ON TABLE public.research_holdout_registry" in sql
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE\n    public.customer_ledger_accounts, public.withdrawals, public.trades" in sql
