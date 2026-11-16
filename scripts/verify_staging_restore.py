@@ -208,18 +208,30 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
         raise ValueError("STAGING_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
     if not production_ref or not re.fullmatch(r"[a-z0-9]{20}", production_ref):
         raise ValueError("PRODUCTION_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
-    # Equal refs are intentional in the single-project/free-tier setup.
-    # The URL must still resolve to the explicitly configured staging project.
-    allowed_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
-    if parsed.hostname.lower() not in allowed_hosts:
-        raise ValueError("DATABASE_URL host does not match the explicitly configured staging Supabase project")
+
+    host = parsed.hostname.lower()
+    direct_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
+    pooler_host = re.fullmatch(
+        r"aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com",
+        host,
+    )
+    pooler_user = unquote(parsed.username or "")
+    pooler_matches_project = bool(pooler_host and pooler_user.rpartition(".")[2] == staging_ref)
+    if host not in direct_hosts and not pooler_matches_project:
+        raise ValueError("DATABASE_URL host/user does not match the explicitly configured Supabase project")
+    if parsed.port not in (None, 5432):
+        raise ValueError("DATABASE_URL must use PostgreSQL port 5432")
     if parsed.path.lstrip("/") != "postgres":
         raise ValueError("DATABASE_URL must target the expected postgres database")
-    env = {key: val for key, val in os.environ.items() if key not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"}}
+
+    env = {
+        key: val for key, val in os.environ.items()
+        if key not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"}
+    }
     env.update({
-        "PGHOST": parsed.hostname,
+        "PGHOST": host,
         "PGPORT": str(parsed.port or 5432),
-        "PGUSER": unquote(parsed.username or ""),
+        "PGUSER": pooler_user,
         "PGPASSWORD": unquote(parsed.password or ""),
         "PGDATABASE": parsed.path.lstrip("/"),
         "PGSSLMODE": "require",
@@ -227,8 +239,7 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
     })
     if not env["PGUSER"] or not env["PGPASSWORD"]:
         raise ValueError("DATABASE_URL must contain a database username and password")
-    return env, parsed.hostname.lower()
-
+    return env, host
 
 def required_table_failures(value: object) -> list[str]:
     """Fail closed if restore SQL did not report required tables or found any missing."""
@@ -365,44 +376,17 @@ def audit(args: argparse.Namespace) -> dict:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Read-only SQL audit returned invalid JSON") from exc
 
-    role = observed.get("runtime_role") or {}
-    failures = []
-    expected_revision = args.expected_revision
-    if observed.get("database") != "postgres":
-        failures.append("unexpected database name")
-    if observed.get("current_user") != observed.get("session_user"):
-        failures.append("current_user differs from session_user")
-    if role.get("name") != args.expected_runtime_role:
-        failures.append("connected role differs from configured staging runtime role")
-    if role.get("name") in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}:
-        failures.append("connected role is reserved or privileged")
-    if not truthy(role.get("login")):
-        failures.append("runtime role is not LOGIN")
-    if truthy(role.get("inherit")):
-        failures.append("runtime role must be NOINHERIT")
-    for key in ("superuser", "create_role", "create_database", "replication"):
-        if truthy(role.get(key)):
-            failures.append(f"runtime role has forbidden capability {key}")
-    if not truthy(role.get("bypass_rls")):
-        failures.append("runtime role lacks the reviewed backend-only BYPASSRLS capability")
-    if int(role.get("owns_public_tables", -1)) != 0:
-        failures.append("runtime role owns application tables or owner count is unavailable")
-    if int(role.get("role_memberships", -1)) != 0:
-        failures.append("runtime role has inherited memberships or membership count is unavailable")
-    if not truthy(role.get("public_schema_usage")):
-        failures.append("runtime role lacks public schema USAGE")
-    if truthy(role.get("public_schema_create")):
-        failures.append("runtime role must not have CREATE on the public schema")
-    for key in ("public_tables_missing_select", "public_tables_missing_dml", "public_sequences_missing_usage"):
-        try:
-            count = int(role.get(key, -1))
-        except (TypeError, ValueError):
-            count = -1
-        if count != 0:
-            failures.append(f"{key} expected 0, observed {count}")
-    for key in ("research_trial_ledger_head_acl_valid", "research_holdout_registry_acl_valid"):
-        if not truthy(role.get(key)):
-            failures.append(f"{key} must be true under the migration 0059 least-privilege grant contract")
+    staging_ref = os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
+    production_ref = os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
+    if staging_ref == production_ref:
+        raise ValueError(
+            "full restore audit requires a distinct non-production target; same-project restore could overwrite the active source"
+        )
+    failures = audit_role_failures(
+        observed.get("audit_role"),
+        args.expected_audit_role,
+        observed.get("transaction_read_only"),
+    )
     revision = str(observed.get("revision") or "")
     if revision != expected_revision:
         failures.append(f"restored database revision must be exactly {expected_revision}")
@@ -452,7 +436,7 @@ def audit(args: argparse.Namespace) -> dict:
             == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
         ) else "separate_supabase_project",
         "staging_database_host": host,
-        "expected_runtime_role": args.expected_runtime_role,
+        "expected_audit_role": args.expected_audit_role,
         "expected_revision": expected_revision,
         "checks": observed,
         "failures": failures,
@@ -469,7 +453,7 @@ def main() -> int:
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
     parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
     parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
-    parser.add_argument("--expected-runtime-role", required=True)
+    parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
     parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
@@ -481,6 +465,7 @@ def main() -> int:
             "restore_operation_id": report["restore_operation_id"],
             "staging_supabase_ref": report["staging_supabase_ref"],
             "revision": report["checks"].get("revision"),
+            "expected_audit_role": report["expected_audit_role"],
             "failures": report["failures"],
             "report": args.output,
         }, indent=2))
