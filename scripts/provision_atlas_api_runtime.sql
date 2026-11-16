@@ -67,7 +67,7 @@ BEGIN
           AND c.relname NOT IN (
             'alembic_version','audit_log','audit_log_external_delivery',
             'customer_paper_submission_audit_retries','customer_ledger_accounts',
-            'withdrawals','ledger_entries','ledger_journals','ledger_journal_lines',
+            'withdrawals','trades','ledger_entries','ledger_journals','ledger_journal_lines',
             'research_trial_archive','research_trial_ledger_head','research_holdout_registry'
           )
     LOOP
@@ -83,7 +83,7 @@ $atlas_api_runtime_grants$;
 -- Financial account and withdrawal history may be updated, never deleted.
 GRANT SELECT ON TABLE public.alembic_version TO atlas_api_runtime;
 GRANT SELECT, INSERT, UPDATE ON TABLE
-    public.customer_ledger_accounts, public.withdrawals
+    public.customer_ledger_accounts, public.withdrawals, public.trades
 TO atlas_api_runtime;
 GRANT SELECT, INSERT ON TABLE
     public.audit_log, public.ledger_entries, public.ledger_journals,
@@ -113,6 +113,7 @@ SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
        has_table_privilege(r.rolname,'public.customer_ledger_accounts','UPDATE') AS ledger_update,
        has_table_privilege(r.rolname,'public.customer_ledger_accounts','DELETE') AS ledger_delete,
        has_table_privilege(r.rolname,'public.withdrawals','DELETE') AS withdrawal_delete,
+       has_table_privilege(r.rolname,'public.trades','DELETE') AS trades_delete,
        has_table_privilege(r.rolname,'public.research_trial_ledger_head','UPDATE') AS trial_head_update,
        has_table_privilege(r.rolname,'public.research_holdout_registry','INSERT') AS holdout_insert,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
