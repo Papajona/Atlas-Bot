@@ -8,6 +8,7 @@ import pytest
 
 from scripts.resolve_staging_dispatch_receipt import (
     CHECK_RUN_NAME,
+    RetryableSnapshotError,
     resolve_staging_dispatch_receipt,
 )
 
@@ -174,9 +175,25 @@ def test_rejects_duplicate_receipts_split_across_pages():
 
 def test_rejects_partial_paginated_api_results():
     receipt = _payload()[0]["check_runs"][0]
-    with pytest.raises(ValueError, match="pagination is incomplete"):
+    with pytest.raises(RetryableSnapshotError, match="snapshot is incomplete"):
         resolve_staging_dispatch_receipt(
             [{"total_count": 2, "check_runs": [receipt]}],
+            request_id=REQUEST_ID,
+            workflow_path=WORKFLOW,
+            expected_sha=SHA,
+        )
+
+
+
+def test_total_count_change_during_pagination_is_retryable():
+    receipt = _payload()[0]["check_runs"][0]
+    payload = [
+        {"total_count": 1, "check_runs": []},
+        {"total_count": 2, "check_runs": [receipt]},
+    ]
+    with pytest.raises(RetryableSnapshotError, match="total_count changed"):
+        resolve_staging_dispatch_receipt(
+            payload,
             request_id=REQUEST_ID,
             workflow_path=WORKFLOW,
             expected_sha=SHA,
@@ -234,6 +251,7 @@ def test_no_url_dispatch_fallback_is_nonce_bound_for_both_child_workflows():
     wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
     assert "resolve_staging_dispatch_run_id()" in wait_step
     assert "--paginate --slurp" in wait_step
+    assert "rc != 3 && rc != 4" in wait_step
     assert "check-runs?check_name=Atlas%20staging%20dispatch%20correlation" in wait_step
     assert "scripts/resolve_staging_dispatch_receipt.py" in wait_step
     assert "2.87.0" in wait_step and "sort -V" in wait_step
