@@ -593,6 +593,17 @@ async def _fill_open_order(
     elapsed_bars = int(elapsed_seconds // timeframe_seconds)
     is_protective_exit = str(meta.get("order_role") or "").upper() == "PROTECTIVE_EXIT"
     ttl_bars = max(1, int(settings.paper_order_ttl_bars))
+    try:
+        calibrated_settings = configured_paper_execution_settings(settings)
+    except PaperExecutionModelError as exc:
+        raise CustomerPaperFlowBlocked(
+            "Paper execution calibration configuration is incomplete"
+        ) from exc
+    participation_rate = (
+        calibrated_settings["max_participation_rate"]
+        if calibrated_settings is not None
+        else settings.paper_max_bar_volume_participation
+    )
     if not is_protective_exit and elapsed_bars > ttl_bars:
         await _paper_call(
             expire_customer_paper_order(
@@ -662,17 +673,6 @@ async def _fill_open_order(
         # then the no-position path above expires the stale remainder.
         remaining = min(remaining, held)
 
-    try:
-        calibrated_settings = configured_paper_execution_settings(settings)
-    except PaperExecutionModelError as exc:
-        raise CustomerPaperFlowBlocked(
-            "Paper execution calibration configuration is incomplete"
-        ) from exc
-    participation_rate = (
-        calibrated_settings["max_participation_rate"]
-        if calibrated_settings is not None
-        else settings.paper_max_bar_volume_participation
-    )
     try:
         budget = await _paper_call(register_customer_paper_market_bar(
             venue=str(state["venue"]).lower(),
