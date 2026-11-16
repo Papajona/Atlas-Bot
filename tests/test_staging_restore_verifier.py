@@ -94,7 +94,7 @@ def test_restore_audit_enforces_column_scoped_read_only_audit_identity():
     assert "has_table_privilege(r.rolname,c.oid,'TRIGGER')" in QUERY
     assert "has_table_privilege(r.rolname,c.oid,'REFERENCES')" in QUERY
     assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in QUERY
-    assert "audit role must be exactly atlas_audit_reader" in verifier
+    assert "expected audit role must be exactly atlas_audit_reader" in verifier
 
     # The verifier's allowlist and the role-provisioning SQL must be identical.
     # Table-level SELECT is deliberately absent to keep unrelated columns private.
