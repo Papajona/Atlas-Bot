@@ -27,18 +27,29 @@ def test_branch_pruning_workflows_share_concurrency_and_require_verified_propaga
     assert "ALREADY ABSENT (concurrent cleanup removed ref)" in one_time
 
 
-def test_staging_preflight_run_is_uniquely_correlated_and_rechecked_before_success():
+def test_staging_identity_preflight_is_callable_by_deployment_without_nested_dispatch():
     deploy = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text()
     preflight = (ROOT / ".github/workflows/staging-identity-preflight.yml").read_text()
 
-    assert "inputs.request_id || 'manual'" in preflight
+    assert "workflow_dispatch:" in preflight
+    assert "workflow_call:" in preflight
     assert "request_id:" in preflight
-    assert '-f "request_id=$request_id"' in deploy
-    assert 'gh_retry run view "$preflight_run_id"' in deploy
-    assert "run_name" in deploy
-    assert "select(.displayTitle == $expected)" in deploy
-    tracked_poll = deploy.index('gh_retry run view "$preflight_run_id"')
-    final_sha_check = deploy.index('if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then', tracked_poll)
-    success_message = deploy.index("PASS: read-only staging identity and isolated-ledger preflight run", tracked_poll)
-    assert final_sha_check < success_message
-    assert "gh run list" not in deploy[tracked_poll:success_message]
+    assert "verify-staging-identity:" in preflight
+    assert "gh workflow run staging-identity-preflight.yml" not in deploy
+    assert "displayTitle" not in deploy
+    job = deploy.split("  verify-staging-identity:", 1)[1].split(
+        "  customer-paper-acceptance:", 1
+    )[0]
+    assert "needs: deploy-paper-staging" in job
+    assert "if: needs.deploy-paper-staging.result == 'success'" in job
+    assert "uses: ./.github/workflows/staging-identity-preflight.yml" in job
+    assert "request_id: atlas-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}" in job
+
+
+def test_customer_acceptance_is_blocked_when_identity_preflight_does_not_pass():
+    deploy = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text()
+    acceptance_job = deploy.split("  customer-paper-acceptance:", 1)[1]
+    assert "verify-staging-identity" in acceptance_job
+    assert "if: needs.verify-staging-identity.result == 'success'" in acceptance_job
+    assert "identity_preflight_passed: ${{ needs.verify-staging-identity.result == 'success' }}" in acceptance_job
+    assert "uses: ./.github/workflows/customer-paper-staging-acceptance.yml" in acceptance_job
