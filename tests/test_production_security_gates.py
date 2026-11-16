@@ -876,3 +876,35 @@ def test_restore_audit_rejects_same_project_source_and_restore_target():
     assert "full restore audit requires a distinct non-production target" in verifier
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
 
+
+
+def test_api_runtime_grants_preserve_financial_custody_execution_and_audit_history():
+    provisioner = (ROOT / "scripts" / "provision_atlas_api_runtime.sql").read_text(encoding="utf-8")
+    protected_tables = (
+        "funding_transactions", "custody_transfers", "tron_sweeps",
+        "revenue_ledger", "cost_ledger", "referral_commissions",
+        "positions", "order_commands", "audit_chain_state",
+    )
+    for table in protected_tables:
+        assert f"'{table}'" in provisioner
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I" not in provisioner
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.%I TO atlas_api_runtime" in provisioner
+    assert "public_tables_with_delete_privileges" in provisioner
+    assert "has_table_privilege('atlas_api_runtime', c.oid, 'DELETE')" in provisioner
+    assert "GRANT SELECT ON TABLE public.referral_commissions TO atlas_api_runtime" in provisioner
+    assert "GRANT SELECT, INSERT ON TABLE public.revenue_ledger, public.cost_ledger TO atlas_api_runtime" in provisioner
+
+
+def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
+    import re
+
+    migrations = ROOT / "alembic" / "versions"
+    for path in sorted(migrations.glob("*.py")):
+        source = path.read_text(encoding="utf-8")
+        revision = re.search(r'(?m)^revision\s*=\s*["\'](\d{4})_', source)
+        if not revision or int(revision.group(1)) <= 59:
+            continue
+        if "rolbypassrls" in source and re.search(r"\bGRANT\b", source, re.IGNORECASE):
+            assert "atlas_audit_reader" in source, (
+                f"{path.name} grants privileges to BYPASSRLS roles but does not exclude atlas_audit_reader"
+            )

@@ -20,6 +20,7 @@ def valid_audit_role():
         "create_database": False,
         "replication": False,
         "bypass_rls": True,
+        "role_default_read_only": True,
         "owns_public_tables": 0,
         "role_memberships": 0,
         "public_schema_usage": True,
@@ -113,3 +114,21 @@ def test_audit_reader_column_allowlist_excludes_customer_profile_and_unneeded_wi
     assert "customer_id" not in AUDIT_REQUIRED_SELECT_COLUMNS["withdrawals"]
     assert "email" not in AUDIT_REQUIRED_SELECT_COLUMNS["withdrawals"]
 
+
+
+def test_audit_role_contract_rejects_missing_role_owned_read_only_setting_even_when_session_is_read_only():
+    role = valid_audit_role()
+    role["role_default_read_only"] = False
+    failures = audit_role_failures(role, "atlas_audit_reader", "on")
+    assert any("default_transaction_read_only" in failure for failure in failures)
+
+
+def test_audit_role_catalog_query_checks_role_and_database_default_read_only_setting():
+    from scripts.verify_staging_restore import audit_role_observations_sql
+
+    query = audit_role_observations_sql()
+    assert "'role_default_read_only'" in query
+    assert "pg_db_role_setting" in query
+    assert "s.setrole = r.oid" in query
+    assert "s.setdatabase" in query
+    assert "default_transaction_read_only" in query

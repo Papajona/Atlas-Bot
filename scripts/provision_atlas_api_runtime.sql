@@ -55,8 +55,9 @@ REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM atlas_api_runtime;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM atlas_api_runtime;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_api_runtime;
 
--- Ordinary mutable application tables receive CRUD, but never TRUNCATE,
--- REFERENCES, TRIGGER, schema CREATE, sequence setval (UPDATE), or function EXECUTE.
+-- Ordinary mutable application tables receive SELECT/INSERT/UPDATE only.
+-- DELETE is intentionally not granted on any public table: application code
+-- retains financial, custody, execution, and audit history rather than deleting it.
 DO $atlas_api_runtime_grants$
 DECLARE item record;
 BEGIN
@@ -68,11 +69,14 @@ BEGIN
             'alembic_version','audit_log','audit_log_external_delivery',
             'customer_paper_submission_audit_retries','customer_ledger_accounts',
             'withdrawals','trades','ledger_entries','ledger_journals','ledger_journal_lines',
-            'research_trial_archive','research_trial_ledger_head','research_holdout_registry'
+            'research_trial_archive','research_trial_ledger_head','research_holdout_registry',
+            'funding_transactions','custody_transfers','tron_sweeps',
+            'revenue_ledger','cost_ledger','referral_commissions',
+            'positions','order_commands','audit_chain_state'
           )
     LOOP
         EXECUTE format(
-            'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime',
+            'GRANT SELECT, INSERT, UPDATE ON TABLE public.%I TO atlas_api_runtime',
             item.relname
         );
     END LOOP;
@@ -94,6 +98,47 @@ GRANT SELECT, INSERT, UPDATE ON TABLE
 TO atlas_api_runtime;
 GRANT SELECT, UPDATE ON TABLE public.research_trial_ledger_head TO atlas_api_runtime;
 GRANT SELECT, INSERT ON TABLE public.research_holdout_registry TO atlas_api_runtime;
+
+-- State/history tables receive only the writes used by current application paths.
+-- The application has no DELETE path for any of these retained records.
+GRANT SELECT, INSERT, UPDATE ON TABLE
+    public.funding_transactions, public.custody_transfers, public.tron_sweeps,
+    public.positions, public.order_commands, public.audit_chain_state
+TO atlas_api_runtime;
+-- Billing ledgers are append-only; referral commissions are read-only in the app.
+GRANT SELECT, INSERT ON TABLE public.revenue_ledger, public.cost_ledger TO atlas_api_runtime;
+GRANT SELECT ON TABLE public.referral_commissions TO atlas_api_runtime;
+
+-- Check effective privileges, including PUBLIC grants, before committing the login.
+DO $atlas_api_runtime_privilege_guard$
+DECLARE
+    unexpected_delete_privileges integer;
+    executable_public_functions integer;
+BEGIN
+    SELECT count(*) INTO unexpected_delete_privileges
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid=c.relnamespace
+    WHERE n.nspname='public' AND c.relkind IN ('r','p')
+      AND has_table_privilege('atlas_api_runtime', c.oid, 'DELETE');
+    IF unexpected_delete_privileges <> 0 THEN
+        RAISE EXCEPTION
+            'atlas_api_runtime has DELETE on % public tables; refusing to commit the production identity',
+            unexpected_delete_privileges;
+    END IF;
+
+    SELECT count(*) INTO executable_public_functions
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public'
+      AND has_function_privilege('atlas_api_runtime', p.oid, 'EXECUTE');
+    IF executable_public_functions <> 0 THEN
+        RAISE EXCEPTION
+            'atlas_api_runtime has effective EXECUTE on % public functions; correct PUBLIC/default function grants before retrying',
+            executable_public_functions;
+    END IF;
+END
+$atlas_api_runtime_privilege_guard$;
+
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO atlas_api_runtime;
 
 ALTER ROLE atlas_api_runtime SET default_transaction_read_only = off;
@@ -114,6 +159,9 @@ SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
        has_table_privilege(r.rolname,'public.customer_ledger_accounts','DELETE') AS ledger_delete,
        has_table_privilege(r.rolname,'public.withdrawals','DELETE') AS withdrawal_delete,
        has_table_privilege(r.rolname,'public.trades','DELETE') AS trades_delete,
+       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND has_table_privilege(r.rolname,c.oid,'DELETE')) AS public_tables_with_delete_privileges,
        has_table_privilege(r.rolname,'public.research_trial_ledger_head','UPDATE') AS trial_head_update,
        has_table_privilege(r.rolname,'public.research_holdout_registry','INSERT') AS holdout_insert,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

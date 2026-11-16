@@ -120,6 +120,7 @@ def test_restore_audit_enforces_column_scoped_read_only_audit_identity():
         "create_database": False,
         "replication": False,
         "bypass_rls": True,
+        "role_default_read_only": True,
         "owns_public_tables": 0,
         "role_memberships": 0,
         "public_schema_usage": True,

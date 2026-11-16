@@ -73,6 +73,25 @@ GRANT SELECT (scope_sha256, source_sample_sha256, report_sha256, holdout_version
 GRANT SELECT (created_at, request_id, provider_id, provider, amount, currency, status, provider_status)
     ON TABLE public.withdrawals TO atlas_audit_reader;
 
+-- The verifier checks effective function privileges, including grants inherited
+-- from PUBLIC. Do not change unrelated function ACLs here: fail and roll back.
+DO $atlas_audit_public_function_guard$
+DECLARE
+    executable_public_functions integer;
+BEGIN
+    SELECT count(*) INTO executable_public_functions
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid=p.pronamespace
+    WHERE n.nspname='public'
+      AND has_function_privilege('atlas_audit_reader', p.oid, 'EXECUTE');
+    IF executable_public_functions <> 0 THEN
+        RAISE EXCEPTION
+            'atlas_audit_reader has effective EXECUTE on % public functions; the function owner must revoke unintended PUBLIC grants or correct default privileges before retrying',
+            executable_public_functions;
+    END IF;
+END
+$atlas_audit_public_function_guard$;
+
 ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on;
 ALTER ROLE atlas_audit_reader SET search_path = pg_catalog, public;
 COMMIT;

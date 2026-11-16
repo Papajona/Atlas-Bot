@@ -74,3 +74,27 @@ def test_database_audit_and_production_api_identities_are_separate_and_minimal()
     assert "atlas_audit_reader" in runbook
     assert "atlas_api_runtime" in runbook
     assert "atlas-staging-audit-db-url" in runbook
+
+
+def test_audit_role_provisioning_rolls_back_if_effective_public_function_execute_remains():
+    provisioner = (ROOT / "scripts/provision_atlas_audit_reader.sql").read_text(encoding="utf-8")
+    guard = provisioner.index("DO $atlas_audit_public_function_guard$")
+    commit = provisioner.index("COMMIT;")
+    block = provisioner[guard:commit]
+    assert "has_function_privilege('atlas_audit_reader', p.oid, 'EXECUTE')" in block
+    assert "RAISE EXCEPTION" in block
+    assert "correct default privileges" in block
+    assert "PUBLIC" in block
+    assert guard < commit
+
+
+def test_api_runtime_provisioning_has_no_public_table_delete_or_function_execute():
+    provisioner = (ROOT / "scripts/provision_atlas_api_runtime.sql").read_text(encoding="utf-8")
+    guard = provisioner.index("DO $atlas_api_runtime_privilege_guard$")
+    commit = provisioner.index("COMMIT;")
+    block = provisioner[guard:commit]
+    assert "has_table_privilege('atlas_api_runtime', c.oid, 'DELETE')" in block
+    assert "has_function_privilege('atlas_api_runtime', p.oid, 'EXECUTE')" in block
+    assert "RAISE EXCEPTION" in block
+    assert "public_tables_with_delete_privileges" in provisioner
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE" not in provisioner

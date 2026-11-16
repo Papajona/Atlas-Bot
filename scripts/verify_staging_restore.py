@@ -53,6 +53,21 @@ def audit_role_observations_sql() -> str:
       'create_database', r.rolcreatedb,
       'replication', r.rolreplication,
       'bypass_rls', r.rolbypassrls,
+      'role_default_read_only', COALESCE((
+        SELECT lower(split_part(cfg.setting, '=', 2)) IN ('on', 'true', '1')
+        FROM pg_db_role_setting s
+        CROSS JOIN LATERAL unnest(s.setconfig) AS cfg(setting)
+        WHERE s.setrole = r.oid
+          AND s.setdatabase IN (
+            0,
+            (SELECT oid FROM pg_database WHERE datname = current_database())
+          )
+          AND lower(split_part(cfg.setting, '=', 1)) = 'default_transaction_read_only'
+        ORDER BY (
+          s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+        ) DESC
+        LIMIT 1
+      ), false),
       'owns_public_tables', (
         SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid
@@ -150,6 +165,8 @@ def audit_role_failures(role: object, expected_role: str, transaction_read_only:
             failures.append(f"audit role has forbidden capability: {key}")
     if not truthy(role.get("bypass_rls")) or not truthy(role.get("public_schema_usage")):
         failures.append("audit role lacks the reviewed backend-only BYPASSRLS/public-schema USAGE contract")
+    if not truthy(role.get("role_default_read_only")):
+        failures.append("audit role default_transaction_read_only is not enabled at role/database level")
     for key in (
         "owns_public_tables",
         "role_memberships",
