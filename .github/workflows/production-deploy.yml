@@ -361,6 +361,8 @@ jobs:
               raise SystemExit("BLOCKED: unexpected database or login/current-role identity mismatch")
           if role in reserved:
               raise SystemExit("BLOCKED: production runtime cannot use a reserved PostgreSQL/Supabase role")
+          if role != "atlas_api_runtime":
+              raise SystemExit("BLOCKED: production DATABASE_URL must use the dedicated atlas_api_runtime identity; paper and audit readers are not production writers")
           if is_superuser.lower() == "true" or can_create_roles.lower() == "true" or can_create_databases.lower() == "true" or can_replicate.lower() == "true":
               raise SystemExit("BLOCKED: production database runtime role has administrative privileges")
           if bypass_rls.lower() != "true":
