@@ -22,13 +22,13 @@ def test_acceptance_dispatch_binds_to_run_url_returned_by_gh():
     block = _acceptance_dispatch_block()
 
     assert 'acceptance_dispatch_output="$(gh workflow run customer-paper-staging-acceptance.yml' in block
-    assert 'acceptance_run_url="$(grep -Eo "https://github\\\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in block
+    assert 'acceptance_run_url="$(grep -Eo "https://github\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in block
     assert 'acceptance_run_id="${acceptance_run_url##*/}"' in block
     assert "gh_retry run list" not in block
     assert "select(.displayTitle == $expected)" not in block
 
 
-def test_discovered_acceptance_run_is_still_rejected_when_sha_or_branch_differs():
+def test_dispatched_acceptance_run_is_still_rejected_when_sha_branch_or_event_differs():
     block = _acceptance_dispatch_block()
 
     assert 'candidate_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
