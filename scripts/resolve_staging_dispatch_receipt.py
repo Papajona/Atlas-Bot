@@ -27,7 +27,7 @@ _REQUIRED_FIELDS = {
 
 
 def resolve_staging_dispatch_receipt(
-    payload: dict[str, Any],
+    payload: Any,
     *,
     request_id: str,
     workflow_path: str,
@@ -65,19 +65,18 @@ def resolve_staging_dispatch_receipt(
     if expected_total != len(check_runs):
         raise ValueError("check-runs pagination is incomplete; refusing a partial nonce lookup")
 
-    matches = [
-        item
-        for item in check_runs
-        if isinstance(item, dict)
-        and item.get("name") == CHECK_RUN_NAME
-        and item.get("external_id") == request_id
+    nonce_matches = [
+        item for item in check_runs
+        if isinstance(item, dict) and item.get("external_id") == request_id
     ]
-    if not matches:
+    if not nonce_matches:
         raise LookupError("nonce-bound staging receipt has not appeared yet")
-    if len(matches) != 1:
+    if len(nonce_matches) != 1:
         raise ValueError("nonce is attached to multiple check runs; run identity is ambiguous")
 
-    receipt = matches[0]
+    receipt = nonce_matches[0]
+    if receipt.get("name") != CHECK_RUN_NAME:
+        raise ValueError("nonce receipt uses an unexpected check-run name")
     if receipt.get("head_sha") != expected_sha:
         raise ValueError("receipt check run is attached to a different commit")
     if (receipt.get("app") or {}).get("slug") != "github-actions":
