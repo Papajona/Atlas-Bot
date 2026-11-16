@@ -73,6 +73,27 @@ def resolve_staging_dispatch_receipt(
     if expected_total != len(check_runs):
         raise RetryableSnapshotError("check-runs pagination snapshot is incomplete; retry the complete snapshot")
 
+    # GitHub's check-runs list can move while pages are being fetched. In that
+    # case the same check run may appear on adjacent pages even when total_count
+    # and the aggregate page length still agree. Treat overlap as a transient
+    # snapshot race; never mistake the repeated row for two nonce receipts.
+    seen_check_run_ids: set[int] = set()
+    for item in check_runs:
+        if not isinstance(item, dict):
+            raise ValueError("a check-run entry has an unexpected shape")
+        check_run_id = item.get("id")
+        if (
+            isinstance(check_run_id, bool)
+            or not isinstance(check_run_id, int)
+            or check_run_id <= 0
+        ):
+            raise ValueError("a check-run entry has no valid positive numeric ID")
+        if check_run_id in seen_check_run_ids:
+            raise RetryableSnapshotError(
+                "check-runs pagination repeated a check-run ID; retry the complete snapshot"
+            )
+        seen_check_run_ids.add(check_run_id)
+
     nonce_matches = [
         item for item in check_runs
         if isinstance(item, dict) and item.get("external_id") == request_id
