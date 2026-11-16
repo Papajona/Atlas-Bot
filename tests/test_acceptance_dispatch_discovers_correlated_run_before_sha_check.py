@@ -22,17 +22,18 @@ def test_acceptance_dispatch_binds_to_run_url_returned_by_gh():
     block = _acceptance_dispatch_block()
 
     assert 'acceptance_dispatch_output="$(gh workflow run customer-paper-staging-acceptance.yml' in block
-    assert 'acceptance_run_url="$(grep -Eo "https://github\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in block
+    assert 'acceptance_run_url="$(grep -Eo "https://github\\\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in block
     assert 'acceptance_run_id="${acceptance_run_url##*/}"' in block
     assert "gh_retry run list" not in block
     assert "select(.displayTitle == $expected)" not in block
 
 
-def test_dispatched_acceptance_run_is_still_rejected_when_sha_branch_or_event_differs():
+def test_dispatched_acceptance_run_is_rejected_when_sha_branch_or_event_differs():
     block = _acceptance_dispatch_block()
 
-    assert 'candidate_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
-    assert 'candidate_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
-    assert 'if [[ "$candidate_sha" != "$GITHUB_SHA" || "$candidate_branch" != "main" ]]; then' in block
-    assert "BLOCKED: uniquely correlated acceptance run is not on exact main commit" in block
-    assert '|| "$run_event" != "workflow_dispatch" ]]' in block
+    assert 'run_sha="$(jq -r \' .headSha // "" \' <<< "$run_json")"' not in block
+    assert 'run_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
+    assert 'run_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
+    assert 'run_event="$(jq -r \'.event // ""\' <<< "$run_json")"' in block
+    assert 'if [[ "$run_id" != "$acceptance_run_id" || "$run_sha" != "$GITHUB_SHA" || "$run_branch" != "main" || "$run_event" != "workflow_dispatch" ]]; then' in block
+    assert 'BLOCKED: tracked customer-paper acceptance run ID, SHA, branch, or event does not match this dispatch.' in block
