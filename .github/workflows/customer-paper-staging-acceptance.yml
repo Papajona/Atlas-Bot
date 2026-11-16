@@ -24,8 +24,9 @@ on:
         type: string
 
 permissions:
-  contents: read
   actions: read
+  checks: write
+  contents: read
   id-token: write
 
 concurrency:
@@ -55,6 +56,35 @@ jobs:
       DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}
       DISPATCH_ID: ${{ inputs.dispatch_id }}
     steps:
+      - name: Publish nonce-bound workflow-run correlation receipt
+        id: dispatch-receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUEST_ID: ${{ inputs.dispatch_id }}
+          WORKFLOW_PATH: .github/workflows/customer-paper-staging-acceptance.yml
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$REQUEST_ID" =~ ^[a-f0-9]{32}$ ]] || { echo "BLOCKED: invalid customer-paper acceptance correlation nonce"; exit 1; }
+          receipt_summary="$(printf '%s\\n' \\
+            "request_id=$REQUEST_ID" \\
+            "workflow_path=$WORKFLOW_PATH" \\
+            "run_id=$GITHUB_RUN_ID" \\
+            "run_attempt=$GITHUB_RUN_ATTEMPT" \\
+            "head_sha=$GITHUB_SHA" \\
+            "head_branch=$GITHUB_REF_NAME" \\
+            "event=$GITHUB_EVENT_NAME")"
+          receipt_json="$(gh api --method POST "/repos/$GITHUB_REPOSITORY/check-runs" \\
+            -f name="Atlas staging dispatch correlation" \\
+            -f head_sha="$GITHUB_SHA" \\
+            -f external_id="$REQUEST_ID" \\
+            -f status="in_progress" \\
+            -f "output[title]=Atlas staging dispatch correlation" \\
+            -f "output[summary]=$receipt_summary")"
+          receipt_id="$(jq -er '.id' <<< "$receipt_json")"
+          [[ "$receipt_id" =~ ^[0-9]+$ ]]
+          echo "check_run_id=$receipt_id" >> "$GITHUB_OUTPUT"
+
       - name: Validate exact successful main deployment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -249,3 +279,26 @@ jobs:
           path: ${{ runner.temp }}/customer-paper-acceptance.json
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Finalize nonce-bound workflow-run correlation receipt
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHECK_RUN_ID: ${{ steps.dispatch-receipt.outputs.check_run_id }}
+          JOB_STATUS: ${{ job.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$CHECK_RUN_ID" =~ ^[0-9]+$ ]]; then
+            echo "No nonce receipt was created; parent dispatch will fail closed if no exact run URL was returned."
+            exit 0
+          fi
+          case "$JOB_STATUS" in
+            success) conclusion=success ;;
+            cancelled) conclusion=cancelled ;;
+            *) conclusion=failure ;;
+          esac
+          gh api --method PATCH "/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \\
+            -f status=completed \\
+            -f conclusion="$conclusion" \\
+            -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
