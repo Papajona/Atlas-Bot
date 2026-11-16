@@ -345,12 +345,14 @@ def add_research_integrity_observations(
 
 
 def audit(args: argparse.Namespace) -> dict:
+    staging_ref = os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
+    production_ref = os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
+    if staging_ref == production_ref:
+        raise ValueError(
+            "full restore audit requires a distinct non-production target; same-project restore could overwrite the active source"
+        )
     database_url = os.environ.get("DATABASE_URL", "")
-    env, host = read_database_uri(
-        database_url,
-        os.environ.get("STAGING_SUPABASE_PROJECT_REF", ""),
-        os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
-    )
+    env, host = read_database_uri(database_url, staging_ref, production_ref)
     if not args.restore_operation_id.strip():
         raise ValueError("A real backup restore operation ID is required")
     if not args.backup_reference.strip():
@@ -376,12 +378,10 @@ def audit(args: argparse.Namespace) -> dict:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Read-only SQL audit returned invalid JSON") from exc
 
-    staging_ref = os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
-    production_ref = os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
-    if staging_ref == production_ref:
-        raise ValueError(
-            "full restore audit requires a distinct non-production target; same-project restore could overwrite the active source"
-        )
+    observed = add_research_integrity_observations(observed, env=env)
+    if observed.get("current_user") != observed.get("session_user"):
+        raise ValueError("audit connection current_user/session_user identity mismatch")
+    expected_revision = args.expected_revision
     failures = audit_role_failures(
         observed.get("audit_role"),
         args.expected_audit_role,
