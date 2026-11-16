@@ -265,12 +265,12 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
         "dispatch_id:", "identity_preflight_passed:",
     ):
         assert input_name in trigger_header
-    assert "run-name: Customer Paper Acceptance \${{ inputs.target_sha }} deploy \${{ inputs.deployment_run_id }} attempt \${{ inputs.deployment_run_attempt }} correlation \${{ inputs.dispatch_id }}" in workflow
-    assert "TARGET_SHA: \${{ inputs.target_sha }}" in workflow
-    assert "DEPLOYMENT_RUN_ID: \${{ inputs.deployment_run_id }}" in workflow
-    assert "DEPLOYMENT_RUN_ATTEMPT: \${{ inputs.deployment_run_attempt }}" in workflow
-    assert "DISPATCH_ID: \${{ inputs.dispatch_id }}" in workflow
-    assert "IDENTITY_PREFLIGHT_PASSED: \${{ inputs.identity_preflight_passed || false }}" in workflow
+    assert "run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }} attempt ${{ inputs.deployment_run_attempt }} correlation ${{ inputs.dispatch_id }}" in workflow
+    assert "TARGET_SHA: ${{ inputs.target_sha }}" in workflow
+    assert "DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}" in workflow
+    assert "DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}" in workflow
+    assert "DISPATCH_ID: ${{ inputs.dispatch_id }}" in workflow
+    assert "IDENTITY_PREFLIGHT_PASSED: ${{ inputs.identity_preflight_passed || false }}" in workflow
     assert '[[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]' in workflow
     assert '[[ "$DISPATCH_ID" =~ ^([a-f0-9]{32}|atlas-[0-9]+-[1-9][0-9]*-[a-f0-9]{40})$ ]]' in workflow
     assert "--jq '.run_attempt'" in workflow
@@ -285,7 +285,7 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     assert 'test "$deploy_outcome" = "success"' in workflow
     assert 'test "$preflight_outcome" = "success"' in workflow
     assert "preflight_outcome=" in workflow
-    assert "ref: \${{ inputs.target_sha }}" in workflow
+    assert "ref: ${{ inputs.target_sha }}" in workflow
     assert "actions: read" in workflow
     assert 'ADAPTIVE_AI_ENABLED: "false"' in workflow
     assert "git ls-remote" not in workflow
@@ -310,10 +310,10 @@ def test_staging_deploy_reuses_customer_acceptance_only_after_identity_preflight
     assert "verify-staging-identity" in acceptance
     assert "if: needs.verify-staging-identity.result == 'success'" in acceptance
     assert "uses: ./.github/workflows/customer-paper-staging-acceptance.yml" in acceptance
-    assert "identity_preflight_passed: \${{ needs.verify-staging-identity.result == 'success' }}" in acceptance
-    assert "target_sha: \${{ github.sha }}" in acceptance
-    assert "deployment_run_id: \${{ format('{0}', github.run_id) }}" in acceptance
-    assert "deployment_run_attempt: \${{ format('{0}', github.run_attempt) }}" in acceptance
+    assert "identity_preflight_passed: ${{ needs.verify-staging-identity.result == 'success' }}" in acceptance
+    assert "target_sha: ${{ github.sha }}" in acceptance
+    assert "deployment_run_id: ${{ format('{0}', github.run_id) }}" in acceptance
+    assert "deployment_run_attempt: ${{ format('{0}', github.run_attempt) }}" in acceptance
     assert "secrets: inherit" in acceptance
 
 def test_acceptance_workflow_checks_project_and_least_privilege_roles_before_drill():
