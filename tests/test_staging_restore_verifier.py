@@ -59,14 +59,14 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert f'default="{expected}"' in provider_verifier
     assert f"verifies revision `{expected}`" in runbook
     assert "app.paper_staging:app" in identity_workflow
-    assert "no second Supabase project or paid branch is required" in runbook
+    assert "no second project or paid branch is required" in runbook
     # Same-project staging and read-only reconciliation are allowed, but a full
     # backup restore may never target the active production database.
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
     assert "A restore audit target must be a distinct non-production Supabase project reference" in runbook
-    assert "the current Free single-project setup has no verified separate restore target" in runbook
+    assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
 
 
@@ -83,7 +83,7 @@ def test_restore_audit_enforces_column_scoped_read_only_audit_identity():
 
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     provisioner = Path("scripts/provision_atlas_audit_reader.sql").read_text(encoding="utf-8")
-    normalized_provisioner = re.sub(r"\\s+", " ", provisioner)
+    normalized_provisioner = re.sub(r"\s+", " ", provisioner)
 
     assert "'required_select_missing'" in QUERY
     assert "'unexpected_select'" in QUERY
