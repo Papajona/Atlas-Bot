@@ -56,8 +56,12 @@ def audit_role_observations_sql() -> str:
       'required_select_missing', (
         SELECT count(*)
         FROM unnest(ARRAY[{table_names}]::text[]) AS required(table_name)
-        WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
-           OR NOT has_table_privilege(r.rolname,format('public.%I',required.table_name),'SELECT')
+        LEFT JOIN pg_class c
+          ON c.relnamespace = 'public'::regnamespace
+         AND c.relname = required.table_name
+         AND c.relkind IN ('r','p')
+        WHERE c.oid IS NULL
+           OR NOT has_table_privilege(r.rolname,c.oid,'SELECT')
       ),
       'unexpected_select', (
         SELECT count(*)
