@@ -49,7 +49,11 @@ def test_lag_regimes_for_attribution_uses_only_the_preceding_completed_bar():
     from app.strategy_router import lag_regimes_for_attribution
 
     index = pd.date_range("2026-01-01", periods=4, freq="h", tz="UTC")
-    regimes = pd.Series(["TREND_UP", "RANGE", "HIGH_VOL", "TREND_DOWN"], index=index, name="regime")
+    regimes = pd.Series(
+        ["TREND_UP", "RANGE", "HIGH_VOL", "TREND_DOWN"],
+        index=index,
+        name="regime",
+    )
     lagged = lag_regimes_for_attribution(regimes)
 
     assert lagged.index.equals(regimes.index)
@@ -62,15 +66,32 @@ def test_regime_performance_attributes_open_return_to_entry_regime(monkeypatch):
     from app import strategy_router as router
 
     frame = _df(5)
-    raw_regimes = pd.Series(["TREND_UP", "RANGE", "RANGE", "TREND_UP", "RANGE"], index=frame.index)
-    executable_returns = pd.Series([0.01, 0.02, 0.08, 0.04, 0.16], index=frame.index, name="net_return")
-    signal_frame = pd.DataFrame(
-        {**{name: np.zeros(len(frame)) for name in router.STRATEGIES}, "realized_vol": np.ones(len(frame))},
+    raw_regimes = pd.Series(
+        ["TREND_UP", "RANGE", "RANGE", "TREND_UP", "RANGE"],
         index=frame.index,
     )
-    monkeypatch.setattr(router, "classify_regime", lambda df, asset="crypto": raw_regimes.reindex(df.index))
-    monkeypatch.setattr(router, "strategy_signals", lambda df, cfg, asset="crypto": signal_frame.reindex(df.index))
-    monkeypatch.setattr(router, "_strategy_returns", lambda *args, **kwargs: executable_returns.reindex(args[0].index))
+    executable_returns = pd.Series(
+        [0.01, 0.02, 0.08, 0.04, 0.16], index=frame.index, name="net_return"
+    )
+    signal_frame = pd.DataFrame(
+        {
+            **{name: np.zeros(len(frame)) for name in router.STRATEGIES},
+            "realized_vol": np.ones(len(frame)),
+        },
+        index=frame.index,
+    )
+    monkeypatch.setattr(
+        router, "classify_regime",
+        lambda df, asset="crypto": raw_regimes.reindex(df.index),
+    )
+    monkeypatch.setattr(
+        router, "strategy_signals",
+        lambda df, cfg, asset="crypto": signal_frame.reindex(df.index),
+    )
+    monkeypatch.setattr(
+        router, "_strategy_returns",
+        lambda *args, **kwargs: executable_returns.reindex(args[0].index),
+    )
 
     performance = router.regime_conditioned_strategy_performance(frame, StrategyConfig())
     # Row 0 has no preceding entry regime; rows 1/4 are TREND_UP and 2/3 RANGE.
@@ -80,6 +101,7 @@ def test_regime_performance_attributes_open_return_to_entry_regime(monkeypatch):
     assert range_["bars"] == 2
     assert np.isclose(trend["mean_return"], 0.09)
     assert np.isclose(range_["mean_return"], 0.06)
+
 
 def test_online_scores_require_minimum_observations():
     from datetime import datetime, timezone
@@ -139,24 +161,36 @@ def test_online_scores_prefer_current_regime_and_net_return():
     assert scores["breakout"] > 0
 
 
+
 def test_paired_switch_uses_lagged_entry_regime_but_live_regime_stays_current(monkeypatch):
     from app import strategy_router as router
 
     frame = _df(300)
     raw_labels = np.array(["TREND_UP"] * 295 + ["RANGE"] * 5)
-    monkeypatch.setattr(router, "classify_regime", lambda df, asset="crypto": pd.Series(raw_labels[:len(df)], index=df.index))
+    monkeypatch.setattr(
+        router, "classify_regime",
+        lambda df, asset="crypto": pd.Series(raw_labels[:len(df)], index=df.index),
+    )
     metrics = {
-        name: {"score": 2.0 if name == "trend" else 1.0 if name == "momentum" else 0.0, "bars": 100, "trades": 100}
+        name: {
+            "score": 2.0 if name == "trend" else 1.0 if name == "momentum" else 0.0,
+            "bars": 100,
+            "trades": 100,
+        }
         for name in router.STRATEGIES
     }
     monkeypatch.setattr(
         router, "regime_conditioned_strategy_performance",
         lambda *args, **kwargs: {name: {"RANGE": row} for name, row in metrics.items()},
     )
-    monkeypatch.setattr(router, "_score_metrics", lambda row, min_trades=20: row["score"])
+    monkeypatch.setattr(
+        router, "_score_metrics", lambda row, min_trades=20: row["score"]
+    )
     monkeypatch.setattr(
         router, "_strategy_returns",
-        lambda df, cfg, strategy, costs_bps, asset, **kwargs: pd.Series(np.zeros(len(df)), index=df.index),
+        lambda df, cfg, strategy, costs_bps, asset, **kwargs: pd.Series(
+            np.zeros(len(df)), index=df.index
+        ),
     )
     signal_frame = pd.DataFrame(
         {
@@ -167,7 +201,10 @@ def test_paired_switch_uses_lagged_entry_regime_but_live_regime_stays_current(mo
         },
         index=frame.index,
     )
-    monkeypatch.setattr(router, "strategy_signals", lambda df, cfg, asset="crypto": signal_frame.reindex(df.index))
+    monkeypatch.setattr(
+        router, "strategy_signals",
+        lambda df, cfg, asset="crypto": signal_frame.reindex(df.index),
+    )
     paired_lengths = []
 
     def capture_paired_lead(challenger, incumbent, **kwargs):
@@ -176,14 +213,21 @@ def test_paired_switch_uses_lagged_entry_regime_but_live_regime_stays_current(mo
 
     monkeypatch.setattr(router, "paired_return_lead", capture_paired_lead)
     selection = router.select_strategy(
-        frame, StrategyConfig(), current_strategy="momentum", min_regime_bars=3,
-        min_trades=0, switch_min_advantage=0.0, online_weight=0.0, blend_enabled=False,
+        frame,
+        StrategyConfig(),
+        current_strategy="momentum",
+        min_regime_bars=3,
+        min_trades=0,
+        switch_min_advantage=0.0,
+        online_weight=0.0,
+        blend_enabled=False,
     )
 
     assert selection["regime"] == "RANGE"
     assert selection["action"] == "HOLD"
     # Four RANGE labels in history yield three entry-regime observations.
     assert paired_lengths == [(3, 3)]
+
 
 def test_policy_walk_forward_includes_online_feedback_and_switch_controls():
     df = _df(1000)
