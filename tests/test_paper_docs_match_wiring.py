@@ -65,10 +65,15 @@ def test_readiness_doc_distinguishes_market_context_from_calibrated_fill_model()
 
 def test_calibrated_platform_quote_preflight_precedes_order_cursor_advancement() -> None:
     source = (ROOT / "app" / "execution.py").read_text(encoding="utf-8")
-    preflight = source.index('"status": "WAITING_FOR_EXECUTION_CONTEXT"')
-    advance = source.index("order_state.bars_elapsed = int(order_state.bars_elapsed or 0) + 1")
-    assert preflight < advance
+    context_validation = source.index("calibrated_context_valid = context_valid")
+    order_guard = source.index("if not calibrated_context_valid:", context_validation)
+    advance = source.index(
+        "order_state.bars_elapsed = int(order_state.bars_elapsed or 0) + 1",
+        order_guard,
+    )
+    assert context_validation < order_guard < advance
     assert "and context_bar_at == bar_at" in source
+    assert "The verified closed OHLC bar is still scanned below for exits." in source
 
 
 def test_platform_protective_exit_is_not_rejected_or_ttl_cancelled_by_model() -> None:
