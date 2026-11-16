@@ -1,9 +1,7 @@
-"""Regression tests for exact-SHA staging acceptance dispatch discovery.
+"""Regression tests for exact-SHA staging acceptance dispatch correlation.
 
-The dispatch is correlated by a unique run name containing the deployment SHA,
-run ID, attempt, and nonce. Discovery must not filter by the pre-dispatch SHA:
-if main advances during dispatch, the correlated run must be found and rejected
-immediately by its explicit head-SHA check rather than hidden until timeout.
+The dispatch response supplies the exact workflow-run URL. The verifier must
+poll only that run and reject it if its SHA, branch, or event is unexpected.
 """
 from pathlib import Path
 
@@ -20,22 +18,21 @@ def _acceptance_dispatch_block() -> str:
     return workflow.split(marker, 1)[1]
 
 
-def test_acceptance_run_discovery_uses_unique_correlation_without_sha_filter():
-    block = _acceptance_dispatch_block()
-    discovery = block.split('run_list="$(gh_retry run list', 1)[1].split(')"', 1)[0]
-
-    assert '--workflow "customer-paper-staging-acceptance.yml"' in discovery
-    assert "--event workflow_dispatch" in discovery
-    assert "--json databaseId,headSha,headBranch,displayTitle" in discovery
-    assert '--commit "$GITHUB_SHA"' not in discovery
-    assert 'select(.displayTitle == $expected)' in block
-
-
-def test_discovered_acceptance_run_is_still_rejected_when_sha_or_branch_differs():
+def test_acceptance_dispatch_binds_to_run_url_returned_by_gh():
     block = _acceptance_dispatch_block()
 
-    assert 'candidate_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
-    assert 'candidate_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
-    assert 'if [[ "$candidate_sha" != "$GITHUB_SHA" || "$candidate_branch" != "main" ]]; then' in block
-    assert "BLOCKED: uniquely correlated acceptance run is not on exact main commit" in block
-    assert '|| "$run_name" != "$expected_run_name" ]]' in block
+    assert 'acceptance_dispatch_output="$(gh workflow run customer-paper-staging-acceptance.yml' in block
+    assert 'acceptance_run_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in block
+    assert 'acceptance_run_id="${acceptance_run_url##*/}"' in block
+    assert "gh_retry run list" not in block
+    assert "select(.displayTitle == $expected)" not in block
+
+
+def test_dispatched_acceptance_run_is_rejected_when_sha_branch_or_event_differs():
+    block = _acceptance_dispatch_block()
+
+    assert 'run_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
+    assert 'run_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
+    assert 'run_event="$(jq -r \'.event // ""\' <<< "$run_json")"' in block
+    assert 'if [[ "$run_id" != "$acceptance_run_id" || "$run_sha" != "$GITHUB_SHA" || "$run_branch" != "main" || "$run_event" != "workflow_dispatch" ]]; then' in block
+    assert 'BLOCKED: tracked customer-paper acceptance run ID, SHA, branch, or event does not match this dispatch.' in block

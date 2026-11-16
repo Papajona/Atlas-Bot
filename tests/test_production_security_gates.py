@@ -505,7 +505,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "github.ref == 'refs/heads/main'" in job
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
-    assert '--event workflow_dispatch' in deploy  # used for the uniquely correlated preflight dispatch
+    assert "run_event" in deploy
     assert '.event == "workflow_dispatch"' in deploy
     assert '.event == "push"' in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
@@ -530,8 +530,12 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
         "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
     )[1]
     assert not any(line.endswith(chr(92) * 2) for line in acceptance_dispatch.splitlines())
-    assert "select(.displayTitle == $expected)" in deploy
-    assert "uniquely correlated staging preflight run was not observed" in deploy
+    assert 'dispatch_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in deploy
+    assert 'preflight_run_id="${dispatch_url##*/}"' in deploy
+    assert 'acceptance_run_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in deploy
+    assert 'acceptance_run_id="${acceptance_run_url##*/}"' in deploy
+    assert "select(.displayTitle == $expected)" not in deploy
+    assert "uniquely correlated staging preflight run was not observed" not in deploy
     assert "main advanced during staging preflight" in deploy
     gate_wait = deploy.split(
         "      - name: Wait for required CI gates to pass on this exact commit", 1

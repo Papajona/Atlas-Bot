@@ -35,8 +35,12 @@ def test_staging_preflight_run_is_uniquely_correlated_and_rechecked_before_succe
     assert "request_id:" in preflight
     assert '-f "request_id=$request_id"' in deploy
     assert 'gh_retry run view "$preflight_run_id"' in deploy
-    assert "run_name" in deploy
-    assert "select(.displayTitle == $expected)" in deploy
+    assert 'dispatch_output="$(gh workflow run staging-identity-preflight.yml' in deploy
+    assert 'dispatch_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in deploy
+    assert 'preflight_run_id="${dispatch_url##*/}"' in deploy
+    assert "run_event" in deploy
+    assert "run_branch" in deploy
+    assert "select(.displayTitle == $expected)" not in deploy
     tracked_poll = deploy.index('gh_retry run view "$preflight_run_id"')
     final_sha_check = deploy.index('if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then', tracked_poll)
     success_message = deploy.index("PASS: read-only staging identity and isolated-ledger preflight run", tracked_poll)

@@ -307,7 +307,8 @@ def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_pre
     assert '-f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT"' in deploy
     assert '-f "dispatch_id=$dispatch_id"' in deploy
     assert 'secrets.token_hex(16)' in deploy
-    assert '$GITHUB_RUN_ATTEMPT correlation $dispatch_id' in deploy
+    assert 'acceptance_run_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in deploy
+    assert "select(.displayTitle == $expected)" not in deploy
     assert 'acceptance_wait_seconds=5400' in deploy
     assert 'acceptance_poll_interval_seconds=30' in deploy
     assert 'while true; do' in deploy
