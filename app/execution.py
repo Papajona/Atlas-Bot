@@ -1289,6 +1289,7 @@ async def advance_platform_paper_orders(
     except (TypeError, ValueError, OverflowError, KeyError, AttributeError) as exc:
         return {"status": "DATA_PROVENANCE_INVALID", "reason": str(exc)[:200], "orders_seen": 0, "fills": 0}
 
+    calibrated_context_valid = True
     if calibrated_settings is not None:
         try:
             context = dict(market_context or {})
@@ -1323,15 +1324,7 @@ async def advance_platform_paper_orders(
             )
         except (TypeError, ValueError, OverflowError, KeyError, AttributeError):
             context_valid = False
-        if not context_valid:
-            return {
-                "status": "WAITING_FOR_EXECUTION_CONTEXT",
-                "bar_at": bar_at.isoformat(),
-                "orders_seen": 0,
-                "attempts": 0,
-                "fills": 0,
-                "liquidity_verified": False,
-            }
+        calibrated_context_valid = context_valid
 
     volume_unit = str(provenance.get("volume_unit") or "unknown")
     verified_liquidity = bool(
@@ -1486,6 +1479,10 @@ async def advance_platform_paper_orders(
                 break
 
         for trade, order_state in pairs:
+            # Missing/stale quote context must not consume an order bar, trigger TTL,
+            # or fill. The verified closed OHLC bar is still scanned below for exits.
+            if not calibrated_context_valid:
+                continue
             if trade.status not in {"OPEN", "PARTIAL"} or order_state.status not in {"OPEN", "PARTIAL"}:
                 continue
             try:
@@ -1938,7 +1935,7 @@ async def advance_platform_paper_orders(
     for item in audit_events:
         await audit("PAPER_FILL_EVENT", item, actor_id="paper-simulator")
     return {
-        "status": "PROCESSED",
+        "status": "PROCESSED" if calibrated_context_valid else "WAITING_FOR_EXECUTION_CONTEXT",
         "bar_at": bar_at.isoformat(),
         "bar_key": bar_key,
         "orders_seen": len(pairs),
