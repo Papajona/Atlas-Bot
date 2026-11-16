@@ -9,6 +9,7 @@ on:
 permissions:
   contents: read
   actions: write
+  checks: read
   id-token: write
 
 concurrency:
@@ -74,6 +75,43 @@ jobs:
               attempt=$((attempt + 1))
               if (( delay < 30 )); then delay=$((delay * 2)); fi
             done
+            return 1
+          }
+
+          require_gh_cli_run_details() {
+            local version
+            version="$(gh version | awk 'NR == 1 {print $3}')"
+            python3 - "$version" <<'PY'
+          import re, sys
+          match = re.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])
+          if not match or tuple(map(int, match.groups())) < (2, 87, 0):
+              raise SystemExit("BLOCKED: staging workflow dispatch requires GitHub CLI 2.87.0 or newer; upgrade the runner CLI before dispatching child workflows.")
+          PY
+          }
+
+          resolve_staging_dispatch_run_id() {
+            local request_id="$1" workflow_path="$2" expected_sha="$3" wait_seconds="$4"
+            local deadline receipt_json resolved rc
+            deadline=$(( $(date +%s) + wait_seconds ))
+            while (( $(date +%s) < deadline )); do
+              if receipt_json="$(gh_retry api "/repos/$GITHUB_REPOSITORY/commits/$expected_sha/check-runs?check_name=Atlas%20staging%20dispatch%20correlation&per_page=100")"; then
+                if resolved="$(python3 scripts/resolve_staging_dispatch_receipt.py \\
+                  --request-id "$request_id" \\
+                  --workflow-path "$workflow_path" \\
+                  --expected-sha "$expected_sha" <<< "$receipt_json")"; then
+                  printf '%s\\n' "$resolved"
+                  return 0
+                else
+                  rc=$?
+                  if (( rc != 3 )); then
+                    echo "BLOCKED: nonce-bound staging dispatch receipt is malformed or ambiguous; refusing to select another run." >&2
+                    return "$rc"
+                  fi
+                fi
+              fi
+              sleep 10
+            done
+            echo "BLOCKED: no exact nonce-bound staging dispatch receipt appeared within ${wait_seconds}s; refusing to guess a workflow run." >&2
             return 1
           }
           ATLAS_GH_RETRY
@@ -300,6 +338,7 @@ jobs:
             exit 1
           fi
 
+          require_gh_cli_run_details
           request_id="atlas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)"
           if ! dispatch_output="$(gh workflow run staging-identity-preflight.yml \
             --repo "$GITHUB_REPOSITORY" \
@@ -317,7 +356,11 @@ jobs:
           dispatch_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+" <<< "$dispatch_output" | tail -n 1 || true)"
           preflight_run_id="${dispatch_url##*/}"
           if [[ -z "$dispatch_url" || ! "$preflight_run_id" =~ ^[0-9]+$ ]]; then
-            echo "BLOCKED: staging identity-preflight dispatch did not return a valid run URL; refusing to guess which run to trust."
+            echo "INFO: dispatch succeeded without a run URL; resolving the child only from its exact nonce-bound check-run receipt."
+            preflight_run_id="$(resolve_staging_dispatch_run_id "$request_id" ".github/workflows/staging-identity-preflight.yml" "$GITHUB_SHA" 900)"
+          fi
+          if [[ ! "$preflight_run_id" =~ ^[0-9]+$ ]]; then
+            echo "BLOCKED: staging identity-preflight did not resolve to one valid workflow run ID."
             exit 1
           fi
 
@@ -385,6 +428,7 @@ jobs:
           # A workflow rerun reuses GITHUB_RUN_ID but increments GITHUB_RUN_ATTEMPT.
           # Add a per-dispatch nonce for traceability; bind verification to the exact
           # run URL returned by this gh workflow run command, not a title search.
+          require_gh_cli_run_details
           dispatch_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
           acceptance_dispatch_started_at="$(date +%s)"
           if ! acceptance_dispatch_output="$(gh workflow run customer-paper-staging-acceptance.yml \
@@ -402,7 +446,11 @@ jobs:
           acceptance_run_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+" <<< "$acceptance_dispatch_output" | tail -n 1 || true)"
           acceptance_run_id="${acceptance_run_url##*/}"
           if [[ -z "$acceptance_run_url" || ! "$acceptance_run_id" =~ ^[0-9]+$ ]]; then
-            echo "BLOCKED: customer-paper acceptance dispatch did not return a valid run URL; refusing to guess which run to trust."
+            echo "INFO: acceptance dispatch succeeded without a run URL; resolving the child only from its exact nonce-bound check-run receipt."
+            acceptance_run_id="$(resolve_staging_dispatch_run_id "$dispatch_id" ".github/workflows/customer-paper-staging-acceptance.yml" "$GITHUB_SHA" 5400)"
+          fi
+          if [[ ! "$acceptance_run_id" =~ ^[0-9]+$ ]]; then
+            echo "BLOCKED: customer-paper acceptance did not resolve to one valid workflow run ID."
             exit 1
           fi
 
