@@ -908,11 +908,13 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch):
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState
+    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"TP-TTL-STOP-{uuid.uuid4().hex[:8]}"
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
-    monkeypatch.setattr(settings, "paper_order_ttl_bars", 1)
+    monkeypatch.setattr(settings, "paper_order_ttl_bars", 2)
+    monkeypatch.setattr(settings, "paper_queue_fill_probability", 0.5)
+    monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.1)
     monkeypatch.setattr(
         execution, "configured_paper_execution_settings", lambda _settings: None
@@ -972,10 +974,40 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch):
             db.add(PaperOrderState(
                 trade_id=take_profit.id, exchange="binance", symbol=symbol,
                 timeframe="5m", submitted_bar_at=submitted_bar.to_pydatetime(),
-                last_processed_bar_at=None, bars_elapsed=0, status="OPEN",
+                last_processed_bar_at=None, bars_elapsed=1, status="OPEN",
             ))
             take_profit_id = take_profit.id
+
+            # This later-created ordinary entry would pass its queue draw on this
+            # high-volume bar if expiry removed the only protective-entry barrier.
+            ordinary_entry = Trade(
+                signal_id=f"tp-ttl-later-entry-{uuid.uuid4().hex}",
+                client_order_id=f"tp-ttl-later-client-{uuid.uuid4().hex}",
+                exchange="binance", symbol=symbol, timeframe="5m", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=94.0, average_fill_price=0.0,
+                fee=0.0, notional=0.0, mode="PAPER", status="OPEN",
+                reason='{"strategy":"tp-ttl-later-entry","asset":"crypto"}',
+                stop_loss_price=0.0, take_profit_price=0.0,
+            )
+            db.add(ordinary_entry)
+            await db.flush()
+            db.add(PaperOrderState(
+                trade_id=ordinary_entry.id, exchange="binance", symbol=symbol,
+                timeframe="5m", submitted_bar_at=submitted_bar.to_pydatetime(),
+                last_processed_bar_at=None, bars_elapsed=0, status="OPEN",
+            ))
+            ordinary_entry_id = ordinary_entry.id
+            ordinary_client_id = ordinary_entry.client_order_id
+            take_profit_client_id = take_profit.client_order_id
             entry_id = entry.id
+
+            def deterministic_queue_draw(value: str) -> float:
+                if take_profit_client_id in value and value.endswith("|QUEUE"):
+                    return 1.0  # take-profit queue miss; TTL expires it below
+                return 0.0  # later ordinary entry would win its queue draw
+
+            monkeypatch.setattr(execution, "_paper_hash_fraction", deterministic_queue_draw)
             await db.commit()
 
         frame = pd.DataFrame(
@@ -984,8 +1016,8 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch):
                 "high": [101.0, 100.0, 96.0],
                 "low": [99.0, 98.0, 93.0],
                 "close": [100.0, 99.0, 94.0],
-                # Verified spot volume is zero for this bar, so the TP cannot fill.
-                "volume": [100.0, 100.0, 0.0],
+                # High verified volume means a successful ordinary-entry queue draw could fill.
+                "volume": [100.0, 100.0, 100.0],
             },
             index=pd.DatetimeIndex([
                 current_floor - pd.Timedelta(minutes=15),
@@ -1008,13 +1040,23 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch):
         assert result["stop_triggers"] == 1
         assert result["protective_exit_orders_created"] == 1
 
+        assert result["queue_misses"] == 1
         async with SessionLocal() as db:
             expired_tp = await db.get(Trade, take_profit_id)
             assert expired_tp.status == "CANCELED"
+            later_entry = await db.get(Trade, ordinary_entry_id)
+            assert later_entry is not None
+            assert later_entry.status == "OPEN"
+            assert later_entry.filled_quantity == 0.0
+            ordinary_event = (await db.execute(select(PaperFillEvent).where(
+                PaperFillEvent.trade_id == ordinary_entry_id,
+            ))).scalars().all()
+            assert len(ordinary_event) == 1
+            assert ordinary_event[0].outcome == "WAIT_PROTECTIVE_TRIGGER"
             stops = (await db.execute(select(Trade).where(
                 Trade.symbol == symbol, Trade.mode == "PAPER",
                 Trade.id != entry_id, Trade.id != take_profit_id,
-                Trade.side == "sell",
+                Trade.id != ordinary_entry_id, Trade.side == "sell",
             ))).scalars().all()
             assert len(stops) == 1
             assert stops[0].status == "OPEN"
