@@ -53,18 +53,25 @@ REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM atlas_audit_reader;
 REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM atlas_audit_reader;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_audit_reader;
 
--- Exact read allowlist shared by restore and provider reconciliation verifiers.
-GRANT SELECT ON TABLE
-    public.alembic_version,
-    public.customer_ledger_accounts,
-    public.ledger_entries,
-    public.ledger_journals,
-    public.ledger_journal_lines,
-    public.research_trial_archive,
-    public.research_trial_ledger_head,
-    public.research_holdout_registry,
-    public.withdrawals
-TO atlas_audit_reader;
+-- Column-level allowlist shared by restore and provider reconciliation verifiers.
+-- Do not grant table-level SELECT: unrelated customer/profile/payout columns remain inaccessible.
+GRANT SELECT (version_num) ON TABLE public.alembic_version TO atlas_audit_reader;
+GRANT SELECT (available, trading_reserved, withdrawal_reserved)
+    ON TABLE public.customer_ledger_accounts TO atlas_audit_reader;
+GRANT SELECT (debit, credit, amount)
+    ON TABLE public.ledger_entries TO atlas_audit_reader;
+GRANT SELECT (id, entry_type, idempotency_key, reference_type, reference_id)
+    ON TABLE public.ledger_journals TO atlas_audit_reader;
+GRANT SELECT (id, journal_id, debit, credit)
+    ON TABLE public.ledger_journal_lines TO atlas_audit_reader;
+GRANT SELECT (ledger_sequence, ledger_entry_sha256)
+    ON TABLE public.research_trial_archive TO atlas_audit_reader;
+GRANT SELECT (id, last_sequence, last_entry_sha256)
+    ON TABLE public.research_trial_ledger_head TO atlas_audit_reader;
+GRANT SELECT (scope_sha256, source_sample_sha256, report_sha256, holdout_version, holdout_plan_json)
+    ON TABLE public.research_holdout_registry TO atlas_audit_reader;
+GRANT SELECT (created_at, request_id, provider_id, provider, amount, currency, status, provider_status)
+    ON TABLE public.withdrawals TO atlas_audit_reader;
 
 ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on;
 ALTER ROLE atlas_audit_reader SET search_path = pg_catalog, public;
