@@ -38,7 +38,11 @@ AUDIT_REQUIRED_SELECT_TABLES = tuple(AUDIT_REQUIRED_SELECT_COLUMNS)
 
 def audit_role_observations_sql() -> str:
     """Return catalog-only checks for the dedicated read-only audit login."""
-    table_names = ", ".join(f"'{name}'" for name in AUDIT_REQUIRED_SELECT_TABLES)
+    column_pairs = ", ".join(
+        f"('{table_name}', '{column_name}')"
+        for table_name, columns in AUDIT_REQUIRED_SELECT_COLUMNS.items()
+        for column_name in columns
+    )
     return f"""
     SELECT jsonb_build_object(
       'name', r.rolname,
@@ -60,20 +64,31 @@ def audit_role_observations_sql() -> str:
       'public_schema_create', has_schema_privilege(r.rolname,'public','CREATE'),
       'required_select_missing', (
         SELECT count(*)
-        FROM unnest(ARRAY[{table_names}]::text[]) AS required(table_name)
+        FROM (VALUES {column_pairs}) AS required(table_name,column_name)
         LEFT JOIN pg_class c
           ON c.relnamespace = 'public'::regnamespace
          AND c.relname = required.table_name
          AND c.relkind IN ('r','p')
-        WHERE c.oid IS NULL
-           OR NOT has_table_privilege(r.rolname,c.oid,'SELECT')
+        LEFT JOIN pg_attribute a
+          ON a.attrelid = c.oid
+         AND a.attname = required.column_name
+         AND a.attnum > 0
+         AND NOT a.attisdropped
+        WHERE a.attnum IS NULL
+           OR NOT has_column_privilege(r.rolname,c.oid,a.attnum,'SELECT')
       ),
       'unexpected_select', (
         SELECT count(*)
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.oid
         WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND NOT (c.relname = ANY (ARRAY[{table_names}]::text[]))
-          AND has_table_privilege(r.rolname,c.oid,'SELECT')
+          AND a.attnum > 0 AND NOT a.attisdropped
+          AND has_column_privilege(r.rolname,c.oid,a.attnum,'SELECT')
+          AND NOT EXISTS (
+            SELECT 1 FROM (VALUES {column_pairs}) AS required(table_name,column_name)
+            WHERE required.table_name=c.relname AND required.column_name=a.attname
+          )
       ),
       'public_tables_with_write_privileges', (
         SELECT count(*)
@@ -85,6 +100,14 @@ def audit_role_observations_sql() -> str:
           OR has_table_privilege(r.rolname,c.oid,'TRUNCATE')
           OR has_table_privilege(r.rolname,c.oid,'REFERENCES')
           OR has_table_privilege(r.rolname,c.oid,'TRIGGER')
+          OR EXISTS (
+            SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped AND (
+              has_column_privilege(r.rolname,c.oid,a.attnum,'INSERT')
+              OR has_column_privilege(r.rolname,c.oid,a.attnum,'UPDATE')
+              OR has_column_privilege(r.rolname,c.oid,a.attnum,'REFERENCES')
+            )
+          )
         )
       ),
       'public_sequences_with_privileges', (
@@ -104,7 +127,6 @@ def audit_role_observations_sql() -> str:
     )
     FROM pg_roles r WHERE r.rolname=current_user
     """
-
 
 def truthy(value: object) -> bool:
     return value is True or str(value).strip().lower() in {"t", "true", "1", "yes", "on"}
