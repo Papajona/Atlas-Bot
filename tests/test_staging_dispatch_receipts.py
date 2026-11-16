@@ -125,3 +125,100 @@ def test_rejects_malformed_api_payload():
             workflow_path=WORKFLOW,
             expected_sha=SHA,
         )
+
+
+from pathlib import Path
+import subprocess
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _workflow_step(workflow: str, name: str) -> str:
+    marker = f"      - name: {name}"
+    assert workflow.count(marker) == 1, f"expected exactly one workflow step named {name!r}"
+    start = workflow.index(marker)
+    end = workflow.find("\\n      - name:", start + len(marker))
+    return workflow[start:] if end < 0 else workflow[start:end]
+
+
+def _run_script(step: str) -> str:
+    marker = "        run: |\\n"
+    assert marker in step, "expected an executable run block"
+    lines = step.split(marker, 1)[1].splitlines()
+    code = []
+    for line in lines:
+        if line.startswith("          "):
+            code.append(line[10:])
+        elif not line.strip():
+            code.append("")
+        else:
+            break
+    assert code, "workflow step has an empty run block"
+    return "\\n".join(code) + "\\n"
+
+
+def _assert_bash_parses(step: str) -> None:
+    result = subprocess.run(
+        ["bash", "-n"],
+        input=_run_script(step),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_no_url_dispatch_fallback_is_nonce_bound_for_both_child_workflows():
+    parent = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
+    assert "  checks: read" in parent
+    wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
+    assert "resolve_staging_dispatch_run_id()" in wait_step
+    assert "check-runs?check_name=Atlas%20staging%20dispatch%20correlation" in wait_step
+    assert "scripts/resolve_staging_dispatch_receipt.py" in wait_step
+    assert "(2, 87, 0)" in wait_step
+
+    preflight_dispatch = _workflow_step(
+        parent, "Dispatch and require read-only staging identity preflight on this exact commit"
+    )
+    assert 'resolve_staging_dispatch_run_id "$request_id" ".github/workflows/staging-identity-preflight.yml" "$GITHUB_SHA" 900' in preflight_dispatch
+    acceptance_dispatch = _workflow_step(
+        parent, "Dispatch and require customer-paper acceptance on this exact deployment"
+    )
+    assert 'resolve_staging_dispatch_run_id "$dispatch_id" ".github/workflows/customer-paper-staging-acceptance.yml" "$GITHUB_SHA" 5400' in acceptance_dispatch
+    assert "gh run list" not in preflight_dispatch + acceptance_dispatch
+
+
+def test_child_workflows_publish_and_finalize_their_actual_nonce_receipt_steps():
+    cases = (
+        (
+            ".github/workflows/staging-identity-preflight.yml",
+            "Publish nonce-bound workflow-run correlation receipt",
+            "Finalize nonce-bound workflow-run correlation receipt",
+            "github.event.inputs.request_id",
+        ),
+        (
+            ".github/workflows/customer-paper-staging-acceptance.yml",
+            "Publish nonce-bound workflow-run correlation receipt",
+            "Finalize nonce-bound workflow-run correlation receipt",
+            "inputs.dispatch_id",
+        ),
+    )
+    for relative_path, publish_name, finalize_name, _input_name in cases:
+        workflow = (ROOT / relative_path).read_text(encoding="utf-8")
+        assert "  checks: write" in workflow
+        publish = _workflow_step(workflow, publish_name)
+        finalize = _workflow_step(workflow, finalize_name)
+        for field in ("external_id=\\"$REQUEST_ID\\"", "run_id=$GITHUB_RUN_ID", "run_attempt=$GITHUB_RUN_ATTEMPT", "head_sha=$GITHUB_SHA", "head_branch=$GITHUB_REF_NAME", "event=$GITHUB_EVENT_NAME"):
+            assert field in publish
+        assert "gh api --method POST" in publish
+        assert "gh api --method PATCH" in finalize
+        assert "status=completed" in finalize
+        _assert_bash_parses(publish)
+        _assert_bash_parses(finalize)
+
+
+def test_dispatch_workflow_shell_helpers_parse_before_the_runner_executes_them():
+    parent = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
+    wait_step = _workflow_step(parent, "Wait for required CI gates to pass on this exact commit")
+    _assert_bash_parses(wait_step)
