@@ -780,7 +780,7 @@ async def _fill_open_order(
                 "bar_key": bar_key,
                 "execution_model": calibrated_estimate,
             }
-            await _paper_call(
+            rejection_result = await _paper_call(
                 reject_customer_paper_order(
                     customer_id=customer_id,
                     client_order_id=client_id,
@@ -789,14 +789,31 @@ async def _fill_open_order(
                 ),
                 "persist calibrated simulated venue rejection",
             )
+            persisted_rejection_metadata = (
+                rejection_result.get("metadata")
+                if isinstance(rejection_result, Mapping) else None
+            )
+            persisted_execution_model = (
+                persisted_rejection_metadata.get("execution_model")
+                if isinstance(persisted_rejection_metadata, Mapping) else None
+            )
+            if not isinstance(persisted_execution_model, Mapping):
+                raise CustomerPaperFlowBlocked(
+                    "Persisted calibrated rejection evidence is unavailable for replay"
+                )
+            costs["execution_model"] = dict(persisted_execution_model)
             return {
-                "status": "SIMULATED_VENUE_REJECTION",
+                "status": (
+                    "SIMULATED_VENUE_REJECTION_REPLAYED"
+                    if rejection_result.get("status") == "REPLAYED"
+                    else "SIMULATED_VENUE_REJECTION"
+                ),
                 "client_order_id": client_id,
                 "order_id": state["order_id"],
                 "bar_key": bar_key,
                 "fill": {"status": "REJECTED"},
                 "cost_model": costs,
-                "execution_model": calibrated_estimate,
+                "execution_model": dict(persisted_execution_model),
                 "recovered_pending_order": True,
             }
         if calibrated_fill_quantity <= 0:
