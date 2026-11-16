@@ -203,7 +203,7 @@ def test_total_count_change_during_pagination_is_retryable():
 def test_rejects_malformed_api_payload():
     with pytest.raises(ValueError, match="unexpected shape"):
         resolve_staging_dispatch_receipt(
-            [],
+            {"check_runs": []},
             request_id=REQUEST_ID,
             workflow_path=WORKFLOW,
             expected_sha=SHA,
