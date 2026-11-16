@@ -17,12 +17,134 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+AUDIT_ROLE_NAME = "atlas_audit_reader"
+AUDIT_REQUIRED_SELECT_TABLES = (
+    "alembic_version",
+    "customer_ledger_accounts",
+    "ledger_entries",
+    "ledger_journals",
+    "ledger_journal_lines",
+    "research_trial_archive",
+    "research_trial_ledger_head",
+    "research_holdout_registry",
+    "withdrawals",
+)
 
-QUERY = r"""
+
+def audit_role_observations_sql() -> str:
+    """Return catalog-only checks for the dedicated read-only audit login."""
+    table_names = ", ".join(f"'{name}'" for name in AUDIT_REQUIRED_SELECT_TABLES)
+    return f"""
+    SELECT jsonb_build_object(
+      'name', r.rolname,
+      'login', r.rolcanlogin,
+      'inherit', r.rolinherit,
+      'superuser', r.rolsuper,
+      'create_role', r.rolcreaterole,
+      'create_database', r.rolcreatedb,
+      'replication', r.rolreplication,
+      'bypass_rls', r.rolbypassrls,
+      'owns_public_tables', (
+        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid
+      ),
+      'role_memberships', (
+        SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid
+      ),
+      'public_schema_usage', has_schema_privilege(r.rolname,'public','USAGE'),
+      'public_schema_create', has_schema_privilege(r.rolname,'public','CREATE'),
+      'required_select_missing', (
+        SELECT count(*)
+        FROM unnest(ARRAY[{table_names}]::text[]) AS required(table_name)
+        WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
+           OR NOT has_table_privilege(r.rolname,format('public.%I',required.table_name),'SELECT')
+      ),
+      'unexpected_select', (
+        SELECT count(*)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND NOT (c.relname = ANY (ARRAY[{table_names}]::text[]))
+          AND has_table_privilege(r.rolname,c.oid,'SELECT')
+      ),
+      'public_tables_with_write_privileges', (
+        SELECT count(*)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND (
+          has_table_privilege(r.rolname,c.oid,'INSERT')
+          OR has_table_privilege(r.rolname,c.oid,'UPDATE')
+          OR has_table_privilege(r.rolname,c.oid,'DELETE')
+          OR has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+          OR has_table_privilege(r.rolname,c.oid,'REFERENCES')
+          OR has_table_privilege(r.rolname,c.oid,'TRIGGER')
+        )
+      ),
+      'public_sequences_with_privileges', (
+        SELECT count(*)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind='S' AND (
+          has_sequence_privilege(r.rolname,c.oid,'USAGE')
+          OR has_sequence_privilege(r.rolname,c.oid,'SELECT')
+          OR has_sequence_privilege(r.rolname,c.oid,'UPDATE')
+        )
+      ),
+      'public_functions_with_execute', (
+        SELECT count(*)
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='public' AND has_function_privilege(r.rolname,p.oid,'EXECUTE')
+      )
+    )
+    FROM pg_roles r WHERE r.rolname=current_user
+    """
+
+
+def truthy(value: object) -> bool:
+    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
+
+
+def audit_role_failures(role: object, expected_role: str, transaction_read_only: object) -> list[str]:
+    """Fail closed unless this is the exact, strictly read-only audit connection."""
+    failures: list[str] = []
+    if expected_role != AUDIT_ROLE_NAME:
+        failures.append(f"expected audit role must be exactly {AUDIT_ROLE_NAME}")
+    if not isinstance(role, dict):
+        return failures + ["audit-role catalog evidence is missing or malformed"]
+    if role.get("name") != expected_role:
+        failures.append("connected role differs from the configured audit database role")
+    if not truthy(role.get("login")):
+        failures.append("audit role is not LOGIN")
+    if truthy(role.get("inherit")):
+        failures.append("audit role must be NOINHERIT")
+    for key in ("superuser", "create_role", "create_database", "replication", "public_schema_create"):
+        if truthy(role.get(key)):
+            failures.append(f"audit role has forbidden capability: {key}")
+    if not truthy(role.get("bypass_rls")) or not truthy(role.get("public_schema_usage")):
+        failures.append("audit role lacks the reviewed backend-only BYPASSRLS/public-schema USAGE contract")
+    for key in (
+        "owns_public_tables",
+        "role_memberships",
+        "required_select_missing",
+        "unexpected_select",
+        "public_tables_with_write_privileges",
+        "public_sequences_with_privileges",
+        "public_functions_with_execute",
+    ):
+        try:
+            observed = int(role.get(key, -1))
+        except (TypeError, ValueError):
+            observed = -1
+        if observed != 0:
+            failures.append(f"audit role {key} expected 0, observed {observed}")
+    if not truthy(transaction_read_only):
+        failures.append("audit connection is not running in a read-only PostgreSQL transaction")
+    return failures
+
+
+QUERY = f"""
 SELECT jsonb_build_object(
   'database', current_database(),
   'current_user', current_user,
   'session_user', session_user,
+  'transaction_read_only', current_setting('transaction_read_only'),
   'revision', (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version),
   'public_table_count', (
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -74,80 +196,9 @@ SELECT jsonb_build_object(
     SELECT count(*) FROM public.ledger_entries
     WHERE debit < 0 OR credit < 0 OR amount <= 0 OR (debit > 0 AND credit > 0) OR (debit = 0 AND credit = 0)
   ),
-  'runtime_role', (
-    SELECT jsonb_build_object(
-      'name', r.rolname,
-      'login', r.rolcanlogin,
-      'inherit', r.rolinherit,
-      'superuser', r.rolsuper,
-      'create_role', r.rolcreaterole,
-      'create_database', r.rolcreatedb,
-      'replication', r.rolreplication,
-      'bypass_rls', r.rolbypassrls,
-      'owns_public_tables', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=r.rolname
-      ),
-      'role_memberships', (
-        SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid
-      ),
-      'public_schema_usage', has_schema_privilege(r.rolname, 'public', 'USAGE'),
-      'public_tables_missing_select', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND NOT has_table_privilege(r.rolname,c.oid,'SELECT')
-      ),
-      'public_schema_create', has_schema_privilege(r.rolname, 'public', 'CREATE'),
-      -- Migration 0059 deliberately gives these two integrity tables narrower
-      -- grants. Keep the ordinary-table DML gate, then verify each restricted ACL
-      -- against the exact SELECT/UPDATE and SELECT/INSERT contract respectively.
-      'public_tables_missing_dml', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')
-          AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
-               AND has_table_privilege(r.rolname,c.oid,'UPDATE')
-               AND has_table_privilege(r.rolname,c.oid,'DELETE'))
-      ),
-      'research_trial_ledger_head_acl_valid', coalesce((
-        SELECT bool_and(
-          has_table_privilege(r.rolname,c.oid,'SELECT')
-          AND has_table_privilege(r.rolname,c.oid,'UPDATE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
-          AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
-        AND NOT has_table_privilege(r.rolname,c.oid,'TRIGGER')
-        AND NOT has_table_privilege(r.rolname,c.oid,'REFERENCES')
-        )
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relname='research_trial_ledger_head'
-          AND c.relkind IN ('r','p')
-      ), false),
-      'research_holdout_registry_acl_valid', coalesce((
-        SELECT bool_and(
-          has_table_privilege(r.rolname,c.oid,'SELECT')
-          AND has_table_privilege(r.rolname,c.oid,'INSERT')
-          AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
-        AND NOT has_table_privilege(r.rolname,c.oid,'TRIGGER')
-        AND NOT has_table_privilege(r.rolname,c.oid,'REFERENCES')
-        )
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relname='research_holdout_registry'
-          AND c.relkind IN ('r','p')
-      ), false),
-      'public_sequences_missing_usage', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind='S'
-          AND NOT has_sequence_privilege(r.rolname,c.oid,'USAGE')
-      )
-    )
-    FROM pg_roles r WHERE r.rolname=current_user
-  )
+  'audit_role', ({audit_role_observations_sql()})
 )::text;
 """
-
 
 def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tuple[dict[str, str], str]:
     parsed = urlparse(value)
