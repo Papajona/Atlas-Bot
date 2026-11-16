@@ -505,7 +505,7 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "github.ref == 'refs/heads/main'" in job
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
-    assert '--event workflow_dispatch' in deploy  # used for the uniquely correlated preflight dispatch
+undefined
     assert '.event == "workflow_dispatch"' in deploy
     assert '.event == "push"' in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
