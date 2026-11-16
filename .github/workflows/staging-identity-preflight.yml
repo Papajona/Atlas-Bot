@@ -8,13 +8,21 @@ on:
         description: Unique caller-generated ID for correlating a deployment's preflight
         required: false
         type: string
+  workflow_call:
+    inputs:
+      request_id:
+        description: Unique caller-generated ID for correlating a deployment's preflight
+        required: false
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: atlas-supabase-staging-identity-preflight
+  # This workflow is read-only; isolate invocations by run so a queued manual
+  # dispatch cannot block the parent deployment's reusable-workflow gate.
+  group: atlas-supabase-staging-identity-preflight-${{ github.run_id }}
   cancel-in-progress: false
 
 jobs:

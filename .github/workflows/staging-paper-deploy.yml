@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: read
-  actions: write
+  actions: read
   id-token: write
 
 concurrency:
@@ -286,177 +286,26 @@ jobs:
           echo "Diagnostic collection finished; it does not convert a failed deployment into success."
           exit 0
 
-      - name: Dispatch and require read-only staging identity preflight on this exact commit
-        if: steps.wait-required-gates.outputs.stale != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          source "$ATLAS_GH_RETRY_HELPER"
-          current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
-          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
-            echo "BLOCKED: main advanced during staging deployment; refusing to certify a different commit."
-            exit 1
-          fi
+  verify-staging-identity:
+    name: verify-staging-identity
+    needs: deploy-paper-staging
+    if: needs.deploy-paper-staging.result == 'success'
+    uses: ./.github/workflows/staging-identity-preflight.yml
+    with:
+      request_id: atlas-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+    secrets: inherit
 
-          request_id="atlas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)"
-          expected_run_name="Staging identity preflight ($request_id)"
-
-          gh workflow run staging-identity-preflight.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f "request_id=$request_id"
-
-          # Discover only the run carrying this dispatch's unique request ID.
-          preflight_run_id=0
-          for attempt in $(seq 1 90); do
-            run_list="$(gh_retry run list \
-              --repo "$GITHUB_REPOSITORY" \
-              --workflow "staging-identity-preflight.yml" \
-              --event workflow_dispatch \
-              --commit "$GITHUB_SHA" \
-              --limit 100 \
-              --json databaseId,headSha,displayTitle)"
-            run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
-            candidate_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
-            candidate_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
-            if [[ "$candidate_id" -gt 0 ]]; then
-              if [[ "$candidate_sha" != "$GITHUB_SHA" ]]; then
-                echo "BLOCKED: correlated staging preflight run is not on exact commit $GITHUB_SHA."
-                exit 1
-              fi
-              preflight_run_id="$candidate_id"
-              break
-            fi
-            sleep 10
-          done
-
-          if [[ "$preflight_run_id" -eq 0 ]]; then
-            echo "BLOCKED: the uniquely correlated staging preflight run was not observed after dispatch."
-            exit 1
-          fi
-
-          # From this point onward, poll the same run ID, never the newest same-SHA run.
-          for attempt in $(seq 1 90); do
-            run_json="$(gh_retry run view "$preflight_run_id" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json databaseId,headSha,status,conclusion,displayTitle)"
-            run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
-            run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
-            run_name="$(jq -r '.displayTitle // ""' <<< "$run_json")"
-            run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
-            run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
-
-            if [[ "$run_id" != "$preflight_run_id" || "$run_name" != "$expected_run_name" ]]; then
-              echo "BLOCKED: the tracked staging preflight run identity changed unexpectedly."
-              exit 1
-            fi
-            if [[ "$run_sha" != "$GITHUB_SHA" ]]; then
-              echo "BLOCKED: the tracked staging preflight is not on exact commit $GITHUB_SHA."
-              exit 1
-            fi
-            if [[ "$run_status" == "completed" ]]; then
-              if [[ "$run_conclusion" != "success" ]]; then
-                echo "BLOCKED: correlated staging preflight completed with conclusion '${run_conclusion:-missing}'. Review run $preflight_run_id; deployment remains paper-only."
-                exit 1
-              fi
-
-              # Re-check after preflight completion, immediately before certifying readiness.
-              if ! current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"; then
-                echo "BLOCKED: unable to re-read main after the staging preflight; deployment readiness is not certified."
-                exit 1
-              fi
-              if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
-                echo "BLOCKED: main advanced during staging preflight; refusing to certify commit $GITHUB_SHA."
-                exit 1
-              fi
-              echo "PASS: read-only staging identity and isolated-ledger preflight run $preflight_run_id succeeded on exact current-main commit $GITHUB_SHA"
-              exit 0
-            fi
-            sleep 10
-          done
-
-          echo "BLOCKED: correlated staging preflight run $preflight_run_id did not complete within the allowed polling window."
-          exit 1
-
-      - name: Dispatch and require customer-paper acceptance on this exact deployment
-        if: steps.wait-required-gates.outputs.stale != 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          source "$ATLAS_GH_RETRY_HELPER"
-          current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
-          if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then
-            echo "BLOCKED: main advanced before customer-paper acceptance dispatch."
-            exit 1
-          fi
-
-          # A workflow rerun reuses GITHUB_RUN_ID but increments GITHUB_RUN_ATTEMPT.
-          # Add a per-dispatch nonce so an earlier acceptance run can never satisfy this attempt.
-          dispatch_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
-          expected_run_name="Customer Paper Acceptance $GITHUB_SHA deploy $GITHUB_RUN_ID attempt $GITHUB_RUN_ATTEMPT correlation $dispatch_id"
-          acceptance_dispatch_started_at="$(date +%s)"
-          gh workflow run customer-paper-staging-acceptance.yml \
-            --repo "$GITHUB_REPOSITORY" \
-            --ref main \
-            -f "target_sha=$GITHUB_SHA" \
-            -f "deployment_run_id=$GITHUB_RUN_ID" \
-            -f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT" \
-            -f "dispatch_id=$dispatch_id"
-
-          acceptance_run_id=0
-          acceptance_wait_seconds=5400
-          acceptance_poll_interval_seconds=30
-          while true; do
-            now="$(date +%s)"
-            if (( now - acceptance_dispatch_started_at >= acceptance_wait_seconds )); then
-              break
-            fi
-
-            if [[ "$acceptance_run_id" -eq 0 ]]; then
-              run_list="$(gh_retry run list \
-                --repo "$GITHUB_REPOSITORY" \
-                --workflow "customer-paper-staging-acceptance.yml" \
-                --event workflow_dispatch \
-                --limit 100 \
-                --json databaseId,headSha,headBranch,displayTitle)"
-              run_json="$(jq --arg expected "$expected_run_name" '[.[] | select(.displayTitle == $expected)] | sort_by(.databaseId) | last // {}' <<< "$run_list")"
-              candidate_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
-              candidate_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
-              candidate_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
-              if [[ "$candidate_id" -gt 0 ]]; then
-                if [[ "$candidate_sha" != "$GITHUB_SHA" || "$candidate_branch" != "main" ]]; then
-                  echo "BLOCKED: uniquely correlated acceptance run is not on exact main commit $GITHUB_SHA."
-                  exit 1
-                fi
-                acceptance_run_id="$candidate_id"
-              fi
-            else
-              run_json="$(gh_retry run view "$acceptance_run_id" --repo "$GITHUB_REPOSITORY" --json databaseId,headSha,headBranch,status,conclusion,displayTitle)"
-              run_id="$(jq -r '.databaseId // 0' <<< "$run_json")"
-              run_sha="$(jq -r '.headSha // ""' <<< "$run_json")"
-              run_branch="$(jq -r '.headBranch // ""' <<< "$run_json")"
-              run_name="$(jq -r '.displayTitle // ""' <<< "$run_json")"
-              run_status="$(jq -r '.status // "missing"' <<< "$run_json")"
-              run_conclusion="$(jq -r '.conclusion // ""' <<< "$run_json")"
-              if [[ "$run_id" != "$acceptance_run_id" || "$run_sha" != "$GITHUB_SHA" || "$run_branch" != "main" || "$run_name" != "$expected_run_name" ]]; then
-                echo "BLOCKED: tracked customer-paper acceptance run identity changed unexpectedly."
-                exit 1
-              fi
-              if [[ "$run_status" == "completed" ]]; then
-                if [[ "$run_conclusion" != "success" ]]; then
-                  echo "BLOCKED: customer-paper acceptance run $acceptance_run_id completed with conclusion '${run_conclusion:-missing}'."
-                  exit 1
-                fi
-                echo "PASS: customer-paper acceptance run $acceptance_run_id succeeded on exact deployed commit $GITHUB_SHA (deployment attempt $GITHUB_RUN_ATTEMPT; unique correlation verified)"
-                exit 0
-              fi
-            fi
-            sleep "$acceptance_poll_interval_seconds"
-          done
-
-          echo "BLOCKED: uniquely correlated customer-paper acceptance run '${acceptance_run_id:-not-observed}' did not complete successfully within ${acceptance_wait_seconds}s; deployment remains paper-only."
-          exit 1
+  customer-paper-acceptance:
+    name: customer-paper-acceptance
+    needs:
+      - deploy-paper-staging
+      - verify-staging-identity
+    if: needs.verify-staging-identity.result == 'success'
+    uses: ./.github/workflows/customer-paper-staging-acceptance.yml
+    with:
+      target_sha: ${{ github.sha }}
+      deployment_run_id: ${{ format('{0}', github.run_id) }}
+      deployment_run_attempt: ${{ format('{0}', github.run_attempt) }}
+      dispatch_id: ${{ format('atlas-{0}-{1}-{2}', github.run_id, github.run_attempt, github.sha) }}
+      identity_preflight_passed: ${{ needs.verify-staging-identity.result == 'success' }}
+    secrets: inherit

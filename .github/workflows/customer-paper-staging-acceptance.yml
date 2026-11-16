@@ -22,6 +22,28 @@ on:
         description: Unique correlation nonce for this acceptance dispatch
         required: true
         type: string
+  workflow_call:
+    inputs:
+      target_sha:
+        description: Exact commit deployed to paper-only staging
+        required: true
+        type: string
+      deployment_run_id:
+        description: Successful Deploy Paper-Only Atlas Staging workflow run ID
+        required: true
+        type: string
+      deployment_run_attempt:
+        description: Exact successful staging deployment attempt number
+        required: true
+        type: string
+      dispatch_id:
+        description: Unique correlation nonce for this acceptance call
+        required: true
+        type: string
+      identity_preflight_passed:
+        description: True only when the caller's exact-commit identity preflight job succeeded
+        required: true
+        type: boolean
 
 permissions:
   contents: read
@@ -54,6 +76,7 @@ jobs:
       DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}
       DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}
       DISPATCH_ID: ${{ inputs.dispatch_id }}
+      IDENTITY_PREFLIGHT_PASSED: ${{ inputs.identity_preflight_passed || false }}
     steps:
       - name: Validate exact successful main deployment
         env:
@@ -61,13 +84,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" && "$IDENTITY_PREFLIGHT_PASSED" != "true" ]]; then
+            echo "BLOCKED: reusable acceptance requires a successful parent identity-preflight dependency."
+            exit 1
+          fi
           test "$GITHUB_REF" = "refs/heads/main"
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$DEPLOYMENT_RUN_ID" =~ ^[0-9]+$ ]]
           [[ "$DEPLOYMENT_RUN_ID" -gt 0 ]]
           [[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
-          [[ "$DISPATCH_ID" =~ ^[a-f0-9]{32}$ ]]
+          [[ "$DISPATCH_ID" =~ ^([a-f0-9]{32}|atlas-[0-9]+-[1-9][0-9]*-[a-f0-9]{40})$ ]]
 
           deployment_attempt_before="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOYMENT_RUN_ID" --jq '.run_attempt')"
           test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"
@@ -81,7 +107,13 @@ jobs:
           deployment_conclusion="$(jq -r '.conclusion // ""' <<< "$deployment_json")"
           image_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Build and push exact commit image to Artifact Registry") | .conclusion][0] // ""' <<< "$deployment_json")"
           deploy_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Deploy restricted paper-only Cloud Run service") | .conclusion][0] // ""' <<< "$deployment_json")"
-          preflight_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Dispatch and require read-only staging identity preflight on this exact commit") | .conclusion][0] // ""' <<< "$deployment_json")"
+          if [[ "$IDENTITY_PREFLIGHT_PASSED" == "true" ]]; then
+            # workflow_call is reachable from the parent only through needs.verify-staging-identity.
+            preflight_outcome="success"
+          else
+            # Keep the manual workflow_dispatch path bound to the legacy parent preflight step.
+            preflight_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Dispatch and require read-only staging identity preflight on this exact commit") | .conclusion][0] // ""' <<< "$deployment_json")"
+          fi
 
           test "$deployment_name" = "Deploy Paper-Only Atlas Staging"
           test "$deployment_sha" = "$TARGET_SHA"
