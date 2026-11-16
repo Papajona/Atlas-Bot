@@ -110,7 +110,8 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
     end = to_utc.isoformat(timespec="microseconds")
     return f"""
     WITH matching_withdrawals AS (
-      SELECT w.*
+      SELECT w.request_id, w.provider_id, w.provider, w.amount, w.currency,
+             w.status, w.provider_status, w.created_at
       FROM public.withdrawals w
       WHERE w.created_at >= TIMESTAMPTZ '{start}'
         AND w.created_at < TIMESTAMPTZ '{end}'
