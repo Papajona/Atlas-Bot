@@ -833,6 +833,11 @@ def test_production_api_role_is_dedicated_and_does_not_receive_ddl_or_immutable_
     assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" in sql
     assert "GRANT SELECT, UPDATE ON TABLE public.research_trial_ledger_head" in sql
     assert "GRANT SELECT, INSERT ON TABLE public.research_holdout_registry" in sql
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE\n    public.customer_ledger_accounts, public.withdrawals" in sql
+    generic_grants = sql.split("AND c.relname NOT IN (", 1)[1].split(")", 1)[0]
+    assert "'customer_ledger_accounts'" in generic_grants
+    assert "'withdrawals'" in generic_grants
+    assert "ledger_delete" in sql and "withdrawal_delete" in sql
     assert "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public" in sql
     for forbidden in ("GRANT TRUNCATE", "GRANT REFERENCES", "GRANT TRIGGER", "GRANT EXECUTE", "GRANT CREATE"):
         assert forbidden not in sql
