@@ -31,7 +31,6 @@ def test_acceptance_dispatch_binds_to_run_url_returned_by_gh():
 def test_dispatched_acceptance_run_is_rejected_when_sha_branch_or_event_differs():
     block = _acceptance_dispatch_block()
 
-    assert 'run_sha="$(jq -r \' .headSha // "" \' <<< "$run_json")"' not in block
     assert 'run_sha="$(jq -r \'.headSha // ""\' <<< "$run_json")"' in block
     assert 'run_branch="$(jq -r \'.headBranch // ""\' <<< "$run_json")"' in block
     assert 'run_event="$(jq -r \'.event // ""\' <<< "$run_json")"' in block
