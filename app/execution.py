@@ -1769,7 +1769,7 @@ async def advance_platform_paper_orders(
             if (
                 trade.status in {"OPEN", "PARTIAL"}
                 and order_state.bars_elapsed >= ttl_bars
-                and not is_triggered_exit
+                and not is_protective_stop_exit
             ):
                 trade.status = "CANCELED"
                 trade.remaining_quantity = 0.0
