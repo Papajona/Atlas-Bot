@@ -1778,6 +1778,15 @@ async def advance_platform_paper_orders(
                     outcome = "CANCELED_TTL"
                     reason = f"{reason}; order TTL exhausted"
                 counts["expired"] += 1
+                # A take-profit order that reaches TTL is no longer an active
+                # position barrier. Let the same completed bar's protective scan
+                # evaluate a stop-loss breach instead of suppressing it for one bar.
+                if is_triggered_exit and not is_protective_stop_exit:
+                    entry_trade_id = exit_trigger.get("entry_trade_id")
+                    if isinstance(entry_trade_id, int) and not isinstance(entry_trade_id, bool):
+                        active_exit_entry_ids.discard(entry_trade_id)
+                    elif isinstance(entry_trade_id, str) and entry_trade_id.isdigit():
+                        active_exit_entry_ids.discard(int(entry_trade_id))
 
             trade.updated_at = now
             event = PaperFillEvent(
