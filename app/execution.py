@@ -1394,6 +1394,10 @@ async def advance_platform_paper_orders(
                     active_exit_entry_ids.add(int(pending_exit["entry_trade_id"]))
             except (TypeError, ValueError):
                 continue
+        # Freeze the entry-fill barrier for this bar. A take-profit may expire below
+        # so the stop scan can run, but that must not allow later ordinary entries to
+        # fill on the same OHLC bar after its protective barrier was active.
+        active_exit_entry_ids_for_fill = frozenset(active_exit_entry_ids)
         # Even when no entry orders are pending, existing platform positions must
         # be checked for stop-loss/take-profit triggers on each new completed bar.
         bar_state = (await db.execute(
@@ -1533,7 +1537,9 @@ async def advance_platform_paper_orders(
             slippage_bps = 0.0
             execution_model_record = None
 
-            if (preexisting_protective_trigger or active_exit_entry_ids) and not is_triggered_exit:
+            if (
+                preexisting_protective_trigger or active_exit_entry_ids_for_fill
+            ) and not is_triggered_exit:
                 outcome = "WAIT_PROTECTIVE_TRIGGER"
                 reason = (
                     "protective exit is pending or an existing position barrier was touched; ordinary entry fills deferred"
