@@ -18,17 +18,22 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 AUDIT_ROLE_NAME = "atlas_audit_reader"
-AUDIT_REQUIRED_SELECT_TABLES = (
-    "alembic_version",
-    "customer_ledger_accounts",
-    "ledger_entries",
-    "ledger_journals",
-    "ledger_journal_lines",
-    "research_trial_archive",
-    "research_trial_ledger_head",
-    "research_holdout_registry",
-    "withdrawals",
-)
+AUDIT_REQUIRED_SELECT_COLUMNS = {
+    "alembic_version": ("version_num",),
+    "customer_ledger_accounts": ("available", "trading_reserved", "withdrawal_reserved"),
+    "ledger_entries": ("debit", "credit", "amount"),
+    "ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id"),
+    "ledger_journal_lines": ("id", "journal_id", "debit", "credit"),
+    "research_trial_archive": ("ledger_sequence", "ledger_entry_sha256"),
+    "research_trial_ledger_head": ("id", "last_sequence", "last_entry_sha256"),
+    "research_holdout_registry": (
+        "scope_sha256", "source_sample_sha256", "report_sha256", "holdout_version", "holdout_plan_json"
+    ),
+    "withdrawals": (
+        "created_at", "request_id", "provider_id", "provider", "amount", "currency", "status", "provider_status"
+    ),
+}
+AUDIT_REQUIRED_SELECT_TABLES = tuple(AUDIT_REQUIRED_SELECT_COLUMNS)
 
 
 def audit_role_observations_sql() -> str:
