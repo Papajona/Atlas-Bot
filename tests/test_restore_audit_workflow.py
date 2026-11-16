@@ -52,3 +52,25 @@ def test_provider_reconciliation_uses_read_only_audit_secret_not_paper_reader_se
     assert "STAGING_DATABASE_SECRET" not in workflow
     assert "EXPECTED_RUNTIME_DB_ROLE" not in workflow
 
+
+
+def test_database_audit_and_production_api_identities_are_separate_and_minimal():
+    audit_sql = (ROOT / "scripts" / "provision_atlas_audit_reader.sql").read_text(encoding="utf-8")
+    api_sql = (ROOT / "scripts" / "provision_atlas_api_runtime.sql").read_text(encoding="utf-8")
+
+    assert "CREATE ROLE atlas_audit_reader" in audit_sql
+    assert "LOGIN NOINHERIT BYPASSRLS" in audit_sql
+    assert "ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on" in audit_sql
+    assert "GRANT SELECT (" in audit_sql
+    assert "GRANT SELECT ON TABLE" not in audit_sql
+    assert "atlas_api_runtime" not in audit_sql
+
+    assert "CREATE ROLE atlas_api_runtime" in api_sql
+    assert "ALTER ROLE atlas_api_runtime SET default_transaction_read_only = off" in api_sql
+    assert "atlas_audit_reader" not in api_sql
+    assert "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO atlas_api_runtime" in api_sql
+
+    runbook = (ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
+    assert "atlas_audit_reader" in runbook
+    assert "atlas_api_runtime" in runbook
+    assert "atlas-staging-audit-db-url" in runbook
