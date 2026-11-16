@@ -94,7 +94,7 @@ jobs:
             local deadline receipt_json resolved rc
             deadline=$(( $(date +%s) + wait_seconds ))
             while (( $(date +%s) < deadline )); do
-              if receipt_json="$(gh_retry api "/repos/$GITHUB_REPOSITORY/commits/$expected_sha/check-runs?check_name=Atlas%20staging%20dispatch%20correlation&per_page=100")"; then
+              if receipt_json="$(gh_retry api --paginate --slurp "/repos/$GITHUB_REPOSITORY/commits/$expected_sha/check-runs?check_name=Atlas%20staging%20dispatch%20correlation&per_page=100")"; then
                 if resolved="$(python3 scripts/resolve_staging_dispatch_receipt.py \
                   --request-id "$request_id" \
                   --workflow-path "$workflow_path" \
