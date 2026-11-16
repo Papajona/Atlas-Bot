@@ -85,18 +85,35 @@ SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
        (SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid) AS memberships,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid) AS owned_public_tables,
-       (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       (SELECT count(*) FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND c.relname NOT IN (
-            'alembic_version','customer_ledger_accounts','ledger_entries','ledger_journals',
-            'ledger_journal_lines','research_trial_archive','research_trial_ledger_head',
-            'research_holdout_registry','withdrawals'
-          ) AND has_table_privilege(r.rolname,c.oid,'SELECT')) AS unexpected_select,
+          AND a.attnum > 0 AND NOT a.attisdropped
+          AND has_column_privilege(r.rolname,c.oid,a.attnum,'SELECT')
+          AND NOT (
+            (c.relname='alembic_version' AND a.attname IN ('version_num'))
+            OR (c.relname='customer_ledger_accounts' AND a.attname IN ('available','trading_reserved','withdrawal_reserved'))
+            OR (c.relname='ledger_entries' AND a.attname IN ('debit','credit','amount'))
+            OR (c.relname='ledger_journals' AND a.attname IN ('id','entry_type','idempotency_key','reference_type','reference_id'))
+            OR (c.relname='ledger_journal_lines' AND a.attname IN ('id','journal_id','debit','credit'))
+            OR (c.relname='research_trial_archive' AND a.attname IN ('ledger_sequence','ledger_entry_sha256'))
+            OR (c.relname='research_trial_ledger_head' AND a.attname IN ('id','last_sequence','last_entry_sha256'))
+            OR (c.relname='research_holdout_registry' AND a.attname IN ('scope_sha256','source_sample_sha256','report_sha256','holdout_version','holdout_plan_json'))
+            OR (c.relname='withdrawals' AND a.attname IN ('created_at','request_id','provider_id','provider','amount','currency','status','provider_status'))
+          )) AS unexpected_select_columns,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p') AND (
           has_table_privilege(r.rolname,c.oid,'INSERT') OR has_table_privilege(r.rolname,c.oid,'UPDATE')
           OR has_table_privilege(r.rolname,c.oid,'DELETE') OR has_table_privilege(r.rolname,c.oid,'TRUNCATE')
           OR has_table_privilege(r.rolname,c.oid,'REFERENCES') OR has_table_privilege(r.rolname,c.oid,'TRIGGER')
+          OR EXISTS (
+            SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped AND (
+              has_column_privilege(r.rolname,c.oid,a.attnum,'INSERT')
+              OR has_column_privilege(r.rolname,c.oid,a.attnum,'UPDATE')
+              OR has_column_privilege(r.rolname,c.oid,a.attnum,'REFERENCES')
+            )
+          )
         )) AS writable_public_tables,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind='S' AND (
