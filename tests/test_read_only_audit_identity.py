@@ -1,4 +1,5 @@
 from scripts.verify_staging_restore import (
+    AUDIT_REQUIRED_SELECT_COLUMNS,
     AUDIT_REQUIRED_SELECT_TABLES,
     audit_role_failures,
     read_database_uri,
@@ -101,3 +102,14 @@ def test_read_database_uri_still_accepts_direct_supabase_endpoint():
     )
     assert host == f"db.{PROJECT_REF}.supabase.co"
     assert env["PGUSER"] == "atlas_audit_reader"
+
+def test_audit_reader_column_allowlist_excludes_customer_profile_and_unneeded_withdrawal_data():
+    assert AUDIT_REQUIRED_SELECT_COLUMNS["customer_ledger_accounts"] == (
+        "available", "trading_reserved", "withdrawal_reserved"
+    )
+    assert AUDIT_REQUIRED_SELECT_COLUMNS["withdrawals"] == (
+        "created_at", "request_id", "provider_id", "provider", "amount", "currency", "status", "provider_status"
+    )
+    assert "customer_id" not in AUDIT_REQUIRED_SELECT_COLUMNS["withdrawals"]
+    assert "email" not in AUDIT_REQUIRED_SELECT_COLUMNS["withdrawals"]
+
