@@ -66,20 +66,20 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$REQUEST_ID" =~ ^[a-f0-9]{32}$ ]] || { echo "BLOCKED: invalid customer-paper acceptance correlation nonce"; exit 1; }
-          receipt_summary="$(printf '%s\\n' \\
-            "request_id=$REQUEST_ID" \\
-            "workflow_path=$WORKFLOW_PATH" \\
-            "run_id=$GITHUB_RUN_ID" \\
-            "run_attempt=$GITHUB_RUN_ATTEMPT" \\
-            "head_sha=$GITHUB_SHA" \\
-            "head_branch=$GITHUB_REF_NAME" \\
+          receipt_summary="$(printf '%s\n' \
+            "request_id=$REQUEST_ID" \
+            "workflow_path=$WORKFLOW_PATH" \
+            "run_id=$GITHUB_RUN_ID" \
+            "run_attempt=$GITHUB_RUN_ATTEMPT" \
+            "head_sha=$GITHUB_SHA" \
+            "head_branch=$GITHUB_REF_NAME" \
             "event=$GITHUB_EVENT_NAME")"
-          receipt_json="$(gh api --method POST "/repos/$GITHUB_REPOSITORY/check-runs" \\
-            -f name="Atlas staging dispatch correlation" \\
-            -f head_sha="$GITHUB_SHA" \\
-            -f external_id="$REQUEST_ID" \\
-            -f status="in_progress" \\
-            -f "output[title]=Atlas staging dispatch correlation" \\
+          receipt_json="$(gh api --method POST "/repos/$GITHUB_REPOSITORY/check-runs" \
+            -f name="Atlas staging dispatch correlation" \
+            -f head_sha="$GITHUB_SHA" \
+            -f external_id="$REQUEST_ID" \
+            -f status="in_progress" \
+            -f "output[title]=Atlas staging dispatch correlation" \
             -f "output[summary]=$receipt_summary")"
           receipt_id="$(jq -er '.id' <<< "$receipt_json")"
           [[ "$receipt_id" =~ ^[0-9]+$ ]]
@@ -298,7 +298,7 @@ jobs:
             cancelled) conclusion=cancelled ;;
             *) conclusion=failure ;;
           esac
-          gh api --method PATCH "/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \\
-            -f status=completed \\
-            -f conclusion="$conclusion" \\
+          gh api --method PATCH "/repos/$GITHUB_REPOSITORY/check-runs/$CHECK_RUN_ID" \
+            -f status=completed \
+            -f conclusion="$conclusion" \
             -f completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
