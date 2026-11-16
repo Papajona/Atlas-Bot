@@ -15,6 +15,12 @@ import sys
 from typing import Any
 
 CHECK_RUN_NAME = "Atlas staging dispatch correlation"
+
+
+class RetryableSnapshotError(Exception):
+    """The paginated API changed during retrieval; retry the entire snapshot."""
+
+
 _REQUIRED_FIELDS = {
     "request_id",
     "workflow_path",
@@ -46,8 +52,10 @@ def resolve_staging_dispatch_receipt(
     if not workflow_path.startswith(".github/workflows/") or not workflow_path.endswith(".yml"):
         raise ValueError("expected workflow path is malformed")
 
-    if not isinstance(payload, list) or not payload:
+    if not isinstance(payload, list):
         raise ValueError("paginated check-runs API response has an unexpected shape")
+    if not payload:
+        raise LookupError("check-runs API has not returned a page yet")
 
     check_runs: list[Any] = []
     expected_total: int | None = None
@@ -60,10 +68,10 @@ def resolve_staging_dispatch_receipt(
         if expected_total is None:
             expected_total = total
         elif total != expected_total:
-            raise ValueError("check-runs pagination changed total_count between pages")
+            raise RetryableSnapshotError("check-runs total_count changed during pagination; retry the complete snapshot")
         check_runs.extend(page["check_runs"])
     if expected_total != len(check_runs):
-        raise ValueError("check-runs pagination is incomplete; refusing a partial nonce lookup")
+        raise RetryableSnapshotError("check-runs pagination snapshot is incomplete; retry the complete snapshot")
 
     nonce_matches = [
         item for item in check_runs
@@ -138,6 +146,9 @@ def main() -> int:
     except LookupError as exc:
         print(f"NOT_FOUND: {exc}", file=sys.stderr)
         return 3
+    except RetryableSnapshotError as exc:
+        print(f"RETRY: {exc}", file=sys.stderr)
+        return 4
     except (ValueError, json.JSONDecodeError) as exc:
         print(f"BLOCKED: invalid staging dispatch receipt: {exc}", file=sys.stderr)
         return 1
