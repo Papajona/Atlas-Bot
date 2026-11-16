@@ -53,41 +53,95 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
     expected = "0059_research_integrity_controls"
 
-    # Restore verification still checks the expected migration revision. The
-    # isolated paper-only runtime intentionally avoids the production Alembic
-    # migration path and verifies its two read-only identities plus ledger readiness.
     assert f"--expected-revision {expected}" in workflow
     assert f"--expected-revision {expected}" in reconciliation_workflow
     assert f'default="{expected}"' in verifier
     assert f'default="{expected}"' in provider_verifier
-    assert f"checks for revision `{expected}`" in runbook
-    assert "database revision is 0049" not in runbook
-    assert "same actual ref" in runbook
-    assert "EXPECTED_ALEMBIC_HEAD" not in identity_workflow
-    assert "0059_research_integrity_controls" not in identity_workflow
+    assert f"verifies revision `{expected}`" in runbook
     assert "app.paper_staging:app" in identity_workflow
-    assert "can access only customer_profiles/app_state" in identity_workflow
-    assert "no second project or paid branch is required" in runbook
-    assert "project refs differ before restoring" not in runbook
-    assert "must use a different Supabase project from production" not in identity_workflow
-    for source in (workflow, identity_workflow, reconciliation_workflow):
-        assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in source
+    assert "no second Supabase project or paid branch is required" in runbook
+    # Same-project staging and read-only reconciliation are allowed, but a full
+    # backup restore may never target the active production database.
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
+    assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
+    assert "A restore audit target must be a distinct non-production Supabase project reference" in runbook
+    assert "the current Free single-project setup has no verified separate restore target" in runbook
+    assert "full restore certification" in runbook
 
 
 
-def test_restore_audit_enforces_migration_0059_research_table_acl_contract():
-    from scripts.verify_staging_restore import QUERY
 
-    assert "c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')" in QUERY
-    assert "'research_trial_ledger_head_acl_valid'" in QUERY
-    assert "'research_holdout_registry_acl_valid'" in QUERY
-    # The ledger head is SELECT/UPDATE only; the holdout registry is SELECT/INSERT only.
-    assert "has_table_privilege(r.rolname,c.oid,'UPDATE')" in QUERY
-    assert "has_table_privilege(r.rolname,c.oid,'INSERT')" in QUERY
-    assert QUERY.count("has_table_privilege(r.rolname,c.oid,'TRIGGER')") == 2
-    assert QUERY.count("has_table_privilege(r.rolname,c.oid,'REFERENCES')") == 2
+def test_restore_audit_enforces_column_scoped_read_only_audit_identity():
+    import re
+
+    from scripts.verify_staging_restore import (
+        AUDIT_REQUIRED_SELECT_COLUMNS,
+        QUERY,
+        audit_role_failures,
+    )
+
+    verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
+    provisioner = Path("scripts/provision_atlas_audit_reader.sql").read_text(encoding="utf-8")
+    normalized_provisioner = re.sub(r"\\s+", " ", provisioner)
+
+    assert "'required_select_missing'" in QUERY
+    assert "'unexpected_select'" in QUERY
+    assert "'public_tables_with_write_privileges'" in QUERY
+    assert "'public_sequences_with_privileges'" in QUERY
+    assert "'public_functions_with_execute'" in QUERY
+    assert "has_column_privilege" in QUERY
+    assert "has_table_privilege(r.rolname,c.oid,'TRIGGER')" in QUERY
+    assert "has_table_privilege(r.rolname,c.oid,'REFERENCES')" in QUERY
     assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in QUERY
-    assert "migration 0059 least-privilege grant contract" in Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
+    assert "audit role must be exactly atlas_audit_reader" in verifier
+
+    # The verifier's allowlist and the role-provisioning SQL must be identical.
+    # Table-level SELECT is deliberately absent to keep unrelated columns private.
+    for table_name, columns in AUDIT_REQUIRED_SELECT_COLUMNS.items():
+        statement = (
+            f"GRANT SELECT ({', '.join(columns)}) ON TABLE public.{table_name} "
+            "TO atlas_audit_reader;"
+        )
+        assert statement in normalized_provisioner
+    assert "GRANT SELECT ON TABLE" not in normalized_provisioner
+    assert "ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on" in normalized_provisioner
+    assert "CREATE ROLE atlas_audit_reader LOGIN NOINHERIT BYPASSRLS" in normalized_provisioner
+
+    good_role = {
+        "name": "atlas_audit_reader",
+        "login": True,
+        "inherit": False,
+        "superuser": False,
+        "create_role": False,
+        "create_database": False,
+        "replication": False,
+        "bypass_rls": True,
+        "owns_public_tables": 0,
+        "role_memberships": 0,
+        "public_schema_usage": True,
+        "public_schema_create": False,
+        "required_select_missing": 0,
+        "unexpected_select": 0,
+        "public_tables_with_write_privileges": 0,
+        "public_sequences_with_privileges": 0,
+        "public_functions_with_execute": 0,
+    }
+    assert audit_role_failures(good_role, "atlas_audit_reader", "on") == []
+
+    unsafe_role = {**good_role, "public_tables_with_write_privileges": 1}
+    assert any(
+        "public_tables_with_write_privileges expected 0" in failure
+        for failure in audit_role_failures(unsafe_role, "atlas_audit_reader", "on")
+    )
+    assert any(
+        "transaction is not running in a read-only" in failure
+        for failure in audit_role_failures(good_role, "atlas_audit_reader", "off")
+    )
+    assert any(
+        "expected audit role must be exactly atlas_audit_reader" in failure
+        for failure in audit_role_failures(good_role, "atlas_api_runtime", "on")
+    )
 
 
 def test_restore_audit_rejects_missing_required_schema_objects():
