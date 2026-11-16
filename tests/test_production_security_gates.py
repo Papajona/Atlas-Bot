@@ -458,14 +458,14 @@ def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
 
 def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_deploy():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
-    # Do not cancel a parent run while its dispatched identity/acceptance children
-    # are still working. The parent polls main and exits stale before any mutation.
+    # The deploy job owns only image build/deploy; reusable identity and
+    # acceptance jobs run afterward through explicit dependencies.
     assert "cancel-in-progress: false" in deploy
     assert "Keep the parent run alive" in deploy
     assert "gate_wait_seconds=7200" in deploy
     assert 'cat > "$RUNNER_TEMP/atlas-gh-retry.sh"' in deploy
     assert 'echo "ATLAS_GH_RETRY_HELPER=$RUNNER_TEMP/atlas-gh-retry.sh" >> "$GITHUB_ENV"' in deploy
-    assert deploy.count('source "$ATLAS_GH_RETRY_HELPER"') == 3
+    assert deploy.count('source "$ATLAS_GH_RETRY_HELPER"') == 1
     assert "max_attempts=6" in deploy
     assert "HTTP (429|5[0-9][0-9])" in deploy
     assert "gh_retry run list" in deploy
@@ -473,6 +473,7 @@ def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_de
     assert "gh api " not in deploy
     assert "gh run list " not in deploy
     assert "gh run view " not in deploy
+    assert "displayTitle" not in deploy
 
     deploy_step = deploy.split(
         "      - name: Deploy restricted paper-only Cloud Run service", 1
@@ -484,12 +485,17 @@ def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_de
     assert guard < comparison < image < mutation
     assert "main advanced before Cloud Run deployment" in deploy_step
 
-    post_deploy_guard = deploy.split(
-        "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
-    )[1].split("\n      - name:", 1)[0]
-    assert 'current_main_sha="$(gh_retry api' in post_deploy_guard
-    assert 'if [[ "$current_main_sha" != "$GITHUB_SHA" ]]' in post_deploy_guard
-    assert "main advanced during staging deployment" in post_deploy_guard
+    identity_job = deploy.split("  verify-staging-identity:", 1)[1].split(
+        "  customer-paper-acceptance:", 1
+    )[0]
+    assert "needs: deploy-paper-staging" in identity_job
+    assert "if: needs.deploy-paper-staging.result == 'success'" in identity_job
+    assert "uses: ./.github/workflows/staging-identity-preflight.yml" in identity_job
+
+    acceptance_job = deploy.split("  customer-paper-acceptance:", 1)[1]
+    assert "verify-staging-identity" in acceptance_job
+    assert "if: needs.verify-staging-identity.result == 'success'" in acceptance_job
+    assert "uses: ./.github/workflows/customer-paper-staging-acceptance.yml" in acceptance_job
 
 def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_gates():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
@@ -505,34 +511,21 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "github.ref == 'refs/heads/main'" in job
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
-    assert '--event workflow_dispatch' in deploy  # used for the uniquely correlated preflight dispatch
     assert '.event == "workflow_dispatch"' in deploy
     assert '.event == "push"' in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
-    assert "gh workflow run staging-identity-preflight.yml" in deploy
-    assert '-f "request_id=$request_id"' in deploy
-    assert 'gh_retry run view "$preflight_run_id"' in deploy
-    assert "Dispatch and require customer-paper acceptance on this exact deployment" in deploy
-    assert "gh workflow run customer-paper-staging-acceptance.yml" in deploy
-    assert '-f "target_sha=$GITHUB_SHA"' in deploy
-    assert '-f "deployment_run_id=$GITHUB_RUN_ID"' in deploy
-    assert '-f "deployment_run_attempt=$GITHUB_RUN_ATTEMPT"' in deploy
-    assert '-f "dispatch_id=$dispatch_id"' in deploy
-    assert 'secrets.token_hex(16)' in deploy
-    assert 'acceptance_wait_seconds=5400' in deploy
-    assert 'acceptance_poll_interval_seconds=30' in deploy
+    assert "displayTitle" not in deploy
+    assert "gh workflow run" not in deploy
+    assert "  verify-staging-identity:" in deploy
+    assert "uses: ./.github/workflows/staging-identity-preflight.yml" in deploy
+    assert "  customer-paper-acceptance:" in deploy
+    assert "uses: ./.github/workflows/customer-paper-staging-acceptance.yml" in deploy
+    assert "needs.verify-staging-identity.result == 'success'" in deploy
     assert 'timeout-minutes: 300' in deploy
-    assert 'gh_retry run view "$acceptance_run_id"' in deploy
-    assert "PASS: customer-paper acceptance run" in deploy
-    acceptance_dispatch = deploy.split(
-        "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
-    )[1]
-    assert not any(line.endswith(chr(92) * 2) for line in acceptance_dispatch.splitlines())
-    assert "select(.displayTitle == $expected)" in deploy
-    assert "uniquely correlated staging preflight run was not observed" in deploy
-    assert "main advanced during staging preflight" in deploy
+    assert "actions: read" in deploy
+
     gate_wait = deploy.split(
         "      - name: Wait for required CI gates to pass on this exact commit", 1
     )[1].split("      - name: Validate staging inputs", 1)[0]
@@ -551,8 +544,6 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
         "Set up Google Cloud SDK",
         "Build and push exact commit image to Artifact Registry",
         "Deploy restricted paper-only Cloud Run service",
-        "Dispatch and require read-only staging identity preflight on this exact commit",
-        "Dispatch and require customer-paper acceptance on this exact deployment",
     ):
         step = deploy.split(f"      - name: {downstream_step}", 1)[1].split("\n      - name:", 1)[0]
         assert "steps.wait-required-gates.outputs.stale != 'true'" in step, downstream_step
@@ -564,10 +555,8 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
     cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
     assert freshness_guard < cloud_run_change
-    assert 'GH_TOKEN: ${{ github.token }}' in deploy[deploy_step:cloud_run_change]
+    assert 'GH_TOKEN: \${{ github.token }}' in deploy[deploy_step:cloud_run_change]
     assert "timeout-minutes: 300" in deploy
-    assert "actions: write" in deploy
-
 
 def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
     ruby = r"""
@@ -606,16 +595,22 @@ def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
 
 
 
-def test_staging_identity_preflight_is_dispatched_after_paper_service_deployment():
+def test_staging_identity_preflight_is_reused_after_paper_service_deployment():
     workflow = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
     trigger_header = workflow.split("\npermissions:", 1)[0]
     assert "workflow_dispatch:" in trigger_header
+    assert "workflow_call:" in trigger_header
     assert "\n  push:" not in trigger_header
     assert "verify-staging-identity:" in workflow
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
-    assert "gh workflow run staging-identity-preflight.yml" in deploy
-    assert deploy.index("Deploy restricted paper-only Cloud Run service") < deploy.index("Dispatch and require read-only staging identity preflight")
-
+    identity_job = deploy.split("  verify-staging-identity:", 1)[1].split(
+        "  customer-paper-acceptance:", 1
+    )[0]
+    assert "needs: deploy-paper-staging" in identity_job
+    assert "if: needs.deploy-paper-staging.result == 'success'" in identity_job
+    assert "uses: ./.github/workflows/staging-identity-preflight.yml" in identity_job
+    acceptance_job = deploy.split("  customer-paper-acceptance:", 1)[1]
+    assert "needs.verify-staging-identity.result == 'success'" in acceptance_job
 
 def _run_production_staging_job_gate(tmp_path: Path, job_conclusion: str):
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
