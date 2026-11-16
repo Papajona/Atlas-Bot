@@ -103,7 +103,7 @@ jobs:
                   return 0
                 else
                   rc=$?
-                  if (( rc != 3 )); then
+                  if (( rc != 3 && rc != 4 )); then
                     echo "BLOCKED: nonce-bound staging dispatch receipt is malformed or ambiguous; refusing to select another run." >&2
                     return "$rc"
                   fi
