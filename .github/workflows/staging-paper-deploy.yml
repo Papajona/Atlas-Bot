@@ -83,7 +83,7 @@ jobs:
             version="$(gh version | awk 'NR == 1 {print $3}')"
             python3 - "$version" <<'PY'
           import re, sys
-          match = re.match(r"^(\\d+)\\.(\\d+)\\.(\\d+)", sys.argv[1])
+          match = re.match(r"^(\d+)\.(\d+)\.(\d+)", sys.argv[1])
           if not match or tuple(map(int, match.groups())) < (2, 87, 0):
               raise SystemExit("BLOCKED: staging workflow dispatch requires GitHub CLI 2.87.0 or newer; upgrade the runner CLI before dispatching child workflows.")
           PY
@@ -95,11 +95,11 @@ jobs:
             deadline=$(( $(date +%s) + wait_seconds ))
             while (( $(date +%s) < deadline )); do
               if receipt_json="$(gh_retry api "/repos/$GITHUB_REPOSITORY/commits/$expected_sha/check-runs?check_name=Atlas%20staging%20dispatch%20correlation&per_page=100")"; then
-                if resolved="$(python3 scripts/resolve_staging_dispatch_receipt.py \\
-                  --request-id "$request_id" \\
-                  --workflow-path "$workflow_path" \\
+                if resolved="$(python3 scripts/resolve_staging_dispatch_receipt.py \
+                  --request-id "$request_id" \
+                  --workflow-path "$workflow_path" \
                   --expected-sha "$expected_sha" <<< "$receipt_json")"; then
-                  printf '%s\\n' "$resolved"
+                  printf '%s\n' "$resolved"
                   return 0
                 else
                   rc=$?
