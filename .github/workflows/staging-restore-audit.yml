@@ -37,15 +37,15 @@ jobs:
       GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT || secrets.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT }}
       STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_SUPABASE_PROJECT_REF }}
       PRODUCTION_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
-      STAGING_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_DATABASE_SECRET }}
-      EXPECTED_RUNTIME_DB_ROLE: ${{ vars.ATLAS_STAGING_RUNTIME_DB_ROLE }}
+      STAGING_AUDIT_DATABASE_SECRET: ${{ vars.ATLAS_STAGING_AUDIT_DATABASE_SECRET }}
+      EXPECTED_AUDIT_DB_ROLE: ${{ vars.ATLAS_STAGING_AUDIT_DB_ROLE }}
       AUDIT_ARCHIVE_BUCKET: ${{ vars.ATLAS_STAGING_EVIDENCE_BUCKET }}
       RESTORE_OPERATION_ID: ${{ inputs.restore_operation_id }}
       BACKUP_REFERENCE: ${{ inputs.backup_reference }}
       RESTORE_EVIDENCE_URI: ${{ inputs.restore_evidence_uri }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - name: Require protected same-project staging configuration
+      - name: Require protected non-production restore target and audit identity
         shell: bash
         run: |
           set -euo pipefail
@@ -63,23 +63,18 @@ jobs:
             exit 1
           }
           : "${STAGING_SUPABASE_PROJECT_REF:?Missing ATLAS_STAGING_SUPABASE_PROJECT_REF}"
-          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the current project ref (same as staging for the free single-project setup)}"
-          : "${STAGING_DATABASE_SECRET:?Missing ATLAS_STAGING_DATABASE_SECRET}"
-          : "${EXPECTED_RUNTIME_DB_ROLE:?Missing ATLAS_STAGING_RUNTIME_DB_ROLE}"
+          : "${PRODUCTION_SUPABASE_PROJECT_REF:?Set ATLAS_PRODUCTION_SUPABASE_PROJECT_REF to the active production project ref}"
+          : "${STAGING_AUDIT_DATABASE_SECRET:?Missing ATLAS_STAGING_AUDIT_DATABASE_SECRET}"
+          : "${EXPECTED_AUDIT_DB_ROLE:?Missing ATLAS_STAGING_AUDIT_DB_ROLE}"
           : "${AUDIT_ARCHIVE_BUCKET:?Missing ATLAS_STAGING_EVIDENCE_BUCKET}"
           : "${RESTORE_OPERATION_ID:?A real restore operation ID is required}"
           : "${BACKUP_REFERENCE:?An immutable backup reference is required}"
           : "${RESTORE_EVIDENCE_URI:?A provider restore evidence URL/URI is required}"
-          # The free-stage deployment uses one Supabase project by design.
-          # Both refs are still required so the audit records the chosen topology.
-          if [[ "$STAGING_SUPABASE_PROJECT_REF" == "$PRODUCTION_SUPABASE_PROJECT_REF" ]]; then
-            echo "Same-project staging selected; runtime must remain paper-only and the database restore must not overwrite an active source."
-          else
-            echo "Distinct staging project selected."
-          fi
+          # A restored target must be independent from the active production source.
           [[ "$STAGING_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
           [[ "$PRODUCTION_SUPABASE_PROJECT_REF" =~ ^[a-z0-9]{20}$ ]]
-          [[ "$EXPECTED_RUNTIME_DB_ROLE" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
+          [[ "$EXPECTED_AUDIT_DB_ROLE" == "atlas_audit_reader" ]] || { echo "BLOCKED: restore audit must use atlas_audit_reader"; exit 1; }
+          [[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]] || { echo "BLOCKED: restore target must be distinct from the active production project; same-project restore could overwrite the source"; exit 1; }
           case "$RESTORE_EVIDENCE_URI" in
             https://*) ;;
             gs://*) ;;
@@ -92,7 +87,7 @@ jobs:
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
-      - name: Download provider restore-operation record and staging database secret
+      - name: Download provider restore-operation record and dedicated audit database secret
         shell: bash
         run: |
           set -euo pipefail
@@ -123,10 +118,10 @@ jobs:
           fi
           test -s "$RUNNER_TEMP/restore-operation-evidence.json"
           gcloud secrets versions access latest \
-            --secret="$STAGING_DATABASE_SECRET" \
-            --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-db-url"
-          test -s "$RUNNER_TEMP/atlas-staging-db-url"
-          chmod 600 "$RUNNER_TEMP/atlas-staging-db-url"
+            --secret="$STAGING_AUDIT_DATABASE_SECRET" \
+            --project="$GCP_PROJECT_ID" > "$RUNNER_TEMP/atlas-staging-audit-db-url"
+          test -s "$RUNNER_TEMP/atlas-staging-audit-db-url"
+          chmod 600 "$RUNNER_TEMP/atlas-staging-audit-db-url"
       - name: Install PostgreSQL client
         run: |
           sudo apt-get update
@@ -154,14 +149,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-db-url")"
+          export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-audit-db-url")"
           python scripts/verify_staging_restore.py \
             --restore-operation-id "$RESTORE_OPERATION_ID" \
             --backup-reference "$BACKUP_REFERENCE" \
             --restore-evidence-uri "$RESTORE_EVIDENCE_URI" \
             --restore-evidence-sha256 "$RESTORE_EVIDENCE_SHA256" \
             --verified-target-project-ref "$VERIFIED_RESTORE_TARGET_PROJECT_REF" \
-            --expected-runtime-role "$EXPECTED_RUNTIME_DB_ROLE" \
+            --expected-audit-role "$EXPECTED_AUDIT_DB_ROLE" \
             --expected-revision 0059_research_integrity_controls \
             --output "$RUNNER_TEMP/staging-restore-audit.json"
       - name: Archive audit output even if ledger invariants failed
@@ -192,3 +187,8 @@ jobs:
             ${{ runner.temp }}/staging-restore-audit.json
           if-no-files-found: warn
           retention-days: 90
+
+      - name: Remove audit database credentials from runner
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/atlas-staging-audit-db-url"

@@ -87,7 +87,7 @@ def upgrade() -> None:
                       AND r.rolname NOT IN (
                           'postgres', 'service_role', 'supabase_admin',
                           'supabase_auth_admin', 'authenticator', 'anon', 'authenticated',
-                          'atlas_paper_reader'
+                          'atlas_paper_reader', 'atlas_audit_reader'
                       )
                       AND has_table_privilege(r.rolname, 'public.audit_log', 'INSERT')
                 LOOP

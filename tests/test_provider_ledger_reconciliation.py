@@ -155,7 +155,7 @@ def test_statement_parser_rejects_duplicate_ids_and_invalid_status(tmp_path):
 
 
 
-def test_provider_reconciliation_query_enforces_migration_0059_research_table_acls():
+def test_provider_reconciliation_query_uses_read_only_audit_acl_contract():
     from datetime import datetime, timezone
 
     query = build_query(
@@ -163,17 +163,17 @@ def test_provider_reconciliation_query_enforces_migration_0059_research_table_ac
         datetime(2026, 10, 14, tzinfo=timezone.utc),
         datetime(2026, 10, 15, tzinfo=timezone.utc),
     )
-
-    assert "c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')" in query
-    assert "'research_trial_ledger_head_acl_valid'" in query
-    assert "'research_holdout_registry_acl_valid'" in query
-    assert "has_table_privilege(r.rolname,c.oid,'UPDATE')" in query
-    assert "has_table_privilege(r.rolname,c.oid,'INSERT')" in query
-    assert query.count("has_table_privilege(r.rolname,c.oid,'TRIGGER')") == 2
-    assert query.count("has_table_privilege(r.rolname,c.oid,'REFERENCES')") == 2
-    assert "has_table_privilege(r.rolname,c.oid,'TRUNCATE')" in query
-    assert "migration 0059 least-privilege grant contract" in Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
-
+    assert "'transaction_read_only', current_setting('transaction_read_only')" in query
+    assert "'audit_role'" in query
+    assert "'required_select_missing'" in query
+    assert "'public_tables_with_write_privileges'" in query
+    assert "'public_sequences_with_privileges'" in query
+    assert "'public_functions_with_execute'" in query
+    assert "tables_missing_dml" not in query
+    assert "public_tables_missing_dml" not in query
+    assert "audit_role_failures(" in Path(
+        "scripts/verify_provider_ledger_reconciliation.py"
+    ).read_text(encoding="utf-8")
 
 def test_query_window_requires_timezone_and_provider_is_restricted():
     start = parse_utc("2026-10-14T00:00:00Z", "start")

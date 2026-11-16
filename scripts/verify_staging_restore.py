@@ -17,12 +17,182 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+AUDIT_ROLE_NAME = "atlas_audit_reader"
+AUDIT_REQUIRED_SELECT_COLUMNS = {
+    "alembic_version": ("version_num",),
+    "customer_ledger_accounts": ("available", "trading_reserved", "withdrawal_reserved"),
+    "ledger_entries": ("debit", "credit", "amount"),
+    "ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id"),
+    "ledger_journal_lines": ("id", "journal_id", "debit", "credit"),
+    "research_trial_archive": ("ledger_sequence", "ledger_entry_sha256"),
+    "research_trial_ledger_head": ("id", "last_sequence", "last_entry_sha256"),
+    "research_holdout_registry": (
+        "scope_sha256", "source_sample_sha256", "report_sha256", "holdout_version", "holdout_plan_json"
+    ),
+    "withdrawals": (
+        "created_at", "request_id", "provider_id", "provider", "amount", "currency", "status", "provider_status"
+    ),
+}
+AUDIT_REQUIRED_SELECT_TABLES = tuple(AUDIT_REQUIRED_SELECT_COLUMNS)
 
-QUERY = r"""
+
+def audit_role_observations_sql() -> str:
+    """Return catalog-only checks for the dedicated read-only audit login."""
+    column_pairs = ", ".join(
+        f"('{table_name}', '{column_name}')"
+        for table_name, columns in AUDIT_REQUIRED_SELECT_COLUMNS.items()
+        for column_name in columns
+    )
+    return f"""
+    SELECT jsonb_build_object(
+      'name', r.rolname,
+      'login', r.rolcanlogin,
+      'inherit', r.rolinherit,
+      'superuser', r.rolsuper,
+      'create_role', r.rolcreaterole,
+      'create_database', r.rolcreatedb,
+      'replication', r.rolreplication,
+      'bypass_rls', r.rolbypassrls,
+      'role_default_read_only', COALESCE((
+        SELECT lower(split_part(cfg.setting, '=', 2)) IN ('on', 'true', '1')
+        FROM pg_db_role_setting s
+        CROSS JOIN LATERAL unnest(s.setconfig) AS cfg(setting)
+        WHERE s.setrole = r.oid
+          AND s.setdatabase IN (
+            0,
+            (SELECT oid FROM pg_database WHERE datname = current_database())
+          )
+          AND lower(split_part(cfg.setting, '=', 1)) = 'default_transaction_read_only'
+        ORDER BY (
+          s.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+        ) DESC
+        LIMIT 1
+      ), false),
+      'owns_public_tables', (
+        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND c.relowner=r.oid
+      ),
+      'role_memberships', (
+        SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid
+      ),
+      'public_schema_usage', has_schema_privilege(r.rolname,'public','USAGE'),
+      'public_schema_create', has_schema_privilege(r.rolname,'public','CREATE'),
+      'required_select_missing', (
+        SELECT count(*)
+        FROM (VALUES {column_pairs}) AS required(table_name,column_name)
+        LEFT JOIN pg_class c
+          ON c.relnamespace = 'public'::regnamespace
+         AND c.relname = required.table_name
+         AND c.relkind IN ('r','p')
+        LEFT JOIN pg_attribute a
+          ON a.attrelid = c.oid
+         AND a.attname = required.column_name
+         AND a.attnum > 0
+         AND NOT a.attisdropped
+        WHERE a.attnum IS NULL
+           OR NOT has_column_privilege(r.rolname,c.oid,a.attnum,'SELECT')
+      ),
+      'unexpected_select', (
+        SELECT count(*)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.oid
+        WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND a.attnum > 0 AND NOT a.attisdropped
+          AND has_column_privilege(r.rolname,c.oid,a.attnum,'SELECT')
+          AND NOT EXISTS (
+            SELECT 1 FROM (VALUES {column_pairs}) AS required(table_name,column_name)
+            WHERE required.table_name=c.relname AND required.column_name=a.attname
+          )
+      ),
+      'public_tables_with_write_privileges', (
+        SELECT count(*)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND (
+          has_table_privilege(r.rolname,c.oid,'INSERT')
+          OR has_table_privilege(r.rolname,c.oid,'UPDATE')
+          OR has_table_privilege(r.rolname,c.oid,'DELETE')
+          OR has_table_privilege(r.rolname,c.oid,'TRUNCATE')
+          OR has_table_privilege(r.rolname,c.oid,'REFERENCES')
+          OR has_table_privilege(r.rolname,c.oid,'TRIGGER')
+          OR EXISTS (
+            SELECT 1 FROM pg_attribute a
+            WHERE a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped AND (
+              has_column_privilege(r.rolname,c.oid,a.attnum,'INSERT')
+              OR has_column_privilege(r.rolname,c.oid,a.attnum,'UPDATE')
+              OR has_column_privilege(r.rolname,c.oid,a.attnum,'REFERENCES')
+            )
+          )
+        )
+      ),
+      'public_sequences_with_privileges', (
+        SELECT count(*)
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind='S' AND (
+          has_sequence_privilege(r.rolname,c.oid,'USAGE')
+          OR has_sequence_privilege(r.rolname,c.oid,'SELECT')
+          OR has_sequence_privilege(r.rolname,c.oid,'UPDATE')
+        )
+      ),
+      'public_functions_with_execute', (
+        SELECT count(*)
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='public' AND has_function_privilege(r.rolname,p.oid,'EXECUTE')
+      )
+    )
+    FROM pg_roles r WHERE r.rolname=current_user
+    """
+
+def truthy(value: object) -> bool:
+    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes", "on"}
+
+
+def audit_role_failures(role: object, expected_role: str, transaction_read_only: object) -> list[str]:
+    """Fail closed unless this is the exact, strictly read-only audit connection."""
+    failures: list[str] = []
+    if expected_role != AUDIT_ROLE_NAME:
+        failures.append(f"expected audit role must be exactly {AUDIT_ROLE_NAME}")
+    if not isinstance(role, dict):
+        return failures + ["audit-role catalog evidence is missing or malformed"]
+    if role.get("name") != expected_role:
+        failures.append("connected role differs from the configured audit database role")
+    if not truthy(role.get("login")):
+        failures.append("audit role is not LOGIN")
+    if truthy(role.get("inherit")):
+        failures.append("audit role must be NOINHERIT")
+    for key in ("superuser", "create_role", "create_database", "replication", "public_schema_create"):
+        if truthy(role.get(key)):
+            failures.append(f"audit role has forbidden capability: {key}")
+    if not truthy(role.get("bypass_rls")) or not truthy(role.get("public_schema_usage")):
+        failures.append("audit role lacks the reviewed backend-only BYPASSRLS/public-schema USAGE contract")
+    if not truthy(role.get("role_default_read_only")):
+        failures.append("audit role default_transaction_read_only is not enabled at role/database level")
+    for key in (
+        "owns_public_tables",
+        "role_memberships",
+        "required_select_missing",
+        "unexpected_select",
+        "public_tables_with_write_privileges",
+        "public_sequences_with_privileges",
+        "public_functions_with_execute",
+    ):
+        try:
+            observed = int(role.get(key, -1))
+        except (TypeError, ValueError):
+            observed = -1
+        if observed != 0:
+            failures.append(f"audit role {key} expected 0, observed {observed}")
+    if not truthy(transaction_read_only):
+        failures.append("audit connection is not running in a read-only PostgreSQL transaction")
+    return failures
+
+
+QUERY = f"""
 SELECT jsonb_build_object(
   'database', current_database(),
   'current_user', current_user,
   'session_user', session_user,
+  'transaction_read_only', current_setting('transaction_read_only'),
   'revision', (SELECT string_agg(version_num, ',' ORDER BY version_num) FROM public.alembic_version),
   'public_table_count', (
     SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -74,80 +244,9 @@ SELECT jsonb_build_object(
     SELECT count(*) FROM public.ledger_entries
     WHERE debit < 0 OR credit < 0 OR amount <= 0 OR (debit > 0 AND credit > 0) OR (debit = 0 AND credit = 0)
   ),
-  'runtime_role', (
-    SELECT jsonb_build_object(
-      'name', r.rolname,
-      'login', r.rolcanlogin,
-      'inherit', r.rolinherit,
-      'superuser', r.rolsuper,
-      'create_role', r.rolcreaterole,
-      'create_database', r.rolcreatedb,
-      'replication', r.rolreplication,
-      'bypass_rls', r.rolbypassrls,
-      'owns_public_tables', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND pg_get_userbyid(c.relowner)=r.rolname
-      ),
-      'role_memberships', (
-        SELECT count(*) FROM pg_auth_members m WHERE m.member=r.oid
-      ),
-      'public_schema_usage', has_schema_privilege(r.rolname, 'public', 'USAGE'),
-      'public_tables_missing_select', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND NOT has_table_privilege(r.rolname,c.oid,'SELECT')
-      ),
-      'public_schema_create', has_schema_privilege(r.rolname, 'public', 'CREATE'),
-      -- Migration 0059 deliberately gives these two integrity tables narrower
-      -- grants. Keep the ordinary-table DML gate, then verify each restricted ACL
-      -- against the exact SELECT/UPDATE and SELECT/INSERT contract respectively.
-      'public_tables_missing_dml', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p')
-          AND c.relname NOT IN ('research_trial_ledger_head', 'research_holdout_registry')
-          AND NOT (has_table_privilege(r.rolname,c.oid,'INSERT')
-               AND has_table_privilege(r.rolname,c.oid,'UPDATE')
-               AND has_table_privilege(r.rolname,c.oid,'DELETE'))
-      ),
-      'research_trial_ledger_head_acl_valid', coalesce((
-        SELECT bool_and(
-          has_table_privilege(r.rolname,c.oid,'SELECT')
-          AND has_table_privilege(r.rolname,c.oid,'UPDATE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'INSERT')
-          AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
-        AND NOT has_table_privilege(r.rolname,c.oid,'TRIGGER')
-        AND NOT has_table_privilege(r.rolname,c.oid,'REFERENCES')
-        )
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relname='research_trial_ledger_head'
-          AND c.relkind IN ('r','p')
-      ), false),
-      'research_holdout_registry_acl_valid', coalesce((
-        SELECT bool_and(
-          has_table_privilege(r.rolname,c.oid,'SELECT')
-          AND has_table_privilege(r.rolname,c.oid,'INSERT')
-          AND NOT has_table_privilege(r.rolname,c.oid,'UPDATE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'DELETE')
-          AND NOT has_table_privilege(r.rolname,c.oid,'TRUNCATE')
-        AND NOT has_table_privilege(r.rolname,c.oid,'TRIGGER')
-        AND NOT has_table_privilege(r.rolname,c.oid,'REFERENCES')
-        )
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relname='research_holdout_registry'
-          AND c.relkind IN ('r','p')
-      ), false),
-      'public_sequences_missing_usage', (
-        SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind='S'
-          AND NOT has_sequence_privilege(r.rolname,c.oid,'USAGE')
-      )
-    )
-    FROM pg_roles r WHERE r.rolname=current_user
-  )
+  'audit_role', ({audit_role_observations_sql()})
 )::text;
 """
-
 
 def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tuple[dict[str, str], str]:
     parsed = urlparse(value)
@@ -157,18 +256,30 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
         raise ValueError("STAGING_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
     if not production_ref or not re.fullmatch(r"[a-z0-9]{20}", production_ref):
         raise ValueError("PRODUCTION_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
-    # Equal refs are intentional in the single-project/free-tier setup.
-    # The URL must still resolve to the explicitly configured staging project.
-    allowed_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
-    if parsed.hostname.lower() not in allowed_hosts:
-        raise ValueError("DATABASE_URL host does not match the explicitly configured staging Supabase project")
+
+    host = parsed.hostname.lower()
+    direct_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
+    pooler_host = re.fullmatch(
+        r"aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com",
+        host,
+    )
+    pooler_user = unquote(parsed.username or "")
+    pooler_matches_project = bool(pooler_host and pooler_user.rpartition(".")[2] == staging_ref)
+    if host not in direct_hosts and not pooler_matches_project:
+        raise ValueError("DATABASE_URL host/user does not match the explicitly configured Supabase project")
+    if parsed.port not in (None, 5432):
+        raise ValueError("DATABASE_URL must use PostgreSQL port 5432")
     if parsed.path.lstrip("/") != "postgres":
         raise ValueError("DATABASE_URL must target the expected postgres database")
-    env = {key: val for key, val in os.environ.items() if key not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"}}
+
+    env = {
+        key: val for key, val in os.environ.items()
+        if key not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"}
+    }
     env.update({
-        "PGHOST": parsed.hostname,
+        "PGHOST": host,
         "PGPORT": str(parsed.port or 5432),
-        "PGUSER": unquote(parsed.username or ""),
+        "PGUSER": pooler_user,
         "PGPASSWORD": unquote(parsed.password or ""),
         "PGDATABASE": parsed.path.lstrip("/"),
         "PGSSLMODE": "require",
@@ -176,8 +287,7 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
     })
     if not env["PGUSER"] or not env["PGPASSWORD"]:
         raise ValueError("DATABASE_URL must contain a database username and password")
-    return env, parsed.hostname.lower()
-
+    return env, host
 
 def required_table_failures(value: object) -> list[str]:
     """Fail closed if restore SQL did not report required tables or found any missing."""
@@ -192,14 +302,10 @@ def required_table_failures(value: object) -> list[str]:
     return failures
 
 
-def truthy(value: object) -> bool:
-    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
-
-
 RESEARCH_INTEGRITY_QUERY = r"""
 SELECT jsonb_build_object(
   'research_trial_ledger_head_rows', (
-    SELECT count(*) FROM public.research_trial_ledger_head
+    SELECT count(id) FROM public.research_trial_ledger_head
   ),
   'research_trial_ledger_head_valid', (
     SELECT count(*) = 1
@@ -283,12 +389,14 @@ def add_research_integrity_observations(
 
 
 def audit(args: argparse.Namespace) -> dict:
+    staging_ref = os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
+    production_ref = os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
+    if staging_ref == production_ref:
+        raise ValueError(
+            "full restore audit requires a distinct non-production target; same-project restore could overwrite the active source"
+        )
     database_url = os.environ.get("DATABASE_URL", "")
-    env, host = read_database_uri(
-        database_url,
-        os.environ.get("STAGING_SUPABASE_PROJECT_REF", ""),
-        os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
-    )
+    env, host = read_database_uri(database_url, staging_ref, production_ref)
     if not args.restore_operation_id.strip():
         raise ValueError("A real backup restore operation ID is required")
     if not args.backup_reference.strip():
@@ -314,44 +422,15 @@ def audit(args: argparse.Namespace) -> dict:
     except json.JSONDecodeError as exc:
         raise RuntimeError("Read-only SQL audit returned invalid JSON") from exc
 
-    role = observed.get("runtime_role") or {}
-    failures = []
-    expected_revision = args.expected_revision
-    if observed.get("database") != "postgres":
-        failures.append("unexpected database name")
+    observed = add_research_integrity_observations(observed, env=env)
     if observed.get("current_user") != observed.get("session_user"):
-        failures.append("current_user differs from session_user")
-    if role.get("name") != args.expected_runtime_role:
-        failures.append("connected role differs from configured staging runtime role")
-    if role.get("name") in {"postgres", "service_role", "supabase_admin", "supabase_auth_admin", "authenticator", "anon", "authenticated"}:
-        failures.append("connected role is reserved or privileged")
-    if not truthy(role.get("login")):
-        failures.append("runtime role is not LOGIN")
-    if truthy(role.get("inherit")):
-        failures.append("runtime role must be NOINHERIT")
-    for key in ("superuser", "create_role", "create_database", "replication"):
-        if truthy(role.get(key)):
-            failures.append(f"runtime role has forbidden capability {key}")
-    if not truthy(role.get("bypass_rls")):
-        failures.append("runtime role lacks the reviewed backend-only BYPASSRLS capability")
-    if int(role.get("owns_public_tables", -1)) != 0:
-        failures.append("runtime role owns application tables or owner count is unavailable")
-    if int(role.get("role_memberships", -1)) != 0:
-        failures.append("runtime role has inherited memberships or membership count is unavailable")
-    if not truthy(role.get("public_schema_usage")):
-        failures.append("runtime role lacks public schema USAGE")
-    if truthy(role.get("public_schema_create")):
-        failures.append("runtime role must not have CREATE on the public schema")
-    for key in ("public_tables_missing_select", "public_tables_missing_dml", "public_sequences_missing_usage"):
-        try:
-            count = int(role.get(key, -1))
-        except (TypeError, ValueError):
-            count = -1
-        if count != 0:
-            failures.append(f"{key} expected 0, observed {count}")
-    for key in ("research_trial_ledger_head_acl_valid", "research_holdout_registry_acl_valid"):
-        if not truthy(role.get(key)):
-            failures.append(f"{key} must be true under the migration 0059 least-privilege grant contract")
+        raise ValueError("audit connection current_user/session_user identity mismatch")
+    expected_revision = args.expected_revision
+    failures = audit_role_failures(
+        observed.get("audit_role"),
+        args.expected_audit_role,
+        observed.get("transaction_read_only"),
+    )
     revision = str(observed.get("revision") or "")
     if revision != expected_revision:
         failures.append(f"restored database revision must be exactly {expected_revision}")
@@ -401,7 +480,7 @@ def audit(args: argparse.Namespace) -> dict:
             == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
         ) else "separate_supabase_project",
         "staging_database_host": host,
-        "expected_runtime_role": args.expected_runtime_role,
+        "expected_audit_role": args.expected_audit_role,
         "expected_revision": expected_revision,
         "checks": observed,
         "failures": failures,
@@ -418,7 +497,7 @@ def main() -> int:
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
     parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
     parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
-    parser.add_argument("--expected-runtime-role", required=True)
+    parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
     parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
@@ -430,6 +509,7 @@ def main() -> int:
             "restore_operation_id": report["restore_operation_id"],
             "staging_supabase_ref": report["staging_supabase_ref"],
             "revision": report["checks"].get("revision"),
+            "expected_audit_role": report["expected_audit_role"],
             "failures": report["failures"],
             "report": args.output,
         }, indent=2))

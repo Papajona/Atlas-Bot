@@ -66,7 +66,7 @@ def _secure_service_tables(bind) -> None:
                   AND NOT EXISTS (
                     SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid
                   )
-                  AND r.rolname NOT IN ('anon', 'authenticated', 'atlas_paper_reader')
+                  AND r.rolname NOT IN ('anon', 'authenticated', 'atlas_paper_reader', 'atlas_audit_reader')
             LOOP
                 EXECUTE format(
                     'GRANT SELECT, UPDATE ON TABLE public.research_trial_ledger_head TO %I',

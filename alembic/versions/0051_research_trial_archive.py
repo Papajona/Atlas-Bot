@@ -69,7 +69,7 @@ def upgrade():
                   AND NOT EXISTS (
                     SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid
                   )
-                  AND r.rolname NOT IN ('anon', 'authenticated', 'atlas_paper_reader')
+                  AND r.rolname NOT IN ('anon', 'authenticated', 'atlas_paper_reader', 'atlas_audit_reader')
             LOOP
                 EXECUTE format('GRANT SELECT, INSERT ON TABLE public.research_trial_archive TO %I', role_name);
             END LOOP;
