@@ -46,9 +46,24 @@ def resolve_staging_dispatch_receipt(
     if not workflow_path.startswith(".github/workflows/") or not workflow_path.endswith(".yml"):
         raise ValueError("expected workflow path is malformed")
 
-    check_runs = payload.get("check_runs") if isinstance(payload, dict) else None
-    if not isinstance(check_runs, list):
-        raise ValueError("check-runs API response has an unexpected shape")
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("paginated check-runs API response has an unexpected shape")
+
+    check_runs: list[Any] = []
+    expected_total: int | None = None
+    for page in payload:
+        if not isinstance(page, dict) or not isinstance(page.get("check_runs"), list):
+            raise ValueError("a check-runs API page has an unexpected shape")
+        total = page.get("total_count")
+        if not isinstance(total, int) or total < 0:
+            raise ValueError("a check-runs API page has no valid total_count")
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise ValueError("check-runs pagination changed total_count between pages")
+        check_runs.extend(page["check_runs"])
+    if expected_total != len(check_runs):
+        raise ValueError("check-runs pagination is incomplete; refusing a partial nonce lookup")
 
     matches = [
         item
