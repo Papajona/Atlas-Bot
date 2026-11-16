@@ -102,7 +102,7 @@ def audit_role_observations_sql() -> str:
 
 
 def truthy(value: object) -> bool:
-    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
+    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes", "on"}
 
 
 def audit_role_failures(role: object, expected_role: str, transaction_read_only: object) -> list[str]:
@@ -259,7 +259,7 @@ def required_table_failures(value: object) -> list[str]:
 
 
 def truthy(value: object) -> bool:
-    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes"}
+    return value is True or str(value).strip().lower() in {"t", "true", "1", "yes", "on"}
 
 
 RESEARCH_INTEGRITY_QUERY = r"""
