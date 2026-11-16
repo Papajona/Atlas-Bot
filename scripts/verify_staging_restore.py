@@ -292,7 +292,7 @@ def truthy(value: object) -> bool:
 RESEARCH_INTEGRITY_QUERY = r"""
 SELECT jsonb_build_object(
   'research_trial_ledger_head_rows', (
-    SELECT count(*) FROM public.research_trial_ledger_head
+    SELECT count(id) FROM public.research_trial_ledger_head
   ),
   'research_trial_ledger_head_valid', (
     SELECT count(*) = 1
