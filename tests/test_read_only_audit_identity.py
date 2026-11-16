@@ -46,7 +46,7 @@ def test_audit_identity_has_a_small_explicit_read_allowlist():
 
 
 def test_audit_role_contract_accepts_only_exact_read_only_identity():
-    assert audit_role_failures(valid_audit_role(), "atlas_audit_reader", True) == []
+    assert audit_role_failures(valid_audit_role(), "atlas_audit_reader", "on") == []
 
 
 def test_audit_role_contract_rejects_all_write_paths_and_wider_reads():
@@ -60,12 +60,12 @@ def test_audit_role_contract_rejects_all_write_paths_and_wider_reads():
     ):
         role = valid_audit_role()
         role[key] = 1
-        assert audit_role_failures(role, "atlas_audit_reader", True)
+        assert audit_role_failures(role, "atlas_audit_reader", "on")
 
 
 def test_audit_role_contract_rejects_wrong_identity_or_writable_transaction():
-    assert audit_role_failures(valid_audit_role(), "atlas_paper_reader", True)
-    assert audit_role_failures(valid_audit_role(), "atlas_audit_reader", False)
+    assert audit_role_failures(valid_audit_role(), "atlas_paper_reader", "on")
+    assert audit_role_failures(valid_audit_role(), "atlas_audit_reader", "off")
 
 
 def test_read_database_uri_accepts_existing_supabase_session_pooler_format():
