@@ -1539,31 +1539,37 @@ async def _close_customer_paper_order(
                 {"lock_key": f"paper-order-fill:{customer_id}:{order_id}"},
             )
             event_key = f"order-close:{key}"
+            filled = Decimal((await conn.execute(text(
+                "SELECT COALESCE(SUM(quantity), 0) FROM customer_paper.fills WHERE customer_id=:customer_id AND order_id=:order_id"
+            ), {"customer_id": customer_id, "order_id": order_id})).scalar_one())
+            requested_metadata = {
+                "remaining_quantity": _fmt(ordered_qty - filled),
+                **(_metadata(metadata) if metadata is not None else {}),
+            }
             same_key = (await conn.execute(text(
                 "SELECT order_id, event_type, metadata_json FROM customer_paper.order_events WHERE customer_id=:customer_id AND event_key=:event_key"
             ), {"customer_id": customer_id, "event_key": event_key})).first()
             if same_key is not None:
                 if str(same_key[0]) != order_id or str(same_key[1]) != terminal_state:
                     raise CustomerPaperIdempotencyConflict("order-close idempotency key conflicts with existing event")
+                stored_metadata = _metadata(same_key[2])
+                if stored_metadata != requested_metadata:
+                    raise CustomerPaperIdempotencyConflict(
+                        "order-close idempotency key was reused with different execution evidence"
+                    )
                 return {
                     "status": "REPLAYED",
                     "order_id": order_id,
                     "state": terminal_state,
-                    "metadata": _metadata(same_key[2]),
+                    "metadata": stored_metadata,
                 }
             state = await _current_order_state(conn, customer_id, order_id)
             if state not in {"SUBMITTED", "PARTIALLY_FILLED"}:
                 raise CustomerPaperOrderConflict(f"order cannot transition from state {state}")
-            filled = Decimal((await conn.execute(text(
-                "SELECT COALESCE(SUM(quantity), 0) FROM customer_paper.fills WHERE customer_id=:customer_id AND order_id=:order_id"
-            ), {"customer_id": customer_id, "order_id": order_id})).scalar_one())
             await _insert_order_event(
                 conn, customer_id=customer_id, order_id=order_id, event_key=event_key,
                 event_type=terminal_state, filled_quantity=filled,
-                metadata={
-                    "remaining_quantity": _fmt(ordered_qty - filled),
-                    **(_metadata(metadata) if metadata is not None else {}),
-                },
+                metadata=requested_metadata,
             )
         return {
             "status": "APPENDED",
