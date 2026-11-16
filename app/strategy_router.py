@@ -98,6 +98,15 @@ def classify_regime(df: pd.DataFrame, *, asset: str = "crypto") -> pd.Series:
     return regime
 
 
+def lag_regimes_for_attribution(regimes: pd.Series) -> pd.Series:
+    """Return the regime known when the bar's executable position was entered.
+
+    _strategy_returns index t earns open[t] to open[t+1]. Its position was
+    decided from completed bar t-1, so attribution must use regime[t-1].
+    """
+    return regimes.shift(1)
+
+
 def _strategy_returns(
     df: pd.DataFrame,
     cfg: StrategyConfig,
@@ -280,7 +289,7 @@ def regime_conditioned_strategy_performance(
     """Compute per-strategy performance separately inside each market regime."""
     cfg = cfg or StrategyConfig()
     annualization_factor = _annualization_factor(df.index, asset=asset)
-    regimes = classify_regime(df, asset=asset)
+    regimes = lag_regimes_for_attribution(classify_regime(df, asset=asset))
     result: dict[str, dict] = {}
     for strategy in STRATEGIES:
         returns = _strategy_returns(
@@ -492,7 +501,9 @@ def select_strategy(df: pd.DataFrame, cfg: StrategyConfig | None = None, *,
             else:
                 # Compare net returns on identical bars in the regime being selected.
                 # This is a paired test, not a comparison of two noisy Sharpe estimates.
-                historical_regimes = classify_regime(history, asset=asset)
+                historical_regimes = lag_regimes_for_attribution(
+                    classify_regime(history, asset=asset)
+                )
                 regime_mask = historical_regimes == current_regime
                 if history_execution_context is None:
                     challenger_stream = _strategy_returns(
