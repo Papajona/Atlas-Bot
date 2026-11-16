@@ -301,8 +301,6 @@ jobs:
           fi
 
           request_id="atlas-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(date +%s%N)"
-          expected_run_name="Staging identity preflight ($request_id)"
-
           if ! dispatch_output="$(gh workflow run staging-identity-preflight.yml \
             --repo "$GITHUB_REPOSITORY" \
             --ref main \
