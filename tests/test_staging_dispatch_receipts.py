@@ -36,6 +36,7 @@ def _payload(*, request_id: str = REQUEST_ID, workflow: str = WORKFLOW) -> list[
             "total_count": 1,
             "check_runs": [
                 {
+                    "id": 123456789,
                     "name": CHECK_RUN_NAME,
                     "external_id": request_id,
                     "head_sha": SHA,
@@ -72,7 +73,9 @@ def test_absent_nonce_is_retryable_and_does_not_select_an_unrelated_run():
 
 def test_rejects_duplicate_receipts_for_the_same_nonce():
     payload = _payload()
-    payload[0]["check_runs"].append(copy.deepcopy(payload[0]["check_runs"][0]))
+    duplicate = copy.deepcopy(payload[0]["check_runs"][0])
+    duplicate["id"] = 123456790
+    payload[0]["check_runs"].append(duplicate)
     payload[0]["total_count"] = 2
     with pytest.raises(ValueError, match="multiple check runs"):
         resolve_staging_dispatch_receipt(
@@ -144,7 +147,7 @@ def test_rejects_wrong_workflow_and_duplicate_summary_fields():
 def test_resolves_a_receipt_on_a_later_check_run_page():
     later_page = _payload()[0]["check_runs"][0]
     payload = [
-        {"total_count": 2, "check_runs": [{"name": "other check", "external_id": "other"}]},
+        {"total_count": 2, "check_runs": [{"id": 123456788, "name": "other check", "external_id": "other"}]},
         {"total_count": 2, "check_runs": [later_page]},
     ]
     assert (
@@ -158,13 +161,43 @@ def test_resolves_a_receipt_on_a_later_check_run_page():
     )
 
 
-def test_rejects_duplicate_receipts_split_across_pages():
+def test_retries_when_paginated_pages_overlap_the_same_check_run_id():
     receipt = _payload()[0]["check_runs"][0]
     payload = [
         {"total_count": 2, "check_runs": [copy.deepcopy(receipt)]},
         {"total_count": 2, "check_runs": [copy.deepcopy(receipt)]},
     ]
+    with pytest.raises(RetryableSnapshotError, match="repeated a check-run ID"):
+        resolve_staging_dispatch_receipt(
+            payload,
+            request_id=REQUEST_ID,
+            workflow_path=WORKFLOW,
+            expected_sha=SHA,
+        )
+
+
+def test_rejects_distinct_nonce_receipts_split_across_pages():
+    receipt = _payload()[0]["check_runs"][0]
+    second_receipt = copy.deepcopy(receipt)
+    second_receipt["id"] = 123456790
+    payload = [
+        {"total_count": 2, "check_runs": [copy.deepcopy(receipt)]},
+        {"total_count": 2, "check_runs": [second_receipt]},
+    ]
     with pytest.raises(ValueError, match="multiple check runs"):
+        resolve_staging_dispatch_receipt(
+            payload,
+            request_id=REQUEST_ID,
+            workflow_path=WORKFLOW,
+            expected_sha=SHA,
+        )
+
+
+
+def test_rejects_check_run_entries_without_a_valid_unique_numeric_id():
+    payload = _payload()
+    payload[0]["check_runs"][0].pop("id")
+    with pytest.raises(ValueError, match="valid positive numeric ID"):
         resolve_staging_dispatch_receipt(
             payload,
             request_id=REQUEST_ID,
