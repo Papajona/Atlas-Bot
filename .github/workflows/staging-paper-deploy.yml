@@ -314,7 +314,7 @@ jobs:
           # gh workflow run returns the exact run URL. Use that dispatch response
           # instead of searching displayTitle, which the REST API may report as the
           # static workflow name even when run-name was supplied in the dispatch.
-          dispatch_url="$(grep -Eo "https://github\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+" <<< "$dispatch_output" | tail -n 1 || true)"
+          dispatch_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+" <<< "$dispatch_output" | tail -n 1 || true)"
           preflight_run_id="${dispatch_url##*/}"
           if [[ -z "$dispatch_url" || ! "$preflight_run_id" =~ ^[0-9]+$ ]]; then
             echo "BLOCKED: staging identity-preflight dispatch did not return a valid run URL; refusing to guess which run to trust."
@@ -399,7 +399,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "$acceptance_dispatch_output"
-          acceptance_run_url="$(grep -Eo "https://github\\.com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+" <<< "$acceptance_dispatch_output" | tail -n 1 || true)"
+          acceptance_run_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+" <<< "$acceptance_dispatch_output" | tail -n 1 || true)"
           acceptance_run_id="${acceptance_run_url##*/}"
           if [[ -z "$acceptance_run_url" || ! "$acceptance_run_id" =~ ^[0-9]+$ ]]; then
             echo "BLOCKED: customer-paper acceptance dispatch did not return a valid run URL; refusing to guess which run to trust."
