@@ -1038,8 +1038,8 @@ def test_cloud_sql_dump_rejects_quoted_set_config_function_standard_strings_off(
 
     dump = tmp_path / "quoted-set-config-function.sql"
     dump.write_text(
-        "SELECT pg_catalog.\\"set_config\\"('standard_conforming_strings', 'off', false);\\n"
-        "SELECT 'a\\\\'b'; CREATE DATABASE other_db; -- '\\n",
+        "SELECT pg_catalog.\"set_config\"('standard_conforming_strings', 'off', false);\n"
+        "SELECT 'a\\'b'; CREATE DATABASE other_db; -- '\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="standard_conforming_strings"):
