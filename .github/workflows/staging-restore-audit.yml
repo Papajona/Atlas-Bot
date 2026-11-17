@@ -168,6 +168,12 @@ jobs:
             --object-versions "$RUNNER_TEMP/recovery-backup-versions.json" \
             --operation-record "$RUNNER_TEMP/restore-operation-evidence.json" \
             --output "$RUNNER_TEMP/cloud-sql-backup-binding.json"
+          # Inspect the exact generation that the Cloud SQL operation imported.
+          # Unsupported archive formats and database-redirection statements fail closed.
+          gcloud storage cp "$BACKUP_REFERENCE" "$RUNNER_TEMP/cloud-sql-import-source"
+          PYTHONPATH=. python scripts/verify_cloud_sql_import_dump.py \
+            --input "$RUNNER_TEMP/cloud-sql-import-source" \
+            --output "$RUNNER_TEMP/cloud-sql-import-dump-verification.json"
       - name: Download provider restore-operation record and dedicated audit database secret
         shell: bash
         run: |
@@ -303,7 +309,8 @@ jobs:
             "$RUNNER_TEMP/recovery-backup-object.json" \
             "$RUNNER_TEMP/recovery-backup-bucket.json" \
             "$RUNNER_TEMP/recovery-backup-versions.json" \
-            "$RUNNER_TEMP/cloud-sql-backup-binding.json"; do
+            "$RUNNER_TEMP/cloud-sql-backup-binding.json" \
+            "$RUNNER_TEMP/cloud-sql-import-dump-verification.json"; do
             if [[ -s "$file" ]]; then
               gcloud storage cp "$file" "$out_dir/$(basename "$file")"
               archived=1
@@ -325,6 +332,7 @@ jobs:
             ${{ runner.temp }}/recovery-backup-bucket.json
             ${{ runner.temp }}/recovery-backup-versions.json
             ${{ runner.temp }}/cloud-sql-backup-binding.json
+            ${{ runner.temp }}/cloud-sql-import-dump-verification.json
           if-no-files-found: warn
           retention-days: 90
 
