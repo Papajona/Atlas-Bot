@@ -905,3 +905,69 @@ def test_cloud_sql_import_dump_ignores_database_words_in_copy_data(tmp_path):
     assert result["database_ddl_commands"] == 0
     assert result["database_switch_commands"] == 0
 
+
+
+def test_cloud_sql_dump_ordinary_string_backslash_does_not_hide_database_ddl(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "ordinary-backslash.sql"
+    dump.write_text("SELECT 'x\\'; CREATE DATABASE other_db; SELECT 'y';\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="executable CREATE/ALTER/DROP DATABASE"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_escape_string_backslash_still_respects_escaped_quote(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "escape-string.sql"
+    dump.write_text("SELECT E'it\\'s ordinary text';\nSELECT 1;\n", encoding="utf-8")
+    assert inspect_import_dump(dump)["status"] == "PASS"
+
+
+def test_cloud_sql_dump_rejects_standard_conforming_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "non-standard-strings.sql"
+    dump.write_text(
+        "SET standard_conforming_strings = off;\n"
+        "SELECT 'x\\'; CREATE DATABASE other_db;\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_rejects_set_config_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "set-config-strings.sql"
+    dump.write_text(
+        "SELECT set_config('standard_conforming_strings', 'off', true);\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_dollar_signs_inside_identifiers_do_not_open_dollar_quotes(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "dollar-identifier.sql"
+    dump.write_text(
+        "SELECT 1 AS a$b$;\n"
+        "CREATE DATABASE other_db;\n"
+        "SELECT 2 AS c$b$;\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="executable CREATE/ALTER/DROP DATABASE"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_scanner_state_is_bounded_for_large_unterminated_statement(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "large-statement.sql"
+    dump.write_text("SELECT\n" + ("long_identifier " * 100_000) + "\n", encoding="utf-8")
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
+    assert result["decompressed_bytes"] > 1_000_000
