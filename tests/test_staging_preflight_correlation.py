@@ -27,22 +27,31 @@ def test_branch_pruning_workflows_share_concurrency_and_require_verified_propaga
     assert "ALREADY ABSENT (concurrent cleanup removed ref)" in one_time
 
 
-def test_staging_preflight_run_is_uniquely_correlated_and_rechecked_before_success():
-    deploy = (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text()
-    preflight = (ROOT / ".github/workflows/staging-identity-preflight.yml").read_text()
+def test_staging_workflow_uses_executable_run_and_current_main_guards():
+    import yaml
 
-    assert "inputs.request_id || 'manual'" in preflight
-    assert "request_id:" in preflight
-    assert '-f "request_id=$request_id"' in deploy
-    assert 'gh_retry run view "$preflight_run_id"' in deploy
-    assert 'dispatch_output="$(gh workflow run staging-identity-preflight.yml' in deploy
-    assert 'dispatch_url="$(grep -Eo "https://github[.]com/${GITHUB_REPOSITORY}/actions/runs/[0-9]+"' in deploy
-    assert 'preflight_run_id="${dispatch_url##*/}"' in deploy
-    assert "run_event" in deploy
-    assert "run_branch" in deploy
-    assert "select(.displayTitle == $expected)" not in deploy
-    tracked_poll = deploy.index('gh_retry run view "$preflight_run_id"')
-    final_sha_check = deploy.index('if [[ "$current_main_sha" != "$GITHUB_SHA" ]]; then', tracked_poll)
-    success_message = deploy.index("PASS: read-only staging identity and isolated-ledger preflight run", tracked_poll)
-    assert final_sha_check < success_message
-    assert "gh run list" not in deploy[tracked_poll:success_message]
+    deploy = yaml.safe_load(
+        (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
+    )
+    preflight = yaml.safe_load(
+        (ROOT / ".github/workflows/staging-identity-preflight.yml").read_text(encoding="utf-8")
+    )
+
+    preflight_input = preflight["on"]["workflow_dispatch"]["inputs"]["request_id"]
+    assert preflight_input["required"] is False
+
+    steps = deploy["jobs"]["deploy-paper-staging"]["steps"]
+    by_name = {step.get("name"): step for step in steps if step.get("name")}
+    preflight_step = by_name[
+        "Dispatch and require read-only staging identity preflight on this exact commit"
+    ]["run"]
+    acceptance_step = by_name[
+        "Dispatch and require customer-paper acceptance on this exact deployment"
+    ]["run"]
+
+    # The verifier is executable workflow code; its success/failure behaviour is
+    # exercised with matching, stale, malformed, and tampered payloads in the
+    # dedicated behavior test module.
+    for run_block in (preflight_step, acceptance_step):
+        assert "scripts/verify_staging_dispatch.py main-sha" in run_block
+        assert "scripts/verify_staging_dispatch.py workflow-run" in run_block
