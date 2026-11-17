@@ -37,7 +37,7 @@ def _first(record: Mapping[str, Any], *keys: str) -> str:
     return ""
 
 def verify(document: Any, *, operation_id: str, backup_reference: str,
-           target_kind: str, target_project_ref: str = "",
+           target_kind: str = "supabase", target_project_ref: str = "",
            target_instance_connection_name: str = "") -> dict[str, Any]:
     record = _record(document)
     observed_operation = _first(record, "restore_operation_id", "restoreOperationId", "operation_id", "operationId", "name", "id")
