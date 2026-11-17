@@ -167,34 +167,6 @@ jobs:
           else
             echo "VERIFIED_RESTORE_TARGET_INSTANCE=$CLOUD_SQL_INSTANCE_CONNECTION_NAME" >> "$GITHUB_ENV"
           fi
-      - name: Connect to isolated Cloud SQL restore target through Auth Proxy
-        if: env.RESTORE_TARGET_KIND == 'cloud_sql'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends golang-go
-          GOBIN="$RUNNER_TEMP/bin" go install github.com/GoogleCloudPlatform/cloud-sql-proxy/v2@v2.18.2
-          gcloud sql instances describe "${CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/cloud-sql-instance.json"
-          python - "$RUNNER_TEMP/cloud-sql-instance.json" "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" "$CLOUD_SQL_DATABASE" <<'PY'
-          import json,sys
-          d=json.load(open(sys.argv[1]))
-          expected=sys.argv[2]
-          observed=f'{d.get("project","")}:{d.get("region","")}:{d.get("name","")}'
-          if observed != expected or d.get("state") != "RUNNABLE":
-              raise SystemExit("BLOCKED: Cloud SQL instance identity/state does not match configured recovery target")
-          if not any(x.get("name")==sys.argv[3] for x in d.get("settings",{}).get("databaseFlags",[]) if isinstance(x,dict)):
-              pass
-          PY
-          "$RUNNER_TEMP/bin/cloud-sql-proxy" --address 127.0.0.1 --port 5432 "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" > "$RUNNER_TEMP/cloud-sql-proxy.log" 2>&1 &
-          echo "$!" > "$RUNNER_TEMP/cloud-sql-proxy.pid"
-          for attempt in $(seq 1 30); do
-            if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432' 2>/dev/null; then exit 0; fi
-            sleep 2
-          done
-          echo "BLOCKED: Cloud SQL Auth Proxy did not become ready" >&2
-          cat "$RUNNER_TEMP/cloud-sql-proxy.log" >&2
-          exit 1
       - name: Run read-only restored-database invariants
         env:
           RESTORE_TARGET_KIND: ${{ vars.ATLAS_STAGING_RESTORE_TARGET_KIND || 'supabase' }}
@@ -206,6 +178,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]]; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends golang-go
+            GOBIN="$RUNNER_TEMP/bin" go install github.com/GoogleCloudPlatform/cloud-sql-proxy/v2@v2.18.2
+            gcloud sql instances describe "${CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/cloud-sql-instance.json"
+            python - "$RUNNER_TEMP/cloud-sql-instance.json" "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          observed=f'{d.get("project","")}:{d.get("region","")}:{d.get("name","")}'
+          if observed != sys.argv[2] or d.get("state") != "RUNNABLE":
+              raise SystemExit("BLOCKED: Cloud SQL instance identity/state does not match configured recovery target")
+          PY
+            gcloud sql databases describe "$CLOUD_SQL_DATABASE" --instance="${CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/cloud-sql-database.json"
+            "$RUNNER_TEMP/bin/cloud-sql-proxy" --address 127.0.0.1 --port 5432 "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" > "$RUNNER_TEMP/cloud-sql-proxy.log" 2>&1 &
+            proxy_pid=$!
+            trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
+            for attempt in $(seq 1 30); do
+              if timeout 1 bash -c '</dev/tcp/127.0.0.1/5432' 2>/dev/null; then break; fi
+              if [[ "$attempt" -eq 30 ]]; then cat "$RUNNER_TEMP/cloud-sql-proxy.log" >&2; exit 1; fi
+              sleep 2
+            done
+          fi
           export DATABASE_URL="$(cat "$RUNNER_TEMP/atlas-staging-audit-db-url")"
           verified_args=()
           if [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]]; then
