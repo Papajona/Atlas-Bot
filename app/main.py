@@ -8921,6 +8921,10 @@ async def research_decision_outcomes_holdout_once(
         evaluate_decision_outcome_labels_once,
         load_all_decision_outcome_labels,
     )
+    from .decision_outcomes import (
+        MAX_DECISION_OUTCOME_LABEL_BYTES,
+        MAX_DECISION_OUTCOME_LABEL_RECORDS,
+    )
     existing = await decision_outcome_holdout_status()
     if existing.get("consumed") is True:
         return {
@@ -8930,7 +8934,9 @@ async def research_decision_outcomes_holdout_once(
         }
     try:
         records = await load_all_decision_outcome_labels(
-            batch_size=2000, max_records=100_000
+            batch_size=2000,
+            max_records=MAX_DECISION_OUTCOME_LABEL_RECORDS,
+            max_decoded_bytes=MAX_DECISION_OUTCOME_LABEL_BYTES,
         )
     except (DecisionOutcomeHistoryResourceLimit, DecisionOutcomeHistoryIntegrityError) as exc:
         raise HTTPException(
