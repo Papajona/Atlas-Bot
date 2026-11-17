@@ -9,6 +9,8 @@ import pytest
 from app.decision_outcomes import (
     DEFAULT_HORIZONS_BARS,
     LABEL_VERSION,
+    MAX_DECISION_OUTCOME_LABEL_BYTES,
+    MAX_DECISION_OUTCOME_LABEL_RECORDS,
     OutcomeLabelError,
     _decision_outcome_label_capacity,
     build_decision_outcome_label,
