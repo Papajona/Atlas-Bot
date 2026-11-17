@@ -70,7 +70,7 @@ def verify_staging_acceptance_deployment(
         raise StagingAcceptanceEvidenceError("deployment is not on main")
 
     status = payload.get("status")
-    if status not in {"in_progress", "completed"}:
+    if not isinstance(status, str) or status not in {"in_progress", "completed"}:
         raise StagingAcceptanceEvidenceError("deployment status is missing or unsupported")
     if status == "completed" and payload.get("conclusion") != "success":
         raise StagingAcceptanceEvidenceError("completed staging deployment did not succeed")
