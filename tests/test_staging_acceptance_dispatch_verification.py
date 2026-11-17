@@ -206,11 +206,28 @@ def test_deployment_workflow_executes_the_same_guards_covered_by_these_tests():
         "PASS: read-only staging identity and isolated-ledger preflight run"
     )
     assert preflight_run_pos < preflight_success
+    _assert_rejects_before_success(
+        preflight,
+        preflight_run_pos,
+        "PASS: read-only staging identity and isolated-ledger preflight run",
+    )
+
+    # The completed-run branch must contain a fresh remote-main read and its
+    # exact-SHA verifier. A check performed before the child-run wait is stale
+    # by construction and must not satisfy this assertion.
+    completed_branch_pos = preflight.index(
+        'if [[ "$run_status" == "completed" ]]; then', preflight_run_pos
+    )
+    main_read_pos = preflight.index(
+        'current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main"',
+        completed_branch_pos,
+    )
     preflight_main_pos, preflight_main_guard = _guard_command(
-        preflight, "main-sha", start_at=preflight_run_pos
+        preflight, "main-sha", start_at=main_read_pos
     )
     assert '--expected-sha "$GITHUB_SHA"' in preflight_main_guard
     assert '--actual-sha "$current_main_sha"' in preflight_main_guard
+    assert completed_branch_pos < main_read_pos < preflight_main_pos < preflight_success
     _assert_rejects_before_success(
         preflight,
         preflight_main_pos,
