@@ -520,8 +520,7 @@ def main() -> int:
     args = parser.parse_args()
     try:
         report = audit(args)
-        Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True, default=str, allow_nan=False) + "
-", encoding="utf-8")
+        Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True, default=str, allow_nan=False) + "\n", encoding="utf-8")
         print(json.dumps({
             "result": report["result"],
             "restore_operation_id": report["restore_operation_id"],
