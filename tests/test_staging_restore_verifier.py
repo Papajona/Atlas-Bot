@@ -1006,7 +1006,7 @@ def test_cloud_sql_dump_rejects_dollar_quoted_set_config_standard_strings_off(tm
 
     dump = tmp_path / "dollar-quoted-standard-strings-off.sql"
     dump.write_text(
-        "SELECT set_config($standard_conforming_strings$, $off$, false);\n"
+        "SELECT set_config($$standard_conforming_strings$$, $$off$$, false);\n"
         "SELECT 'a\\'b'; CREATE DATABASE other_db; -- '\n",
         encoding="utf-8",
     )
@@ -1019,7 +1019,7 @@ def test_cloud_sql_dump_accepts_dollar_quoted_unrelated_set_config(tmp_path):
 
     dump = tmp_path / "dollar-quoted-unrelated-setting.sql"
     dump.write_text(
-        "SELECT set_config($application_name$, $atlas-restore-audit$, false);\n"
+        "SELECT set_config($$application_name$$, $$atlas-restore-audit$$, false);\n"
         "CREATE TABLE public.restore_probe(id integer);\n",
         encoding="utf-8",
     )
