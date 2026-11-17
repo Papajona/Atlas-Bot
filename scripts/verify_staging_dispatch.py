@@ -69,7 +69,7 @@ def verify_dispatched_workflow_run(
         raise StagingDispatchVerificationError("workflow run was not created by workflow_dispatch")
 
     status = payload.get("status")
-    if status not in _ALLOWED_STATUSES:
+    if not isinstance(status, str) or status not in _ALLOWED_STATUSES:
         raise StagingDispatchVerificationError("workflow run status is missing or unsupported")
 
     conclusion = payload.get("conclusion")
