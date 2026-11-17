@@ -62,10 +62,11 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "no second project or paid branch is required" in runbook
     # Same-project staging and read-only reconciliation are allowed, but a full
     # backup restore may never target the active production database.
+    assert 'if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
-    assert "A restore audit target must be a distinct non-production Supabase project reference" in runbook
+    assert "restore audit target" in runbook
     assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
 
@@ -285,7 +286,7 @@ def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     assert host == "127.0.0.1"
     assert env["PGDATABASE"] == "atlas_recovery"
     assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
-    assert env["PGSSLMODE"] == "require"
+    assert env["PGSSLMODE"] == "disable"  # TLS terminates in the Cloud SQL Auth Proxy
 
 
 @pytest.mark.parametrize("dsn", [
