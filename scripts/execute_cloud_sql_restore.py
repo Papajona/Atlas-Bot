@@ -113,25 +113,25 @@ def validate_backup_metadata(
     if not match:
         raise ValueError("backup reference is not generation-pinned")
     object_name, expected_generation = match.groups()
-    if str(object_metadata.get("name") or "") != object_name:
+    if str(_pick(object_metadata, "name") or "") != object_name:
         raise ValueError("GCS object metadata name does not match the backup reference")
-    if str(object_metadata.get("generation") or "") != expected_generation:
+    if str(_pick(object_metadata, "generation") or "") != expected_generation:
         raise ValueError("GCS object metadata generation does not match the backup reference")
-    if int(object_metadata.get("size") or 0) <= 0:
+    if int(_pick(object_metadata, "size") or 0) <= 0:
         raise ValueError("GCS backup object is empty")
-    if not (object_metadata.get("md5Hash") or object_metadata.get("crc32c")):
+    if not (_pick(object_metadata, "md5_hash", "md5Hash") or _pick(object_metadata, "crc32c_hash", "crc32c")):
         raise ValueError("GCS backup object has no provider checksum metadata")
-    bucket = object_metadata.get("bucket")
+    bucket = _pick(object_metadata, "bucket")
     if bucket and bucket != BACKUP_BUCKET:
         raise ValueError("GCS backup object is outside the approved recovery bucket")
-    retention_policy = bucket_metadata.get("retentionPolicy")
-    if not isinstance(retention_policy, Mapping) or retention_policy.get("isLocked") is not True:
+    retention_policy = _pick(bucket_metadata, "retention_policy", "retentionPolicy")
+    if not isinstance(retention_policy, Mapping) or _pick(retention_policy, "is_locked", "isLocked") is not True:
         raise ValueError("GCS recovery backup bucket retention policy must be locked")
-    retention_expiration = object_metadata.get("retentionExpirationTime")
+    retention_expiration = _pick(object_metadata, "retention_expiration_time", "retentionExpirationTime")
     if not retention_expiration:
-        retention = object_metadata.get("retention")
+        retention = _pick(object_metadata, "retention")
         if isinstance(retention, Mapping):
-            retention_expiration = retention.get("retainUntilTime")
+            retention_expiration = _pick(retention, "retain_until_time", "retainUntilTime")
     expires = _utc_timestamp(retention_expiration, "retention expiration")
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
