@@ -115,6 +115,15 @@ def test_two_version_relabel_capacity_is_reserved_before_writes():
     assert near_capacity["remaining_records"] == 5
     assert near_capacity["fits"] is False
 
+    byte_capacity = _decision_outcome_label_capacity(
+        existing_records=100_000,
+        pending_decisions=10,
+        batch_limit=10,
+        existing_bytes=256 * 1024 * 1024 - 2,
+        pending_bytes=3,
+    )
+    assert byte_capacity["fits"] is False
+
 
 def test_label_window_hash_and_outcome_do_not_depend_on_bars_after_longest_horizon():
     df = _frame()
