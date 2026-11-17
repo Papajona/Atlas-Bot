@@ -288,7 +288,7 @@ def read_database_uri(value: str, staging_ref: str = "", production_ref: str = "
         "PGUSER": unquote(parsed.username or ""),
         "PGPASSWORD": unquote(parsed.password or ""),
         "PGDATABASE": database,
-        "PGSSLMODE": "require",
+        "PGSSLMODE": "disable" if target_kind == "cloud_sql" else "require",
         "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=15000",
     })
     if not env["PGUSER"] or not env["PGPASSWORD"]:
