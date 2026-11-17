@@ -20,6 +20,22 @@ from .distributed import allow_rate_limit
 EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT = "__EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT__"
 
 
+def serialize_audit_detail(detail: dict) -> str:
+    """Serialize the decoded JSON payload using the loader's exact byte-count format."""
+    return json.dumps(
+        detail or {},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+        allow_nan=False,
+    )
+
+
+async def prepare_audit_detail(detail: dict, actor_id: str = "") -> dict:
+    """Apply rate-limit annotations once so callers can budget the exact stored payload."""
+    return await _rate_limited_detail(detail, actor_id)
+
+
 # SQLite ignores SELECT ... FOR UPDATE. Serialize idempotent appends within this
 # process per database, then recover from cross-process lock/unique races by
 # rolling back and reading the winner's indexed idempotency row.
@@ -133,7 +149,7 @@ async def _append_audit_locked(
     row = AuditLog(
         event=event,
         idempotency_key=idempotency_key,
-        detail=json.dumps(audit_detail, default=str),
+        detail=serialize_audit_detail(audit_detail),
         actor_id=actor_id,
         previous_hash=previous,
         event_hash=event_hash,
@@ -302,17 +318,26 @@ async def append_audit_once(
         sqlite_lock.release()
 
 
-async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> AuditLog:
-    # Preserve the established rate-limit annotation, but complete its Redis round
-    # trip before locking the chain head so all other audit writers are not blocked.
-    audit_detail = await _rate_limited_detail(detail, actor_id)
+async def append_prepared_audit(
+    db, *, event: str, detail: dict, actor_id: str = ""
+) -> AuditLog:
+    """Append an already rate-annotated detail without changing its serialized size."""
     state = await _lock_chain_state(db)
     return await _append_audit_locked(
         db,
         event=event,
-        audit_detail=audit_detail,
+        audit_detail=detail,
         actor_id=actor_id,
         state=state,
+    )
+
+
+async def append_audit(db, *, event: str, detail: dict, actor_id: str = "") -> AuditLog:
+    # Preserve the established rate-limit annotation, but complete its Redis round
+    # trip before locking the chain head so all other audit writers are not blocked.
+    audit_detail = await prepare_audit_detail(detail, actor_id)
+    return await append_prepared_audit(
+        db, event=event, detail=audit_detail, actor_id=actor_id
     )
 
 
