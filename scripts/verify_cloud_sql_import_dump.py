@@ -118,15 +118,19 @@ def _inspect_lines(lines) -> tuple[int, int]:
         nonlocal copy_pending
         first_two = statement_prefix[:2]
         changes_string_mode = (
-            statement_has_setting_name
-            and (
-                (bool(statement_prefix) and statement_prefix[0] == "SET"
-                 and (statement_has_off_token or literal_is_off))
-                or (first_two == ["ALTER", "SYSTEM"]
-                    and (statement_has_off_token or literal_is_off))
-                or (statement_has_set_config
-                    and literal_mentions_setting
-                    and literal_is_off)
+            (
+                statement_has_setting_name
+                and (
+                    (bool(statement_prefix) and statement_prefix[0] == "SET"
+                     and (statement_has_off_token or literal_is_off))
+                    or (first_two == ["ALTER", "SYSTEM"]
+                        and (statement_has_off_token or literal_is_off))
+                )
+            )
+            or (
+                statement_has_set_config
+                and literal_mentions_setting
+                and literal_is_off
             )
         )
         if changes_string_mode:
