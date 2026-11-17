@@ -73,6 +73,9 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "backup reference must pin an exact GCS generation" in workflow
     assert 'gcloud sql operations describe "$RESTORE_OPERATION_ID"' in workflow
     assert "verify_cloud_sql_backup_binding.py" in workflow
+    assert '"versions": "true"' in workflow
+    assert 'objects describe "$BACKUP_REFERENCE"' in workflow
+    assert '--target-database "$CLOUD_SQL_DATABASE"' in workflow
 
 
 
