@@ -59,6 +59,8 @@ def _decision_outcome_label_capacity(
             and new_bytes <= remaining_bytes
         ),
     }
+
+
 _SUPPORTED_YFINANCE_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "1d"}
 _SUPPORTED_OANDA_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
 
