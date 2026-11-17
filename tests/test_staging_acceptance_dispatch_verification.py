@@ -378,9 +378,20 @@ def test_manual_acceptance_workflow_executes_the_tested_deployment_evidence_veri
         assert inputs[field]["required"] is True
 
     steps = workflow["jobs"]["customer-paper-acceptance"]["steps"]
-    checkout_index = next(
+    checkout_indices = [
         i for i, step in enumerate(steps)
         if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert len(checkout_indices) == 2
+    dispatch_checkout_index = next(
+        i for i, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+        and step.get("with", {}).get("ref") == "${{ github.sha }}"
+    )
+    target_checkout_index = next(
+        i for i, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+        and step.get("with", {}).get("ref") == "${{ inputs.target_sha }}"
     )
     python_index = next(
         i for i, step in enumerate(steps)
@@ -392,7 +403,11 @@ def test_manual_acceptance_workflow_executes_the_tested_deployment_evidence_veri
     ]
     assert len(validation_indices) == 1
     validation_index = validation_indices[0]
-    assert checkout_index < python_index < validation_index
+    target_identity_index = next(
+        i for i, step in enumerate(steps)
+        if step.get("name") == "Require checkout to match the exact deployed or manually dispatched commit"
+    )
+    assert dispatch_checkout_index < python_index < validation_index < target_checkout_index < target_identity_index
     run = steps[validation_index]["run"]
     assert "scripts/verify_staging_acceptance_deployment.py" in run
     assert '--expected-run-id "$DEPLOYMENT_RUN_ID"' in run
