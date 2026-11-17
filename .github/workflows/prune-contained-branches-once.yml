@@ -302,6 +302,54 @@ jobs:
                     reviewed_reason="reviewed superseded customer paper integration branch; main contains the evolved isolated flow/lifecycle, immediate entitlement rechecks, expanded fill/recovery tests, and guarded backup-evidence provisioning"
                   fi
                   ;;
+                "fix/cloud-sql-restore-audit-target-main-2026-11-17:e203bbb81893346b6db6d08ea0c8152a318bb634")
+                  # PR #430 is a superseded copy of #425. The merged #425 implementation
+                  # carries the exact Cloud SQL target/operation/backup gates plus later
+                  # import-dump hardening and regression coverage. Pin both ref and SHA.
+                  if git show "$main_sha:.github/workflows/staging-restore-audit.yml" | grep -F 'RESTORE_TARGET_KIND' >/dev/null \
+                    && git show "$main_sha:.github/workflows/staging-restore-audit.yml" | grep -F 'CLOUD_SQL_INSTANCE_CONNECTION_NAME' >/dev/null \
+                    && git show "$main_sha:.github/workflows/staging-restore-audit.yml" | grep -F 'gcloud sql operations describe' >/dev/null \
+                    && git show "$main_sha:scripts/verify_cloud_sql_backup_binding.py" | grep -F 'def verify_backup_binding' >/dev/null \
+                    && git show "$main_sha:scripts/verify_cloud_sql_backup_binding.py" | grep -F 'retention_policy' >/dev/null \
+                    && git show "$main_sha:scripts/verify_restore_operation_evidence.py" | grep -F 'target_instance_connection_name' >/dev/null \
+                    && git show "$main_sha:scripts/verify_staging_restore.py" | grep -F 'Cloud SQL Auth Proxy' >/dev/null \
+                    && git show "$main_sha:scripts/verify_cloud_sql_import_dump.py" | grep -F '_PSQL_META_COMMAND.match(line, i)' >/dev/null \
+                    && git show "$main_sha:tests/test_staging_restore_verifier.py" | grep -F 'def test_cloud_sql_import_dump_rejects_inline_psql_database_switches' >/dev/null \
+                    && git show "$main_sha:tests/test_staging_restore_verifier.py" | grep -F 'def test_cloud_sql_dump_rejects_quoted_set_config_function_standard_strings_off' >/dev/null \
+                    && ! git show "$sha:scripts/verify_cloud_sql_import_dump.py" | grep -F '_PSQL_META_COMMAND.match(line, i)' >/dev/null; then
+                    reviewed_reason="reviewed superseded PR #430 branch; exact #430 SHA is retired because merged #425 on main contains its Cloud SQL restore-audit features plus the stronger stateful SQL/psql scanner and regression tests"
+                  fi
+                  ;;
+                "fix/remediation-c0d9afaf-4d1401:511f353105f9b967aaae18b63efec4c145397238")
+                  # Qodo fixer #432 rewrote the scanner using a simpler line-based
+                  # implementation. Current main has the stateful parser that handles
+                  # quotes, comments, dollar literals, and inline psql commands.
+                  if git show "$sha:scripts/verify_cloud_sql_import_dump.py" | grep -F 'def _has_executable_psql_connect' >/dev/null \
+                    && git show "$main_sha:scripts/verify_cloud_sql_import_dump.py" | grep -F '_PSQL_META_COMMAND.match(line, i)' >/dev/null \
+                    && git show "$main_sha:scripts/verify_cloud_sql_import_dump.py" | grep -F 'command in {"connect", "c"}' >/dev/null \
+                    && git show "$main_sha:tests/test_staging_restore_verifier.py" | grep -F 'def test_cloud_sql_import_dump_rejects_inline_psql_database_switches' >/dev/null \
+                    && ! git show "$main_sha:scripts/verify_cloud_sql_import_dump.py" | grep -F 'def _has_executable_psql_connect' >/dev/null; then
+                    reviewed_reason="reviewed Qodo fixer #432 branch; its exact simplified line-based scanner is superseded by main's quote/comment-aware stateful psql parser and inline-connect regression"
+                  fi
+                  ;;
+                "fix/remediation-cb26b1b0-9e1868:4084ad2f8c9688b84c026a2f05c2d1aec238804e")
+                  # Qodo fixer #427/#428 introduced label version v2, but main has
+                  # since added bounded history, transactional serialization, prepared
+                  # encrypted audit writes, and version-separated research diagnostics.
+                  if git show "$sha:app/decision_outcomes.py" | grep -F 'LABEL_VERSION = "decision-outcome-v2"' >/dev/null \
+                    && git show "$sha:app/decision_outcomes.py" | grep -F 'await append_audit(' >/dev/null \
+                    && git show "$main_sha:app/decision_outcomes.py" | grep -F 'MAX_DECISION_OUTCOME_LABEL_RECORDS' >/dev/null \
+                    && git show "$main_sha:app/decision_outcomes.py" | grep -F 'MAX_DECISION_OUTCOME_LABEL_BYTES' >/dev/null \
+                    && git show "$main_sha:app/decision_outcomes.py" | grep -F '_LABEL_HISTORY_ADVISORY_LOCK' >/dev/null \
+                    && git show "$main_sha:app/decision_outcomes.py" | grep -F 'await append_prepared_audit(' >/dev/null \
+                    && git show "$main_sha:app/decision_outcomes.py" | grep -F 'prepare_audit_detail' >/dev/null \
+                    && git show "$main_sha:app/decision_outcome_research.py" | grep -F 'load_all_decision_outcome_labels' >/dev/null \
+                    && git show "$main_sha:app/decision_outcome_research.py" | grep -F 'label_version_date_ranges' >/dev/null \
+                    && git show "$main_sha:docs/DECISION_OUTCOME_LABELS.md" | grep -F 'pending_actionable_decisions_for_version' >/dev/null \
+                    && ! git show "$sha:app/decision_outcomes.py" | grep -F '_LABEL_HISTORY_ADVISORY_LOCK' >/dev/null; then
+                    reviewed_reason="reviewed superseded Qodo label-v2 fixer branch; current main retains v2 while adding bounded concurrent history writes, encrypted prepared audit records, and version-separated research history"
+                  fi
+                  ;;
               esac
               if [[ -n "$reviewed_reason" ]]; then
                 reason="$reviewed_reason"
