@@ -671,14 +671,16 @@ def test_cloud_sql_native_generation_suffixed_import_uri_is_accepted():
             "uri": pinned,
         },
     }
-    assert verify(
+    result = verify(
         operation,
         operation_id="operation-987",
         backup_reference=pinned,
         target_kind="cloud_sql",
         target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
         target_database="atlas-recovery-db",
-    )["backup_generation"] == "1750000000000000"
+    )
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["native_import_uri_has_generation"] is True
 
 
 def test_cloud_sql_import_into_different_database_is_rejected():
