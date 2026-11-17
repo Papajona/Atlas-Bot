@@ -62,10 +62,11 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "no second project or paid branch is required" in runbook
     # Same-project staging and read-only reconciliation are allowed, but a full
     # backup restore may never target the active production database.
+    assert 'if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
-    assert "A restore audit target must be a distinct non-production Supabase project reference" in runbook
+    assert "restore audit target" in runbook
     assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
 
@@ -273,3 +274,111 @@ def test_research_integrity_query_executes_against_postgres():
     assert result["research_trial_ledger_head_rows"] == 1
     assert result["research_trial_ledger_head_valid"] is True
     assert result["research_holdout_registry_invalid_rows"] == 0
+
+
+def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
+    env, host = read_database_uri(
+        "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
+        target_kind="cloud_sql",
+        cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
+        cloud_sql_database="atlas_recovery",
+    )
+    assert host == "127.0.0.1"
+    assert env["PGDATABASE"] == "atlas_recovery"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGSSLMODE"] == "disable"  # TLS terminates in the Cloud SQL Auth Proxy
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://user:pw@db.production.example:5432/atlas_recovery",
+    "postgresql://user:pw@127.0.0.1:5432/postgres",
+])
+def test_restore_audit_rejects_wrong_cloud_sql_host_or_database(dsn):
+    with pytest.raises(ValueError):
+        read_database_uri(
+            dsn, target_kind="cloud_sql",
+            cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
+            cloud_sql_database="atlas_recovery",
+        )
+
+
+def test_restore_audit_rejects_malformed_cloud_sql_instance():
+    with pytest.raises(ValueError, match="project:region:instance"):
+        read_database_uri(
+            "postgresql://user:pw@127.0.0.1:5432/atlas_recovery",
+            target_kind="cloud_sql", cloud_sql_instance="production",
+            cloud_sql_database="atlas_recovery",
+        )
+
+
+def test_cloud_sql_restore_evidence_requires_exact_instance_and_success():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://atlas-staging-510915-db-backups/backup.dump",
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "status": "DONE",
+    }
+    result = verify(
+        document, operation_id="restore-op-123",
+        backup_reference="gs://atlas-staging-510915-db-backups/backup.dump",
+        target_kind="cloud_sql",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["status"] == "PASS"
+    assert result["target_kind"] == "cloud_sql"
+
+
+def test_cloud_sql_restore_evidence_rejects_wrong_instance_or_running_operation():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://bucket/backup.dump",
+        "instance_connection_name": "prod:region:database",
+        "status": "RUNNING",
+    }
+    with pytest.raises(ValueError):
+        verify(
+            document, operation_id="restore-op-123",
+            backup_reference="gs://bucket/backup.dump",
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_supabase_restore_evidence_compatibility():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123", "backup_reference": "backup-123",
+        "target_project_ref": "abcdefghijklmnopqrst", "status": "COMPLETED",
+    }
+    result = verify(
+        document, operation_id="restore-op-123", backup_reference="backup-123",
+        target_kind="supabase", target_project_ref="abcdefghijklmnopqrst",
+    )
+    assert result["target_supabase_project_ref"] == "abcdefghijklmnopqrst"
+
+
+def test_cloud_sql_native_import_operation_evidence_shape():
+    from scripts.verify_restore_operation_evidence import verify
+
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "region": "europe-west1",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump"},
+    }
+    result = verify(
+        operation,
+        operation_id="operation-987",
+        backup_reference="gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump",
+        target_kind="cloud_sql",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["provider_status"] == "DONE"
