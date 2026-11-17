@@ -61,7 +61,7 @@ def validate_restore_inputs(
     backup_match = _BACKUP_RE.fullmatch(backup_reference or "")
     if not backup_match:
         raise ValueError(
-            f"backup reference must be gs://{BACKUP_BUCKET}/<object>#<generation>"
+            f"backup reference must use the approved recovery bucket gs://{BACKUP_BUCKET}/<object>#<generation>"
         )
     object_name, generation = backup_match.groups()
     if not object_name or object_name.startswith("/") or ".." in object_name.split("/"):
