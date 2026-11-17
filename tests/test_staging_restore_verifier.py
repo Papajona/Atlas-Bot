@@ -507,8 +507,8 @@ def test_nested_supabase_restore_record_is_selected_over_targetless_wrapper_meta
         "backup_reference": "wrapper-backup",
         "status": "COMPLETED",
         "data": {
-            "metadata": {
-                "result": {
+            "result": {
+                "operation": {
                     "operation_id": "restore-op-123",
                     "backup_reference": "backup-123",
                     "target_project_ref": "abcdefghijklmnopqrst",
