@@ -4,6 +4,7 @@ import asyncio
 import os
 
 import pytest
+import yaml
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -250,43 +251,73 @@ def test_acceptance_rls_helper_hides_existing_other_tenant_rows(monkeypatch):
 def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     from pathlib import Path
 
-    workflow = (
+    workflow = yaml.safe_load(
+        (
+            Path(__file__).resolve().parents[1]
+            / ".github"
+            / "workflows"
+            / "customer-paper-staging-acceptance.yml"
+        ).read_text(encoding="utf-8")
+    )
+    triggers = workflow.get("on", workflow.get(True))
+    assert "workflow_dispatch" in triggers
+    assert "workflow_run" not in triggers
+    inputs = triggers["workflow_dispatch"]["inputs"]
+    for field in (
+        "target_sha",
+        "deployment_run_id",
+        "deployment_run_attempt",
+        "dispatch_id",
+    ):
+        assert inputs[field]["required"] is True
+
+    steps = workflow["jobs"]["customer-paper-acceptance"]["steps"]
+    checkout_index = next(
+        index for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    python_index = next(
+        index for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/setup-python@")
+    )
+    checkout = steps[checkout_index]
+    assert checkout["with"]["ref"] == "${{ inputs.target_sha }}"
+    assert checkout_index < python_index
+
+    checkout_check = next(
+        index for index, step in enumerate(steps)
+        if step.get("name")
+        == "Require checkout to match the exact deployed or manually dispatched commit"
+    )
+    validation_matches = [
+        (index, step) for index, step in enumerate(steps)
+        if step.get("name") == "Validate exact successful main deployment"
+    ]
+    assert len(validation_matches) == 1
+    validation_index, validation = validation_matches[0]
+    assert checkout_index < python_index < checkout_check < validation_index
+
+    run = validation["run"]
+    assert "scripts/verify_staging_acceptance_deployment.py" in run
+    assert '--expected-run-id "$DEPLOYMENT_RUN_ID"' in run
+    assert '--expected-attempt "$DEPLOYMENT_RUN_ATTEMPT"' in run
+    assert '--expected-sha "$TARGET_SHA"' in run
+    assert '--attempt-before "$deployment_attempt_before"' in run
+    assert '--attempt-after "$deployment_attempt_after"' in run
+    assert '<<< "$deployment_json"' in run
+    assert 'test "$GITHUB_EVENT_NAME" = "workflow_dispatch"' in run
+    assert 'test "$GITHUB_REF" = "refs/heads/main"' in run
+
+    assert workflow["permissions"]["actions"] == "read"
+    assert workflow["env"]["ADAPTIVE_AI_ENABLED"] == "false"
+    validator = (
         Path(__file__).resolve().parents[1]
-        / ".github"
-        / "workflows"
-        / "customer-paper-staging-acceptance.yml"
+        / "scripts"
+        / "verify_staging_acceptance_deployment.py"
     ).read_text(encoding="utf-8")
-    trigger_header = workflow.split("\npermissions:", 1)[0]
-    assert "workflow_dispatch:" in trigger_header
-    assert "workflow_run:" not in trigger_header
-    assert "target_sha:" in trigger_header
-    assert "deployment_run_id:" in trigger_header
-    assert "deployment_run_attempt:" in trigger_header
-    assert "dispatch_id:" in trigger_header
-    assert "run-name: Customer Paper Acceptance ${{ inputs.target_sha }} deploy ${{ inputs.deployment_run_id }} attempt ${{ inputs.deployment_run_attempt }} correlation ${{ inputs.dispatch_id }}" in workflow
-    assert "TARGET_SHA: ${{ inputs.target_sha }}" in workflow
-    assert "DEPLOYMENT_RUN_ID: ${{ inputs.deployment_run_id }}" in workflow
-    assert "DEPLOYMENT_RUN_ATTEMPT: ${{ inputs.deployment_run_attempt }}" in workflow
-    assert "DISPATCH_ID: ${{ inputs.dispatch_id }}" in workflow
-    assert '[[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]' in workflow
-    assert '[[ "$DISPATCH_ID" =~ ^[a-f0-9]{32}$ ]]' in workflow
-    assert "--jq '.run_attempt'" in workflow
-    assert 'test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
-    assert 'test "$deployment_attempt_after" = "$DEPLOYMENT_RUN_ATTEMPT"' in workflow
-    assert 'test "$GITHUB_REF" = "refs/heads/main"' in workflow
-    assert 'test "$deployment_name" = "Deploy Paper-Only Atlas Staging"' in workflow
-    assert 'test "$deployment_sha" = "$TARGET_SHA"' in workflow
-    assert '[[ "$deployment_status" == "in_progress" || "$deployment_status" == "completed" ]]' in workflow
-    assert 'test "$deployment_conclusion" = "success"' in workflow
-    assert 'test "$image_outcome" = "success"' in workflow
-    assert 'test "$deploy_outcome" = "success"' in workflow
-    assert 'test "$preflight_outcome" = "success"' in workflow
-    assert "preflight_outcome=" in workflow
-    assert "ref: ${{ inputs.target_sha }}" in workflow
-    assert "actions: read" in workflow
-    assert 'ADAPTIVE_AI_ENABLED: "false"' in workflow
-    assert "git ls-remote" not in workflow
-    assert "[atlas-paper-acceptance-drill]" not in workflow
+    assert '"Build and push exact commit image to Artifact Registry"' in validator
+    assert '"Deploy restricted paper-only Cloud Run service"' in validator
+    assert '"Dispatch and require read-only staging identity preflight on this exact commit"' in validator
 
 
 def test_staging_deploy_dispatches_acceptance_only_after_successful_identity_preflight():
