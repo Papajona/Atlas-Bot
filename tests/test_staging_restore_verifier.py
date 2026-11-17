@@ -71,7 +71,8 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "full restore certification" in runbook
     assert "PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" in workflow
     assert "backup reference must pin an exact GCS generation" in workflow
-    assert "Cloud SQL evidence must be an exported provider-native operation JSON object" in workflow
+    assert 'gcloud sql operations describe "$RESTORE_OPERATION_ID"' in workflow
+    assert "verify_cloud_sql_backup_binding.py" in workflow
 
 
 
