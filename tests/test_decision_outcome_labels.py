@@ -8,7 +8,9 @@ import pytest
 
 from app.decision_outcomes import (
     DEFAULT_HORIZONS_BARS,
+    LABEL_VERSION,
     OutcomeLabelError,
+    _decision_outcome_label_capacity,
     build_decision_outcome_label,
 )
 
@@ -70,6 +72,7 @@ def test_outcome_label_uses_subsequent_completed_bars_and_configured_costs():
     label = build_decision_outcome_label(_decision(), df)
 
     assert label["status"] == "VALID"
+    assert label["label_version"] == LABEL_VERSION == "decision-outcome-v2"
     assert label["mode"] == "PAPER"
     assert label["effective_mode"] == "NOT_EXECUTED"
     assert label["research_only"] is True
@@ -90,6 +93,27 @@ def test_outcome_label_uses_subsequent_completed_bars_and_configured_costs():
     assert one["candidate_side_net_return_bps"] == pytest.approx(one["forward_return_bps"] - 15.125)
     assert len(label["outcome_window_sha256"]) == 64
     assert len(label["label_id"]) == 64
+
+
+def test_two_version_relabel_capacity_is_reserved_before_writes():
+    # 100,000 v1 audit labels plus their v2 relabels fit the shared ceiling.
+    full_pair_batch = _decision_outcome_label_capacity(
+        existing_records=100_000,
+        pending_decisions=100_000,
+        batch_limit=10_000,
+    )
+    assert full_pair_batch["maximum_records"] == 200_000
+    assert full_pair_batch["requested_max_new_records"] == 10_000
+    assert full_pair_batch["fits"] is True
+
+    # A batch that would cross the complete-history ceiling is rejected pre-write.
+    near_capacity = _decision_outcome_label_capacity(
+        existing_records=199_995,
+        pending_decisions=100,
+        batch_limit=10,
+    )
+    assert near_capacity["remaining_records"] == 5
+    assert near_capacity["fits"] is False
 
 
 def test_label_window_hash_and_outcome_do_not_depend_on_bars_after_longest_horizon():
