@@ -486,14 +486,11 @@ def audit(args: argparse.Namespace) -> dict:
         "verified_restore_target_project_ref": verified_target_ref or None,\n        "verified_restore_target_instance_connection_name": verified_target_instance or None,
         "production_supabase_ref": os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
         "staging_supabase_ref": staging_ref or None,\n        "restore_target_kind": target_kind,\n        "cloud_sql_instance_connection_name": cloud_sql_instance or None,\n        "cloud_sql_database": cloud_sql_database or None,
-        "same_project_staging": (
-            os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
-            == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
+        "same_project_staging": (staging_ref == production_ref) if target_kind == "supabase" else None,
+        "staging_scope": (
+            "cloud_sql_non_production_instance" if target_kind == "cloud_sql"
+            else ("same_supabase_project" if staging_ref == production_ref else "separate_supabase_project")
         ),
-        "staging_scope": "same_supabase_project" if (
-            os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
-            == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
-        ) else "separate_supabase_project",
         "staging_database_host": host,
         "expected_audit_role": args.expected_audit_role,
         "expected_revision": expected_revision,
