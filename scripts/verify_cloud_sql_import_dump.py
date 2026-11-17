@@ -196,9 +196,8 @@ def _inspect_lines(lines) -> tuple[int, int]:
 
         if state == "line_comment":
             state = "normal"
-        # Keep words split across physical lines contiguous, e.g. CREATE\nDATABASE.
-        if word:
-            word.append(" ")
+        # SQL keywords are whitespace-delimited even when a statement spans lines.
+        flush_word()
 
     flush_word()
     if state in {"single_quote", "double_quote", "block_comment", "dollar_quote"}:
