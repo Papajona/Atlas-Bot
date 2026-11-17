@@ -37,7 +37,8 @@ def test_staging_workflow_uses_executable_run_and_current_main_guards():
         (ROOT / ".github/workflows/staging-identity-preflight.yml").read_text(encoding="utf-8")
     )
 
-    preflight_input = preflight["on"]["workflow_dispatch"]["inputs"]["request_id"]
+    preflight_on = preflight.get("on", preflight.get(True))
+    preflight_input = preflight_on["workflow_dispatch"]["inputs"]["request_id"]
     assert preflight_input["required"] is False
 
     steps = deploy["jobs"]["deploy-paper-staging"]["steps"]
