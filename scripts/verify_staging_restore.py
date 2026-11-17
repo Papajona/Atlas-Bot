@@ -260,7 +260,7 @@ def read_database_uri(value: str, staging_ref: str = "", production_ref: str = "
         if not production_ref or not re.fullmatch(r"[a-z0-9]{20}", production_ref):
             raise ValueError("PRODUCTION_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
         direct_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
-        pooler_host = re.fullmatch(r"aws-\\d+-[a-z0-9]+(?:-[a-z0-9]+)*\\.pooler\\.supabase\\.com", host)
+        pooler_host = re.fullmatch(r"aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com", host)
         pooler_user = unquote(parsed.username or "")
         pooler_matches_project = bool(pooler_host and pooler_user.rpartition(".")[2] == staging_ref)
         if host not in direct_hosts and not pooler_matches_project:
