@@ -158,6 +158,37 @@ def _has_operation_error(operation: Mapping[str, Any]) -> bool:
     return bool(operation.get("errors"))
 
 
+def _live_backup_generation(
+    versions: Mapping[str, Any],
+    *,
+    object_name: str,
+    instant: datetime,
+) -> str:
+    """Return the generation that was live at an instant, for this exact object name."""
+    items = versions.get("items")
+    if not isinstance(items, list):
+        raise ValueError("GCS object-version listing is incomplete")
+    candidates: list[tuple[int, str]] = []
+    for item in items:
+        if not isinstance(item, Mapping) or str(item.get("name") or "") != object_name:
+            continue
+        created = _utc_timestamp(item.get("timeCreated"), "object version creation time")
+        if created > instant:
+            continue
+        deleted_value = item.get("timeDeleted")
+        if deleted_value:
+            deleted = _utc_timestamp(deleted_value, "object version deletion time")
+            if deleted <= instant:
+                continue
+        generation = str(item.get("generation") or "")
+        if not generation.isdigit() or int(generation) <= 0:
+            raise ValueError("GCS object-version listing contains an invalid generation")
+        candidates.append((int(generation), generation))
+    if not candidates:
+        raise ValueError("no retained generation of the backup object was live before import")
+    return max(candidates)[1]
+
+
 def _list_object_versions(
     *,
     object_name: str,
@@ -269,6 +300,19 @@ def execute_restore(
         backup_reference=backup_reference,
     )
     object_uri = backup_reference.split("#", 1)[0]
+
+    # Cloud SQL's native import API addresses the object URI rather than a GCS
+    # generation-qualified URL. Require the pinned generation to be the live
+    # version immediately before the import; the post-import binding audit then
+    # proves it remained live for the operation's complete start/end interval.
+    versions_before = _list_object_versions(object_name=object_name, run=run)
+    live_generation_before = _live_backup_generation(
+        versions_before,
+        object_name=object_name,
+        instant=datetime.now(timezone.utc),
+    )
+    if live_generation_before != generation:
+        raise ValueError("pinned GCS generation is not the live backup object before import")
 
     instance = _run_json(
         [
