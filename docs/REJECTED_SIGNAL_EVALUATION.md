@@ -7,13 +7,22 @@ This report is read-only and research-only. It consumes persisted `ADAPTIVE_DECI
 After outcome labels have been generated and reviewed:
 
 ```bash
-python scripts/evaluate_rejected_signals.py --limit 10000 --holdout-fraction 0.30 --min-group-samples 30
+python scripts/evaluate_rejected_signals.py --holdout-fraction 0.30 --min-group-samples 30
 ```
 
-To save the JSON report as an artifact:
+By default the report loads the complete audit-label history within the shared 200,000-record / 256 MiB safety budget. It does not silently take the newest 10,000 rows. To inspect one methodology only, select it explicitly; an optional limit is applied after version filtering:
 
 ```bash
-python scripts/evaluate_rejected_signals.py --limit 10000 --holdout-fraction 0.30 --min-group-samples 30 --output reports/rejected-signal-evaluation.json
+python scripts/evaluate_rejected_signals.py --label-version decision-outcome-v1 --limit 10000
+python scripts/evaluate_rejected_signals.py --label-version decision-outcome-v2
+```
+
+The report's `history_selection` and `coverage` fields state which versions, counts and market-timestamp date ranges were loaded. A `--limit` without `--label-version` is rejected so newer rows from one methodology cannot silently displace another.
+
+To save the full-history JSON report as an artifact:
+
+```bash
+python scripts/evaluate_rejected_signals.py --holdout-fraction 0.30 --min-group-samples 30 --output reports/rejected-signal-evaluation.json
 ```
 
 The `rejected-signal-evaluation-v4` report includes:
