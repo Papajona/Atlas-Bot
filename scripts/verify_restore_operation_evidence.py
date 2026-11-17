@@ -15,8 +15,8 @@ def _record(document: Any) -> Mapping[str, Any]:
     if not isinstance(document, Mapping):
         raise ValueError("provider restore evidence must be a JSON object")
     aliases = (
-        ("restore_operation_id", "restoreOperationId", "operation_id", "operationId", "id"),
-        ("backup_reference", "backupReference", "source_backup_id", "sourceBackupId", "backup_id", "backupId"),
+        ("restore_operation_id", "restoreOperationId", "operation_id", "operationId", "name", "id"),
+        ("backup_reference", "backupReference", "source_backup_id", "sourceBackupId", "backup_id", "backupId", "uri"),
         ("status", "state", "phase"),
     )
     def complete(record: Mapping[str, Any]) -> bool:
@@ -40,8 +40,8 @@ def verify(document: Any, *, operation_id: str, backup_reference: str,
            target_kind: str, target_project_ref: str = "",
            target_instance_connection_name: str = "") -> dict[str, Any]:
     record = _record(document)
-    observed_operation = _first(record, "restore_operation_id", "restoreOperationId", "operation_id", "operationId", "id")
-    observed_backup = _first(record, "backup_reference", "backupReference", "source_backup_id", "sourceBackupId", "backup_id", "backupId")
+    observed_operation = _first(record, "restore_operation_id", "restoreOperationId", "operation_id", "operationId", "name", "id")
+    observed_backup = _first(record, "backup_reference", "backupReference", "source_backup_id", "sourceBackupId", "backup_id", "backupId", "uri")
     status = _first(record, "status", "state", "phase").upper()
     if not operation_id.strip() or observed_operation != operation_id.strip():
         raise ValueError("provider evidence operation ID does not match the requested restore")
@@ -56,6 +56,12 @@ def verify(document: Any, *, operation_id: str, backup_reference: str,
         return {"status":"PASS","restore_operation_id":observed_operation,"backup_reference":observed_backup,"target_kind":"supabase","target_supabase_project_ref":observed_target,"provider_status":status}
     if target_kind == "cloud_sql":
         observed_instance = _first(record, "target_instance_connection_name", "instance_connection_name", "instanceConnectionName", "target_instance", "instance")
+        if not observed_instance:
+            target_project = _first(record, "targetProject", "target_project", "project")
+            target_region = _first(record, "region", "targetRegion")
+            target_id = _first(record, "targetId", "target_id", "instanceName")
+            if target_project and target_region and target_id:
+                observed_instance = f"{target_project}:{target_region}:{target_id}"
         if not re.fullmatch(r"[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+", target_instance_connection_name or "") or observed_instance != target_instance_connection_name:
             raise ValueError("provider evidence target does not match the configured Cloud SQL instance connection name")
         return {"status":"PASS","restore_operation_id":observed_operation,"backup_reference":observed_backup,"target_kind":"cloud_sql","target_instance_connection_name":observed_instance,"provider_status":status}
