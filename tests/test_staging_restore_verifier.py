@@ -308,3 +308,54 @@ def test_restore_audit_rejects_malformed_cloud_sql_instance():
             target_kind="cloud_sql", cloud_sql_instance="production",
             cloud_sql_database="atlas_recovery",
         )
+
+
+def test_cloud_sql_restore_evidence_requires_exact_instance_and_success():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://atlas-staging-510915-db-backups/backup.dump",
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "status": "DONE",
+    }
+    result = verify(
+        document, operation_id="restore-op-123",
+        backup_reference="gs://atlas-staging-510915-db-backups/backup.dump",
+        target_kind="cloud_sql",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["status"] == "PASS"
+    assert result["target_kind"] == "cloud_sql"
+
+
+def test_cloud_sql_restore_evidence_rejects_wrong_instance_or_running_operation():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://bucket/backup.dump",
+        "instance_connection_name": "prod:region:database",
+        "status": "RUNNING",
+    }
+    with pytest.raises(ValueError):
+        verify(
+            document, operation_id="restore-op-123",
+            backup_reference="gs://bucket/backup.dump",
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_supabase_restore_evidence_compatibility():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123", "backup_reference": "backup-123",
+        "target_project_ref": "abcdefghijklmnopqrst", "status": "COMPLETED",
+    }
+    result = verify(
+        document, operation_id="restore-op-123", backup_reference="backup-123",
+        target_kind="supabase", target_project_ref="abcdefghijklmnopqrst",
+    )
+    assert result["target_supabase_project_ref"] == "abcdefghijklmnopqrst"
