@@ -94,38 +94,23 @@ jobs:
           test "$GITHUB_EVENT_NAME" = "workflow_dispatch"
           test "$GITHUB_REF" = "refs/heads/main"
           [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$DEPLOYMENT_RUN_ID" =~ ^[0-9]+$ ]]
-          [[ "$DEPLOYMENT_RUN_ID" -gt 0 ]]
+          [[ "$DEPLOYMENT_RUN_ID" =~ ^[1-9][0-9]*$ ]]
           [[ "$DEPLOYMENT_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
           [[ "$DISPATCH_ID" =~ ^[a-f0-9]{32}$ ]]
 
           deployment_attempt_before="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOYMENT_RUN_ID" --jq '.run_attempt')"
-          test "$deployment_attempt_before" = "$DEPLOYMENT_RUN_ATTEMPT"
           deployment_json="$(gh run view "$DEPLOYMENT_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --json name,headSha,headBranch,status,conclusion,jobs)"
-          deployment_name="$(jq -r '.name // ""' <<< "$deployment_json")"
-          deployment_sha="$(jq -r '.headSha // ""' <<< "$deployment_json")"
-          deployment_branch="$(jq -r '.headBranch // ""' <<< "$deployment_json")"
-          deployment_status="$(jq -r '.status // ""' <<< "$deployment_json")"
-          deployment_conclusion="$(jq -r '.conclusion // ""' <<< "$deployment_json")"
-          image_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Build and push exact commit image to Artifact Registry") | .conclusion][0] // ""' <<< "$deployment_json")"
-          deploy_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Deploy restricted paper-only Cloud Run service") | .conclusion][0] // ""' <<< "$deployment_json")"
-          preflight_outcome="$(jq -r '[.jobs[] | select(.name == "deploy-paper-staging") | .steps[] | select(.name == "Dispatch and require read-only staging identity preflight on this exact commit") | .conclusion][0] // ""' <<< "$deployment_json")"
-
-          test "$deployment_name" = "Deploy Paper-Only Atlas Staging"
-          test "$deployment_sha" = "$TARGET_SHA"
-          test "$deployment_branch" = "main"
-          [[ "$deployment_status" == "in_progress" || "$deployment_status" == "completed" ]]
-          if [[ "$deployment_status" == "completed" ]]; then
-            test "$deployment_conclusion" = "success"
-          fi
-          test "$image_outcome" = "success"
-          test "$deploy_outcome" = "success"
-          test "$preflight_outcome" = "success"
+            --json databaseId,name,headSha,headBranch,status,conclusion,jobs)"
           deployment_attempt_after="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$DEPLOYMENT_RUN_ID" --jq '.run_attempt')"
-          test "$deployment_attempt_after" = "$DEPLOYMENT_RUN_ATTEMPT"
-          echo "PASS: exact paper-only deployment $DEPLOYMENT_RUN_ID attempt $DEPLOYMENT_RUN_ATTEMPT built and deployed $TARGET_SHA and passed read-only staging identity/readiness before acceptance (correlation $DISPATCH_ID)"
+
+          python3 scripts/verify_staging_acceptance_deployment.py \
+            --expected-run-id "$DEPLOYMENT_RUN_ID" \
+            --expected-attempt "$DEPLOYMENT_RUN_ATTEMPT" \
+            --expected-sha "$TARGET_SHA" \
+            --attempt-before "$deployment_attempt_before" \
+            --attempt-after "$deployment_attempt_after" <<< "$deployment_json"
+          echo "PASS: deployment evidence is bound to correlation $DISPATCH_ID"
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
