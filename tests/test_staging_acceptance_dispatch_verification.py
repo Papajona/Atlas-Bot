@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -156,6 +157,22 @@ def _step(steps: list[dict], name: str) -> dict:
     return matches[0]
 
 
+def _guard_command(step: str, subcommand: str, *, start_at: int = 0) -> tuple[int, str]:
+    marker = f"if ! python3 scripts/verify_staging_dispatch.py {subcommand}"
+    matches = list(re.finditer(re.escape(marker), step[start_at:]))
+    assert matches, f"missing executable {subcommand} verifier invocation"
+    start = start_at + matches[0].start()
+    end = step.index("then", start)
+    return start, step[start:end]
+
+
+def _assert_rejects_before_success(step: str, command_start: int, success_marker: str) -> None:
+    success = step.index(success_marker)
+    assert command_start < success
+    failure_branch = step[step.index("then", command_start) : step.index("fi", step.index("then", command_start))]
+    assert "exit 1" in failure_branch
+
+
 def test_deployment_workflow_executes_the_same_guards_covered_by_these_tests():
     steps = _workflow_steps(".github/workflows/staging-paper-deploy.yml")
     preflight = _step(
@@ -168,11 +185,53 @@ def test_deployment_workflow_executes_the_same_guards_covered_by_these_tests():
     )["run"]
     deployment = _step(steps, "Deploy restricted paper-only Cloud Run service")["run"]
 
-    for script in (preflight, acceptance, deployment):
-        assert "scripts/verify_staging_dispatch.py main-sha" in script
-    assert (
-        "scripts/verify_staging_dispatch.py workflow-run" in preflight
+    # Verify the deploy guard's exact arguments and that rejection occurs before
+    # image selection and the Cloud Run mutation.
+    deploy_guard_pos, deploy_guard = _guard_command(deployment, "main-sha")
+    assert '--expected-sha "$GITHUB_SHA"' in deploy_guard
+    assert '--actual-sha "$current_main_sha"' in deploy_guard
+    deploy_failure_end = deployment.index("fi", deployment.index("then", deploy_guard_pos))
+    image_pos = deployment.index('IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")')
+    mutation_pos = deployment.index('gcloud run deploy "$STAGING_SERVICE"')
+    assert deploy_guard_pos < deploy_failure_end < image_pos < mutation_pos
+    assert "exit 1" in deployment[deployment.index("then", deploy_guard_pos):deploy_failure_end]
+
+    # Preflight: validate the exact child run, then re-read and compare main before
+    # the parent emits its success result.
+    preflight_run_pos, preflight_run_guard = _guard_command(preflight, "workflow-run")
+    assert '--expected-run-id "$preflight_run_id"' in preflight_run_guard
+    assert '--expected-sha "$GITHUB_SHA"' in preflight_run_guard
+    assert '<<< "$run_json"' in preflight_run_guard
+    preflight_success = preflight.index(
+        "PASS: read-only staging identity and isolated-ledger preflight run"
     )
-    assert (
-        "scripts/verify_staging_dispatch.py workflow-run" in acceptance
+    assert preflight_run_pos < preflight_success
+    preflight_main_pos, preflight_main_guard = _guard_command(
+        preflight, "main-sha", start_at=preflight_run_pos
+    )
+    assert '--expected-sha "$GITHUB_SHA"' in preflight_main_guard
+    assert '--actual-sha "$current_main_sha"' in preflight_main_guard
+    _assert_rejects_before_success(
+        preflight,
+        preflight_main_pos,
+        "PASS: read-only staging identity and isolated-ledger preflight run",
+    )
+
+    # Acceptance: do not dispatch if main is stale; validate the exact dispatched
+    # child ID/SHA and fail before reporting successful acceptance.
+    acceptance_main_pos, acceptance_main_guard = _guard_command(acceptance, "main-sha")
+    assert '--expected-sha "$GITHUB_SHA"' in acceptance_main_guard
+    assert '--actual-sha "$current_main_sha"' in acceptance_main_guard
+    dispatch_pos = acceptance.index(
+        "gh workflow run customer-paper-staging-acceptance.yml"
+    )
+    assert acceptance_main_pos < dispatch_pos
+    acceptance_run_pos, acceptance_run_guard = _guard_command(acceptance, "workflow-run")
+    assert '--expected-run-id "$acceptance_run_id"' in acceptance_run_guard
+    assert '--expected-sha "$GITHUB_SHA"' in acceptance_run_guard
+    assert '<<< "$run_json"' in acceptance_run_guard
+    _assert_rejects_before_success(
+        acceptance,
+        acceptance_run_pos,
+        "PASS: customer-paper acceptance run",
     )
