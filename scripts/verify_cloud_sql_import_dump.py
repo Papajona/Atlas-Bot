@@ -78,6 +78,12 @@ def _inspect_lines(lines) -> tuple[int, int]:
         nonlocal statement_has_setting_name, statement_has_off_token
         nonlocal statement_has_set_config, set_config_arg_state, set_config_arg_unknown
         upper = token.upper()
+        if set_config_arg_state == "await_open" and upper != "SET_CONFIG":
+            # A quoted/unquoted identifier named set_config is only a function
+            # candidate until another significant SQL token arrives.
+            # E.g. SELECT "set_config" FROM t WHERE (true) is a column reference,
+            # not a call; do not let the later parenthesis become its arguments.
+            set_config_arg_state = "none"
         if set_config_arg_state == "first" and upper != "__QUOTED_LITERAL__":
             set_config_arg_unknown = True
         if len(statement_prefix) < 3:
