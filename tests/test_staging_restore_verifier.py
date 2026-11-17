@@ -812,7 +812,7 @@ def test_cloud_sql_import_dump_rejects_database_redirection(tmp_path, sql):
 
     dump = tmp_path / "redirect.sql"
     dump.write_text(sql, encoding="utf-8")
-    with pytest.raises(ValueError, match="redirect|switch"):
+    with pytest.raises(ValueError, match="DATABASE|database switch"):
         inspect_import_dump(dump)
 
 
