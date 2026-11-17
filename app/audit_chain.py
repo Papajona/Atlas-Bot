@@ -20,14 +20,14 @@ from .distributed import allow_rate_limit
 EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT = "__EXTERNAL_AUDIT_DELIVERY_IN_FLIGHT__"
 
 
-def serialize_audit_detail(detail: dict) -> str:
-    """Serialize the decoded JSON payload using the loader's exact byte-count format."""
+def serialize_audit_detail(detail: dict, *, allow_nan: bool = True) -> str:
+    """Serialize the decoded JSON payload using the loader's compact byte-count format."""
     return json.dumps(
         detail or {},
         sort_keys=True,
         separators=(",", ":"),
         default=str,
-        allow_nan=False,
+        allow_nan=allow_nan,
     )
 
 
