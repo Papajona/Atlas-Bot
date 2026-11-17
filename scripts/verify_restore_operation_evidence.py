@@ -104,7 +104,7 @@ def _cloud_sql_instance(record: Mapping[str, Any], expected_instance: str) -> st
         observed_project = _consistent("Cloud SQL target project", projects)
         observed_id = _consistent("Cloud SQL target instance", instance_ids)
         if observed_project != expected_project or observed_id != expected_id:
-            raise ValueError("provider evidence target project/instance does not match the configured Cloud SQL target")
+            raise ValueError("provider evidence contains conflicting Cloud SQL target project/instance values")
     if regions and _consistent("Cloud SQL target region", regions) != expected_region:
         raise ValueError("provider evidence target region does not match the configured Cloud SQL target")
 
@@ -152,14 +152,37 @@ def _cloud_sql_backup(record: Mapping[str, Any], expected_reference: str) -> tup
         if generation is not None:
             observed_generations.append(generation)
     if _consistent("backup object URI", normalized_objects) != expected_object_uri:
-        raise ValueError("Cloud SQL native import URI does not match the object path of the generation-pinned backup reference")
+        raise ValueError("provider evidence contains conflicting backup reference values")
     if observed_generations and _consistent("backup generation", observed_generations) != expected_generation:
-        raise ValueError("provider evidence backup generation conflicts with the generation-pinned backup reference")
-    if native_import_uris and _consistent("native import URI", native_import_uris) != expected_object_uri:
-        raise ValueError("Cloud SQL native import URI conflicts with the pinned backup object path")
-    # Cloud SQL's native importContext.uri is an object URI and does not carry a GCS generation.
-    # Generation assurance is therefore delegated to the separate locked-retention/object-metadata gate.
+        raise ValueError("provider evidence contains conflicting backup reference generations")
+    for native_uri in native_import_uris:
+        native_object_uri, native_generation = _gcs_uri_parts(native_uri)
+        if native_object_uri != expected_object_uri:
+            raise ValueError("provider evidence contains conflicting backup reference values")
+        if native_generation is not None and native_generation != expected_generation:
+            raise ValueError("provider evidence contains conflicting backup reference generations")
+    # The native Cloud SQL import URI may be unversioned or generation-qualified.
+    # The workflow independently proves which generation was live for the full import interval.
     return expected_reference, expected_object_uri, expected_generation
+
+
+
+
+def _cloud_sql_database(record: Mapping[str, Any], expected_database: str) -> str:
+    context = record.get("importContext", record.get("import_context"))
+    if not isinstance(context, Mapping):
+        raise ValueError("Cloud SQL import evidence does not identify importContext.database")
+    observed = _consistent(
+        "Cloud SQL import database",
+        _values(context, ("database", "databaseName", "database_name")),
+    )
+    if not expected_database or not expected_database.strip():
+        raise ValueError("expected Cloud SQL database must be explicitly configured")
+    if not observed:
+        raise ValueError("Cloud SQL import evidence does not identify importContext.database")
+    if observed != expected_database.strip():
+        raise ValueError("Cloud SQL import database does not match the configured Cloud SQL database")
+    return observed
 
 
 def _has_provider_error(record: Mapping[str, Any]) -> bool:
@@ -184,6 +207,7 @@ def verify(
     target_kind: str = "supabase",
     target_project_ref: str = "",
     target_instance_connection_name: str = "",
+    target_database: str = "",
 ) -> dict[str, Any]:
     if target_kind not in {"supabase", "cloud_sql"}:
         raise ValueError("target kind must be supabase or cloud_sql")
@@ -221,6 +245,7 @@ def verify(
         raise ValueError("Cloud SQL restore evidence must identify an IMPORT operation")
     if _has_provider_error(record):
         raise ValueError("Cloud SQL import operation reports provider errors")
+    observed_database = _cloud_sql_database(record, target_database)
 
     return {
         "status": "PASS",
@@ -231,6 +256,7 @@ def verify(
         "native_import_uri_has_generation": False,
         "target_kind": "cloud_sql",
         "target_instance_connection_name": observed_instance,
+        "target_database": observed_database,
         "operation_type": operation_type,
         "provider_status": status,
     }
@@ -244,6 +270,7 @@ def main() -> int:
     parser.add_argument("--target-kind", choices=("supabase", "cloud_sql"), default="supabase")
     parser.add_argument("--target-project-ref", default="")
     parser.add_argument("--target-instance-connection-name", default="")
+    parser.add_argument("--target-database", default="")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
     try:
@@ -257,6 +284,7 @@ def main() -> int:
             target_kind=args.target_kind,
             target_project_ref=args.target_project_ref,
             target_instance_connection_name=args.target_instance_connection_name,
+            target_database=args.target_database,
         )
         result["evidence_sha256"] = hashlib.sha256(raw).hexdigest()
         result["source_file_bytes"] = len(raw)
