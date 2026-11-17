@@ -226,6 +226,11 @@ def test_deployment_workflow_executes_the_same_guards_covered_by_these_tests():
         "gh workflow run customer-paper-staging-acceptance.yml"
     )
     assert acceptance_main_pos < dispatch_pos
+    _assert_rejects_before_success(
+        acceptance,
+        acceptance_main_pos,
+        "gh workflow run customer-paper-staging-acceptance.yml",
+    )
     acceptance_run_pos, acceptance_run_guard = _guard_command(acceptance, "workflow-run")
     assert '--expected-run-id "$acceptance_run_id"' in acceptance_run_guard
     assert '--expected-sha "$GITHUB_SHA"' in acceptance_run_guard
