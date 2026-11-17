@@ -59,6 +59,11 @@ def _inspect_lines(lines) -> tuple[int, int]:
     statement_has_setting_name = False
     statement_has_off_token = False
     statement_has_set_config = False
+    set_config_arg_state = "none"
+    set_config_arg_literal_count = 0
+    set_config_arg_literal = ""
+    set_config_arg_unknown = False
+    statement_targets_standard_conforming_strings = False
     literal_mentions_setting = False
     literal_is_off = False
     literal_sample: list[str] = []
@@ -71,8 +76,10 @@ def _inspect_lines(lines) -> tuple[int, int]:
     def add_token(token: str) -> None:
         nonlocal previous_token, copy_from_stdin
         nonlocal statement_has_setting_name, statement_has_off_token
-        nonlocal statement_has_set_config
+        nonlocal statement_has_set_config, set_config_arg_state, set_config_arg_unknown
         upper = token.upper()
+        if set_config_arg_state == "first" and upper != "__QUOTED_LITERAL__":
+            set_config_arg_unknown = True
         if len(statement_prefix) < 3:
             statement_prefix.append(upper)
         if upper == "STANDARD_CONFORMING_STRINGS":
@@ -81,6 +88,8 @@ def _inspect_lines(lines) -> tuple[int, int]:
             statement_has_off_token = True
         if upper == "SET_CONFIG":
             statement_has_set_config = True
+            if set_config_arg_state != "first":
+                set_config_arg_state = "await_open"
         if statement_prefix and statement_prefix[0] == "COPY":
             if previous_token == "FROM" and upper == "STDIN":
                 copy_from_stdin = True
@@ -105,17 +114,36 @@ def _inspect_lines(lines) -> tuple[int, int]:
         nonlocal previous_token, copy_from_stdin
         nonlocal statement_has_setting_name, statement_has_off_token
         nonlocal statement_has_set_config, literal_mentions_setting, literal_is_off
+        nonlocal set_config_arg_state, set_config_arg_literal_count, set_config_arg_literal
+        nonlocal set_config_arg_unknown, statement_targets_standard_conforming_strings
         statement_prefix.clear()
         previous_token = ""
         copy_from_stdin = False
         statement_has_setting_name = False
         statement_has_off_token = False
         statement_has_set_config = False
+        set_config_arg_state = "none"
+        set_config_arg_literal_count = 0
+        set_config_arg_literal = ""
+        set_config_arg_unknown = False
+        statement_targets_standard_conforming_strings = False
         literal_mentions_setting = False
         literal_is_off = False
 
+    def finish_set_config_first_argument() -> None:
+        nonlocal set_config_arg_state, statement_targets_standard_conforming_strings
+        if set_config_arg_state != "first":
+            return
+        if set_config_arg_unknown or set_config_arg_literal_count != 1:
+            # A computed or non-literal GUC name cannot be proven unrelated.
+            statement_targets_standard_conforming_strings = True
+        elif set_config_arg_literal == "standard_conforming_strings":
+            statement_targets_standard_conforming_strings = True
+        set_config_arg_state = "done"
+
     def finish_statement() -> bool:
         nonlocal copy_pending
+        finish_set_config_first_argument()
         first_two = statement_prefix[:2]
         changes_string_mode = (
             (
@@ -127,13 +155,7 @@ def _inspect_lines(lines) -> tuple[int, int]:
                         and (statement_has_off_token or literal_is_off))
                 )
             )
-            or (
-                # The value may be computed (for example, 'o' || 'ff'), so
-                # any set_config targeting this GUC is blocked unless the dump
-                # can be proven to preserve the scanner's assumed string mode.
-                statement_has_set_config
-                and literal_mentions_setting
-            )
+            or statement_targets_standard_conforming_strings
         )
         if changes_string_mode:
             raise ValueError(
@@ -151,7 +173,15 @@ def _inspect_lines(lines) -> tuple[int, int]:
 
     def record_literal() -> None:
         nonlocal literal_mentions_setting, literal_is_off
+        nonlocal set_config_arg_literal_count, set_config_arg_literal
+        nonlocal set_config_arg_unknown
         sample = "".join(literal_sample).strip().lower()
+        if set_config_arg_state == "first":
+            set_config_arg_literal_count += 1
+            if set_config_arg_literal_count == 1:
+                set_config_arg_literal = sample
+            else:
+                set_config_arg_unknown = True
         if "standard_conforming_strings" in sample:
             literal_mentions_setting = True
         if sample in {"off", "false", "no", "0", "disable"}:
@@ -345,6 +375,22 @@ def _inspect_lines(lines) -> tuple[int, int]:
                 i += 1
                 continue
 
+            if char == "(":
+                flush_word()
+                if set_config_arg_state == "await_open":
+                    set_config_arg_state = "first"
+                    set_config_arg_literal_count = 0
+                    set_config_arg_literal = ""
+                    set_config_arg_unknown = False
+                elif set_config_arg_state == "first":
+                    set_config_arg_unknown = True
+                i += 1
+                continue
+            if char == ",":
+                flush_word()
+                finish_set_config_first_argument()
+                i += 1
+                continue
             if char == ";":
                 flush_word()
                 finish_statement()
