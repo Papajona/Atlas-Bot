@@ -1033,6 +1033,19 @@ def test_cloud_sql_dump_accepts_unrelated_set_config_value_mentioning_protected_
     assert inspect_import_dump(dump)["status"] == "PASS"
 
 
+def test_cloud_sql_dump_rejects_quoted_set_config_function_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "quoted-set-config-function.sql"
+    dump.write_text(
+        "SELECT pg_catalog.\\"set_config\\"('standard_conforming_strings', 'off', false);\\n"
+        "SELECT 'a\\\\'b'; CREATE DATABASE other_db; -- '\\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
 def test_cloud_sql_dump_rejects_computed_set_config_setting_name(tmp_path):
     from scripts.verify_cloud_sql_import_dump import inspect_import_dump
 
