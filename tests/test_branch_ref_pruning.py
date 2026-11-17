@@ -1378,7 +1378,7 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         1,
     )[1].split(";;", 1)[0]
     for marker in (
-        "LABEL_VERSION = \\"decision-outcome-v2\\"",
+        'LABEL_VERSION = "decision-outcome-v2"',
         "MAX_DECISION_OUTCOME_LABEL_RECORDS",
         "MAX_DECISION_OUTCOME_LABEL_BYTES",
         "_LABEL_HISTORY_ADVISORY_LOCK",
