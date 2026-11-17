@@ -483,9 +483,13 @@ def audit(args: argparse.Namespace) -> dict:
         "backup_reference": args.backup_reference,
         "restore_evidence_uri": evidence,
         "restore_evidence_sha256": evidence_sha256,
-        "verified_restore_target_project_ref": verified_target_ref or None,\n        "verified_restore_target_instance_connection_name": verified_target_instance or None,
+        "verified_restore_target_project_ref": verified_target_ref or None,
+        "verified_restore_target_instance_connection_name": verified_target_instance or None,
         "production_supabase_ref": os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
-        "staging_supabase_ref": staging_ref or None,\n        "restore_target_kind": target_kind,\n        "cloud_sql_instance_connection_name": cloud_sql_instance or None,\n        "cloud_sql_database": cloud_sql_database or None,
+        "staging_supabase_ref": staging_ref or None,
+        "restore_target_kind": target_kind,
+        "cloud_sql_instance_connection_name": cloud_sql_instance or None,
+        "cloud_sql_database": cloud_sql_database or None,
         "same_project_staging": (staging_ref == production_ref) if target_kind == "supabase" else None,
         "staging_scope": (
             "cloud_sql_non_production_instance" if target_kind == "cloud_sql"
@@ -508,14 +512,16 @@ def main() -> int:
     parser.add_argument("--backup-reference", required=True, help="Provider backup ID or immutable backup object URI")
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
     parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
-    parser.add_argument("--verified-target-project-ref", default="", help="Supabase target ref verified from provider record")\n    parser.add_argument("--verified-target-instance-connection-name", default="", help="Cloud SQL instance verified from provider record")
+    parser.add_argument("--verified-target-project-ref", default="", help="Supabase target ref verified from provider record")
+    parser.add_argument("--verified-target-instance-connection-name", default="", help="Cloud SQL instance verified from provider record")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
     parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
     try:
         report = audit(args)
-        Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True, default=str, allow_nan=False) + "\n", encoding="utf-8")
+        Path(args.output).write_text(json.dumps(report, indent=2, sort_keys=True, default=str, allow_nan=False) + "
+", encoding="utf-8")
         print(json.dumps({
             "result": report["result"],
             "restore_operation_id": report["restore_operation_id"],
