@@ -248,6 +248,19 @@ SELECT jsonb_build_object(
 )::text;
 """
 
+def validate_cloud_sql_target_pair(target_instance: str, production_instance: str) -> None:
+    """Require explicit, valid, different Cloud SQL recovery and production identities."""
+    pattern = r"^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$"
+    if not re.fullmatch(pattern, target_instance or ""):
+        raise ValueError("CLOUD_SQL_INSTANCE_CONNECTION_NAME must be project:region:instance")
+    if not re.fullmatch(pattern, production_instance or ""):
+        raise ValueError(
+            "PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME must be explicitly configured as project:region:instance"
+        )
+    if target_instance == production_instance:
+        raise ValueError("Cloud SQL restore target must be distinct from the production instance")
+
+
 def read_database_uri(value: str, staging_ref: str = "", production_ref: str = "", *, target_kind: str = "supabase", cloud_sql_instance: str = "", cloud_sql_database: str = "") -> tuple[dict[str, str], str]:
     parsed = urlparse(value)
     if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"} or not parsed.hostname:
@@ -404,8 +417,7 @@ def audit(args: argparse.Namespace) -> dict:
         raise ValueError("full restore audit requires a distinct non-production target; same-project restore could overwrite the active source")
     if target_kind == "cloud_sql":
         production_instance = os.environ.get("PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME", "").strip()
-        if not cloud_sql_instance or cloud_sql_instance == production_instance:
-            raise ValueError("Cloud SQL restore target must be configured and distinct from the production instance")
+        validate_cloud_sql_target_pair(cloud_sql_instance, production_instance)
     database_url = os.environ.get("DATABASE_URL", "")
     env, host = read_database_uri(database_url, staging_ref, production_ref,
         target_kind=target_kind, cloud_sql_instance=cloud_sql_instance, cloud_sql_database=cloud_sql_database)
