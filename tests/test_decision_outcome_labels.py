@@ -380,10 +380,9 @@ def test_postgres_label_history_write_lock_is_acquired_and_released(monkeypatch)
             statements.append("BATCH")
 
     asyncio.run(run())
-    assert statements[0].startswith("SELECT pg_advisory_lock")
+    assert statements[0].startswith("SELECT pg_advisory_xact_lock")
     assert "BATCH" in statements
-    assert statements[-2].startswith("SELECT pg_advisory_unlock")
-    assert statements[-1] == "COMMIT"
+    assert statements[-1] == "ROLLBACK"
 
 
 def test_persistent_batch_reports_post_write_pending_count(monkeypatch):
