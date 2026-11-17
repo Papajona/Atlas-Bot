@@ -64,6 +64,7 @@ def _inspect_lines(lines) -> tuple[int, int]:
     set_config_arg_literal = ""
     set_config_arg_unknown = False
     statement_targets_standard_conforming_strings = False
+    quoted_set_config_pending = False
     literal_mentions_setting = False
     literal_is_off = False
     literal_sample: list[str] = []
@@ -272,7 +273,10 @@ def _inspect_lines(lines) -> tuple[int, int]:
                     # A quoted function name is still an executable SQL
                     # identifier. Preserve set_config so its GUC argument
                     # receives the same conservative string-mode validation.
-                    add_token("SET_CONFIG" if identifier == "SET_CONFIG" else "__QUOTED_IDENTIFIER__")
+                    if identifier == "SET_CONFIG":
+                        quoted_set_config_pending = True
+                    else:
+                        add_token("__QUOTED_IDENTIFIER__")
                     state = "normal"
                     i += 1
                     continue
@@ -291,6 +295,24 @@ def _inspect_lines(lines) -> tuple[int, int]:
                     append_literal_char(char)
                     i += 1
                 continue
+
+            # A quoted set_config identifier is a function only when the next
+            # executable token is its opening parenthesis. Whitespace and comments
+            # are SQL separators; another token means this was a column/identifier.
+            if quoted_set_config_pending:
+                if char.isspace():
+                    i += 1
+                    continue
+                if char == "-" and nxt == "-":
+                    pass
+                elif char == "/" and nxt == "*":
+                    pass
+                elif char == "(":
+                    add_token("SET_CONFIG")
+                    quoted_set_config_pending = False
+                else:
+                    add_token("__QUOTED_IDENTIFIER__")
+                    quoted_set_config_pending = False
 
             # Normal SQL/psql input. Ignore comments and literal contents, but
             # preserve enough bounded token state to detect executable commands.
