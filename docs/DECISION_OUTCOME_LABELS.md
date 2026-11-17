@@ -42,4 +42,4 @@ A rejected signal followed by a favourable price move is not automatically a bad
 
 ## Reproducibility
 
-The label version is `decision-outcome-v1`. A methodology change must bump that version. Review `outcome_window_sha256`, `source_dataset_sha256`, `market_timestamp`, the selected horizons, and the recorded costs before comparing labels across runs.
+The label version is `decision-outcome-v2`. Version v2 uses next-open executable candidate-side returns; v1 labels carry close-to-close fills and are not regenerated in place. A methodology change must bump that version. Research groups labels by version, so v1 and v2 are reported separately. To label previously recorded decisions under v2, run `scripts/label_adaptive_decision_outcomes.py` in dry-run mode first and verify the record count before any write. Review `outcome_window_sha256`, `source_dataset_sha256`, `market_timestamp`, the selected horizons, and the recorded costs before comparing labels across runs.
