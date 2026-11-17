@@ -272,22 +272,26 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
         assert inputs[field]["required"] is True
 
     steps = workflow["jobs"]["customer-paper-acceptance"]["steps"]
-    checkout_index = next(
+    checkout_indices = [
         index for index, step in enumerate(steps)
         if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert len(checkout_indices) == 2
+    dispatch_checkout_index = next(
+        index for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+        and step.get("name") == "Checkout dispatch revision for deployment evidence verifier"
     )
+    target_checkout_index = next(
+        index for index, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+        and step.get("with", {}).get("ref") == "${{ inputs.target_sha }}"
+    )
+    dispatch_checkout = steps[dispatch_checkout_index]
+    assert dispatch_checkout["with"]["ref"] == "${{ github.sha }}"
     python_index = next(
         index for index, step in enumerate(steps)
         if step.get("uses", "").startswith("actions/setup-python@")
-    )
-    checkout = steps[checkout_index]
-    assert checkout["with"]["ref"] == "${{ inputs.target_sha }}"
-    assert checkout_index < python_index
-
-    checkout_check = next(
-        index for index, step in enumerate(steps)
-        if step.get("name")
-        == "Require checkout to match the exact deployed or manually dispatched commit"
     )
     validation_matches = [
         (index, step) for index, step in enumerate(steps)
@@ -295,7 +299,12 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     ]
     assert len(validation_matches) == 1
     validation_index, validation = validation_matches[0]
-    assert checkout_index < python_index < checkout_check < validation_index
+    checkout_check = next(
+        index for index, step in enumerate(steps)
+        if step.get("name")
+        == "Require checkout to match the exact deployed or manually dispatched commit"
+    )
+    assert dispatch_checkout_index < python_index < validation_index < target_checkout_index < checkout_check
 
     run = validation["run"]
     assert "scripts/verify_staging_acceptance_deployment.py" in run
