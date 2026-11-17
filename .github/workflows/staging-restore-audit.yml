@@ -1,4 +1,5 @@
 name: Audit restored staging database
+run-name: Cloud SQL restore audit (${{ inputs.restore_operation_id }})
 
 on:
   workflow_dispatch:
