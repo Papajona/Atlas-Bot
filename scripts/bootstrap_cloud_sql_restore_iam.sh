@@ -108,7 +108,7 @@ ensure_project_role "$EXECUTOR_ROLE" "Atlas Cloud SQL Restore Executor" \
 # database, operation and secret metadata. It cannot import, update or delete.
 ensure_project_role "$AUDIT_ROLE" "Atlas Cloud SQL Restore Auditor" \
   "Read-only Cloud SQL restore verification and proxy access; no import or database writes." \
-  "cloudsql.instances.get,cloudsql.instances.connect,cloudsql.operations.get,cloudsql.databases.get,serviceusage.services.use,secretmanager.versions.access"
+  "cloudsql.instances.get,cloudsql.instances.connect,cloudsql.operations.get,cloudsql.databases.get,serviceusage.services.use"
 
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$EXECUTOR_EMAIL" \
