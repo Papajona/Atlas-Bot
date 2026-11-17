@@ -132,7 +132,7 @@ def _gcs_uri_parts(value: str) -> tuple[str, str | None]:
     return object_uri, generation if separator else None
 
 
-def _cloud_sql_backup(record: Mapping[str, Any], expected_reference: str) -> tuple[str, str, str, bool]:
+def _cloud_sql_backup(record: Mapping[str, Any], expected_reference: str) -> tuple[str, str, str]:
     match = _GENERATION_BACKUP_RE.fullmatch(expected_reference or "")
     if not match:
         raise ValueError("Cloud SQL backup reference must pin an immutable GCS object generation using #<generation>")
@@ -151,22 +151,19 @@ def _cloud_sql_backup(record: Mapping[str, Any], expected_reference: str) -> tup
         normalized_objects.append(object_uri)
         if generation is not None:
             observed_generations.append(generation)
-    if _consistent("backup object URI", normalized_objects) != expected_object_uri:
+    if _consistent("backup reference object URI", normalized_objects) != expected_object_uri:
         raise ValueError("provider evidence contains conflicting backup reference values")
     if observed_generations and _consistent("backup generation", observed_generations) != expected_generation:
         raise ValueError("provider evidence contains conflicting backup reference generations")
-    native_import_uri_has_generation = False
     for native_uri in native_import_uris:
         native_object_uri, native_generation = _gcs_uri_parts(native_uri)
         if native_object_uri != expected_object_uri:
             raise ValueError("provider evidence contains conflicting backup reference values")
-        if native_generation is not None:
-            native_import_uri_has_generation = True
-            if native_generation != expected_generation:
-                raise ValueError("provider evidence contains conflicting backup reference generations")
+        if native_generation is not None and native_generation != expected_generation:
+            raise ValueError("provider evidence contains conflicting backup reference generations")
     # The native Cloud SQL import URI may be unversioned or generation-qualified.
     # The workflow independently proves which generation was live for the full import interval.
-    return expected_reference, expected_object_uri, expected_generation, native_import_uri_has_generation
+    return expected_reference, expected_object_uri, expected_generation
 
 
 
@@ -242,7 +239,7 @@ def verify(
         }
 
     observed_instance = _cloud_sql_instance(record, target_instance_connection_name)
-    pinned_reference, object_uri, generation, native_import_uri_has_generation = _cloud_sql_backup(record, backup_reference)
+    pinned_reference, object_uri, generation = _cloud_sql_backup(record, backup_reference)
     operation_type = _first(record, "operationType", "operation_type").upper()
     if operation_type != "IMPORT":
         raise ValueError("Cloud SQL restore evidence must identify an IMPORT operation")
@@ -256,7 +253,7 @@ def verify(
         "backup_reference": pinned_reference,
         "backup_object_uri": object_uri,
         "backup_generation": generation,
-        "native_import_uri_has_generation": native_import_uri_has_generation,
+        "native_import_uri_has_generation": False,
         "target_kind": "cloud_sql",
         "target_instance_connection_name": observed_instance,
         "target_database": observed_database,
