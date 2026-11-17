@@ -14,7 +14,7 @@ from typing import BinaryIO
 _WORD_LIMIT = 64
 _LITERAL_SAMPLE_LIMIT = 128
 _DOLLAR_QUOTE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]{0,62})?\$")
-_PSQL_CONNECT = re.compile(r"\\(connect|c)\b", re.IGNORECASE)
+_PSQL_META_COMMAND = re.compile(r"\\([A-Za-z][A-Za-z0-9_-]*)(?:[ \t]+([^\r\n]*))?")
 _FALSE_VALUES = {"OFF", "FALSE", "NO", "0", "DISABLE"}
 
 
@@ -128,9 +128,11 @@ def _inspect_lines(lines) -> tuple[int, int]:
                 )
             )
             or (
+                # The value may be computed (for example, 'o' || 'ff'), so
+                # any set_config targeting this GUC is blocked unless the dump
+                # can be proven to preserve the scanner's assumed string mode.
                 statement_has_set_config
                 and literal_mentions_setting
-                and literal_is_off
             )
         )
         if changes_string_mode:
@@ -296,12 +298,29 @@ def _inspect_lines(lines) -> tuple[int, int]:
 
             if char == "\\":
                 flush_word()
-                if _PSQL_CONNECT.match(line, i):
+                match = _PSQL_META_COMMAND.match(line, i)
+                if not match:
+                    raise ValueError(
+                        "Cloud SQL import dump contains an unsupported psql meta-command"
+                    )
+                command = match.group(1).lower()
+                if command in {"connect", "c"}:
                     raise ValueError(
                         "Cloud SQL import dump contains a psql \\connect/\\c database switch"
                     )
-                i += 1
-                continue
+                if command in {"restrict", "unrestrict"}:
+                    arguments = (match.group(2) or "").strip().split()
+                    if len(arguments) != 1:
+                        raise ValueError(
+                            f"Cloud SQL import dump contains an invalid psql \\{command} command"
+                        )
+                    # PostgreSQL dump wrappers are non-SQL control commands.
+                    # Consume their arguments without letting them enter SQL tokens.
+                    i = len(line)
+                    continue
+                raise ValueError(
+                    f"Cloud SQL import dump contains unsupported psql meta-command \\{command}"
+                )
 
             if char == "$":
                 # PostgreSQL permits dollar signs inside unquoted identifiers.
