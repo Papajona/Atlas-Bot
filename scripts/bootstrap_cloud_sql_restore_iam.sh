@@ -130,6 +130,8 @@ done
 for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
   gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
     --member="serviceAccount:$email" --role="roles/storage.objectViewer" --quiet >/dev/null
+  gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
+    --member="serviceAccount:$email" --role="roles/storage.legacyBucketReader" --quiet >/dev/null
 done
 
 # Cloud SQL performs the server-side GCS read using its service agent, not the
@@ -145,6 +147,9 @@ gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
 gcloud storage buckets add-iam-policy-binding "gs://$ATLAS_STAGING_EVIDENCE_BUCKET" \
   --member="serviceAccount:$AUDIT_EMAIL" \
   --role="roles/storage.objectCreator" --quiet >/dev/null
+gcloud storage buckets add-iam-policy-binding "gs://$ATLAS_STAGING_EVIDENCE_BUCKET" \
+  --member="serviceAccount:$AUDIT_EMAIL" \
+  --role="roles/storage.legacyBucketReader" --quiet >/dev/null
 gcloud secrets add-iam-policy-binding "$AUDIT_DATABASE_SECRET" \
   --project="$PROJECT_ID" --member="serviceAccount:$AUDIT_EMAIL" \
   --role="roles/secretmanager.secretAccessor" --quiet >/dev/null
