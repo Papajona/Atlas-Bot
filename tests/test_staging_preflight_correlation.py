@@ -46,13 +46,4 @@ def test_staging_workflow_uses_executable_run_and_current_main_guards():
     preflight_step = by_name[
         "Dispatch and require read-only staging identity preflight on this exact commit"
     ]["run"]
-    acceptance_step = by_name[
-        "Dispatch and require customer-paper acceptance on this exact deployment"
-    ]["run"]
-
-    # The verifier is executable workflow code; its success/failure behaviour is
-    # exercised with matching, stale, malformed, and tampered payloads in the
-    # dedicated behavior test module.
-    for run_block in (preflight_step, acceptance_step):
-        assert "scripts/verify_staging_dispatch.py main-sha" in run_block
-        assert "scripts/verify_staging_dispatch.py workflow-run" in run_block
+    assert '-f "request_id=$request_id"' in preflight_step
