@@ -14,7 +14,7 @@ From the repository root:
 python scripts/label_adaptive_decision_outcomes.py --limit 100 --horizons 1,3,6 --days 365
 ```
 
-The default is dry-run. It prints a JSON summary and up to ten sample labels without writing them. The summary includes `pending_decisions_for_version` (the full number of decisions not yet labelled under the active version) and `label_history_capacity` (current rows, remaining slots and the maximum safe batch).
+The default is dry-run. It prints a JSON summary and up to ten sample labels without writing them. The summary includes `pending_decisions_for_version` (the current number of decisions not yet labelled under the active version), `pending_actionable_decisions_for_version` (pending decisions that are not already classified as permanently unlabelable), `pending_unlabelable_decisions_for_version` (decisions requiring metadata or provenance repair), and `label_history_capacity` (current rows, remaining slots and the maximum safe batch). A dry-run also reports `projected_pending_decisions_for_version`; it does not reduce the actual pending count.
 
 After reviewing the preview, data provenance and capacity, persist research labels explicitly in batches:
 
@@ -22,7 +22,11 @@ After reviewing the preview, data provenance and capacity, persist research labe
 python scripts/label_adaptive_decision_outcomes.py --limit 10000 --horizons 1,3,6 --days 365 --persist
 ```
 
-Repeat the same command until `pending_decisions_for_version` reaches zero. Each successful batch is appended as new audit events; the original v1 rows are never overwritten. Records that cannot yet be labelled remain pending and must not be counted as completed. The writer refuses a batch before appending anything when the total label-audit history would exceed 200,000 records, a bounded budget sized for up to 100,000 v1 rows plus 100,000 v2 relabel rows.
+Repeat bounded persistence batches while `pending_actionable_decisions_for_version` is greater than zero. After a successful persistent batch, `pending_decisions_for_version` is recalculated from the post-write history, so it falls by the number of decisions actually labelled. The original v1 rows are never overwritten. The remaining actionable count includes decisions not yet examined and retryable failures such as `INSUFFICIENT_FUTURE_DATA` or a transient `market_data_fetch_error`; those may be retried after new candles are available or the source recovers.
+
+Do not repeat an unchanged command merely because `pending_decisions_for_version` is non-zero when `pending_actionable_decisions_for_version` is zero. In that case the remaining decisions are classified in `skip_reasons` and `pending_unlabelable_decisions_for_version`. Inspect those reasons, repair the recorded market metadata/provenance or source-data issue, and rerun only after the underlying data has changed. Unsupported assets/sources, missing market metadata, invalid timestamps, and provenance mismatches do not become labelable just by repeating the same batch.
+
+The writer serializes persistent relabel batches with a database-coordinated lock, prepares rate-limit annotations before measuring their serialized bytes, and checks the actual generated batch rather than the maximum number of pending decisions. It refuses the complete batch before appending if the actual records/decoded bytes exceed the shared 200,000-record or 256 MiB budget.
 
 Use the deployment's approved database environment. The command does not need exchange trading permissions; the crypto adapter fetches public OHLCV. The OANDA adapter is the existing practice/demo-only fetcher.
 
