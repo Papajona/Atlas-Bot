@@ -138,9 +138,8 @@ def _inspect_lines(lines) -> tuple[int, int]:
             raise ValueError(
                 "Cloud SQL import dump contains executable CREATE/ALTER/DROP DATABASE"
             )
-        copy_pending = bool(
-            statement_prefix and statement_prefix[0] == "COPY" and copy_from_stdin
-        )
+        if statement_prefix:
+            copy_pending = bool(statement_prefix[0] == "COPY" and copy_from_stdin)
         reset_statement()
         return copy_pending
 
