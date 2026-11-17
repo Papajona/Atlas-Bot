@@ -340,7 +340,6 @@ def test_cloud_sql_restore_evidence_requires_pinned_import_and_exact_instance():
         "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
         "operationType": "IMPORT",
         "status": "DONE",
-        "importContext": {"database": "atlas-recovery-db", "uri": backup},
         "error": {"errors": []},
     }
     result = verify(
