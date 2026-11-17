@@ -286,7 +286,7 @@ def test_research_integrity_query_executes_against_postgres():
 def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     env, host = read_database_uri(
         "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
-        target_kind="cloud_sql", target_database="atlas-recovery-db",
+        target_kind="cloud_sql",
         cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
         cloud_sql_database="atlas_recovery",
     )
@@ -303,7 +303,7 @@ def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
 def test_restore_audit_rejects_wrong_cloud_sql_host_or_database(dsn):
     with pytest.raises(ValueError):
         read_database_uri(
-            dsn, target_kind="cloud_sql", target_database="atlas-recovery-db",
+            dsn, target_kind="cloud_sql",
             cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
             cloud_sql_database="atlas_recovery",
         )
@@ -313,7 +313,7 @@ def test_restore_audit_rejects_malformed_cloud_sql_instance():
     with pytest.raises(ValueError, match="project:region:instance"):
         read_database_uri(
             "postgresql://user:pw@127.0.0.1:5432/atlas_recovery",
-            target_kind="cloud_sql", target_database="atlas-recovery-db", cloud_sql_instance="production",
+            target_kind="cloud_sql", cloud_sql_instance="production",
             cloud_sql_database="atlas_recovery",
         )
 
