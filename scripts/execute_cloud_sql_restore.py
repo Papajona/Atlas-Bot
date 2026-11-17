@@ -30,8 +30,8 @@ _INSTANCE_RE = re.compile(r"^([a-z0-9-]+):([a-z0-9-]+):([a-z0-9-]+)$")
 _BACKUP_RE = re.compile(
     rf"^gs://{re.escape(BACKUP_BUCKET)}/([^#]+)#([1-9][0-9]*)$"
 )
-_DATABASE_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]{{0,62}}$")
-_OPERATION_RE = re.compile(r"^[A-Za-z0-9._-]{{1,256}}$")
+_DATABASE_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,62}$")
+_OPERATION_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 
 
 def validate_restore_inputs(
