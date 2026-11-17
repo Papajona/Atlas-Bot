@@ -12,7 +12,7 @@ on:
         required: true
         type: string
       restore_evidence_uri:
-        description: Provider operation detail URL (https://) or immutable audit-log URI (gs://)
+        description: Supabase provider URL or exported provider-native operation JSON in GCS for Cloud SQL
         required: true
         type: string
 
@@ -73,7 +73,14 @@ jobs:
           : "${BACKUP_REFERENCE:?An immutable backup reference is required}"
           : "${RESTORE_EVIDENCE_URI:?A provider restore evidence URL/URI is required}"
           [[ "$EXPECTED_AUDIT_DB_ROLE" == "atlas_audit_reader" ]] || { echo "BLOCKED: restore audit must use atlas_audit_reader"; exit 1; }
-          case "$RESTORE_EVIDENCE_URI" in https://*|gs://*) ;; *) echo "BLOCKED: restore evidence must be HTTPS or GCS"; exit 1 ;; esac
+          if [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]]; then
+            [[ "$RESTORE_EVIDENCE_URI" == gs://atlas-staging-510915-db-backups/* ]] || {
+              echo "BLOCKED: Cloud SQL evidence must be an exported provider-native operation JSON object in the approved GCS bucket" >&2
+              exit 1
+            }
+          else
+            case "$RESTORE_EVIDENCE_URI" in https://*|gs://*) ;; *) echo "BLOCKED: Supabase restore evidence must be HTTPS or GCS"; exit 1 ;; esac
+          fi
           if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then
             : "${STAGING_SUPABASE_PROJECT_REF:?Missing ATLAS_STAGING_SUPABASE_PROJECT_REF}"
             : "${PRODUCTION_SUPABASE_PROJECT_REF:?Missing ATLAS_PRODUCTION_SUPABASE_PROJECT_REF}"
@@ -82,7 +89,9 @@ jobs:
           elif [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]]; then
             : "${CLOUD_SQL_INSTANCE_CONNECTION_NAME:?Missing ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME}"
             : "${CLOUD_SQL_DATABASE:?Missing ATLAS_STAGING_CLOUD_SQL_DATABASE}"
-            [[ "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]]
+            : "${PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME:?Missing ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME}"
+            [[ "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]] || { echo "BLOCKED: recovery Cloud SQL instance identity is invalid" >&2; exit 1; }
+            [[ "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]] || { echo "BLOCKED: production Cloud SQL instance identity is missing or invalid" >&2; exit 1; }
             [[ "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" != "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" ]] || { echo "BLOCKED: restore target must not be the production Cloud SQL instance"; exit 1; }
             [[ "${CLOUD_SQL_INSTANCE_CONNECTION_NAME%%:*}" == "$GCP_PROJECT_ID" ]] || { echo "BLOCKED: recovery instance must be in the approved GCP project"; exit 1; }
             [[ "${CLOUD_SQL_INSTANCE_CONNECTION_NAME#*:}" == "$GCP_REGION:"* ]] || { echo "BLOCKED: recovery instance must be in the approved GCP region"; exit 1; }
@@ -106,19 +115,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          case "$BACKUP_REFERENCE" in
-            gs://atlas-staging-510915-db-backups/*) ;;
-            *) echo "BLOCKED: Cloud SQL recovery backup must be an object in gs://atlas-staging-510915-db-backups/" >&2; exit 1 ;;
-          esac
+          [[ "$BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/.+#([1-9][0-9]*)$ ]] || {
+            echo "BLOCKED: Cloud SQL backup reference must pin an exact GCS generation using #<generation>" >&2
+            exit 1
+          }
+          backup_generation="${BASH_REMATCH[1]}"
           gcloud storage objects describe "$BACKUP_REFERENCE" --format=json > "$RUNNER_TEMP/recovery-backup-object.json"
-          python - "$RUNNER_TEMP/recovery-backup-object.json" <<'PY'
+          python - "$RUNNER_TEMP/recovery-backup-object.json" "$backup_generation" <<'PY'
           import json,sys
           obj=json.load(open(sys.argv[1]))
           generation=str(obj.get("generation",""))
+          expected_generation=sys.argv[2]
           try:
               size=int(obj.get("size",0))
           except (TypeError,ValueError):
               size=0
+          if generation != expected_generation:
+              raise SystemExit("BLOCKED: described GCS object generation differs from the generation pinned in BACKUP_REFERENCE")
           if not generation.isdigit() or int(generation)<=0 or size<=0:
               raise SystemExit("BLOCKED: backup object lacks a positive generation and non-zero size")
           if not (obj.get("md5Hash") or obj.get("crc32c")):
