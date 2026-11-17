@@ -1346,6 +1346,50 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         in ledger_case
     )
 
+    # Each retired branch is pinned to its exact historical tip and is removable
+    # only while main still contains the specific stronger replacement behavior.
+    assert "[atlas-branch-prune-verified-duplicates-once-20261020]" in workflow
+
+    cloud_sql_case = workflow.split(
+        '"fix/cloud-sql-restore-audit-target-main-2026-11-17:e203bbb81893346b6db6d08ea0c8152a318bb634")',
+        1,
+    )[1].split(";;", 1)[0]
+    for marker in (
+        "RESTORE_TARGET_KIND",
+        "CLOUD_SQL_INSTANCE_CONNECTION_NAME",
+        "def verify_backup_binding",
+        "target_instance_connection_name",
+        "_PSQL_META_COMMAND.match(line, i)",
+        "test_cloud_sql_import_dump_rejects_inline_psql_database_switches",
+        "test_cloud_sql_dump_rejects_quoted_set_config_function_standard_strings_off",
+    ):
+        assert marker in cloud_sql_case
+
+    qodo_scanner_case = workflow.split(
+        '"fix/remediation-c0d9afaf-4d1401:511f353105f9b967aaae18b63efec4c145397238")',
+        1,
+    )[1].split(";;", 1)[0]
+    assert "def _has_executable_psql_connect" in qodo_scanner_case
+    assert "_PSQL_META_COMMAND.match(line, i)" in qodo_scanner_case
+    assert 'command in {"connect", "c"}' in qodo_scanner_case
+
+    qodo_labels_case = workflow.split(
+        '"fix/remediation-cb26b1b0-9e1868:4084ad2f8c9688b84c026a2f05c2d1aec238804e")',
+        1,
+    )[1].split(";;", 1)[0]
+    for marker in (
+        "LABEL_VERSION = \\"decision-outcome-v2\\"",
+        "MAX_DECISION_OUTCOME_LABEL_RECORDS",
+        "MAX_DECISION_OUTCOME_LABEL_BYTES",
+        "_LABEL_HISTORY_ADVISORY_LOCK",
+        "append_prepared_audit",
+        "load_all_decision_outcome_labels",
+        "label_version_date_ranges",
+        "pending_actionable_decisions_for_version",
+    ):
+        assert marker in qodo_labels_case
+
+
 
 
 def test_open_pull_request_head_enumeration_uses_all_rest_pages(monkeypatch):
