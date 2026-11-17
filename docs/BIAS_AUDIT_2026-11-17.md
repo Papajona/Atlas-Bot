@@ -23,7 +23,7 @@ Regression tests: `tests/test_bias_audit_2026_11_17.py`.
 
 1. Original OANDA dataset identity and financing/carry evidence remain unresolved; zero carry must not be interpreted as evidence of zero financing.
 2. Paper fills remain incomplete without queue/depth modelling. OHLCV-only paper results are diagnostic, not validation-grade.
-3. Persisted legacy outcome labels (`decision-outcome-v1`) lack executable fields. The label version is bumped to `decision-outcome-v2`, so previously labelled decisions are re-labelled under v2 and research groups the two methodologies separately. Re-run `scripts/label_adaptive_decision_outcomes.py` in dry-run mode first; verify the affected record count and output before any write.
+3. Persisted legacy outcome labels (`decision-outcome-v1`) lack executable fields. The active label version is already `decision-outcome-v2`; v1 rows do not suppress v2 generation, and research selects executable returns for v2 while keeping v1 close-to-close results in a separate group. Dry-run with `--limit 10000` and inspect `pending_decisions_for_version` plus `label_history_capacity` before persisting in batches. The hard ceiling is 200,000 total label audit rows (100,000 v1 plus up to 100,000 v2); persistent batches that would exceed the ceiling are refused before any write. Do not bump to v3 unless the methodology itself changes again.
 
 ## Paper-test protocol
 
