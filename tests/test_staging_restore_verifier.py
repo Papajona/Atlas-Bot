@@ -851,41 +851,6 @@ def test_cloud_sql_import_dump_rejects_database_ddl_with_interleaved_comments(tm
         inspect_import_dump(dump)
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "\\connect other_db",
-        "\\c other_db",
-    ],
-)
-def test_cloud_sql_import_dump_rejects_inline_psql_database_switches(tmp_path, command):
-    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
-
-    dump = tmp_path / "inline-switch.sql"
-    dump.write_text(f"SELECT 1; {command}\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="database switch"):
-        inspect_import_dump(dump)
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "CREATE /* comment between keywords */ DATABASE other_db;\n",
-        "CREATE -- comment between keywords\nDATABASE other_db;\n",
-        "CREATE /* outer /* nested */ comment */ TEMP /* before DATABASE */ DATABASE other_db;\n",
-        "ALTER /* comment */ DATABASE atlas_recovery RENAME TO other_db;\n",
-        "DROP /* comment */ DATABASE atlas_recovery;\n",
-    ],
-)
-def test_cloud_sql_import_dump_rejects_database_ddl_with_interleaved_comments(tmp_path, sql):
-    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
-
-    dump = tmp_path / "comment-obfuscated-database-ddl.sql"
-    dump.write_text(sql, encoding="utf-8")
-    with pytest.raises(ValueError, match="DATABASE"):
-        inspect_import_dump(dump)
-
-
 def test_cloud_sql_import_dump_rejects_gzip_database_switch(tmp_path):
     import gzip
     from scripts.verify_cloud_sql_import_dump import inspect_import_dump
