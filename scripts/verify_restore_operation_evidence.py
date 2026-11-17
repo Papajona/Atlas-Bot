@@ -42,6 +42,10 @@ def verify(document: Any, *, operation_id: str, backup_reference: str,
     record = _record(document)
     observed_operation = _first(record, "restore_operation_id", "restoreOperationId", "operation_id", "operationId", "name", "id")
     observed_backup = _first(record, "backup_reference", "backupReference", "source_backup_id", "sourceBackupId", "backup_id", "backupId", "uri")
+    if not observed_backup:
+        import_context = record.get("importContext", record.get("import_context", {}))
+        if isinstance(import_context, Mapping):
+            observed_backup = _first(import_context, "uri", "backup_reference", "backupReference")
     status = _first(record, "status", "state", "phase").upper()
     if not operation_id.strip() or observed_operation != operation_id.strip():
         raise ValueError("provider evidence operation ID does not match the requested restore")
