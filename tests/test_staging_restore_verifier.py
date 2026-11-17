@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy
+from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy, validate_cloud_sql_target_pair
 
 
 STAGING = "abcdefghijklmnopqrst"
@@ -62,12 +62,22 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "no second project or paid branch is required" in runbook
     # Same-project staging and read-only reconciliation are allowed, but a full
     # backup restore may never target the active production database.
+    assert 'if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
-    assert "A restore audit target must be a distinct non-production Supabase project reference" in runbook
+    assert "restore audit target" in runbook
     assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
+    assert "PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" in workflow
+    assert "backup reference must pin an exact GCS generation" in workflow
+    assert 'gcloud sql operations describe "$RESTORE_OPERATION_ID"' in workflow
+    assert "verify_cloud_sql_backup_binding.py" in workflow
+    assert "verify_cloud_sql_import_dump.py" in workflow
+    assert 'storage cp "$BACKUP_REFERENCE"' in workflow
+    assert '"versions": "true"' in workflow
+    assert 'objects describe "$BACKUP_REFERENCE"' in workflow
+    assert '--target-database "$CLOUD_SQL_DATABASE"' in workflow
 
 
 
@@ -273,3 +283,826 @@ def test_research_integrity_query_executes_against_postgres():
     assert result["research_trial_ledger_head_rows"] == 1
     assert result["research_trial_ledger_head_valid"] is True
     assert result["research_holdout_registry_invalid_rows"] == 0
+
+
+def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
+    env, host = read_database_uri(
+        "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
+        target_kind="cloud_sql",
+        cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
+        cloud_sql_database="atlas_recovery",
+    )
+    assert host == "127.0.0.1"
+    assert env["PGDATABASE"] == "atlas_recovery"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGSSLMODE"] == "disable"  # TLS terminates in the Cloud SQL Auth Proxy
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://user:pw@db.production.example:5432/atlas_recovery",
+    "postgresql://user:pw@127.0.0.1:5432/postgres",
+])
+def test_restore_audit_rejects_wrong_cloud_sql_host_or_database(dsn):
+    with pytest.raises(ValueError):
+        read_database_uri(
+            dsn, target_kind="cloud_sql",
+            cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
+            cloud_sql_database="atlas_recovery",
+        )
+
+
+def test_restore_audit_rejects_malformed_cloud_sql_instance():
+    with pytest.raises(ValueError, match="project:region:instance"):
+        read_database_uri(
+            "postgresql://user:pw@127.0.0.1:5432/atlas_recovery",
+            target_kind="cloud_sql", cloud_sql_instance="production",
+            cloud_sql_database="atlas_recovery",
+        )
+
+
+def test_cloud_sql_target_pair_requires_explicit_distinct_production_instance():
+    target = "atlas-staging-510915:europe-west1:atlas-recovery"
+    production = "atlas-production:europe-west1:atlas-primary"
+    validate_cloud_sql_target_pair(target, production)
+    with pytest.raises(ValueError, match="PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME"):
+        validate_cloud_sql_target_pair(target, "")
+    with pytest.raises(ValueError, match="PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME"):
+        validate_cloud_sql_target_pair(target, "production")
+    with pytest.raises(ValueError, match="distinct"):
+        validate_cloud_sql_target_pair(target, target)
+
+
+def test_cloud_sql_restore_evidence_requires_pinned_import_and_exact_instance():
+    from scripts.verify_restore_operation_evidence import verify
+
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": backup,
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "error": {"errors": []},
+        "importContext": {
+            "database": "atlas-recovery-db",
+            "uri": backup,
+        },
+    }
+    result = verify(
+        document, operation_id="restore-op-123",
+        backup_reference=backup,
+        target_kind="cloud_sql", target_database="atlas-recovery-db",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["status"] == "PASS"
+    assert result["target_kind"] == "cloud_sql"
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["operation_type"] == "IMPORT"
+
+
+def test_cloud_sql_restore_evidence_rejects_wrong_instance_or_running_operation():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://bucket/backup.dump#1750000000000000",
+        "instance_connection_name": "prod:region:database",
+        "operationType": "IMPORT",
+        "status": "RUNNING",
+    }
+    with pytest.raises(ValueError):
+        verify(
+            document, operation_id="restore-op-123",
+            backup_reference="gs://bucket/backup.dump#1750000000000000",
+            target_kind="cloud_sql", target_database="atlas-recovery-db",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_supabase_restore_evidence_compatibility():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123", "backup_reference": "backup-123",
+        "target_project_ref": "abcdefghijklmnopqrst", "status": "COMPLETED",
+    }
+    result = verify(
+        document, operation_id="restore-op-123", backup_reference="backup-123",
+        target_kind="supabase", target_project_ref="abcdefghijklmnopqrst",
+    )
+    assert result["target_supabase_project_ref"] == "abcdefghijklmnopqrst"
+
+
+def test_cloud_sql_native_import_operation_evidence_shape():
+    from scripts.verify_restore_operation_evidence import verify
+
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "region": "europe-west1",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"database": "atlas-recovery-db", "uri": "gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump#1750000000000000"},
+    }
+    result = verify(
+        operation,
+        operation_id="operation-987",
+        backup_reference="gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump#1750000000000000",
+        target_kind="cloud_sql", target_database="atlas-recovery-db",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["provider_status"] == "DONE"
+
+
+def test_cloud_sql_evidence_rejects_export_or_missing_operation_type():
+    from scripts.verify_restore_operation_evidence import verify
+
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    base = {
+        "operation_id": "restore-op-123",
+        "backup_reference": backup,
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "status": "DONE",
+    }
+    for document in (base, {**base, "operationType": "EXPORT"}):
+        with pytest.raises(ValueError, match="IMPORT"):
+            verify(
+                document, operation_id="restore-op-123", backup_reference=backup,
+                target_kind="cloud_sql", target_database="atlas-recovery-db",
+                target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+            )
+
+
+def test_cloud_sql_done_import_with_provider_errors_is_rejected():
+    from scripts.verify_restore_operation_evidence import verify
+
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": backup,
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "error": {"errors": [{"code": "INVALID_ARGUMENT", "message": "import rejected"}]},
+    }
+    with pytest.raises(ValueError, match="provider errors"):
+        verify(
+            document, operation_id="restore-op-123", backup_reference=backup,
+            target_kind="cloud_sql", target_database="atlas-recovery-db",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_cloud_sql_native_aliases_cannot_hide_conflicting_target_or_backup():
+    from scripts.verify_restore_operation_evidence import verify
+
+    target = "atlas-staging-510915:europe-west1:atlas-recovery"
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    common = {
+        "operation_id": "restore-op-123",
+        "instance_connection_name": target,
+        "operationType": "IMPORT",
+        "status": "DONE",
+    }
+    wrong_target = {
+        **common,
+        "targetProject": "atlas-production",
+        "region": "europe-west1",
+        "targetId": "atlas-primary",
+        "importContext": {"database": "atlas-recovery-db", "uri": backup},
+    }
+    with pytest.raises(ValueError, match="conflicting Cloud SQL target"):
+        verify(
+            wrong_target, operation_id="restore-op-123", backup_reference=backup,
+            target_kind="cloud_sql", target_database="atlas-recovery-db", target_instance_connection_name=target,
+        )
+
+    wrong_backup = {
+        **common,
+        "backup_reference": backup,
+        "importContext": {"database": "atlas-recovery-db", "uri": "gs://atlas-staging-510915-db-backups/other.dump#1750000000000001"},
+    }
+    with pytest.raises(ValueError, match="conflicting backup reference"):
+        verify(
+            wrong_backup, operation_id="restore-op-123", backup_reference=backup,
+            target_kind="cloud_sql", target_database="atlas-recovery-db", target_instance_connection_name=target,
+        )
+
+
+def test_cloud_sql_restore_requires_generation_pinned_backup_reference():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://atlas-staging-510915-db-backups/backup.dump",
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+    }
+    with pytest.raises(ValueError, match="pin an immutable GCS object generation"):
+        verify(
+            document, operation_id="restore-op-123",
+            backup_reference="gs://atlas-staging-510915-db-backups/backup.dump",
+            target_kind="cloud_sql", target_database="atlas-recovery-db",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_nested_supabase_restore_record_is_selected_over_targetless_wrapper_metadata():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "id": "wrapper-request-id",
+        "backup_reference": "wrapper-backup",
+        "status": "COMPLETED",
+        "data": {
+            "result": {
+                "operation": {
+                    "operation_id": "restore-op-123",
+                    "backup_reference": "backup-123",
+                    "target_project_ref": "abcdefghijklmnopqrst",
+                    "status": "COMPLETED",
+                }
+            }
+        },
+    }
+    result = verify(
+        document, operation_id="restore-op-123", backup_reference="backup-123",
+        target_kind="supabase", target_project_ref="abcdefghijklmnopqrst",
+    )
+    assert result["status"] == "PASS"
+    assert result["target_supabase_project_ref"] == "abcdefghijklmnopqrst"
+
+
+def test_cloud_sql_native_operation_without_region_uses_configured_instance_metadata():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"database": "atlas-recovery-db", "uri": "gs://atlas-staging-510915-db-backups/backup.dump"},
+    }
+    result = verify(
+        operation,
+        operation_id="operation-987",
+        backup_reference=pinned,
+        target_kind="cloud_sql", target_database="atlas-recovery-db",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["native_import_uri_has_generation"] is False
+    assert result["target_instance_connection_name"] == "atlas-staging-510915:europe-west1:atlas-recovery"
+
+
+def test_cloud_sql_native_import_uri_matches_object_part_not_generation_fragment():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"database": "atlas-recovery-db", "uri": "gs://atlas-staging-510915-db-backups/backup.dump"},
+    }
+    assert verify(
+        operation, operation_id="operation-987", backup_reference=pinned,
+        target_kind="cloud_sql", target_database="atlas-recovery-db",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )["backup_reference"] == pinned
+
+
+def test_gcs_backup_binding_accepts_standardized_snake_case_checksum_fields():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    result = verify_backup_binding(
+        backup_reference="gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+        object_metadata={
+            "generation": "1750000000000000",
+            "size": "1024",
+            "md5_hash": "d41d8cd98f00b204e9800998ecf8427e",
+            "time_created": "2026-11-17T10:00:00Z",
+            "retention_expiration_time": "2027-11-17T10:00:00Z",
+        },
+        bucket_metadata={"retention_policy": {"is_locked": True, "retention_period": "31536000s"}},
+        object_versions={"items": [{
+            "name": "backup.dump", "generation": "1750000000000000",
+            "timeCreated": "2026-11-17T10:00:00Z",
+        }]},
+        operation_record={
+            "name": "operation-987",
+            "operationType": "IMPORT",
+            "status": "DONE",
+            "startTime": "2026-11-17T10:05:00Z",
+            "endTime": "2026-11-17T10:10:00Z",
+            "importContext": {"database": "atlas-recovery-db", "uri": "gs://atlas-staging-510915-db-backups/backup.dump"},
+        },
+    )
+    assert result["status"] == "PASS"
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["bucket_retention_policy_locked"] is True
+    assert result["backup_checksum"]["md5_hash"] == "d41d8cd98f00b204e9800998ecf8427e"
+
+
+def test_gcs_backup_binding_rejects_generation_mismatch_and_unlocked_retention():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    args = {
+        "backup_reference": "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+        "object_metadata": {
+            "generation": "1750000000000001",
+            "size": "1024",
+            "crc32c_hash": "ImIEBA==",
+            "time_created": "2026-11-17T10:00:00Z",
+            "retention_expiration_time": "2027-11-17T10:00:00Z",
+        },
+        "bucket_metadata": {"retention_policy": {"is_locked": False}},
+        "object_versions": {"items": [{
+            "name": "backup.dump", "generation": "1750000000000000",
+            "timeCreated": "2026-11-17T10:00:00Z",
+        }]},
+        "operation_record": {
+            "operationType": "IMPORT", "status": "DONE",
+            "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
+        },
+    }
+    with pytest.raises(ValueError, match="generation"):
+        verify_backup_binding(**args)
+    args["object_metadata"]["generation"] = "1750000000000000"
+    with pytest.raises(ValueError, match="retention policy must be locked"):
+        verify_backup_binding(**args)
+
+
+def test_gcs_backup_binding_rejects_retention_not_covering_import_window():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    with pytest.raises(ValueError, match="retained from before import start"):
+        verify_backup_binding(
+            backup_reference="gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+            object_metadata={
+                "generation": "1750000000000000", "size": "1024", "crc32c_hash": "ImIEBA==",
+                "time_created": "2026-11-17T10:06:00Z",
+                "retention_expiration_time": "2026-11-17T10:09:00Z",
+            },
+            bucket_metadata={"retention_policy": {"is_locked": True}},
+            object_versions={"items": [{
+                "name": "backup.dump", "generation": "1750000000000000",
+                "timeCreated": "2026-11-17T10:06:00Z",
+            }]},
+            operation_record={
+                "operationType": "IMPORT", "status": "DONE",
+                "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
+            },
+        )
+
+
+def test_cloud_sql_native_generation_suffixed_import_uri_is_accepted():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {
+            "database": "atlas-recovery-db",
+            "uri": pinned,
+        },
+    }
+    assert verify(
+        operation,
+        operation_id="operation-987",
+        backup_reference=pinned,
+        target_kind="cloud_sql",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        target_database="atlas-recovery-db",
+    )["backup_generation"] == "1750000000000000"
+
+
+def test_cloud_sql_import_into_different_database_is_rejected():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {
+            "database": "wrong_database",
+            "uri": "gs://atlas-staging-510915-db-backups/backup.dump",
+        },
+    }
+    with pytest.raises(ValueError, match="does not match the configured Cloud SQL database"):
+        verify(
+            operation, operation_id="operation-987", backup_reference=pinned,
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+            target_database="atlas-recovery-db",
+        )
+
+
+def test_cloud_sql_import_without_definitive_database_is_rejected():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/backup.dump"},
+    }
+    with pytest.raises(ValueError, match="does not identify importContext.database"):
+        verify(
+            operation, operation_id="operation-987", backup_reference=pinned,
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+            target_database="atlas-recovery-db",
+        )
+
+
+def test_pinned_older_backup_generation_succeeds_when_newer_version_appears_after_import():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    result = verify_backup_binding(
+        backup_reference="gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+        object_metadata={
+            "name": "backup.dump", "bucket": "atlas-staging-510915-db-backups",
+            "generation": "1750000000000000", "size": "1024",
+            "crc32c_hash": "ImIEBA==", "time_created": "2026-11-17T10:00:00Z",
+            "retention_expiration_time": "2027-11-17T10:00:00Z",
+        },
+        bucket_metadata={"retention_policy": {"is_locked": True}},
+        object_versions={"items": [
+            {"name": "backup.dump", "generation": "1750000000000000", "timeCreated": "2026-11-17T10:00:00Z"},
+            {"name": "backup.dump", "generation": "1750000000000001", "timeCreated": "2026-11-17T10:20:00Z"},
+        ]},
+        operation_record={
+            "operationType": "IMPORT", "status": "DONE",
+            "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
+        },
+    )
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["live_generation_at_import_start"] == "1750000000000000"
+    assert result["live_generation_at_import_end"] == "1750000000000000"
+
+
+def test_backup_binding_rejects_object_replaced_during_import_interval():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    with pytest.raises(ValueError, match="live object generation for the full"):
+        verify_backup_binding(
+            backup_reference="gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+            object_metadata={
+                "name": "backup.dump", "bucket": "atlas-staging-510915-db-backups",
+                "generation": "1750000000000000", "size": "1024",
+                "crc32c_hash": "ImIEBA==", "time_created": "2026-11-17T10:00:00Z",
+                "retention_expiration_time": "2027-11-17T10:00:00Z",
+            },
+            bucket_metadata={"retention_policy": {"is_locked": True}},
+            object_versions={"items": [
+                {"name": "backup.dump", "generation": "1750000000000000", "timeCreated": "2026-11-17T10:00:00Z"},
+                {"name": "backup.dump", "generation": "1750000000000001", "timeCreated": "2026-11-17T10:07:00Z"},
+            ]},
+            operation_record={
+                "operationType": "IMPORT", "status": "DONE",
+                "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
+            },
+        )
+
+
+def test_cloud_sql_import_dump_accepts_database_neutral_plain_sql(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "backup.sql"
+    dump.write_text(
+        "SET statement_timeout = 0;\nCREATE TABLE public.restore_probe(id integer);\n",
+        encoding="utf-8",
+    )
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
+    assert result["format"] == "plain_sql"
+    assert result["target_database_is_not_overridden_by_dump"] is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE DATABASE other_db;\n",
+        "ALTER DATABASE atlas_recovery RENAME TO other_db;\n",
+        "DROP DATABASE atlas_recovery;\n",
+        "\\connect other_db\n",
+        "\\c other_db\n",
+        "CREATE\nDATABASE other_db;\n",
+    ],
+)
+def test_cloud_sql_import_dump_rejects_database_redirection(tmp_path, sql):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "redirect.sql"
+    dump.write_text(sql, encoding="utf-8")
+    with pytest.raises(ValueError, match="DATABASE|database switch"):
+        inspect_import_dump(dump)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "\\connect other_db",
+        "\\c other_db",
+    ],
+)
+def test_cloud_sql_import_dump_rejects_inline_psql_database_switches(tmp_path, command):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "inline-switch.sql"
+    dump.write_text(f"SELECT 1; {command}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="database switch"):
+        inspect_import_dump(dump)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE /* comment between keywords */ DATABASE other_db;\n",
+        "CREATE -- comment between keywords\nDATABASE other_db;\n",
+        "CREATE /* outer /* nested */ comment */ TEMP /* before DATABASE */ DATABASE other_db;\n",
+        "ALTER /* comment */ DATABASE atlas_recovery RENAME TO other_db;\n",
+        "DROP /* comment */ DATABASE atlas_recovery;\n",
+    ],
+)
+def test_cloud_sql_import_dump_rejects_database_ddl_with_interleaved_comments(tmp_path, sql):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "comment-obfuscated-database-ddl.sql"
+    dump.write_text(sql, encoding="utf-8")
+    with pytest.raises(ValueError, match="DATABASE"):
+        inspect_import_dump(dump)
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "\\restrict backup-guard\nCREATE DATABASE other_db;\n",
+        "\\restrict backup-guard\nCREATE\nDATABASE other_db;\n",
+    ],
+)
+def test_cloud_sql_import_dump_rejects_database_ddl_after_psql_restrict(tmp_path, sql):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "restricted-database-ddl.sql"
+    dump.write_text(sql, encoding="utf-8")
+    with pytest.raises(ValueError, match="executable CREATE/ALTER/DROP DATABASE"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_accepts_pg_dump_restrict_wrappers(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "pg-dump-restrict-wrappers.sql"
+    dump.write_text(
+        "\\restrict backup-guard\n"
+        "CREATE TABLE public.restore_probe(id integer);\n"
+        "\\unrestrict backup-guard\n",
+        encoding="utf-8",
+    )
+    assert inspect_import_dump(dump)["status"] == "PASS"
+
+
+@pytest.mark.parametrize("command", ["\\i external.sql", "\\set ON_ERROR_STOP off"])
+def test_cloud_sql_import_dump_rejects_unsupported_psql_commands(tmp_path, command):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "unsupported-psql-command.sql"
+    dump.write_text(command + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported psql meta-command"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_rejects_gzip_database_switch(tmp_path):
+    import gzip
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "redirect.sql.gz"
+    with gzip.open(dump, "wb") as handle:
+        handle.write(b"\\connect another_database\n")
+    with pytest.raises(ValueError, match="switch"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_rejects_unsupported_binary_archive(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "backup.dump"
+    dump.write_bytes(b"PGDMP\\x01\\x0f")
+    with pytest.raises(ValueError, match="custom-format archives"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_ignores_database_words_in_comments_strings_and_dollar_quotes(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "inert-database-words.sql"
+    dump.write_text(
+        "-- CREATE DATABASE comment_db;\n"
+        "/* ALTER DATABASE comment_db RENAME TO other_db; */\n"
+        "CREATE TABLE messages(body text);\n"
+        "INSERT INTO messages VALUES ('CREATE DATABASE string_db; \\connect other_db');\n"
+        "DO $block$ BEGIN RAISE NOTICE 'DROP DATABASE other_db'; END $block$;\n",
+        encoding="utf-8",
+    )
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
+    assert result["database_ddl_commands"] == 0
+    assert result["database_switch_commands"] == 0
+
+
+def test_cloud_sql_import_dump_ignores_database_words_in_copy_data(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "copy-data.sql"
+    dump.write_text(
+        "CREATE TABLE imported_rows(body text);\n"
+        "COPY imported_rows(body) FROM stdin;\n"
+        "CREATE DATABASE data_db; \\connect other_db\n"
+        "\\.\n",
+        encoding="utf-8",
+    )
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
+    assert result["database_ddl_commands"] == 0
+    assert result["database_switch_commands"] == 0
+
+
+
+def test_cloud_sql_dump_ordinary_string_backslash_does_not_hide_database_ddl(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "ordinary-backslash.sql"
+    dump.write_text("SELECT 'x\\'; CREATE DATABASE other_db; SELECT 'y';\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="executable CREATE/ALTER/DROP DATABASE"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_escape_string_backslash_still_respects_escaped_quote(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "escape-string.sql"
+    dump.write_text("SELECT E'it\\'s ordinary text';\nSELECT 1;\n", encoding="utf-8")
+    assert inspect_import_dump(dump)["status"] == "PASS"
+
+
+def test_cloud_sql_dump_rejects_standard_conforming_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "non-standard-strings.sql"
+    dump.write_text(
+        "SET standard_conforming_strings = off;\n"
+        "SELECT 'x\\'; CREATE DATABASE other_db;\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_rejects_set_config_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "set-config-strings.sql"
+    dump.write_text(
+        "SELECT set_config('standard_conforming_strings', 'off', true);\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_rejects_computed_set_config_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "computed-standard-strings-off.sql"
+    dump.write_text(
+        "SELECT set_config('standard_conforming_strings', 'o' || 'ff', false);\n"
+        "SELECT 'a\\'b'; CREATE DATABASE other_db; -- '\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_rejects_dollar_quoted_set_config_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "dollar-quoted-standard-strings-off.sql"
+    dump.write_text(
+        "SELECT set_config($$standard_conforming_strings$$, $$off$$, false);\n"
+        "SELECT 'a\\'b'; CREATE DATABASE other_db; -- '\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT set_config('application_name', 'standard_conforming_strings', true);",
+        "SELECT set_config($$application_name$$, $$standard_conforming_strings$$, true);",
+    ],
+)
+def test_cloud_sql_dump_accepts_unrelated_set_config_value_mentioning_protected_setting(tmp_path, statement):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "dollar-quoted-unrelated-setting.sql"
+    dump.write_text(
+        statement + "\n"
+        "CREATE TABLE public.restore_probe(id integer);\n",
+        encoding="utf-8",
+    )
+    assert inspect_import_dump(dump)["status"] == "PASS"
+
+
+def test_cloud_sql_dump_rejects_quoted_set_config_function_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "quoted-set-config-function.sql"
+    dump.write_text(
+        "SELECT pg_catalog.\"set_config\"('standard_conforming_strings', 'off', false);\n"
+        "SELECT 'a\\'b'; CREATE DATABASE other_db; -- '\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_rejects_computed_set_config_setting_name(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "computed-guc-name.sql"
+    dump.write_text(
+        "SELECT set_config('standard_' || 'conforming_strings', 'off', false);\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_dollar_signs_inside_identifiers_do_not_open_dollar_quotes(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "dollar-identifier.sql"
+    dump.write_text(
+        "SELECT 1 AS a$b$;\n"
+        "CREATE DATABASE other_db;\n"
+        "SELECT 2 AS c$b$;\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="executable CREATE/ALTER/DROP DATABASE"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_scanner_state_is_bounded_for_large_unterminated_statement(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "large-statement.sql"
+    dump.write_text("SELECT\n" + ("long_identifier " * 100_000) + "\n", encoding="utf-8")
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
+    assert result["decompressed_bytes"] > 1_000_000
+
+
+def test_cloud_sql_dump_rejects_copy_from_stdin_without_terminator(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "incomplete-copy.sql"
+    dump.write_text(
+        "CREATE TABLE imported_rows(body text);\n"
+        "COPY imported_rows(body) FROM stdin;\n"
+        "ordinary data row\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="COPY FROM STDIN"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_accepts_quoted_column_named_set_config_with_parenthesized_predicate(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "quoted-set-config-column.sql"
+    dump.write_text(
+        'CREATE TABLE t ("set_config" text);\n'
+        'SELECT "set_config" FROM t WHERE (true);\n',
+        encoding="utf-8",
+    )
+    assert inspect_import_dump(dump)["status"] == "PASS"
