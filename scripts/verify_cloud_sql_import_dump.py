@@ -11,8 +11,11 @@ from pathlib import Path
 from typing import BinaryIO
 
 
-_DOLLAR_QUOTE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_WORD_LIMIT = 64
+_LITERAL_SAMPLE_LIMIT = 128
+_DOLLAR_QUOTE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]{0,62})?\$")
 _PSQL_CONNECT = re.compile(r"\\(connect|c)\b", re.IGNORECASE)
+_FALSE_VALUES = {"OFF", "FALSE", "NO", "0", "DISABLE"}
 
 
 def _open_sql(path: Path) -> tuple[BinaryIO, bool]:
@@ -31,40 +34,128 @@ def _open_sql(path: Path) -> tuple[BinaryIO, bool]:
     return raw, False
 
 
-def _database_ddl(tokens: list[str]) -> bool:
-    words = [token.upper() for token in tokens]
-    if len(words) >= 2 and words[0] in {"ALTER", "DROP"} and words[1] == "DATABASE":
+def _is_database_ddl(prefix: list[str]) -> bool:
+    if len(prefix) >= 2 and prefix[0] in {"ALTER", "DROP"} and prefix[1] == "DATABASE":
         return True
-    if len(words) >= 2 and words[0] == "CREATE" and words[1] == "DATABASE":
+    if len(prefix) >= 2 and prefix[0] == "CREATE" and prefix[1] == "DATABASE":
         return True
-    if len(words) >= 3 and words[0] == "CREATE" and words[1] in {"TEMP", "TEMPORARY"} and words[2] == "DATABASE":
-        return True
-    return False
-
-
-def _copy_from_stdin(tokens: list[str]) -> bool:
-    words = [token.upper() for token in tokens]
-    return words and words[0] == "COPY" and any(
-        words[index:index + 2] == ["FROM", "STDIN"]
-        for index in range(len(words) - 1)
-    )
+    return len(prefix) >= 3 and prefix[0] == "CREATE" and prefix[1] in {
+        "TEMP", "TEMPORARY",
+    } and prefix[2] == "DATABASE"
 
 
 def _inspect_lines(lines) -> tuple[int, int]:
+    """Scan with bounded statement/token state; never retain a whole SQL statement."""
     state = "normal"
     block_depth = 0
     dollar_delimiter = ""
-    statement_tokens: list[str] = []
+    escape_single_quote = False
     word: list[str] = []
+    word_overflow = False
+    word_overflow_marker = "__OTHER__"
+    statement_prefix: list[str] = []
+    previous_token = ""
+    copy_from_stdin = False
+    statement_has_setting_name = False
+    statement_has_off_token = False
+    statement_has_set_config = False
+    literal_mentions_setting = False
+    literal_is_off = False
+    literal_sample: list[str] = []
+    identifier_sample: list[str] = []
     copy_pending = False
     copy_data = False
     total_bytes = 0
     line_count = 0
 
+    def add_token(token: str) -> None:
+        nonlocal previous_token, copy_from_stdin
+        nonlocal statement_has_setting_name, statement_has_off_token
+        nonlocal statement_has_set_config
+        upper = token.upper()
+        if len(statement_prefix) < 3:
+            statement_prefix.append(upper)
+        if upper == "STANDARD_CONFORMING_STRINGS":
+            statement_has_setting_name = True
+        if upper in _FALSE_VALUES:
+            statement_has_off_token = True
+        if upper == "SET_CONFIG":
+            statement_has_set_config = True
+        if statement_prefix and statement_prefix[0] == "COPY":
+            if previous_token == "FROM" and upper == "STDIN":
+                copy_from_stdin = True
+        previous_token = upper
+
     def flush_word() -> None:
-        if word:
-            statement_tokens.append("".join(word))
+        nonlocal word_overflow
+        if word or word_overflow:
+            token = "".join(word) if not word_overflow else word_overflow_marker
+            add_token(token)
             word.clear()
+            word_overflow = False
+
+    def append_word_char(char: str) -> None:
+        nonlocal word_overflow
+        if len(word) < _WORD_LIMIT:
+            word.append(char)
+        else:
+            word_overflow = True
+
+    def reset_statement() -> None:
+        nonlocal previous_token, copy_from_stdin
+        nonlocal statement_has_setting_name, statement_has_off_token
+        nonlocal statement_has_set_config, literal_mentions_setting, literal_is_off
+        statement_prefix.clear()
+        previous_token = ""
+        copy_from_stdin = False
+        statement_has_setting_name = False
+        statement_has_off_token = False
+        statement_has_set_config = False
+        literal_mentions_setting = False
+        literal_is_off = False
+
+    def finish_statement() -> bool:
+        nonlocal copy_pending
+        first_two = statement_prefix[:2]
+        changes_string_mode = (
+            statement_has_setting_name
+            and (
+                (bool(statement_prefix) and statement_prefix[0] == "SET"
+                 and (statement_has_off_token or literal_is_off))
+                or (first_two == ["ALTER", "SYSTEM"]
+                    and (statement_has_off_token or literal_is_off))
+                or (statement_has_set_config
+                    and literal_mentions_setting
+                    and literal_is_off)
+            )
+        )
+        if changes_string_mode:
+            raise ValueError(
+                "Cloud SQL import dump changes standard_conforming_strings; "
+                "the SQL string boundaries cannot be certified"
+            )
+        if _is_database_ddl(statement_prefix):
+            raise ValueError(
+                "Cloud SQL import dump contains executable CREATE/ALTER/DROP DATABASE"
+            )
+        copy_pending = bool(
+            statement_prefix and statement_prefix[0] == "COPY" and copy_from_stdin
+        )
+        reset_statement()
+        return copy_pending
+
+    def record_literal() -> None:
+        nonlocal literal_mentions_setting, literal_is_off
+        sample = "".join(literal_sample).strip().lower()
+        if "standard_conforming_strings" in sample:
+            literal_mentions_setting = True
+        if sample in {"off", "false", "no", "0", "disable"}:
+            literal_is_off = True
+        literal_sample.clear()
+
+    def append_literal_char(char: str) -> None:
+        if len(literal_sample) < _LITERAL_SAMPLE_LIMIT:
+            literal_sample.append(char)
 
     for raw_line in lines:
         line_count += 1
@@ -108,34 +199,55 @@ def _inspect_lines(lines) -> tuple[int, int]:
                 i += 1
                 continue
             if state == "single_quote":
-                if char == "\\":
+                if escape_single_quote and char == "\\":
+                    append_literal_char(char)
+                    if i + 1 < len(line):
+                        append_literal_char(line[i + 1])
                     i += 2
                     continue
                 if char == "'" and nxt == "'":
+                    append_literal_char("'")
                     i += 2
                     continue
                 if char == "'":
+                    record_literal()
                     state = "normal"
+                    escape_single_quote = False
+                else:
+                    append_literal_char(char)
                 i += 1
                 continue
             if state == "double_quote":
                 if char == '"' and nxt == '"':
+                    if len(identifier_sample) < _LITERAL_SAMPLE_LIMIT:
+                        identifier_sample.append('"')
                     i += 2
                     continue
                 if char == '"':
+                    identifier = "".join(identifier_sample).upper()
+                    if identifier == "STANDARD_CONFORMING_STRINGS":
+                        statement_has_setting_name = True
+                    identifier_sample.clear()
+                    add_token("__QUOTED_IDENTIFIER__")
                     state = "normal"
+                    i += 1
+                    continue
+                if len(identifier_sample) < _LITERAL_SAMPLE_LIMIT:
+                    identifier_sample.append(char)
                 i += 1
                 continue
             if state == "dollar_quote":
                 if line.startswith(dollar_delimiter, i):
                     i += len(dollar_delimiter)
+                    dollar_delimiter = ""
+                    add_token("__QUOTED_LITERAL__")
                     state = "normal"
                 else:
                     i += 1
                 continue
 
-            # Normal SQL/psql input. Comments and quoted content are not executable
-            # command tokens and must not cause valid backup data to be rejected.
+            # Normal SQL/psql input. Ignore comments and literal contents, but
+            # preserve enough bounded token state to detect executable commands.
             if char == "-" and nxt == "-":
                 flush_word()
                 state = "line_comment"
@@ -146,24 +258,38 @@ def _inspect_lines(lines) -> tuple[int, int]:
                 block_depth = 1
                 i += 2
                 continue
-            if char == "'":
-                flush_word()
+
+            # PostgreSQL U&'...' Unicode escape strings use backslash escapes.
+            if (
+                char == "&"
+                and not word_overflow
+                and "".join(word).upper() == "U"
+                and nxt == "'"
+            ):
+                word.clear()
                 state = "single_quote"
+                escape_single_quote = True
+                literal_sample.clear()
+                i += 2
+                continue
+            if char == "'":
+                prefix = "".join(word).upper() if not word_overflow else ""
+                if prefix in {"E", "N", "B", "X"}:
+                    word.clear()
+                    word_overflow = False
+                else:
+                    flush_word()
+                state = "single_quote"
+                escape_single_quote = prefix == "E"
+                literal_sample.clear()
                 i += 1
                 continue
             if char == '"':
                 flush_word()
                 state = "double_quote"
+                identifier_sample.clear()
                 i += 1
                 continue
-            if char == "$":
-                match = _DOLLAR_QUOTE.match(line, i)
-                if match:
-                    flush_word()
-                    dollar_delimiter = match.group(0)
-                    state = "dollar_quote"
-                    i = match.end()
-                    continue
 
             if char == "\\":
                 flush_word()
@@ -174,20 +300,30 @@ def _inspect_lines(lines) -> tuple[int, int]:
                 i += 1
                 continue
 
+            if char == "$":
+                # PostgreSQL permits dollar signs inside unquoted identifiers.
+                # Only recognize a dollar-quote opener at a token boundary.
+                if word or word_overflow:
+                    append_word_char(char)
+                    i += 1
+                    continue
+                match = _DOLLAR_QUOTE.match(line, i)
+                if match:
+                    dollar_delimiter = match.group(0)
+                    state = "dollar_quote"
+                    i = match.end()
+                    continue
+                i += 1
+                continue
+
             if char.isalnum() or char == "_":
-                word.append(char)
+                append_word_char(char)
                 i += 1
                 continue
 
             if char == ";":
                 flush_word()
-                if _database_ddl(statement_tokens):
-                    raise ValueError(
-                        "Cloud SQL import dump contains executable CREATE/ALTER/DROP DATABASE"
-                    )
-                if _copy_from_stdin(statement_tokens):
-                    copy_pending = True
-                statement_tokens.clear()
+                finish_statement()
                 i += 1
                 continue
 
@@ -196,14 +332,14 @@ def _inspect_lines(lines) -> tuple[int, int]:
 
         if state == "line_comment":
             state = "normal"
-        # SQL keywords are whitespace-delimited even when a statement spans lines.
+        # Flushing at a line boundary preserves bounded memory while retaining
+        # multi-line SQL keyword recognition (CREATE newline DATABASE).
         flush_word()
 
     flush_word()
     if state in {"single_quote", "double_quote", "block_comment", "dollar_quote"}:
         raise ValueError("Cloud SQL import dump ends inside an unterminated SQL lexical construct")
-    if _database_ddl(statement_tokens):
-        raise ValueError("Cloud SQL import dump ends with executable CREATE/ALTER/DROP DATABASE")
+    finish_statement()
     if copy_data or copy_pending:
         raise ValueError("Cloud SQL COPY FROM STDIN section is missing its \\. terminator")
     return total_bytes, line_count
