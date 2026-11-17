@@ -23,7 +23,7 @@ Regression tests: `tests/test_bias_audit_2026_11_17.py`.
 
 1. Original OANDA dataset identity and financing/carry evidence remain unresolved; zero carry must not be interpreted as evidence of zero financing.
 2. Paper fills remain incomplete without queue/depth modelling. OHLCV-only paper results are diagnostic, not validation-grade.
-3. Persisted legacy outcome labels lack executable fields. Re-run `scripts/label_adaptive_decision_outcomes.py` in dry-run mode first; verify the affected record count and output before any write.
+3. Persisted legacy outcome labels (`decision-outcome-v1`) lack executable fields. The label version is bumped to `decision-outcome-v2`, so previously labelled decisions are re-labelled under v2 and research groups the two methodologies separately. Re-run `scripts/label_adaptive_decision_outcomes.py` in dry-run mode first; verify the affected record count and output before any write.
 
 ## Paper-test protocol
 
