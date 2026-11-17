@@ -248,7 +248,7 @@ jobs:
           archived=0
           for file in \
             "$RUNNER_TEMP/restore-evidence-verification.json" \
-            "$RUNNER_TEMP/staging-restore-audit.json" \\
+            "$RUNNER_TEMP/staging-restore-audit.json" \
             "$RUNNER_TEMP/recovery-backup-object.json"; do
             if [[ -s "$file" ]]; then
               gcloud storage cp "$file" "$out_dir/$(basename "$file")"
