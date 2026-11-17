@@ -378,12 +378,22 @@ def test_manual_acceptance_workflow_executes_the_tested_deployment_evidence_veri
         assert inputs[field]["required"] is True
 
     steps = workflow["jobs"]["customer-paper-acceptance"]["steps"]
-    matches = [
-        step for step in steps
+    checkout_index = next(
+        i for i, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/checkout@")
+    )
+    python_index = next(
+        i for i, step in enumerate(steps)
+        if step.get("uses", "").startswith("actions/setup-python@")
+    )
+    validation_indices = [
+        i for i, step in enumerate(steps)
         if step.get("name") == "Validate exact successful main deployment"
     ]
-    assert len(matches) == 1
-    run = matches[0]["run"]
+    assert len(validation_indices) == 1
+    validation_index = validation_indices[0]
+    assert checkout_index < python_index < validation_index
+    run = steps[validation_index]["run"]
     assert "scripts/verify_staging_acceptance_deployment.py" in run
     assert '--expected-run-id "$DEPLOYMENT_RUN_ID"' in run
     assert '--expected-attempt "$DEPLOYMENT_RUN_ATTEMPT"' in run
