@@ -1094,3 +1094,15 @@ def test_cloud_sql_dump_rejects_copy_from_stdin_without_terminator(tmp_path):
     )
     with pytest.raises(ValueError, match="COPY FROM STDIN"):
         inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_accepts_quoted_column_named_set_config_with_parenthesized_predicate(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "quoted-set-config-column.sql"
+    dump.write_text(
+        'CREATE TABLE t ("set_config" text);\n'
+        'SELECT "set_config" FROM t WHERE (true);\n',
+        encoding="utf-8",
+    )
+    assert inspect_import_dump(dump)["status"] == "PASS"
