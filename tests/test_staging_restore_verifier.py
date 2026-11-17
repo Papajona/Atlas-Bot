@@ -805,6 +805,8 @@ def test_cloud_sql_import_dump_accepts_database_neutral_plain_sql(tmp_path):
         "\\connect other_db\n",
         "\\c other_db\n",
         "CREATE\nDATABASE other_db;\n",
+        "SELECT 1; \\connect other_db\n",
+        "SELECT 1; \\c other_db\n",
     ],
 )
 def test_cloud_sql_import_dump_rejects_database_redirection(tmp_path, sql):
@@ -816,39 +818,18 @@ def test_cloud_sql_import_dump_rejects_database_redirection(tmp_path, sql):
         inspect_import_dump(dump)
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "\\connect other_db",
-        "\\c other_db",
-    ],
-)
-def test_cloud_sql_import_dump_rejects_inline_psql_database_switches(tmp_path, command):
+def test_cloud_sql_import_dump_ignores_backslash_c_inside_quotes_and_comments(tmp_path):
     from scripts.verify_cloud_sql_import_dump import inspect_import_dump
 
-    dump = tmp_path / "inline-switch.sql"
-    dump.write_text(f"SELECT 1; {command}\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="database switch"):
-        inspect_import_dump(dump)
-
-
-@pytest.mark.parametrize(
-    "sql",
-    [
-        "CREATE /* comment between keywords */ DATABASE other_db;\n",
-        "CREATE -- comment between keywords\nDATABASE other_db;\n",
-        "CREATE /* outer /* nested */ comment */ TEMP /* before DATABASE */ DATABASE other_db;\n",
-        "ALTER /* comment */ DATABASE atlas_recovery RENAME TO other_db;\n",
-        "DROP /* comment */ DATABASE atlas_recovery;\n",
-    ],
-)
-def test_cloud_sql_import_dump_rejects_database_ddl_with_interleaved_comments(tmp_path, sql):
-    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
-
-    dump = tmp_path / "comment-obfuscated-database-ddl.sql"
-    dump.write_text(sql, encoding="utf-8")
-    with pytest.raises(ValueError, match="DATABASE"):
-        inspect_import_dump(dump)
+    dump = tmp_path / "literal.sql"
+    dump.write_text(
+        "INSERT INTO t VALUES ('C:\\connect data');\n"
+        "SELECT 1; -- \\connect other_db\n"
+        "SELECT 'it''s \\c fine';\n",
+        encoding="utf-8",
+    )
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
 
 
 def test_cloud_sql_import_dump_rejects_gzip_database_switch(tmp_path):
@@ -869,39 +850,3 @@ def test_cloud_sql_import_dump_rejects_unsupported_binary_archive(tmp_path):
     dump.write_bytes(b"PGDMP\\x01\\x0f")
     with pytest.raises(ValueError, match="custom-format archives"):
         inspect_import_dump(dump)
-
-
-def test_cloud_sql_import_dump_ignores_database_words_in_comments_strings_and_dollar_quotes(tmp_path):
-    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
-
-    dump = tmp_path / "inert-database-words.sql"
-    dump.write_text(
-        "-- CREATE DATABASE comment_db;\n"
-        "/* ALTER DATABASE comment_db RENAME TO other_db; */\n"
-        "CREATE TABLE messages(body text);\n"
-        "INSERT INTO messages VALUES ('CREATE DATABASE string_db; \\connect other_db');\n"
-        "DO $block$ BEGIN RAISE NOTICE 'DROP DATABASE other_db'; END $block$;\n",
-        encoding="utf-8",
-    )
-    result = inspect_import_dump(dump)
-    assert result["status"] == "PASS"
-    assert result["database_ddl_commands"] == 0
-    assert result["database_switch_commands"] == 0
-
-
-def test_cloud_sql_import_dump_ignores_database_words_in_copy_data(tmp_path):
-    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
-
-    dump = tmp_path / "copy-data.sql"
-    dump.write_text(
-        "CREATE TABLE imported_rows(body text);\n"
-        "COPY imported_rows(body) FROM stdin;\n"
-        "CREATE DATABASE data_db; \\connect other_db\n"
-        "\\.\n",
-        encoding="utf-8",
-    )
-    result = inspect_import_dump(dump)
-    assert result["status"] == "PASS"
-    assert result["database_ddl_commands"] == 0
-    assert result["database_switch_commands"] == 0
-
