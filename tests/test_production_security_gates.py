@@ -573,7 +573,9 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     )[1].split("\n      - name:", 1)[0]
     assert "failure() && steps.wait-required-gates.outputs.stale != 'true'" in diagnostic_step
     deploy_step = deploy.index("      - name: Deploy restricted paper-only Cloud Run service")
-    freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
+    freshness_guard = deploy.index(
+        'if ! python3 scripts/verify_staging_dispatch.py main-sha', deploy_step
+    )
     cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
     assert freshness_guard < cloud_run_change
     assert 'GH_TOKEN: ${{ github.token }}' in deploy[deploy_step:cloud_run_change]
