@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind a Cloud SQL IMPORT to a generation-pinned, retention-protected GCS backup."""
+"""Bind a Cloud SQL IMPORT to the exact GCS generation live for the import interval."""
 from __future__ import annotations
 
 import argparse
@@ -33,11 +33,41 @@ def _timestamp(value: Any, label: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _live_generation_at(
+    versions: list[Mapping[str, Any]],
+    *,
+    object_name: str,
+    instant: datetime,
+    label: str,
+) -> str:
+    candidates: list[tuple[int, str]] = []
+    for version in versions:
+        if str(_pick(version, "name") or "") != object_name:
+            continue
+        created = _timestamp(_pick(version, "timeCreated", "time_created"), "object version timeCreated")
+        if created > instant:
+            continue
+        deleted_value = _pick(version, "timeDeleted", "time_deleted")
+        if deleted_value:
+            deleted = _timestamp(deleted_value, "object version timeDeleted")
+            if deleted <= instant:
+                continue
+        generation = str(_pick(version, "generation") or "")
+        if not generation.isdigit() or int(generation) <= 0:
+            raise ValueError("GCS object versions contain a missing or invalid generation")
+        candidates.append((int(generation), generation))
+    if not candidates:
+        raise ValueError(f"no retained generation of the backup object was live at import {label}")
+    # Cloud Storage generations are monotonically increasing for an object name.
+    return max(candidates)[1]
+
+
 def verify_backup_binding(
     *,
     backup_reference: str,
     object_metadata: Any,
     bucket_metadata: Any,
+    object_versions: Any,
     operation_record: Any,
 ) -> dict[str, Any]:
     match = _BACKUP_RE.fullmatch(backup_reference or "")
@@ -50,10 +80,13 @@ def verify_backup_binding(
         raise ValueError("GCS bucket metadata must be a JSON object")
     if not isinstance(operation_record, Mapping):
         raise ValueError("Cloud SQL operation evidence must be a JSON object")
+    if not isinstance(object_versions, Mapping) or not isinstance(object_versions.get("items"), list):
+        raise ValueError("GCS object-version listing must include a complete items array")
 
+    bucket_name, object_name = expected_uri[5:].split("/", 1)
     observed_generation = str(_pick(object_metadata, "generation") or "")
     if observed_generation != expected_generation:
-        raise ValueError("GCS object generation differs from the generation pinned in BACKUP_REFERENCE")
+        raise ValueError("generation-qualified GCS describe did not return the pinned backup generation")
 
     try:
         size = int(_pick(object_metadata, "size") or 0)
@@ -67,11 +100,17 @@ def verify_backup_binding(
     if not (md5_hash or crc32c_hash):
         raise ValueError("GCS backup object has no provider checksum metadata (md5_hash or crc32c_hash)")
 
+    metadata_name = str(_pick(object_metadata, "name") or "")
+    metadata_bucket = str(_pick(object_metadata, "bucket") or "")
+    if metadata_name and metadata_name != object_name:
+        raise ValueError("generation-qualified GCS object name does not match the backup reference")
+    if metadata_bucket and metadata_bucket != bucket_name:
+        raise ValueError("generation-qualified GCS object bucket does not match the backup reference")
+
     retention = _pick(bucket_metadata, "retention_policy", "retentionPolicy")
     if not isinstance(retention, Mapping):
         raise ValueError("approved backup bucket has no retention policy metadata")
-    locked = _pick(retention, "is_locked", "isLocked")
-    if locked is not True:
+    if _pick(retention, "is_locked", "isLocked") is not True:
         raise ValueError("GCS backup bucket retention policy must be locked")
 
     operation_type = str(_pick(operation_record, "operationType", "operation_type") or "").upper()
@@ -109,15 +148,30 @@ def verify_backup_binding(
     retention_ends = _timestamp(retention_expiration, "GCS object retention expiration timestamp")
     if not (created_at <= import_started <= import_ended < retention_ends):
         raise ValueError(
-            "generation-pinned GCS object was not demonstrably retained from before import start through import completion"
+            "pinned GCS object was not demonstrably retained from before import start through import completion"
         )
 
-    object_name = _pick(object_metadata, "name")
-    bucket_name = _pick(object_metadata, "bucket")
-    if object_name and bucket_name:
-        observed_uri = f"gs://{bucket_name}/{str(object_name).lstrip('/')}"
-        if observed_uri != expected_uri:
-            raise ValueError("GCS object metadata name/bucket does not match the pinned backup URI")
+    versions = object_versions["items"]
+    if any(not isinstance(item, Mapping) for item in versions):
+        raise ValueError("GCS object-version listing contains a malformed version entry")
+    exact_versions = [
+        item for item in versions
+        if str(_pick(item, "name") or "") == object_name
+        and str(_pick(item, "generation") or "") == expected_generation
+    ]
+    if len(exact_versions) != 1:
+        raise ValueError("GCS object-version listing does not contain the exact pinned generation exactly once")
+
+    live_at_start = _live_generation_at(
+        versions, object_name=object_name, instant=import_started, label="start"
+    )
+    live_at_end = _live_generation_at(
+        versions, object_name=object_name, instant=import_ended, label="completion"
+    )
+    if live_at_start != expected_generation or live_at_end != expected_generation:
+        raise ValueError(
+            "pinned GCS generation was not the live object generation for the full Cloud SQL import interval"
+        )
 
     return {
         "status": "PASS",
@@ -129,6 +183,8 @@ def verify_backup_binding(
         "backup_object_created_at": created_at.isoformat(),
         "backup_retention_expires_at": retention_ends.isoformat(),
         "bucket_retention_policy_locked": True,
+        "live_generation_at_import_start": live_at_start,
+        "live_generation_at_import_end": live_at_end,
         "cloud_sql_operation_type": operation_type,
         "cloud_sql_operation_status": status,
         "cloud_sql_operation_start": import_started.isoformat(),
@@ -141,6 +197,7 @@ def main() -> int:
     parser.add_argument("--backup-reference", required=True)
     parser.add_argument("--object-metadata", required=True)
     parser.add_argument("--bucket-metadata", required=True)
+    parser.add_argument("--object-versions", required=True)
     parser.add_argument("--operation-record", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -149,6 +206,7 @@ def main() -> int:
             backup_reference=args.backup_reference,
             object_metadata=json.loads(Path(args.object_metadata).read_text(encoding="utf-8")),
             bucket_metadata=json.loads(Path(args.bucket_metadata).read_text(encoding="utf-8")),
+            object_versions=json.loads(Path(args.object_versions).read_text(encoding="utf-8")),
             operation_record=json.loads(Path(args.operation_record).read_text(encoding="utf-8")),
         )
         Path(args.output).write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
