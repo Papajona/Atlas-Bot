@@ -125,8 +125,8 @@ for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
     --role="roles/iam.workloadIdentityUser" >/dev/null
 done
 
-# The GitHub executor/auditor and the Cloud SQL service agent can read backup
-# objects. None receives write access to the backup bucket.
+# The GitHub executor/auditor can read backup objects. None receives write access
+# to the backup bucket.
 for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
   gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
     --member="serviceAccount:$email" --role="roles/storage.objectViewer" --quiet >/dev/null
@@ -134,12 +134,26 @@ for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
     --member="serviceAccount:$email" --role="roles/storage.legacyBucketReader" --quiet >/dev/null
 done
 
-# Cloud SQL performs the server-side GCS read using its service agent, not the
-# GitHub runner identity.
-gcloud beta services identity create --service=sqladmin.googleapis.com --project="$PROJECT_ID" >/dev/null
-CLOUD_SQL_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-cloud-sql.iam.gserviceaccount.com"
+# Cloud SQL performs the server-side GCS read as the recovery instance's own
+# service account, not the GitHub runner identity. Verify the configured
+# instance is the recovery target before granting bucket access to its account.
+RECOVERY_INSTANCE_ID="${ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}"
+RECOVERY_INSTANCE_JSON="$(gcloud sql instances describe "$RECOVERY_INSTANCE_ID" \
+  --project="$PROJECT_ID" --format=json)"
+RECOVERY_INSTANCE_SA="$(printf '%s' "$RECOVERY_INSTANCE_JSON" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+expected = sys.argv[1]
+observed = "%s:%s:%s" % (doc.get("project", ""), doc.get("region", ""), doc.get("name", ""))
+if observed != expected:
+    sys.exit("BLOCKED: recovery Cloud SQL instance identity does not match configuration")
+email = doc.get("serviceAccountEmailAddress", "")
+if not email:
+    sys.exit("BLOCKED: recovery Cloud SQL instance has no service account")
+print(email)
+' "$ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME")"
 gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
-  --member="serviceAccount:$CLOUD_SQL_SERVICE_AGENT" \
+  --member="serviceAccount:$RECOVERY_INSTANCE_SA" \
   --role="roles/storage.objectViewer" --quiet >/dev/null
 
 # Auditor is read-only on the backup source and can create audit evidence only
