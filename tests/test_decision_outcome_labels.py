@@ -282,3 +282,218 @@ def test_label_rejects_data_whose_bytes_do_not_match_recorded_source_hash():
     with pytest.raises(OutcomeLabelError) as exc:
         build_decision_outcome_label(_decision(), df)
     assert exc.value.code == "DATA_PROVENANCE_MISMATCH"
+
+
+def test_capacity_uses_actual_label_count_not_all_pending_decisions():
+    # One remaining record must still be usable even when many pending decisions
+    # are skipped and only one valid candidate is actually generated.
+    capacity = _decision_outcome_label_capacity(
+        existing_records=MAX_DECISION_OUTCOME_LABEL_RECORDS - 1,
+        pending_decisions=100,
+        batch_limit=100,
+        requested_new_records=1,
+    )
+    assert capacity["remaining_records"] == 1
+    assert capacity["requested_max_new_records"] == 1
+    assert capacity["fits"] is True
+
+
+def test_prepared_audit_payload_includes_rate_limit_annotation_in_byte_budget():
+    import asyncio
+    from app import audit_chain
+
+    async def deny_rate_limit(*args, **kwargs):
+        return False, 0
+
+    async def run():
+        return await audit_chain.prepare_audit_detail(
+            {"record_type": "adaptive_decision_outcome_label", "decision_id": "decision-001"},
+            actor_id="research-outcome-labeler",
+        )
+
+    original = audit_chain.allow_rate_limit
+    audit_chain.allow_rate_limit = deny_rate_limit
+    try:
+        prepared = asyncio.run(run())
+    finally:
+        audit_chain.allow_rate_limit = original
+
+    assert prepared["audit_chain_rate_limited"] is True
+    assert prepared["audit_chain_rate_limit"] == {"limit": 100, "window_seconds": 60}
+    encoded_size = len(audit_chain.serialize_audit_detail(prepared).encode("utf-8"))
+    unannotated_size = len(audit_chain.serialize_audit_detail({
+        "record_type": "adaptive_decision_outcome_label",
+        "decision_id": "decision-001",
+    }).encode("utf-8"))
+    assert encoded_size > unannotated_size
+    capacity = _decision_outcome_label_capacity(
+        existing_records=1,
+        pending_decisions=1,
+        batch_limit=1,
+        existing_bytes=MAX_DECISION_OUTCOME_LABEL_BYTES - encoded_size,
+        pending_bytes=encoded_size,
+        requested_new_records=1,
+    )
+    assert capacity["fits"] is True
+
+
+def test_postgres_label_history_write_lock_is_acquired_and_released(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from app import decision_outcomes
+
+    statements = []
+
+    class _Connection:
+        async def execute(self, statement, params=None):
+            statements.append(str(statement).strip())
+            return None
+
+        async def commit(self):
+            statements.append("COMMIT")
+
+    connection = _Connection()
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get_bind(self):
+            return SimpleNamespace(
+                dialect=SimpleNamespace(name="postgresql"),
+                url="postgresql://atlas/test",
+            )
+
+        async def connection(self):
+            return connection
+
+    from app import db as db_module
+    monkeypatch.setattr(db_module, "SessionLocal", lambda: _Session())
+
+    async def run():
+        async with decision_outcomes._decision_outcome_label_write_lock():
+            statements.append("BATCH")
+
+    asyncio.run(run())
+    assert statements[0].startswith("SELECT pg_advisory_lock")
+    assert "BATCH" in statements
+    assert statements[-2].startswith("SELECT pg_advisory_unlock")
+    assert statements[-1] == "COMMIT"
+
+
+def test_persistent_batch_reports_post_write_pending_count(monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+    from app import decision_outcomes
+    from app import audit_chain
+    from app import db as db_module
+
+    decision = _decision()
+    rows = [
+        [SimpleNamespace(detail=decision)],
+        [],
+    ]
+    appended = []
+
+    class _Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.values
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, query):
+            return _Rows(rows.pop(0))
+
+    @asynccontextmanager
+    async def no_op_lock():
+        yield
+
+    async def prepare(detail, actor_id=""):
+        return {
+            **detail,
+            "audit_chain_rate_limited": True,
+            "audit_chain_rate_limit": {"limit": 100, "window_seconds": 60},
+        }
+
+    async def append(db, *, event, detail, actor_id=""):
+        appended.append((event, detail, actor_id))
+        return SimpleNamespace(id=len(appended))
+
+    monkeypatch.setattr(db_module, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(decision_outcomes, "_decision_outcome_label_write_lock", no_op_lock)
+    monkeypatch.setattr(decision_outcomes, "_fetch_decision_data", lambda record, days=365: _frame())
+    monkeypatch.setattr(audit_chain, "prepare_audit_detail", prepare)
+    monkeypatch.setattr(audit_chain, "append_prepared_audit", append)
+
+    result = asyncio.run(decision_outcomes.process_decision_outcome_labels(
+        limit=100, persist=True,
+    ))
+    assert result["persisted"] is True
+    assert result["created"] == 1
+    assert result["pending_decisions_before_run"] == 1
+    assert result["pending_decisions_for_version"] == 0
+    assert result["pending_actionable_decisions_for_version"] == 0
+    assert result["candidate_labels_created"] == 1
+    assert len(appended) == 1
+    assert appended[0][1]["audit_chain_rate_limited"] is True
+
+
+def test_unlabelable_pending_decisions_do_not_keep_actionable_stop_count_positive(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from app import decision_outcomes
+    from app import db as db_module
+
+    unsupported = _decision()
+    unsupported["decision_id"] = "decision-unsupported"
+    unsupported["asset"] = "commodity"
+    rows = [
+        [SimpleNamespace(detail=unsupported)],
+        [],
+    ]
+
+    class _Rows:
+        def __init__(self, values):
+            self.values = values
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self.values
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, query):
+            return _Rows(rows.pop(0))
+
+    monkeypatch.setattr(db_module, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(decision_outcomes, "_fetch_decision_data", lambda record, days=365: _frame())
+
+    result = asyncio.run(decision_outcomes.process_decision_outcome_labels(
+        limit=100, persist=False,
+    ))
+    assert result["pending_decisions_for_version"] == 1
+    assert result["pending_actionable_decisions_for_version"] == 0
+    assert result["pending_unlabelable_decisions_for_version"] == 1
+    assert result["skip_reasons"]["UNSUPPORTED_ASSET"] == 1
