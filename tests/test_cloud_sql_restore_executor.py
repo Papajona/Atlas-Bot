@@ -8,6 +8,7 @@ import pytest
 
 from scripts.execute_cloud_sql_restore import (
     _extract_operation_id,
+    _live_backup_generation,
     _wait_for_operation,
     validate_backup_metadata,
     validate_restore_inputs,
@@ -184,3 +185,66 @@ def test_wait_for_operation_rejects_provider_error_and_wrong_target_database():
                 },
             }),
         )
+
+
+
+def test_pinned_generation_must_be_the_live_object_before_import():
+    instant = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
+    versions = {
+        "items": [
+            {
+                "name": "atlas-prod-backup.sql",
+                "generation": "1750000000000000",
+                "timeCreated": "2026-11-16T00:00:00Z",
+            },
+            {
+                "name": "atlas-prod-backup.sql",
+                "generation": "1750000000000001",
+                "timeCreated": "2026-11-17T11:00:00Z",
+            },
+        ]
+    }
+    assert _live_backup_generation(
+        versions, object_name="atlas-prod-backup.sql", instant=instant
+    ) == "1750000000000001"
+    with pytest.raises(ValueError, match="no retained generation"):
+        _live_backup_generation(
+            {"items": []}, object_name="atlas-prod-backup.sql", instant=instant
+        )
+
+
+def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_audit():
+    workflow = Path(".github/workflows/staging-cloud-sql-restore.yml").read_text(encoding="utf-8")
+    audit_workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
+    executor = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
+
+    assert "workflow_dispatch:" in workflow
+    assert 'confirm_restore_target' in workflow
+    assert '== "RESTORE"' in workflow
+    assert "GCP_STAGING_RESTORE_EXECUTOR_SERVICE_ACCOUNT" in workflow
+    assert "scripts/execute_cloud_sql_restore.py" in workflow
+    assert "gh api --method POST" in workflow
+    assert "staging-restore-audit.yml/dispatches" in workflow
+    assert "gh run watch" in workflow
+    assert "run-name: Cloud SQL restore audit (" in audit_workflow
+    assert '"gcloud", "sql", "import", "sql"' in executor
+    assert '"--async"' in executor
+    assert "verify_cloud_sql_import_dump.py" in executor
+    assert "_live_backup_generation" in executor
+    assert "verify_backup_binding(" in executor
+    assert "verify_restore_operation(" in executor
+
+
+def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
+    bootstrap = Path("scripts/bootstrap_cloud_sql_restore_iam.sh").read_text(encoding="utf-8")
+    assert "atlas-staging-restore-executor" in bootstrap
+    assert "atlas-staging-restore-audit" in bootstrap
+    assert "cloudsql.instances.import" in bootstrap
+    assert "cloudsql.instances.connect" in bootstrap
+    assert "roles/storage.objectViewer" in bootstrap
+    assert "roles/storage.objectCreator" in bootstrap
+    assert "roles/secretmanager.secretAccessor" in bootstrap
+    assert "refs/heads/main" in bootstrap
+    assert "gcloud sql instances create" not in bootstrap
+    assert "gcloud sql databases create" not in bootstrap
+    assert "gcloud sql import" not in bootstrap
