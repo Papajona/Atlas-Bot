@@ -418,3 +418,30 @@ def test_parent_rechecks_main_after_acceptance_child_completes_before_success():
     failure_branch_end = run.index("fi", run.index("then", main_guard))
     assert completed < fresh_main < main_guard < success
     assert "exit 1" in run[run.index("then", main_guard):failure_branch_end]
+
+
+def test_superseded_parent_run_cannot_start_deploy_preflight_or_acceptance():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
+    )
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"deploy-paper-staging"}
+    steps = jobs["deploy-paper-staging"]["steps"]
+    named = {step.get("name"): step for step in steps if step.get("name")}
+
+    gate = named["Wait for required CI gates to pass on this exact commit"]
+    assert gate["id"] == "wait-required-gates"
+    assert "stale=true" in gate["run"]
+    for name in (
+        "Validate staging inputs",
+        "Checkout exact main commit",
+        "Authenticate to Google Cloud with main-only workload identity",
+        "Set up Google Cloud SDK",
+        "Build and push exact commit image to Artifact Registry",
+        "Deploy restricted paper-only Cloud Run service",
+        "Dispatch and require read-only staging identity preflight on this exact commit",
+        "Dispatch and require customer-paper acceptance on this exact deployment",
+    ):
+        assert name in named
+        condition = named[name].get("if", "")
+        assert "steps.wait-required-gates.outputs.stale != 'true'" in condition, name
