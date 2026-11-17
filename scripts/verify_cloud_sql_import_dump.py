@@ -263,7 +263,10 @@ def _inspect_lines(lines) -> tuple[int, int]:
                     if identifier == "STANDARD_CONFORMING_STRINGS":
                         statement_has_setting_name = True
                     identifier_sample.clear()
-                    add_token("__QUOTED_IDENTIFIER__")
+                    # A quoted function name is still an executable SQL
+                    # identifier. Preserve set_config so its GUC argument
+                    # receives the same conservative string-mode validation.
+                    add_token("SET_CONFIG" if identifier == "SET_CONFIG" else "__QUOTED_IDENTIFIER__")
                     state = "normal"
                     i += 1
                     continue
