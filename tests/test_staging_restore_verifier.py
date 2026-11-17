@@ -971,3 +971,17 @@ def test_cloud_sql_dump_scanner_state_is_bounded_for_large_unterminated_statemen
     result = inspect_import_dump(dump)
     assert result["status"] == "PASS"
     assert result["decompressed_bytes"] > 1_000_000
+
+
+def test_cloud_sql_dump_rejects_copy_from_stdin_without_terminator(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "incomplete-copy.sql"
+    dump.write_text(
+        "CREATE TABLE imported_rows(body text);\n"
+        "COPY imported_rows(body) FROM stdin;\n"
+        "ordinary data row\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="COPY FROM STDIN"):
+        inspect_import_dump(dump)
