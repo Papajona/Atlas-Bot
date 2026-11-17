@@ -474,24 +474,18 @@ def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_de
     assert "gh run list " not in deploy
     assert "gh run view " not in deploy
 
-    import yaml
-
-    workflow = yaml.safe_load(deploy)
-    steps = {
-        step.get("name"): step
-        for step in workflow["jobs"]["deploy-paper-staging"]["steps"]
-        if step.get("name")
-    }
-    deploy_step = steps["Deploy restricted paper-only Cloud Run service"]["run"]
+    deploy_step = deploy.split(
+        "      - name: Deploy restricted paper-only Cloud Run service", 1
+    )[1].split("\n      - name:", 1)[0]
     guard = deploy_step.index('current_main_sha="$(gh_retry api')
     comparison = deploy_step.index("scripts/verify_staging_dispatch.py main-sha", guard)
     image = deploy_step.index('IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")', comparison)
     mutation = deploy_step.index('gcloud run deploy "$STAGING_SERVICE"', image)
     assert guard < comparison < image < mutation
 
-    post_deploy_guard = steps[
-        "Dispatch and require read-only staging identity preflight on this exact commit"
-    ]["run"]
+    post_deploy_guard = deploy.split(
+        "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
+    )[1].split("\n      - name:", 1)[0]
     assert 'current_main_sha="$(gh_retry api' in post_deploy_guard
     assert "scripts/verify_staging_dispatch.py main-sha" in post_deploy_guard
     assert "scripts/verify_staging_dispatch.py workflow-run" in post_deploy_guard
@@ -515,20 +509,12 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert '.event == "push"' in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
 
-    import yaml
-
-    workflow = yaml.safe_load(deploy)
-    steps = {
-        step.get("name"): step
-        for step in workflow["jobs"]["deploy-paper-staging"]["steps"]
-        if step.get("name")
-    }
-    preflight_step = steps[
-        "Dispatch and require read-only staging identity preflight on this exact commit"
-    ]["run"]
-    acceptance_step = steps[
-        "Dispatch and require customer-paper acceptance on this exact deployment"
-    ]["run"]
+    preflight_step = deploy.split(
+        "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
+    )[1].split("\n      - name:", 1)[0]
+    acceptance_step = deploy.split(
+        "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
+    )[1].split("\n      - name:", 1)[0]
     assert "scripts/verify_staging_dispatch.py workflow-run" in preflight_step
     assert "scripts/verify_staging_dispatch.py workflow-run" in acceptance_step
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
