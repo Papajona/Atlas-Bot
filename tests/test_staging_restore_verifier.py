@@ -73,6 +73,8 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "backup reference must pin an exact GCS generation" in workflow
     assert 'gcloud sql operations describe "$RESTORE_OPERATION_ID"' in workflow
     assert "verify_cloud_sql_backup_binding.py" in workflow
+    assert "verify_cloud_sql_import_dump.py" in workflow
+    assert 'storage cp "$BACKUP_REFERENCE"' in workflow
     assert '"versions": "true"' in workflow
     assert 'objects describe "$BACKUP_REFERENCE"' in workflow
     assert '--target-database "$CLOUD_SQL_DATABASE"' in workflow
@@ -286,7 +288,7 @@ def test_research_integrity_query_executes_against_postgres():
 def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     env, host = read_database_uri(
         "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
-        target_kind="cloud_sql", target_database="atlas-recovery-db",
+        target_kind="cloud_sql",
         cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
         cloud_sql_database="atlas_recovery",
     )
@@ -303,7 +305,7 @@ def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
 def test_restore_audit_rejects_wrong_cloud_sql_host_or_database(dsn):
     with pytest.raises(ValueError):
         read_database_uri(
-            dsn, target_kind="cloud_sql", target_database="atlas-recovery-db",
+            dsn, target_kind="cloud_sql",
             cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
             cloud_sql_database="atlas_recovery",
         )
@@ -313,7 +315,7 @@ def test_restore_audit_rejects_malformed_cloud_sql_instance():
     with pytest.raises(ValueError, match="project:region:instance"):
         read_database_uri(
             "postgresql://user:pw@127.0.0.1:5432/atlas_recovery",
-            target_kind="cloud_sql", target_database="atlas-recovery-db", cloud_sql_instance="production",
+            target_kind="cloud_sql", cloud_sql_instance="production",
             cloud_sql_database="atlas_recovery",
         )
 
@@ -341,6 +343,10 @@ def test_cloud_sql_restore_evidence_requires_pinned_import_and_exact_instance():
         "operationType": "IMPORT",
         "status": "DONE",
         "error": {"errors": []},
+        "importContext": {
+            "database": "atlas-recovery-db",
+            "uri": backup,
+        },
     }
     result = verify(
         document, operation_id="restore-op-123",
@@ -671,16 +677,14 @@ def test_cloud_sql_native_generation_suffixed_import_uri_is_accepted():
             "uri": pinned,
         },
     }
-    result = verify(
+    assert verify(
         operation,
         operation_id="operation-987",
         backup_reference=pinned,
         target_kind="cloud_sql",
         target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
         target_database="atlas-recovery-db",
-    )
-    assert result["backup_generation"] == "1750000000000000"
-    assert result["native_import_uri_has_generation"] is True
+    )["backup_generation"] == "1750000000000000"
 
 
 def test_cloud_sql_import_into_different_database_is_rejected():
@@ -776,3 +780,57 @@ def test_backup_binding_rejects_object_replaced_during_import_interval():
                 "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
             },
         )
+
+
+def test_cloud_sql_import_dump_accepts_database_neutral_plain_sql(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "backup.sql"
+    dump.write_text(
+        "SET statement_timeout = 0;\nCREATE TABLE public.restore_probe(id integer);\n",
+        encoding="utf-8",
+    )
+    result = inspect_import_dump(dump)
+    assert result["status"] == "PASS"
+    assert result["format"] == "plain_sql"
+    assert result["target_database_is_not_overridden_by_dump"] is True
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "CREATE DATABASE other_db;\n",
+        "ALTER DATABASE atlas_recovery RENAME TO other_db;\n",
+        "DROP DATABASE atlas_recovery;\n",
+        "\\connect other_db\n",
+        "\\c other_db\n",
+        "CREATE\nDATABASE other_db;\n",
+    ],
+)
+def test_cloud_sql_import_dump_rejects_database_redirection(tmp_path, sql):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "redirect.sql"
+    dump.write_text(sql, encoding="utf-8")
+    with pytest.raises(ValueError, match="redirect|switch"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_rejects_gzip_database_switch(tmp_path):
+    import gzip
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "redirect.sql.gz"
+    with gzip.open(dump, "wb") as handle:
+        handle.write(b"\\connect another_database\n")
+    with pytest.raises(ValueError, match="switch"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_rejects_unsupported_binary_archive(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "backup.dump"
+    dump.write_bytes(b"PGDMP\\x01\\x0f")
+    with pytest.raises(ValueError, match="custom-format archives"):
+        inspect_import_dump(dump)
