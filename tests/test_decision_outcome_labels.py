@@ -95,6 +95,62 @@ def test_outcome_label_uses_subsequent_completed_bars_and_configured_costs():
     assert len(label["label_id"]) == 64
 
 
+def test_existing_v1_label_does_not_prevent_v2_relabel_dry_run(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from app import db as db_module
+    from app import decision_outcomes
+
+    existing_v1 = {
+        "record_type": "adaptive_decision_outcome_label",
+        "decision_id": "decision-001",
+        "label_version": "decision-outcome-v1",
+        "status": "VALID",
+    }
+    query_results = [
+        [SimpleNamespace(detail=_decision())],
+        [SimpleNamespace(detail=existing_v1)],
+    ]
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def scalars(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def execute(self, query):
+            return _Rows(query_results.pop(0))
+
+    monkeypatch.setattr(db_module, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(
+        decision_outcomes, "_fetch_decision_data",
+        lambda record, days=365: _frame(),
+    )
+
+    result = asyncio.run(decision_outcomes.process_decision_outcome_labels(
+        limit=100, persist=False,
+    ))
+
+    assert result["label_version"] == "decision-outcome-v2"
+    assert result["persisted"] is False
+    assert result["selected"] == 1
+    assert result["created"] == 1
+    assert result["pending_decisions_for_version"] == 1
+    assert result["preview"][0]["decision_id"] == "decision-001"
+    assert result["preview"][0]["label_version"] == "decision-outcome-v2"
+
+
 def test_two_version_relabel_capacity_is_reserved_before_writes():
     # 100,000 v1 audit labels plus their v2 relabels fit the shared ceiling.
     full_pair_batch = _decision_outcome_label_capacity(
