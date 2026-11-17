@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy
+from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy, validate_cloud_sql_target_pair
 
 
 STAGING = "abcdefghijklmnopqrst"
@@ -69,6 +69,9 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "restore audit target" in runbook
     assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
+    assert "PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" in workflow
+    assert "backup reference must pin an exact GCS generation" in workflow
+    assert "Cloud SQL evidence must be an exported provider-native operation JSON object" in workflow
 
 
 
@@ -311,23 +314,40 @@ def test_restore_audit_rejects_malformed_cloud_sql_instance():
         )
 
 
-def test_cloud_sql_restore_evidence_requires_exact_instance_and_success():
+def test_cloud_sql_target_pair_requires_explicit_distinct_production_instance():
+    target = "atlas-staging-510915:europe-west1:atlas-recovery"
+    production = "atlas-production:europe-west1:atlas-primary"
+    validate_cloud_sql_target_pair(target, production)
+    with pytest.raises(ValueError, match="PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME"):
+        validate_cloud_sql_target_pair(target, "")
+    with pytest.raises(ValueError, match="PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME"):
+        validate_cloud_sql_target_pair(target, "production")
+    with pytest.raises(ValueError, match="distinct"):
+        validate_cloud_sql_target_pair(target, target)
+
+
+def test_cloud_sql_restore_evidence_requires_pinned_import_and_exact_instance():
     from scripts.verify_restore_operation_evidence import verify
 
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
     document = {
         "operation_id": "restore-op-123",
-        "backup_reference": "gs://atlas-staging-510915-db-backups/backup.dump",
+        "backup_reference": backup,
         "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "operationType": "IMPORT",
         "status": "DONE",
+        "error": {"errors": []},
     }
     result = verify(
         document, operation_id="restore-op-123",
-        backup_reference="gs://atlas-staging-510915-db-backups/backup.dump",
+        backup_reference=backup,
         target_kind="cloud_sql",
         target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
     )
     assert result["status"] == "PASS"
     assert result["target_kind"] == "cloud_sql"
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["operation_type"] == "IMPORT"
 
 
 def test_cloud_sql_restore_evidence_rejects_wrong_instance_or_running_operation():
@@ -335,14 +355,15 @@ def test_cloud_sql_restore_evidence_rejects_wrong_instance_or_running_operation(
 
     document = {
         "operation_id": "restore-op-123",
-        "backup_reference": "gs://bucket/backup.dump",
+        "backup_reference": "gs://bucket/backup.dump#1750000000000000",
         "instance_connection_name": "prod:region:database",
+        "operationType": "IMPORT",
         "status": "RUNNING",
     }
     with pytest.raises(ValueError):
         verify(
             document, operation_id="restore-op-123",
-            backup_reference="gs://bucket/backup.dump",
+            backup_reference="gs://bucket/backup.dump#1750000000000000",
             target_kind="cloud_sql",
             target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
         )
@@ -372,13 +393,133 @@ def test_cloud_sql_native_import_operation_evidence_shape():
         "region": "europe-west1",
         "operationType": "IMPORT",
         "status": "DONE",
-        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump"},
+        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump#1750000000000000"},
     }
     result = verify(
         operation,
         operation_id="operation-987",
-        backup_reference="gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump",
+        backup_reference="gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump#1750000000000000",
         target_kind="cloud_sql",
         target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
     )
     assert result["provider_status"] == "DONE"
+
+
+def test_cloud_sql_evidence_rejects_export_or_missing_operation_type():
+    from scripts.verify_restore_operation_evidence import verify
+
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    base = {
+        "operation_id": "restore-op-123",
+        "backup_reference": backup,
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "status": "DONE",
+    }
+    for document in (base, {**base, "operationType": "EXPORT"}):
+        with pytest.raises(ValueError, match="IMPORT"):
+            verify(
+                document, operation_id="restore-op-123", backup_reference=backup,
+                target_kind="cloud_sql",
+                target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+            )
+
+
+def test_cloud_sql_done_import_with_provider_errors_is_rejected():
+    from scripts.verify_restore_operation_evidence import verify
+
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": backup,
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "error": {"errors": [{"code": "INVALID_ARGUMENT", "message": "import rejected"}]},
+    }
+    with pytest.raises(ValueError, match="provider errors"):
+        verify(
+            document, operation_id="restore-op-123", backup_reference=backup,
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_cloud_sql_native_aliases_cannot_hide_conflicting_target_or_backup():
+    from scripts.verify_restore_operation_evidence import verify
+
+    target = "atlas-staging-510915:europe-west1:atlas-recovery"
+    backup = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    common = {
+        "operation_id": "restore-op-123",
+        "instance_connection_name": target,
+        "operationType": "IMPORT",
+        "status": "DONE",
+    }
+    wrong_target = {
+        **common,
+        "targetProject": "atlas-production",
+        "region": "europe-west1",
+        "targetId": "atlas-primary",
+        "importContext": {"uri": backup},
+    }
+    with pytest.raises(ValueError, match="conflicting Cloud SQL target"):
+        verify(
+            wrong_target, operation_id="restore-op-123", backup_reference=backup,
+            target_kind="cloud_sql", target_instance_connection_name=target,
+        )
+
+    wrong_backup = {
+        **common,
+        "backup_reference": backup,
+        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/other.dump#1750000000000001"},
+    }
+    with pytest.raises(ValueError, match="conflicting backup reference"):
+        verify(
+            wrong_backup, operation_id="restore-op-123", backup_reference=backup,
+            target_kind="cloud_sql", target_instance_connection_name=target,
+        )
+
+
+def test_cloud_sql_restore_requires_generation_pinned_backup_reference():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "operation_id": "restore-op-123",
+        "backup_reference": "gs://atlas-staging-510915-db-backups/backup.dump",
+        "instance_connection_name": "atlas-staging-510915:europe-west1:atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+    }
+    with pytest.raises(ValueError, match="pin an immutable GCS object generation"):
+        verify(
+            document, operation_id="restore-op-123",
+            backup_reference="gs://atlas-staging-510915-db-backups/backup.dump",
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        )
+
+
+def test_nested_supabase_restore_record_is_selected_over_targetless_wrapper_metadata():
+    from scripts.verify_restore_operation_evidence import verify
+
+    document = {
+        "id": "wrapper-request-id",
+        "backup_reference": "wrapper-backup",
+        "status": "COMPLETED",
+        "data": {
+            "metadata": {
+                "result": {
+                    "operation_id": "restore-op-123",
+                    "backup_reference": "backup-123",
+                    "target_project_ref": "abcdefghijklmnopqrst",
+                    "status": "COMPLETED",
+                }
+            }
+        },
+    }
+    result = verify(
+        document, operation_id="restore-op-123", backup_reference="backup-123",
+        target_kind="supabase", target_project_ref="abcdefghijklmnopqrst",
+    )
+    assert result["status"] == "PASS"
+    assert result["target_supabase_project_ref"] == "abcdefghijklmnopqrst"
