@@ -273,3 +273,38 @@ def test_research_integrity_query_executes_against_postgres():
     assert result["research_trial_ledger_head_rows"] == 1
     assert result["research_trial_ledger_head_valid"] is True
     assert result["research_holdout_registry_invalid_rows"] == 0
+
+
+def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
+    env, host = read_database_uri(
+        "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
+        target_kind="cloud_sql",
+        cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
+        cloud_sql_database="atlas_recovery",
+    )
+    assert host == "127.0.0.1"
+    assert env["PGDATABASE"] == "atlas_recovery"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGSSLMODE"] == "require"
+
+
+@pytest.mark.parametrize("dsn", [
+    "postgresql://user:pw@db.production.example:5432/atlas_recovery",
+    "postgresql://user:pw@127.0.0.1:5432/postgres",
+])
+def test_restore_audit_rejects_wrong_cloud_sql_host_or_database(dsn):
+    with pytest.raises(ValueError):
+        read_database_uri(
+            dsn, target_kind="cloud_sql",
+            cloud_sql_instance="atlas-staging-510915:europe-west1:atlas-recovery",
+            cloud_sql_database="atlas_recovery",
+        )
+
+
+def test_restore_audit_rejects_malformed_cloud_sql_instance():
+    with pytest.raises(ValueError, match="project:region:instance"):
+        read_database_uri(
+            "postgresql://user:pw@127.0.0.1:5432/atlas_recovery",
+            target_kind="cloud_sql", cloud_sql_instance="production",
+            cloud_sql_database="atlas_recovery",
+        )
