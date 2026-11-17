@@ -27,20 +27,37 @@ DEFAULT_HORIZONS_BARS = (1, 3, 6)
 
 
 def _decision_outcome_label_capacity(
-    existing_records: int, pending_decisions: int, batch_limit: int
+    existing_records: int,
+    pending_decisions: int,
+    batch_limit: int,
+    *,
+    existing_bytes: int = 0,
+    pending_bytes: int = 0,
 ) -> dict:
-    """Conservatively reserve label-audit capacity before any persistent write."""
+    """Conservatively reserve both record and decoded-byte budgets before writes."""
     existing = max(0, int(existing_records))
     pending = max(0, int(pending_decisions))
     requested = min(max(0, int(batch_limit)), pending)
+    decoded = max(0, int(existing_bytes))
+    new_bytes = max(0, int(pending_bytes))
     remaining = max(0, MAX_DECISION_OUTCOME_LABEL_RECORDS - existing)
+    remaining_bytes = max(0, MAX_DECISION_OUTCOME_LABEL_BYTES - decoded)
     return {
         "maximum_records": MAX_DECISION_OUTCOME_LABEL_RECORDS,
         "existing_records": existing,
         "pending_decisions_for_version": pending,
         "requested_max_new_records": requested,
         "remaining_records": remaining,
-        "fits": existing <= MAX_DECISION_OUTCOME_LABEL_RECORDS and requested <= remaining,
+        "maximum_decoded_bytes": MAX_DECISION_OUTCOME_LABEL_BYTES,
+        "existing_decoded_bytes": decoded,
+        "requested_new_decoded_bytes": new_bytes,
+        "remaining_decoded_bytes": remaining_bytes,
+        "fits": (
+            existing <= MAX_DECISION_OUTCOME_LABEL_RECORDS
+            and requested <= remaining
+            and decoded <= MAX_DECISION_OUTCOME_LABEL_BYTES
+            and new_bytes <= remaining_bytes
+        ),
     }
 _SUPPORTED_YFINANCE_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "1d"}
 _SUPPORTED_OANDA_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
@@ -497,6 +514,44 @@ async def process_decision_outcome_labels(
         decision_records = [_decode_audit_detail(row.detail) for row in decisions]
         existing_records = [_decode_audit_detail(row.detail) for row in existing_rows]
 
+    if any(
+        not isinstance(record, dict)
+        or record.get("record_type") != "adaptive_decision_outcome_label"
+        for record in existing_records
+    ):
+        return {
+            "status": "LABEL_HISTORY_INVALID",
+            "label_version": LABEL_VERSION,
+            "research_only": True,
+            "persisted": False,
+            "created": 0,
+            "selected": 0,
+            "pending_decisions_for_version": None,
+            "label_history_capacity": None,
+            "skip_reasons": {"invalid_existing_label_history": len(existing_rows)},
+            "preview": [],
+        }
+    try:
+        existing_label_bytes = sum(
+            len(json.dumps(
+                record, sort_keys=True, separators=(",", ":"), allow_nan=False,
+            ).encode("utf-8"))
+            for record in existing_records
+        )
+    except (TypeError, ValueError, OverflowError):
+        return {
+            "status": "LABEL_HISTORY_INVALID",
+            "label_version": LABEL_VERSION,
+            "research_only": True,
+            "persisted": False,
+            "created": 0,
+            "selected": 0,
+            "pending_decisions_for_version": None,
+            "label_history_capacity": None,
+            "skip_reasons": {"non_serializable_existing_label_history": len(existing_rows)},
+            "preview": [],
+        }
+
     already_labelled = {
         (str(record.get("decision_id")), str(record.get("label_version")))
         for record in existing_records
@@ -510,7 +565,10 @@ async def process_decision_outcome_labels(
         and (str(record.get("decision_id") or "").strip(), LABEL_VERSION) not in already_labelled
     }
     capacity = _decision_outcome_label_capacity(
-        len(existing_rows), len(pending_decision_ids), limit
+        len(existing_rows),
+        len(pending_decision_ids),
+        limit,
+        existing_bytes=existing_label_bytes,
     )
     if persist and not capacity["fits"]:
         return {
@@ -529,6 +587,7 @@ async def process_decision_outcome_labels(
     created = skipped = failed = selected = 0
     reasons: dict[str, int] = {}
     preview: list[dict] = []
+    labels_to_persist: list[dict] = []
 
     for record in decision_records:
         if not record:
@@ -573,6 +632,55 @@ async def process_decision_outcome_labels(
             reasons[exc.code] = reasons.get(exc.code, 0) + 1
             continue
         if persist:
+            labels_to_persist.append(label)
+        elif len(preview) < 10:
+            preview.append(label)
+        created += 1
+        already_labelled.add((decision_id, LABEL_VERSION))
+
+    if persist:
+        try:
+            pending_label_bytes = sum(
+                len(json.dumps(
+                    label, sort_keys=True, separators=(",", ":"), allow_nan=False,
+                ).encode("utf-8"))
+                for label in labels_to_persist
+            )
+        except (TypeError, ValueError, OverflowError):
+            return {
+                "status": "LABEL_HISTORY_INVALID",
+                "label_version": LABEL_VERSION,
+                "research_only": True,
+                "persisted": False,
+                "created": 0,
+                "selected": selected,
+                "pending_decisions_for_version": len(pending_decision_ids),
+                "label_history_capacity": capacity,
+                "skip_reasons": {**reasons, "non_serializable_pending_label": len(labels_to_persist)},
+                "preview": [],
+            }
+        capacity = _decision_outcome_label_capacity(
+            len(existing_rows),
+            len(pending_decision_ids),
+            limit,
+            existing_bytes=existing_label_bytes,
+            pending_bytes=pending_label_bytes,
+        )
+        if not capacity["fits"]:
+            return {
+                "status": "LABEL_HISTORY_CAPACITY_EXCEEDED",
+                "label_version": LABEL_VERSION,
+                "research_only": True,
+                "persisted": False,
+                "created": 0,
+                "selected": selected,
+                "pending_decisions_for_version": len(pending_decision_ids),
+                "label_history_capacity": capacity,
+                "skip_reasons": reasons,
+                "preview": [],
+            }
+        # Only now, after the entire candidate batch fits both budgets, append.
+        for label in labels_to_persist:
             async with SessionLocal() as db:
                 await append_audit(
                     db,
@@ -580,10 +688,6 @@ async def process_decision_outcome_labels(
                     detail=label,
                     actor_id="research-outcome-labeler",
                 )
-        elif len(preview) < 10:
-            preview.append(label)
-        created += 1
-        already_labelled.add((decision_id, LABEL_VERSION))
 
     return {
         "label_version": LABEL_VERSION,
