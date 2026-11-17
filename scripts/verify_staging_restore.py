@@ -248,30 +248,36 @@ SELECT jsonb_build_object(
 )::text;
 """
 
-def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tuple[dict[str, str], str]:
+def read_database_uri(value: str, staging_ref: str = "", production_ref: str = "", *, target_kind: str = "supabase", cloud_sql_instance: str = "", cloud_sql_database: str = "") -> tuple[dict[str, str], str]:
     parsed = urlparse(value)
     if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"} or not parsed.hostname:
         raise ValueError("DATABASE_URL must be a PostgreSQL URI")
-    if not staging_ref or not re.fullmatch(r"[a-z0-9]{20}", staging_ref):
-        raise ValueError("STAGING_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
-    if not production_ref or not re.fullmatch(r"[a-z0-9]{20}", production_ref):
-        raise ValueError("PRODUCTION_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
-
     host = parsed.hostname.lower()
-    direct_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
-    pooler_host = re.fullmatch(
-        r"aws-\d+-[a-z0-9]+(?:-[a-z0-9]+)*\.pooler\.supabase\.com",
-        host,
-    )
-    pooler_user = unquote(parsed.username or "")
-    pooler_matches_project = bool(pooler_host and pooler_user.rpartition(".")[2] == staging_ref)
-    if host not in direct_hosts and not pooler_matches_project:
-        raise ValueError("DATABASE_URL host/user does not match the explicitly configured Supabase project")
+    database = parsed.path.lstrip("/")
+    if target_kind == "supabase":
+        if not staging_ref or not re.fullmatch(r"[a-z0-9]{20}", staging_ref):
+            raise ValueError("STAGING_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
+        if not production_ref or not re.fullmatch(r"[a-z0-9]{20}", production_ref):
+            raise ValueError("PRODUCTION_SUPABASE_PROJECT_REF must be an explicit 20-character project ref")
+        direct_hosts = {f"db.{staging_ref}.supabase.co", f"{staging_ref}.supabase.co"}
+        pooler_host = re.fullmatch(r"aws-\\d+-[a-z0-9]+(?:-[a-z0-9]+)*\\.pooler\\.supabase\\.com", host)
+        pooler_user = unquote(parsed.username or "")
+        pooler_matches_project = bool(pooler_host and pooler_user.rpartition(".")[2] == staging_ref)
+        if host not in direct_hosts and not pooler_matches_project:
+            raise ValueError("DATABASE_URL host/user does not match the explicitly configured Supabase project")
+        if database != "postgres":
+            raise ValueError("DATABASE_URL must target the expected postgres database")
+    elif target_kind == "cloud_sql":
+        if not re.fullmatch(r"[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+", cloud_sql_instance or ""):
+            raise ValueError("CLOUD_SQL_INSTANCE_CONNECTION_NAME must be project:region:instance")
+        if not cloud_sql_database or database != cloud_sql_database:
+            raise ValueError("DATABASE_URL database does not match the configured Cloud SQL database")
+        if host not in {"127.0.0.1", "localhost"}:
+            raise ValueError("Cloud SQL audit DATABASE_URL must connect through the local Cloud SQL Auth Proxy")
+    else:
+        raise ValueError("RESTORE_TARGET_KIND must be supabase or cloud_sql")
     if parsed.port not in (None, 5432):
         raise ValueError("DATABASE_URL must use PostgreSQL port 5432")
-    if parsed.path.lstrip("/") != "postgres":
-        raise ValueError("DATABASE_URL must target the expected postgres database")
-
     env = {
         key: val for key, val in os.environ.items()
         if key not in {"DATABASE_URL", "PGPASSWORD", "PGHOST", "PGPORT", "PGUSER", "PGDATABASE"}
@@ -279,9 +285,9 @@ def read_database_uri(value: str, staging_ref: str, production_ref: str) -> tupl
     env.update({
         "PGHOST": host,
         "PGPORT": str(parsed.port or 5432),
-        "PGUSER": pooler_user,
+        "PGUSER": unquote(parsed.username or ""),
         "PGPASSWORD": unquote(parsed.password or ""),
-        "PGDATABASE": parsed.path.lstrip("/"),
+        "PGDATABASE": database,
         "PGSSLMODE": "require",
         "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=15000",
     })
@@ -389,14 +395,20 @@ def add_research_integrity_observations(
 
 
 def audit(args: argparse.Namespace) -> dict:
+    target_kind = os.environ.get("RESTORE_TARGET_KIND", "supabase").strip().lower()
     staging_ref = os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
     production_ref = os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
-    if staging_ref == production_ref:
-        raise ValueError(
-            "full restore audit requires a distinct non-production target; same-project restore could overwrite the active source"
-        )
+    cloud_sql_instance = os.environ.get("CLOUD_SQL_INSTANCE_CONNECTION_NAME", "").strip()
+    cloud_sql_database = os.environ.get("CLOUD_SQL_DATABASE", "").strip()
+    if target_kind == "supabase" and staging_ref == production_ref:
+        raise ValueError("full restore audit requires a distinct non-production target; same-project restore could overwrite the active source")
+    if target_kind == "cloud_sql":
+        production_instance = os.environ.get("PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME", "").strip()
+        if not cloud_sql_instance or cloud_sql_instance == production_instance:
+            raise ValueError("Cloud SQL restore target must be configured and distinct from the production instance")
     database_url = os.environ.get("DATABASE_URL", "")
-    env, host = read_database_uri(database_url, staging_ref, production_ref)
+    env, host = read_database_uri(database_url, staging_ref, production_ref,
+        target_kind=target_kind, cloud_sql_instance=cloud_sql_instance, cloud_sql_database=cloud_sql_database)
     if not args.restore_operation_id.strip():
         raise ValueError("A real backup restore operation ID is required")
     if not args.backup_reference.strip():
@@ -409,8 +421,11 @@ def audit(args: argparse.Namespace) -> dict:
     if not re.fullmatch(r"[0-9a-f]{64}", evidence_sha256):
         raise ValueError("The downloaded provider restore-operation record must have a verified SHA-256")
     verified_target_ref = str(args.verified_target_project_ref or "").strip()
-    if verified_target_ref != os.environ.get("STAGING_SUPABASE_PROJECT_REF", ""):
+    verified_target_instance = str(args.verified_target_instance_connection_name or "").strip()
+    if target_kind == "supabase" and verified_target_ref != staging_ref:
         raise ValueError("Provider restore-operation evidence was not verified against the configured staging project")
+    if target_kind == "cloud_sql" and verified_target_instance != cloud_sql_instance:
+        raise ValueError("Provider restore-operation evidence was not verified against the configured Cloud SQL instance")
     proc = subprocess.run(
         ["psql", "-X", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", QUERY],
         capture_output=True, text=True, env=env, check=False,
@@ -468,9 +483,9 @@ def audit(args: argparse.Namespace) -> dict:
         "backup_reference": args.backup_reference,
         "restore_evidence_uri": evidence,
         "restore_evidence_sha256": evidence_sha256,
-        "verified_restore_target_project_ref": verified_target_ref,
+        "verified_restore_target_project_ref": verified_target_ref or None,\n        "verified_restore_target_instance_connection_name": verified_target_instance or None,
         "production_supabase_ref": os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", ""),
-        "staging_supabase_ref": os.environ["STAGING_SUPABASE_PROJECT_REF"],
+        "staging_supabase_ref": staging_ref or None,\n        "restore_target_kind": target_kind,\n        "cloud_sql_instance_connection_name": cloud_sql_instance or None,\n        "cloud_sql_database": cloud_sql_database or None,
         "same_project_staging": (
             os.environ.get("STAGING_SUPABASE_PROJECT_REF", "")
             == os.environ.get("PRODUCTION_SUPABASE_PROJECT_REF", "")
@@ -496,7 +511,7 @@ def main() -> int:
     parser.add_argument("--backup-reference", required=True, help="Provider backup ID or immutable backup object URI")
     parser.add_argument("--restore-evidence-uri", required=True, help="Provider restore operation evidence URL or immutable audit-log URI")
     parser.add_argument("--restore-evidence-sha256", required=True, help="SHA-256 of the downloaded provider-native JSON restore record")
-    parser.add_argument("--verified-target-project-ref", required=True, help="Target ref verified from that provider record")
+    parser.add_argument("--verified-target-project-ref", default="", help="Supabase target ref verified from provider record")\n    parser.add_argument("--verified-target-instance-connection-name", default="", help="Cloud SQL instance verified from provider record")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
     parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
     parser.add_argument("--output", default="staging-restore-audit.json")
