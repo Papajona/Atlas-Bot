@@ -505,6 +505,73 @@ def test_large_complete_label_history_fails_closed_without_truncation(monkeypatc
         asyncio.run(load_all_decision_outcome_labels(batch_size=100, max_records=1))
 
 
+def test_complete_label_history_budget_covers_both_v1_and_v2_row_sets(monkeypatch):
+    import json
+    from collections import Counter
+    from types import SimpleNamespace
+    from app import db as db_module
+    from app.decision_outcome_research import (
+        MAX_DECISION_OUTCOME_LABEL_RECORDS,
+        load_all_decision_outcome_labels,
+    )
+
+    rows = []
+    for version in ("decision-outcome-v1", "decision-outcome-v2"):
+        for position in range(2):
+            record = {**_outcome_label(position), "label_version": version}
+            if version == "decision-outcome-v2":
+                record["outcomes"]["1"].update({
+                    "entry_timing": "NEXT_OPEN",
+                    "executable_candidate_side_net_return_bps": 3.0,
+                })
+            rows.append((len(rows) + 1, json.dumps(record)))
+
+    class _Rows:
+        def __init__(self, values=()):
+            self.values = list(values)
+
+        def all(self):
+            return self.values
+
+    class _Transaction:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    class _Db:
+        bind = SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def get_bind(self):
+            return self.bind
+
+        def begin(self):
+            return _Transaction()
+
+        async def execute(self, query):
+            if str(query).startswith("SET TRANSACTION"):
+                return _Rows()
+            return _Rows(rows)
+
+    monkeypatch.setattr(db_module, "SessionLocal", _Db)
+    labels = asyncio.run(load_all_decision_outcome_labels(
+        batch_size=100, max_records=4, max_decoded_bytes=1_048_576,
+    ))
+    assert len(labels) == 4
+    assert Counter(row["label_version"] for row in labels) == {
+        "decision-outcome-v1": 2,
+        "decision-outcome-v2": 2,
+    }
+    assert MAX_DECISION_OUTCOME_LABEL_RECORDS >= 4
+
+
 def test_complete_label_history_uses_one_repeatable_read_snapshot(monkeypatch):
     import json
     from types import SimpleNamespace
