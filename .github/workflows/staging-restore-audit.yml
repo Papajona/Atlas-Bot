@@ -119,12 +119,53 @@ jobs:
             exit 1
           }
           backup_object_uri="${BACKUP_REFERENCE%%#*}"
-          gcloud storage objects describe "$backup_object_uri" --format=json > "$RUNNER_TEMP/recovery-backup-object.json"
+          # Describe the exact generation, not whichever version is live today.
+          gcloud storage objects describe "$BACKUP_REFERENCE" --format=json > "$RUNNER_TEMP/recovery-backup-object.json"
           gcloud storage buckets describe gs://atlas-staging-510915-db-backups --format=json > "$RUNNER_TEMP/recovery-backup-bucket.json"
+          python - "$backup_object_uri" "$RUNNER_TEMP/recovery-backup-versions.json" <<'PY'
+          import json
+          import subprocess
+          import sys
+          from urllib.parse import quote, urlencode
+          from urllib.request import Request, urlopen
+
+          object_uri, output_path = sys.argv[1:]
+          bucket, object_name = object_uri[5:].split("/", 1)
+          token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
+          if not token:
+              raise SystemExit("BLOCKED: Google Cloud access token is unavailable")
+          items = []
+          page_token = None
+          while True:
+              query = {
+                  "versions": "true",
+                  "prefix": object_name,
+                  "maxResults": "1000",
+                  "fields": "items(name,generation,timeCreated,timeDeleted),nextPageToken",
+              }
+              if page_token:
+                  query["pageToken"] = page_token
+              url = (
+                  "https://storage.googleapis.com/storage/v1/b/"
+                  + quote(bucket, safe="")
+                  + "/o?"
+                  + urlencode(query)
+              )
+              request = Request(url, headers={"Authorization": "Bearer " + token})
+              with urlopen(request, timeout=30) as response:
+                  page = json.loads(response.read().decode("utf-8"))
+              items.extend(page.get("items", []))
+              page_token = page.get("nextPageToken")
+              if not page_token:
+                  break
+          with open(output_path, "w", encoding="utf-8") as handle:
+              json.dump({"items": items}, handle, sort_keys=True)
+          PY
           PYTHONPATH=. python scripts/verify_cloud_sql_backup_binding.py \
             --backup-reference "$BACKUP_REFERENCE" \
             --object-metadata "$RUNNER_TEMP/recovery-backup-object.json" \
             --bucket-metadata "$RUNNER_TEMP/recovery-backup-bucket.json" \
+            --object-versions "$RUNNER_TEMP/recovery-backup-versions.json" \
             --operation-record "$RUNNER_TEMP/restore-operation-evidence.json" \
             --output "$RUNNER_TEMP/cloud-sql-backup-binding.json"
       - name: Download provider restore-operation record and dedicated audit database secret
@@ -180,7 +221,10 @@ jobs:
           if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then
             evidence_args+=(--target-project-ref "$STAGING_SUPABASE_PROJECT_REF")
           else
-            evidence_args+=(--target-instance-connection-name "$CLOUD_SQL_INSTANCE_CONNECTION_NAME")
+            evidence_args+=(
+              --target-instance-connection-name "$CLOUD_SQL_INSTANCE_CONNECTION_NAME"
+              --target-database "$CLOUD_SQL_DATABASE"
+            )
           fi
           PYTHONPATH=. python scripts/verify_restore_operation_evidence.py \
             --input "$RUNNER_TEMP/restore-operation-evidence.json" \
@@ -258,6 +302,7 @@ jobs:
             "$RUNNER_TEMP/staging-restore-audit.json" \
             "$RUNNER_TEMP/recovery-backup-object.json" \
             "$RUNNER_TEMP/recovery-backup-bucket.json" \
+            "$RUNNER_TEMP/recovery-backup-versions.json" \
             "$RUNNER_TEMP/cloud-sql-backup-binding.json"; do
             if [[ -s "$file" ]]; then
               gcloud storage cp "$file" "$out_dir/$(basename "$file")"
@@ -278,6 +323,7 @@ jobs:
             ${{ runner.temp }}/staging-restore-audit.json
             ${{ runner.temp }}/recovery-backup-object.json
             ${{ runner.temp }}/recovery-backup-bucket.json
+            ${{ runner.temp }}/recovery-backup-versions.json
             ${{ runner.temp }}/cloud-sql-backup-binding.json
           if-no-files-found: warn
           retention-days: 90
