@@ -10,12 +10,15 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 LABEL_VERSION = "decision-outcome-v2"
@@ -25,6 +28,9 @@ MAX_DECISION_OUTCOME_LABEL_RECORDS = 200_000
 MAX_DECISION_OUTCOME_LABEL_BYTES = 256 * 1024 * 1024
 DEFAULT_HORIZONS_BARS = (1, 3, 6)
 
+_LABEL_HISTORY_ADVISORY_LOCK = (1096041555, 1146045780)
+_SQLITE_LABEL_HISTORY_LOCKS: dict[str, asyncio.Lock] = {}
+
 
 def _decision_outcome_label_capacity(
     existing_records: int,
@@ -33,11 +39,16 @@ def _decision_outcome_label_capacity(
     *,
     existing_bytes: int = 0,
     pending_bytes: int = 0,
+    requested_new_records: int | None = None,
 ) -> dict:
-    """Conservatively reserve both record and decoded-byte budgets before writes."""
+    """Measure the actual candidate batch against the shared record and byte budgets."""
     existing = max(0, int(existing_records))
     pending = max(0, int(pending_decisions))
-    requested = min(max(0, int(batch_limit)), pending)
+    requested = (
+        min(max(0, int(batch_limit)), pending)
+        if requested_new_records is None
+        else max(0, int(requested_new_records))
+    )
     decoded = max(0, int(existing_bytes))
     new_bytes = max(0, int(pending_bytes))
     remaining = max(0, MAX_DECISION_OUTCOME_LABEL_RECORDS - existing)
@@ -481,7 +492,7 @@ def _decode_audit_detail(value: Any) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-async def process_decision_outcome_labels(
+async def _process_decision_outcome_labels_unlocked(
     *,
     limit: int = 100,
     horizons_bars: tuple[int, ...] | list[int] = DEFAULT_HORIZONS_BARS,
@@ -493,7 +504,7 @@ async def process_decision_outcome_labels(
     Existing valid labels at this version are skipped. Insufficient future data is
     retried on a later run. The default is dry-run and cannot write audit records.
     """
-    from .audit_chain import append_audit
+    from .audit_chain import append_prepared_audit, prepare_audit_detail, serialize_audit_detail
     from .db import AuditLog, SessionLocal
 
     limit = max(1, min(10_000, int(limit)))
@@ -571,6 +582,7 @@ async def process_decision_outcome_labels(
         len(pending_decision_ids),
         limit,
         existing_bytes=existing_label_bytes,
+        requested_new_records=0,
     )
     if persist and not capacity["fits"]:
         return {
@@ -585,11 +597,30 @@ async def process_decision_outcome_labels(
             "skip_reasons": {},
             "preview": [],
         }
+    if persist and capacity["remaining_records"] <= 0 and pending_decision_ids:
+        return {
+            "status": "LABEL_HISTORY_CAPACITY_EXCEEDED",
+            "label_version": LABEL_VERSION,
+            "research_only": True,
+            "persisted": False,
+            "failed": True,
+            "created": 0,
+            "selected": 0,
+            "pending_decisions_before_run": len(pending_decision_ids),
+            "pending_decisions_for_version": len(pending_decision_ids),
+            "pending_actionable_decisions_for_version": len(pending_decision_ids),
+            "pending_unlabelable_decisions_for_version": 0,
+            "label_history_capacity": capacity,
+            "skip_reasons": {},
+            "preview": [],
+        }
+    candidate_limit = min(limit, capacity["remaining_records"]) if persist else limit
     data_cache: dict[tuple[str, str, str, str], Any] = {}
     created = skipped = failed = selected = 0
     reasons: dict[str, int] = {}
     preview: list[dict] = []
     labels_to_persist: list[dict] = []
+    permanently_unlabelable_ids: set[str] = set()
 
     for record in decision_records:
         if not record:
@@ -603,7 +634,7 @@ async def process_decision_outcome_labels(
             continue
         if (decision_id, LABEL_VERSION) in already_labelled:
             continue
-        if created >= limit:
+        if created >= candidate_limit:
             break
         selected += 1
         key = (
@@ -624,6 +655,8 @@ async def process_decision_outcome_labels(
             skipped += 1
             code = fetched.code if isinstance(fetched, OutcomeLabelError) else "market_data_fetch_error"
             reasons[code] = reasons.get(code, 0) + 1
+            if code not in {"INSUFFICIENT_FUTURE_DATA", "market_data_fetch_error"}:
+                permanently_unlabelable_ids.add(decision_id)
             if not isinstance(fetched, OutcomeLabelError):
                 failed += 1
             continue
@@ -632,6 +665,8 @@ async def process_decision_outcome_labels(
         except OutcomeLabelError as exc:
             skipped += 1
             reasons[exc.code] = reasons.get(exc.code, 0) + 1
+            if exc.code != "INSUFFICIENT_FUTURE_DATA":
+                permanently_unlabelable_ids.add(decision_id)
             continue
         if persist:
             labels_to_persist.append(label)
@@ -640,13 +675,17 @@ async def process_decision_outcome_labels(
         created += 1
         already_labelled.add((decision_id, LABEL_VERSION))
 
+    persisted_decision_ids: set[str] = set()
+    projected_created = created
     if persist:
         try:
-            pending_label_bytes = sum(
-                len(json.dumps(
-                    label, sort_keys=True, separators=(",", ":"), allow_nan=False,
-                ).encode("utf-8"))
+            prepared_labels = [
+                await prepare_audit_detail(label, actor_id="research-outcome-labeler")
                 for label in labels_to_persist
+            ]
+            pending_label_bytes = sum(
+                len(serialize_audit_detail(label).encode("utf-8"))
+                for label in prepared_labels
             )
         except (TypeError, ValueError, OverflowError):
             return {
@@ -654,9 +693,13 @@ async def process_decision_outcome_labels(
                 "label_version": LABEL_VERSION,
                 "research_only": True,
                 "persisted": False,
+                "failed": True,
                 "created": 0,
                 "selected": selected,
+                "pending_decisions_before_run": len(pending_decision_ids),
                 "pending_decisions_for_version": len(pending_decision_ids),
+                "pending_actionable_decisions_for_version": len(pending_decision_ids),
+                "pending_unlabelable_decisions_for_version": 0,
                 "label_history_capacity": capacity,
                 "skip_reasons": {**reasons, "non_serializable_pending_label": len(labels_to_persist)},
                 "preview": [],
@@ -667,6 +710,7 @@ async def process_decision_outcome_labels(
             limit,
             existing_bytes=existing_label_bytes,
             pending_bytes=pending_label_bytes,
+            requested_new_records=len(prepared_labels),
         )
         if not capacity["fits"]:
             return {
@@ -674,22 +718,34 @@ async def process_decision_outcome_labels(
                 "label_version": LABEL_VERSION,
                 "research_only": True,
                 "persisted": False,
+                "failed": True,
                 "created": 0,
                 "selected": selected,
+                "pending_decisions_before_run": len(pending_decision_ids),
                 "pending_decisions_for_version": len(pending_decision_ids),
+                "pending_actionable_decisions_for_version": len(pending_decision_ids),
+                "pending_unlabelable_decisions_for_version": len(permanently_unlabelable_ids),
                 "label_history_capacity": capacity,
                 "skip_reasons": reasons,
                 "preview": [],
             }
-        # Only now, after the entire candidate batch fits both budgets, append.
-        for label in labels_to_persist:
+        # The surrounding database-coordinated lock is held from before the initial
+        # history read until this loop finishes. Other labelers cannot share a stale
+        # capacity snapshot while this batch appends its exact preflighted payloads.
+        for label in prepared_labels:
             async with SessionLocal() as db:
-                await append_audit(
+                await append_prepared_audit(
                     db,
                     event="ADAPTIVE_DECISION_OUTCOME_LABEL",
                     detail=label,
                     actor_id="research-outcome-labeler",
                 )
+            persisted_decision_ids.add(str(label.get("decision_id") or "").strip())
+        created = len(persisted_decision_ids)
+
+    pending_after = pending_decision_ids - persisted_decision_ids
+    pending_unlabelable = pending_after & permanently_unlabelable_ids
+    pending_actionable = pending_after - pending_unlabelable
 
     return {
         "label_version": LABEL_VERSION,
@@ -697,10 +753,101 @@ async def process_decision_outcome_labels(
         "persisted": bool(persist),
         "selected": selected,
         "created": created,
+        "candidate_labels_created": projected_created,
         "skipped": skipped,
         "failed": failed,
-        "pending_decisions_for_version": len(pending_decision_ids),
+        "pending_decisions_before_run": len(pending_decision_ids),
+        "pending_decisions_for_version": len(pending_after),
+        "pending_actionable_decisions_for_version": len(pending_actionable),
+        "pending_unlabelable_decisions_for_version": len(pending_unlabelable),
+        "projected_pending_decisions_for_version": (
+            max(0, len(pending_decision_ids) - projected_created)
+            if not persist else len(pending_after)
+        ),
         "label_history_capacity": capacity,
         "skip_reasons": reasons,
         "preview": preview,
     }
+
+
+@asynccontextmanager
+async def _decision_outcome_label_write_lock():
+    """Serialize complete label recount/capacity/append batches across processes."""
+    from .db import SessionLocal
+
+    async with SessionLocal() as lock_db:
+        bind = lock_db.get_bind()
+        dialect = bind.dialect.name
+        if dialect == "postgresql":
+            connection = await lock_db.connection()
+            namespace, resource = _LABEL_HISTORY_ADVISORY_LOCK
+            await connection.execute(
+                text("SELECT pg_advisory_lock(:namespace, :resource)"),
+                {"namespace": namespace, "resource": resource},
+            )
+            await connection.commit()
+            try:
+                yield
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:namespace, :resource)"),
+                    {"namespace": namespace, "resource": resource},
+                )
+                await connection.commit()
+            return
+
+        if dialect == "sqlite":
+            database_url = str(bind.url)
+            local_lock = _SQLITE_LABEL_HISTORY_LOCKS.get(database_url)
+            if local_lock is None:
+                local_lock = asyncio.Lock()
+                _SQLITE_LABEL_HISTORY_LOCKS[database_url] = local_lock
+            await local_lock.acquire()
+            lock_file = None
+            fcntl_module = None
+            try:
+                database_path = str(getattr(bind.url, "database", "") or "")
+                if database_path and database_path != ":memory:" and not database_path.startswith("file::memory:"):
+                    try:
+                        import fcntl as fcntl_module
+                    except ImportError as exc:
+                        raise RuntimeError(
+                            "cross-process SQLite label persistence requires POSIX file locking; use PostgreSQL"
+                        ) from exc
+                    key = os.path.realpath(database_path)
+                    lock_name = hashlib.sha256(key.encode("utf-8")).hexdigest()
+                    lock_path = os.path.join(
+                        tempfile.gettempdir(),
+                        f"atlas-decision-outcome-label-{lock_name}.lock",
+                    )
+                    lock_file = open(lock_path, "a+", encoding="utf-8")
+                    await asyncio.to_thread(fcntl_module.flock, lock_file.fileno(), fcntl_module.LOCK_EX)
+                yield
+            finally:
+                if lock_file is not None and fcntl_module is not None:
+                    await asyncio.to_thread(fcntl_module.flock, lock_file.fileno(), fcntl_module.LOCK_UN)
+                    lock_file.close()
+                local_lock.release()
+            return
+
+        raise RuntimeError(
+            f"decision outcome label persistence is unsupported for database dialect {dialect!r}"
+        )
+
+
+async def process_decision_outcome_labels(
+    *,
+    limit: int = 100,
+    horizons_bars: tuple[int, ...] | list[int] = DEFAULT_HORIZONS_BARS,
+    days: int = 365,
+    persist: bool = False,
+) -> dict:
+    """Evaluate decisions; serialize persistent batches across database workers."""
+    if not persist:
+        return await _process_decision_outcome_labels_unlocked(
+            limit=limit, horizons_bars=horizons_bars, days=days, persist=False,
+        )
+    async with _decision_outcome_label_write_lock():
+        return await _process_decision_outcome_labels_unlocked(
+            limit=limit, horizons_bars=horizons_bars, days=days, persist=True,
+        )
