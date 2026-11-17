@@ -359,3 +359,25 @@ def test_supabase_restore_evidence_compatibility():
         target_kind="supabase", target_project_ref="abcdefghijklmnopqrst",
     )
     assert result["target_supabase_project_ref"] == "abcdefghijklmnopqrst"
+
+
+def test_cloud_sql_native_import_operation_evidence_shape():
+    from scripts.verify_restore_operation_evidence import verify
+
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "region": "europe-west1",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump"},
+    }
+    result = verify(
+        operation,
+        operation_id="operation-987",
+        backup_reference="gs://atlas-staging-510915-db-backups/atlas-prod-backup.dump",
+        target_kind="cloud_sql",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+    )
+    assert result["provider_status"] == "DONE"
