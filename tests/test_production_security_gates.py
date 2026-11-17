@@ -478,18 +478,17 @@ def test_staging_deployment_keeps_inflight_runs_alive_and_rechecks_sha_before_de
         "      - name: Deploy restricted paper-only Cloud Run service", 1
     )[1].split("\n      - name:", 1)[0]
     guard = deploy_step.index('current_main_sha="$(gh_retry api')
-    comparison = deploy_step.index('if [[ "$current_main_sha" != "$GITHUB_SHA" ]]', guard)
+    comparison = deploy_step.index("scripts/verify_staging_dispatch.py main-sha", guard)
     image = deploy_step.index('IMAGE="$(cat "$RUNNER_TEMP/atlas-paper-staging-image")', comparison)
     mutation = deploy_step.index('gcloud run deploy "$STAGING_SERVICE"', image)
     assert guard < comparison < image < mutation
-    assert "main advanced before Cloud Run deployment" in deploy_step
 
     post_deploy_guard = deploy.split(
         "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
     )[1].split("\n      - name:", 1)[0]
     assert 'current_main_sha="$(gh_retry api' in post_deploy_guard
-    assert 'if [[ "$current_main_sha" != "$GITHUB_SHA" ]]' in post_deploy_guard
-    assert "main advanced during staging deployment" in post_deploy_guard
+    assert "scripts/verify_staging_dispatch.py main-sha" in post_deploy_guard
+    assert "scripts/verify_staging_dispatch.py workflow-run" in post_deploy_guard
 
 def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_gates():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
@@ -505,10 +504,19 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "github.ref == 'refs/heads/main'" in job
     assert "Wait for required CI gates to pass on this exact commit" in deploy
     assert '--commit "$GITHUB_SHA"' in deploy
-    assert "run_event" in deploy
+    assert "verification_event" in deploy
     assert '.event == "workflow_dispatch"' in deploy
     assert '.event == "push"' in deploy
     assert 'Atlas Native AI offline verification (no provider calls)' in deploy
+
+    preflight_step = deploy.split(
+        "      - name: Dispatch and require read-only staging identity preflight on this exact commit", 1
+    )[1].split("\n      - name:", 1)[0]
+    acceptance_step = deploy.split(
+        "      - name: Dispatch and require customer-paper acceptance on this exact deployment", 1
+    )[1].split("\n      - name:", 1)[0]
+    assert "scripts/verify_staging_dispatch.py workflow-run" in preflight_step
+    assert "scripts/verify_staging_dispatch.py workflow-run" in acceptance_step
     for required_workflow in ("ci.yml", "ledger-concurrency-check.yml", "production-verification.yml"):
         assert f'"{required_workflow}"' in deploy
     assert "gh workflow run staging-identity-preflight.yml" in deploy
@@ -565,7 +573,9 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     )[1].split("\n      - name:", 1)[0]
     assert "failure() && steps.wait-required-gates.outputs.stale != 'true'" in diagnostic_step
     deploy_step = deploy.index("      - name: Deploy restricted paper-only Cloud Run service")
-    freshness_guard = deploy.index("main advanced before Cloud Run deployment", deploy_step)
+    freshness_guard = deploy.index(
+        'if ! python3 scripts/verify_staging_dispatch.py main-sha', deploy_step
+    )
     cloud_run_change = deploy.index('gcloud run deploy "$STAGING_SERVICE"', deploy_step)
     assert freshness_guard < cloud_run_change
     assert 'GH_TOKEN: ${{ github.token }}' in deploy[deploy_step:cloud_run_change]
