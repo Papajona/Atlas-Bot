@@ -372,6 +372,9 @@ def test_postgres_label_history_write_lock_is_acquired_and_released(monkeypatch)
         async def connection(self):
             return connection
 
+        async def rollback(self):
+            statements.append("ROLLBACK")
+
     from app import db as db_module
     monkeypatch.setattr(db_module, "SessionLocal", lambda: _Session())
 
