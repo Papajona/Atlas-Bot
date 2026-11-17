@@ -14,13 +14,15 @@ From the repository root:
 python scripts/label_adaptive_decision_outcomes.py --limit 100 --horizons 1,3,6 --days 365
 ```
 
-The default is dry-run. It prints a JSON summary and up to ten sample labels without writing them.
+The default is dry-run. It prints a JSON summary and up to ten sample labels without writing them. The summary includes `pending_decisions_for_version` (the full number of decisions not yet labelled under the active version) and `label_history_capacity` (current rows, remaining slots and the maximum safe batch).
 
-After reviewing the preview and its data provenance, persist research labels explicitly:
+After reviewing the preview, data provenance and capacity, persist research labels explicitly in batches:
 
 ```bash
-python scripts/label_adaptive_decision_outcomes.py --limit 100 --horizons 1,3,6 --days 365 --persist
+python scripts/label_adaptive_decision_outcomes.py --limit 10000 --horizons 1,3,6 --days 365 --persist
 ```
+
+Repeat the same command until `pending_decisions_for_version` reaches zero. Each successful batch is appended as new audit events; the original v1 rows are never overwritten. Records that cannot yet be labelled remain pending and must not be counted as completed. The writer refuses a batch before appending anything when the total label-audit history would exceed 200,000 records, a bounded budget sized for up to 100,000 v1 rows plus 100,000 v2 relabel rows.
 
 Use the deployment's approved database environment. The command does not need exchange trading permissions; the crypto adapter fetches public OHLCV. The OANDA adapter is the existing practice/demo-only fetcher.
 
@@ -42,4 +44,4 @@ A rejected signal followed by a favourable price move is not automatically a bad
 
 ## Reproducibility
 
-The label version is `decision-outcome-v2`. Version v2 uses next-open executable candidate-side returns; v1 labels carry close-to-close fills and are not regenerated in place. A methodology change must bump that version. Research groups labels by version, so v1 and v2 are reported separately. To label previously recorded decisions under v2, run `scripts/label_adaptive_decision_outcomes.py` in dry-run mode first and verify the record count before any write. Review `outcome_window_sha256`, `source_dataset_sha256`, `market_timestamp`, the selected horizons, and the recorded costs before comparing labels across runs.
+The active label version is `decision-outcome-v2`. Version v2 uses next-open executable candidate-side returns; v1 labels carry close-to-close fills and are not regenerated in place. The labeler skips a decision only when a valid label for the active version already exists, so a v1-labelled decision remains eligible for v2. Research uses executable returns only for v2 and groups v1 and v2 separately. Review `outcome_window_sha256`, `source_dataset_sha256`, `market_timestamp`, the selected horizons, and the recorded costs before comparing labels across runs.
