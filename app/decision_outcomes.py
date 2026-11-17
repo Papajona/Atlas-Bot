@@ -269,6 +269,16 @@ def build_decision_outcome_label(
         raise OutcomeLabelError("INVALID_COST_PROFILE", f"Invalid configured carry for asset {asset!r}")
     side = _candidate_side(decision_record)
 
+    # Completed-candle decisions can first enter at the next observed candle open.
+    entry_open_value = None
+    if "open" in df.columns:
+        try:
+            entry_open_value = float(df.iloc[baseline_index + 1]["open"])
+        except (TypeError, ValueError):
+            entry_open_value = None
+        if entry_open_value is not None and (not math.isfinite(entry_open_value) or entry_open_value <= 0):
+            entry_open_value = None
+
     horizon_results = {}
     for horizon in horizons:
         outcome_index = baseline_index + horizon
@@ -288,7 +298,28 @@ def build_decision_outcome_label(
             candidate_net = forward_bps - 2.0 * costs_bps - carry_cost_bps
         elif side == "sell":
             candidate_net = short_bps - 2.0 * costs_bps - carry_cost_bps
+        executable = {
+            "entry_timing": "NEXT_OPEN_UNAVAILABLE",
+            "executable_entry_open": None,
+            "executable_candidate_side_net_return_bps": None,
+        }
+        if entry_open_value is not None:
+            exe_long = (outcome_close / entry_open_value - 1.0) * 10_000.0
+            exe_short = (entry_open_value / outcome_close - 1.0) * 10_000.0
+            exe_net = None
+            if side == "buy":
+                exe_net = exe_long - 2.0 * costs_bps - carry_cost_bps
+            elif side == "sell":
+                exe_net = exe_short - 2.0 * costs_bps - carry_cost_bps
+            executable = {
+                "entry_timing": "NEXT_OPEN",
+                "executable_entry_open": entry_open_value,
+                "executable_long_gross_return_bps": float(exe_long),
+                "executable_short_gross_return_bps": float(exe_short),
+                "executable_candidate_side_net_return_bps": float(exe_net) if exe_net is not None else None,
+            }
         horizon_results[str(horizon)] = {
+            **executable,
             "status": "VALID",
             "horizon_bars": horizon,
             "horizon_unit": "subsequent_observed_completed_candles",
