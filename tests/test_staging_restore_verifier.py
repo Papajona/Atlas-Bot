@@ -851,6 +851,45 @@ def test_cloud_sql_import_dump_rejects_database_ddl_with_interleaved_comments(tm
         inspect_import_dump(dump)
 
 
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "\\restrict backup-guard\nCREATE DATABASE other_db;\n",
+        "\\restrict backup-guard\nCREATE\nDATABASE other_db;\n",
+    ],
+)
+def test_cloud_sql_import_dump_rejects_database_ddl_after_psql_restrict(tmp_path, sql):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "restricted-database-ddl.sql"
+    dump.write_text(sql, encoding="utf-8")
+    with pytest.raises(ValueError, match="executable CREATE/ALTER/DROP DATABASE"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_import_dump_accepts_pg_dump_restrict_wrappers(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "pg-dump-restrict-wrappers.sql"
+    dump.write_text(
+        "\\restrict backup-guard\n"
+        "CREATE TABLE public.restore_probe(id integer);\n"
+        "\\unrestrict backup-guard\n",
+        encoding="utf-8",
+    )
+    assert inspect_import_dump(dump)["status"] == "PASS"
+
+
+@pytest.mark.parametrize("command", ["\\i external.sql", "\\set ON_ERROR_STOP off"])
+def test_cloud_sql_import_dump_rejects_unsupported_psql_commands(tmp_path, command):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "unsupported-psql-command.sql"
+    dump.write_text(command + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported psql meta-command"):
+        inspect_import_dump(dump)
+
+
 def test_cloud_sql_import_dump_rejects_gzip_database_switch(tmp_path):
     import gzip
     from scripts.verify_cloud_sql_import_dump import inspect_import_dump
@@ -943,6 +982,19 @@ def test_cloud_sql_dump_rejects_set_config_standard_strings_off(tmp_path):
     dump = tmp_path / "set-config-strings.sql"
     dump.write_text(
         "SELECT set_config('standard_conforming_strings', 'off', true);\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
+
+
+def test_cloud_sql_dump_rejects_computed_set_config_standard_strings_off(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "computed-standard-strings-off.sql"
+    dump.write_text(
+        "SELECT set_config('standard_conforming_strings', 'o' || 'ff', false);\n"
+        "SELECT 'a\\'b'; CREATE DATABASE other_db; -- '\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="standard_conforming_strings"):
