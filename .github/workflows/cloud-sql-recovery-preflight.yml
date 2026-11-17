@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/cloud-sql-recovery-preflight.yml"
+      - "scripts/cloud_sql_recovery_inventory.py"
   workflow_dispatch:
 
 permissions:
@@ -61,17 +62,21 @@ jobs:
           gcloud sql databases describe "$CLOUD_SQL_DATABASE" --instance="$instance_name" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/recovery-database.json"
           gcloud storage buckets describe "gs://$BACKUP_BUCKET" --format=json > "$RUNNER_TEMP/backup-bucket.json"
 
-          python - "$RUNNER_TEMP" "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" "$CLOUD_SQL_DATABASE" "$BACKUP_BUCKET" <<'PY'
+          python - "$RUNNER_TEMP" "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" "$CLOUD_SQL_DATABASE" "$BACKUP_BUCKET" "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" <<'PY'
           import json
-          import os
           import subprocess
           import sys
           from pathlib import Path
           from urllib.parse import quote, urlencode
           from urllib.request import Request, urlopen
 
+          from scripts.cloud_sql_recovery_inventory import (
+              classify_backup_objects,
+              require_supported_postgresql_major,
+          )
+
           root = Path(sys.argv[1])
-          expected_instance, expected_database, bucket = sys.argv[2:]
+          expected_instance, expected_database, bucket, source_instance = sys.argv[2:]
           instance = json.loads((root / "recovery-instance.json").read_text())
           database = json.loads((root / "recovery-database.json").read_text())
           bucket_meta = json.loads((root / "backup-bucket.json").read_text())
@@ -83,6 +88,10 @@ jobs:
               raise SystemExit("BLOCKED: Cloud SQL recovery instance is not RUNNABLE")
           if database.get("name") != expected_database:
               raise SystemExit("BLOCKED: Cloud SQL recovery database identity does not match the protected configuration")
+          try:
+              postgres_major = require_supported_postgresql_major(instance.get("databaseVersion"))
+          except ValueError as exc:
+              raise SystemExit(f"BLOCKED: {exc}") from exc
 
           retention = bucket_meta.get("retentionPolicy") or bucket_meta.get("retention_policy") or {}
           retention_locked = retention.get("isLocked", retention.get("is_locked")) is True
@@ -96,7 +105,7 @@ jobs:
               query = {
                   "versions": "true",
                   "maxResults": "1000",
-                  "fields": "items(name,generation,size,timeCreated,timeDeleted,md5Hash,crc32c,retentionExpirationTime),nextPageToken",
+                  "fields": "items(name,generation,size,timeCreated,timeDeleted,softDeleteTime,hardDeleteTime,md5Hash,crc32c,retentionExpirationTime,metadata),nextPageToken",
               }
               if page_token:
                   query["pageToken"] = page_token
@@ -114,32 +123,29 @@ jobs:
               if not page_token:
                   break
 
-          candidate = [
-              {
-                  "name": item.get("name"),
-                  "generation": item.get("generation"),
-                  "size": item.get("size"),
-                  "timeCreated": item.get("timeCreated"),
-                  "timeDeleted": item.get("timeDeleted"),
-                  "checksum_present": bool(item.get("md5Hash") or item.get("crc32c")),
-                  "retentionExpirationTime": item.get("retentionExpirationTime"),
-              }
-              for item in items
-              if item.get("name", "").lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))
-          ]
+          candidates, unverified = classify_backup_objects(
+              items,
+              expected_source_instance=source_instance,
+              expected_source_database=expected_database,
+          )
           summary = {
-              "status": "PASS" if retention_locked and candidate else "BLOCKED",
+              "status": "PASS" if retention_locked and candidates else "BLOCKED",
               "target_instance": observed,
               "target_state": instance.get("state"),
               "target_database": database.get("name"),
               "database_version": instance.get("databaseVersion"),
+              "supported_postgresql_major": postgres_major,
               "region": instance.get("region"),
               "backup_bucket": bucket,
               "bucket_retention_policy_locked": retention_locked,
               "listed_object_versions": len(items),
-              "database_backup_candidates": len(candidate),
-              "candidate_objects": candidate[:100],
-              "candidate_list_truncated": len(candidate) > 100,
+              "source_associated_backup_candidates": len(candidates),
+              "candidate_objects": candidates[:100],
+              "unverified_backup_like_objects": len(unverified),
+              "unverified_objects": unverified[:100],
+              "unverified_list_truncated": len(unverified) > 100,
+              "candidate_list_truncated": len(candidates) > 100,
+              "source_association_note": "Custom metadata match is source association only; it does not prove dump integrity or a successful restore.",
           }
           (root / "recovery-preflight-summary.json").write_text(
               json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
@@ -147,8 +153,8 @@ jobs:
           print(json.dumps(summary, sort_keys=True))
           if not retention_locked:
               raise SystemExit("BLOCKED: backup bucket retention policy is not locked")
-          if not candidate:
-              raise SystemExit("BLOCKED: no PostgreSQL backup object was found in the approved bucket")
+          if not candidates:
+              raise SystemExit("BLOCKED: no live, non-empty, checksummed, retained backup generation with source metadata matching the configured production instance/database was found")
           PY
       - name: Preserve sanitized recovery resource inventory
         if: always()
