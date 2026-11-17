@@ -1686,3 +1686,79 @@ def test_same_tree_merge_child_proof_fails_closed_on_unreadable_git_metadata(mon
         lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1, "", "object unavailable"),
     )
     assert pruning._same_tree_merge_child_of_main("branch-sha", "current-main") is False
+
+def test_octopus_no_code_merge_records_all_superseded_branch_heads(tmp_path, monkeypatch):
+    """A history-only merge may retain several stale tips without changing main's tree."""
+    repository = tmp_path / "atlas-merge-proof"
+    repository.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.name", "Atlas branch-pruning test")
+    git("config", "user.email", "atlas-branch-pruning@example.invalid")
+    (repository / "main.txt").write_text("current-main-tree\n", encoding="utf-8")
+    git("add", "main.txt")
+    git("commit", "-m", "main baseline")
+    base_sha = git("rev-parse", "HEAD")
+
+    (repository / "main.txt").write_text("current-main-tree-with-final-guards\n", encoding="utf-8")
+    git("add", "main.txt")
+    git("commit", "-m", "current main")
+    main_sha = git("rev-parse", "HEAD")
+    main_tree = git("rev-parse", "HEAD^{tree}")
+
+    branch_one_sha = git("commit-tree", main_tree, "-p", base_sha, "-m", "old branch one")
+    branch_two_sha = git("commit-tree", main_tree, "-p", base_sha, "-m", "old branch two")
+    merge_sha = git(
+        "commit-tree",
+        main_tree,
+        "-p",
+        main_sha,
+        "-p",
+        branch_one_sha,
+        "-p",
+        branch_two_sha,
+        "-m",
+        "merge superseded branches without code changes",
+    )
+
+    def run_in_fixture(args, *, check=True):
+        return subprocess.run(
+            args,
+            cwd=repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    monkeypatch.setattr(pruning, "_run", run_in_fixture)
+
+    assert git("rev-parse", f"{merge_sha}^{{tree}}") == main_tree
+    assert pruning._is_ancestor(branch_one_sha, main_sha) is False
+    assert pruning._is_ancestor(branch_two_sha, main_sha) is False
+    assert pruning._is_ancestor(main_sha, merge_sha) is True
+    assert pruning._is_ancestor(branch_one_sha, merge_sha) is True
+    assert pruning._is_ancestor(branch_two_sha, merge_sha) is True
+
+    for branch_name, branch_sha in (
+        ("fix/stale-one", branch_one_sha),
+        ("fix/stale-two", branch_two_sha),
+    ):
+        assert should_delete_ref(
+            branch_name,
+            branch_sha,
+            merge_sha,
+            set(),
+            [],
+            pruning._is_ancestor,
+        ) == (True, "exact branch tip is an ancestor of main")
+
