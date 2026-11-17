@@ -85,6 +85,22 @@ jobs:
           [[ "$receipt_id" =~ ^[0-9]+$ ]]
           echo "check_run_id=$receipt_id" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target_sha }}
+          fetch-depth: 1
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Require checkout to match the exact deployed or manually dispatched commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          echo "PASS: acceptance checkout matches successful staging deployment run $DEPLOYMENT_RUN_ID on exact commit $TARGET_SHA"
+
       - name: Validate exact successful main deployment
         env:
           GH_TOKEN: ${{ github.token }}
@@ -111,22 +127,6 @@ jobs:
             --attempt-before "$deployment_attempt_before" \
             --attempt-after "$deployment_attempt_after" <<< "$deployment_json"
           echo "PASS: deployment evidence is bound to correlation $DISPATCH_ID"
-
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.target_sha }}
-          fetch-depth: 1
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-
-      - name: Require checkout to match the exact deployed or manually dispatched commit
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          echo "PASS: acceptance checkout matches successful staging deployment run $DEPLOYMENT_RUN_ID on exact commit $TARGET_SHA"
 
       - name: Validate protected staging identity inputs
         shell: bash
