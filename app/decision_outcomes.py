@@ -684,7 +684,7 @@ async def _process_decision_outcome_labels_unlocked(
                 for label in labels_to_persist
             ]
             pending_label_bytes = sum(
-                len(serialize_audit_detail(label).encode("utf-8"))
+                len(serialize_audit_detail(label, allow_nan=False).encode("utf-8"))
                 for label in prepared_labels
             )
         except (TypeError, ValueError, OverflowError):
@@ -782,18 +782,16 @@ async def _decision_outcome_label_write_lock():
             connection = await lock_db.connection()
             namespace, resource = _LABEL_HISTORY_ADVISORY_LOCK
             await connection.execute(
-                text("SELECT pg_advisory_lock(:namespace, :resource)"),
+                text("SELECT pg_advisory_xact_lock(:namespace, :resource)"),
                 {"namespace": namespace, "resource": resource},
             )
-            await connection.commit()
             try:
+                # Keep this transaction open for the complete read/capacity/append
+                # sequence. Transaction-scoped locks remain pinned through PgBouncer
+                # transaction pooling and release atomically on rollback/commit.
                 yield
             finally:
-                await connection.execute(
-                    text("SELECT pg_advisory_unlock(:namespace, :resource)"),
-                    {"namespace": namespace, "resource": resource},
-                )
-                await connection.commit()
+                await lock_db.rollback()
             return
 
         if dialect == "sqlite":
