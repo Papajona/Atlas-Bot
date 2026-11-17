@@ -309,7 +309,7 @@ def test_acceptance_workflow_requires_an_exact_successful_deployment_dispatch():
     assert 'test "$GITHUB_REF" = "refs/heads/main"' in run
 
     assert workflow["permissions"]["actions"] == "read"
-    assert workflow["env"]["ADAPTIVE_AI_ENABLED"] == "false"
+    assert workflow["jobs"]["customer-paper-acceptance"]["env"]["ADAPTIVE_AI_ENABLED"] == "false"
     validator = (
         Path(__file__).resolve().parents[1]
         / "scripts"
