@@ -1014,16 +1014,35 @@ def test_cloud_sql_dump_rejects_dollar_quoted_set_config_standard_strings_off(tm
         inspect_import_dump(dump)
 
 
-def test_cloud_sql_dump_accepts_dollar_quoted_unrelated_set_config(tmp_path):
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT set_config('application_name', 'standard_conforming_strings', true);",
+        "SELECT set_config($$application_name$$, $$standard_conforming_strings$$, true);",
+    ],
+)
+def test_cloud_sql_dump_accepts_unrelated_set_config_value_mentioning_protected_setting(tmp_path, statement):
     from scripts.verify_cloud_sql_import_dump import inspect_import_dump
 
     dump = tmp_path / "dollar-quoted-unrelated-setting.sql"
     dump.write_text(
-        "SELECT set_config($$application_name$$, $$atlas-restore-audit$$, false);\n"
+        statement + "\n"
         "CREATE TABLE public.restore_probe(id integer);\n",
         encoding="utf-8",
     )
     assert inspect_import_dump(dump)["status"] == "PASS"
+
+
+def test_cloud_sql_dump_rejects_computed_set_config_setting_name(tmp_path):
+    from scripts.verify_cloud_sql_import_dump import inspect_import_dump
+
+    dump = tmp_path / "computed-guc-name.sql"
+    dump.write_text(
+        "SELECT set_config('standard_' || 'conforming_strings', 'off', false);\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="standard_conforming_strings"):
+        inspect_import_dump(dump)
 
 
 def test_cloud_sql_dump_dollar_signs_inside_identifiers_do_not_open_dollar_quotes(tmp_path):
