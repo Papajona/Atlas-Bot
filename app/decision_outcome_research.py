@@ -17,6 +17,11 @@ import pandas as pd
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
+from .decision_outcomes import (
+    MAX_DECISION_OUTCOME_LABEL_BYTES,
+    MAX_DECISION_OUTCOME_LABEL_RECORDS,
+)
+
 
 def _finite_return(label: dict, horizon: int) -> float | None:
     outcomes = label.get("outcomes")
@@ -154,8 +159,22 @@ def _normalise_labels(records: list[dict]) -> tuple[list[dict], dict]:
     valid = list(latest_by_decision.values())
     missing_side = sum(1 for item in valid if item["candidate_side"] is None)
     label_versions: dict[str, int] = defaultdict(int)
+    label_version_timestamps: dict[str, list[pd.Timestamp]] = defaultdict(list)
     for item in valid:
-        label_versions[item["label_version"]] += 1
+        version = item["label_version"]
+        label_versions[version] += 1
+        timestamp = _time(item.get("market_timestamp"))
+        if timestamp is not None:
+            label_version_timestamps[version].append(timestamp)
+    version_date_ranges = {
+        version: {
+            "first_market_timestamp": min(timestamps).isoformat(),
+            "last_market_timestamp": max(timestamps).isoformat(),
+            "timestamp_count": len(timestamps),
+        }
+        for version, timestamps in sorted(label_version_timestamps.items())
+        if timestamps
+    }
     return valid, {
         "input_records": len(records),
         "valid_labels": len(valid),
@@ -164,6 +183,7 @@ def _normalise_labels(records: list[dict]) -> tuple[list[dict], dict]:
         "valid_labels_without_candidate_side": missing_side,
         "duplicate_decision_labels": duplicate_labels,
         "label_version_counts": dict(sorted(label_versions.items())),
+        "label_version_date_ranges": version_date_ranges,
     }
 
 def evaluate_decision_outcome_labels(
@@ -459,35 +479,32 @@ def evaluate_decision_outcome_labels(
     }
 
 
-async def load_decision_outcome_labels(*, limit: int = 10_000) -> list[dict]:
-    """Read encrypted outcome-label audit records without writing to the database."""
-    from .db import AuditLog, SessionLocal
+async def load_decision_outcome_labels(
+    *,
+    label_version: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """Load complete label history, optionally selecting one version before limiting.
 
-    limit = max(1, min(100_000, int(limit)))
-    async with SessionLocal() as db:
-        rows = (
-            await db.execute(
-                select(AuditLog)
-                .where(AuditLog.event == "ADAPTIVE_DECISION_OUTCOME_LABEL")
-                .order_by(AuditLog.created_at.desc(), AuditLog.id.desc())
-                .limit(limit)
-            )
-        ).scalars().all()
-    result = []
-    for row in reversed(rows):
-        detail = row.detail
-        if isinstance(detail, dict):
-            record = detail
-        elif isinstance(detail, str):
-            try:
-                record = json.loads(detail)
-            except (TypeError, ValueError):
-                continue
-        else:
-            continue
-        if isinstance(record, dict):
-            result.append(record)
-    return result
+    A limit without an explicit label version is rejected: truncating the global
+    latest-row window could silently remove older methodology versions after relabeling.
+    """
+    if limit is not None and not label_version:
+        raise ValueError("--limit requires an explicit label_version")
+    if label_version is not None and not str(label_version).strip():
+        raise ValueError("label_version must be a non-empty string")
+    records = await load_all_decision_outcome_labels()
+    if label_version is not None:
+        records = [
+            record for record in records
+            if str(record.get("label_version") or "") == str(label_version).strip()
+        ]
+    if limit is not None:
+        parsed_limit = int(limit)
+        if parsed_limit < 1:
+            raise ValueError("limit must be positive")
+        records = records[-min(parsed_limit, MAX_DECISION_OUTCOME_LABEL_RECORDS):]
+    return records
 
 
 
@@ -731,8 +748,8 @@ class DecisionOutcomeHistoryIntegrityError(RuntimeError):
 async def load_all_decision_outcome_labels(
     *,
     batch_size: int = 2000,
-    max_records: int = 100_000,
-    max_decoded_bytes: int = 128 * 1024 * 1024,
+    max_records: int = MAX_DECISION_OUTCOME_LABEL_RECORDS,
+    max_decoded_bytes: int = MAX_DECISION_OUTCOME_LABEL_BYTES,
 ) -> list[dict]:
     """Read all labels in bounded scalar batches; fail closed instead of truncating.
 
@@ -744,8 +761,8 @@ async def load_all_decision_outcome_labels(
     from .db import AuditLog, SessionLocal
 
     batch_size = max(100, min(5000, int(batch_size)))
-    max_records = max(1, min(250_000, int(max_records)))
-    max_decoded_bytes = max(1_048_576, min(256 * 1024 * 1024, int(max_decoded_bytes)))
+    max_records = max(1, min(MAX_DECISION_OUTCOME_LABEL_RECORDS, int(max_records)))
+    max_decoded_bytes = max(1_048_576, min(MAX_DECISION_OUTCOME_LABEL_BYTES, int(max_decoded_bytes)))
     result: list[dict] = []
     decoded_bytes = 0
     before_id = None

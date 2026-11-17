@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-import pandas as pd
+import asyncio
 
+import pandas as pd
+import pytest
+
+from app import decision_outcome_research
 from app.decision_outcome_research import evaluate_decision_outcome_labels
 
 
@@ -60,6 +64,79 @@ def test_report_separates_trade_and_rejected_signal_outcomes():
     assert group["by_decision"]["NO_TRADE"]["mean_bps"] is not None
     assert report["rejected_by_reason"][0]["decision_reason_code"] == "model_veto"
     assert report["rejected_by_reason"][0]["metrics"]["n"] == 10
+
+
+def test_v1_close_to_close_and_v2_executable_returns_are_separate():
+    v1 = _label(0, decision="TRADE", value=100.0)
+    v2 = _label(1, decision="TRADE", value=100.0)
+    v2["label_version"] = "decision-outcome-v2"
+    v2["outcomes"]["1"].update({
+        "entry_timing": "NEXT_OPEN",
+        "executable_candidate_side_net_return_bps": 7.0,
+    })
+    report = evaluate_decision_outcome_labels(
+        [v1, v2], min_group_samples=1, min_unique_timestamps=3,
+        redact_holdout=False,
+    )
+    groups = {row["label_version"]: row for row in report["by_market_and_decision"]}
+    assert set(groups) == {"decision-outcome-v1", "decision-outcome-v2"}
+    assert groups["decision-outcome-v1"]["by_decision"]["TRADE"]["mean_bps"] == 100.0
+    assert groups["decision-outcome-v2"]["by_decision"]["TRADE"]["mean_bps"] == 7.0
+    assert report["coverage"]["label_version_counts"] == {
+        "decision-outcome-v1": 1, "decision-outcome-v2": 1,
+    }
+
+
+def test_history_report_retains_v1_after_more_than_ten_thousand_newer_v2_labels():
+    legacy = [_label(i, value=float(i + 1)) for i in range(12)]
+    newer = []
+    for i in range(10_001):
+        record = _label(i + 12, value=500.0 + i)
+        record["label_version"] = "decision-outcome-v2"
+        record["outcomes"]["1"].update({
+            "entry_timing": "NEXT_OPEN",
+            "executable_candidate_side_net_return_bps": 5.0,
+        })
+        newer.append(record)
+
+    report = evaluate_decision_outcome_labels(
+        legacy + newer, min_group_samples=1, min_unique_timestamps=3,
+        redact_holdout=False,
+    )
+    assert report["coverage"]["input_records"] == 10_013
+    assert report["coverage"]["label_version_counts"] == {
+        "decision-outcome-v1": 12,
+        "decision-outcome-v2": 10_001,
+    }
+    groups = {row["label_version"]: row for row in report["by_market_and_decision"]}
+    assert set(groups) == {"decision-outcome-v1", "decision-outcome-v2"}
+    assert report["coverage"]["label_version_date_ranges"]["decision-outcome-v1"]["timestamp_count"] == 12
+    assert report["coverage"]["label_version_date_ranges"]["decision-outcome-v2"]["timestamp_count"] == 10_001
+
+
+def test_report_loader_applies_version_filter_before_optional_limit(monkeypatch):
+    records = [
+        {**_label(i), "label_version": version}
+        for version, count, offset in (
+            ("decision-outcome-v1", 12, 0),
+            ("decision-outcome-v2", 10_001, 12),
+        )
+        for i in range(offset, offset + count)
+    ]
+
+    async def fake_load_all():
+        return records
+
+    monkeypatch.setattr(decision_outcome_research, "load_all_decision_outcome_labels", fake_load_all)
+    all_versions = asyncio.run(decision_outcome_research.load_decision_outcome_labels())
+    legacy_tail = asyncio.run(decision_outcome_research.load_decision_outcome_labels(
+        label_version="decision-outcome-v1", limit=10,
+    ))
+    assert len(all_versions) == 10_013
+    assert len(legacy_tail) == 10
+    assert {row["label_version"] for row in legacy_tail} == {"decision-outcome-v1"}
+    with pytest.raises(ValueError, match="explicit label_version"):
+        asyncio.run(decision_outcome_research.load_decision_outcome_labels(limit=10))
 
 
 def test_chronological_holdout_purges_training_labels_whose_outcome_overlaps():

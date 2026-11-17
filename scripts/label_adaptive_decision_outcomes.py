@@ -58,7 +58,10 @@ def main() -> int:
         )
     )
     print(json.dumps(result, indent=2, sort_keys=True, default=str))
-    if result.get("failed"):
+    if result.get("failed") or result.get("status") in {
+        "LABEL_HISTORY_CAPACITY_EXCEEDED",
+        "LABEL_HISTORY_INVALID",
+    }:
         return 2
     return 0
 
