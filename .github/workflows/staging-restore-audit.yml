@@ -28,7 +28,7 @@ jobs:
   audit-restored-target:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     environment: staging
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
@@ -101,6 +101,29 @@ jobs:
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
+      - name: Verify immutable recovery backup object in approved GCS bucket
+        if: env.RESTORE_TARGET_KIND == 'cloud_sql'
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$BACKUP_REFERENCE" in
+            gs://atlas-staging-510915-db-backups/*) ;;
+            *) echo "BLOCKED: Cloud SQL recovery backup must be an object in gs://atlas-staging-510915-db-backups/" >&2; exit 1 ;;
+          esac
+          gcloud storage objects describe "$BACKUP_REFERENCE" --format=json > "$RUNNER_TEMP/recovery-backup-object.json"
+          python - "$RUNNER_TEMP/recovery-backup-object.json" <<'PY'
+          import json,sys
+          obj=json.load(open(sys.argv[1]))
+          generation=str(obj.get("generation",""))
+          try:
+              size=int(obj.get("size",0))
+          except (TypeError,ValueError):
+              size=0
+          if not generation.isdigit() or int(generation)<=0 or size<=0:
+              raise SystemExit("BLOCKED: backup object lacks a positive generation and non-zero size")
+          if not (obj.get("md5Hash") or obj.get("crc32c")):
+              raise SystemExit("BLOCKED: backup object has no provider checksum metadata")
+          PY
       - name: Download provider restore-operation record and dedicated audit database secret
         shell: bash
         run: |
@@ -225,7 +248,7 @@ jobs:
           archived=0
           for file in \
             "$RUNNER_TEMP/restore-evidence-verification.json" \
-            "$RUNNER_TEMP/staging-restore-audit.json"; do
+            "$RUNNER_TEMP/staging-restore-audit.json" \\\n            "$RUNNER_TEMP/recovery-backup-object.json"; do
             if [[ -s "$file" ]]; then
               gcloud storage cp "$file" "$out_dir/$(basename "$file")"
               archived=1
@@ -241,7 +264,7 @@ jobs:
           name: atlas-staging-restore-audit-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/restore-evidence-verification.json
-            ${{ runner.temp }}/staging-restore-audit.json
+            ${{ runner.temp }}/staging-restore-audit.json\n            ${{ runner.temp }}/recovery-backup-object.json
           if-no-files-found: warn
           retention-days: 90
 
