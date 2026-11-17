@@ -582,6 +582,10 @@ def test_gcs_backup_binding_accepts_standardized_snake_case_checksum_fields():
             "retention_expiration_time": "2027-11-17T10:00:00Z",
         },
         bucket_metadata={"retention_policy": {"is_locked": True, "retention_period": "31536000s"}},
+        object_versions={"items": [{
+            "name": "backup.dump", "generation": "1750000000000000",
+            "timeCreated": "2026-11-17T10:00:00Z",
+        }]},
         operation_record={
             "name": "operation-987",
             "operationType": "IMPORT",
@@ -610,6 +614,10 @@ def test_gcs_backup_binding_rejects_generation_mismatch_and_unlocked_retention()
             "retention_expiration_time": "2027-11-17T10:00:00Z",
         },
         "bucket_metadata": {"retention_policy": {"is_locked": False}},
+        "object_versions": {"items": [{
+            "name": "backup.dump", "generation": "1750000000000000",
+            "timeCreated": "2026-11-17T10:00:00Z",
+        }]},
         "operation_record": {
             "operationType": "IMPORT", "status": "DONE",
             "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
@@ -634,6 +642,130 @@ def test_gcs_backup_binding_rejects_retention_not_covering_import_window():
                 "retention_expiration_time": "2026-11-17T10:09:00Z",
             },
             bucket_metadata={"retention_policy": {"is_locked": True}},
+            object_versions={"items": [{
+                "name": "backup.dump", "generation": "1750000000000000",
+                "timeCreated": "2026-11-17T10:06:00Z",
+            }]},
+            operation_record={
+                "operationType": "IMPORT", "status": "DONE",
+                "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
+            },
+        )
+
+
+def test_cloud_sql_native_generation_suffixed_import_uri_is_accepted():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {
+            "database": "atlas-recovery-db",
+            "uri": pinned,
+        },
+    }
+    assert verify(
+        operation,
+        operation_id="operation-987",
+        backup_reference=pinned,
+        target_kind="cloud_sql",
+        target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+        target_database="atlas-recovery-db",
+    )["backup_generation"] == "1750000000000000"
+
+
+def test_cloud_sql_import_into_different_database_is_rejected():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {
+            "database": "wrong_database",
+            "uri": "gs://atlas-staging-510915-db-backups/backup.dump",
+        },
+    }
+    with pytest.raises(ValueError, match="does not match the configured Cloud SQL database"):
+        verify(
+            operation, operation_id="operation-987", backup_reference=pinned,
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+            target_database="atlas-recovery-db",
+        )
+
+
+def test_cloud_sql_import_without_definitive_database_is_rejected():
+    from scripts.verify_restore_operation_evidence import verify
+
+    pinned = "gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000"
+    operation = {
+        "name": "operation-987",
+        "targetProject": "atlas-staging-510915",
+        "targetId": "atlas-recovery",
+        "operationType": "IMPORT",
+        "status": "DONE",
+        "importContext": {"uri": "gs://atlas-staging-510915-db-backups/backup.dump"},
+    }
+    with pytest.raises(ValueError, match="does not identify importContext.database"):
+        verify(
+            operation, operation_id="operation-987", backup_reference=pinned,
+            target_kind="cloud_sql",
+            target_instance_connection_name="atlas-staging-510915:europe-west1:atlas-recovery",
+            target_database="atlas-recovery-db",
+        )
+
+
+def test_pinned_older_backup_generation_succeeds_when_newer_version_appears_after_import():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    result = verify_backup_binding(
+        backup_reference="gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+        object_metadata={
+            "name": "backup.dump", "bucket": "atlas-staging-510915-db-backups",
+            "generation": "1750000000000000", "size": "1024",
+            "crc32c_hash": "ImIEBA==", "time_created": "2026-11-17T10:00:00Z",
+            "retention_expiration_time": "2027-11-17T10:00:00Z",
+        },
+        bucket_metadata={"retention_policy": {"is_locked": True}},
+        object_versions={"items": [
+            {"name": "backup.dump", "generation": "1750000000000000", "timeCreated": "2026-11-17T10:00:00Z"},
+            {"name": "backup.dump", "generation": "1750000000000001", "timeCreated": "2026-11-17T10:20:00Z"},
+        ]},
+        operation_record={
+            "operationType": "IMPORT", "status": "DONE",
+            "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
+        },
+    )
+    assert result["backup_generation"] == "1750000000000000"
+    assert result["live_generation_at_import_start"] == "1750000000000000"
+    assert result["live_generation_at_import_end"] == "1750000000000000"
+
+
+def test_backup_binding_rejects_object_replaced_during_import_interval():
+    from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
+
+    with pytest.raises(ValueError, match="live object generation for the full"):
+        verify_backup_binding(
+            backup_reference="gs://atlas-staging-510915-db-backups/backup.dump#1750000000000000",
+            object_metadata={
+                "name": "backup.dump", "bucket": "atlas-staging-510915-db-backups",
+                "generation": "1750000000000000", "size": "1024",
+                "crc32c_hash": "ImIEBA==", "time_created": "2026-11-17T10:00:00Z",
+                "retention_expiration_time": "2027-11-17T10:00:00Z",
+            },
+            bucket_metadata={"retention_policy": {"is_locked": True}},
+            object_versions={"items": [
+                {"name": "backup.dump", "generation": "1750000000000000", "timeCreated": "2026-11-17T10:00:00Z"},
+                {"name": "backup.dump", "generation": "1750000000000001", "timeCreated": "2026-11-17T10:07:00Z"},
+            ]},
             operation_record={
                 "operationType": "IMPORT", "status": "DONE",
                 "startTime": "2026-11-17T10:05:00Z", "endTime": "2026-11-17T10:10:00Z",
