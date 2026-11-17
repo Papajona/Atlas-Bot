@@ -151,7 +151,7 @@ def _cloud_sql_backup(record: Mapping[str, Any], expected_reference: str) -> tup
         normalized_objects.append(object_uri)
         if generation is not None:
             observed_generations.append(generation)
-    if _consistent("backup object URI", normalized_objects) != expected_object_uri:
+    if _consistent("backup reference object URI", normalized_objects) != expected_object_uri:
         raise ValueError("provider evidence contains conflicting backup reference values")
     if observed_generations and _consistent("backup generation", observed_generations) != expected_generation:
         raise ValueError("provider evidence contains conflicting backup reference generations")
