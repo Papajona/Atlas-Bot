@@ -25,7 +25,14 @@ def _finite_return(label: dict, horizon: int) -> float | None:
     outcome = outcomes.get(str(horizon))
     if not isinstance(outcome, dict) or outcome.get("status") != "VALID":
         return None
-    value = outcome.get("candidate_side_net_return_bps")
+    # New labels must use executable returns; unavailable next-open fills fail closed.
+    # Only legacy labels without entry_timing may use close-to-close fallback.
+    if "entry_timing" in outcome:
+        if outcome.get("entry_timing") != "NEXT_OPEN":
+            return None
+        value = outcome.get("executable_candidate_side_net_return_bps")
+    else:
+        value = outcome.get("candidate_side_net_return_bps")
     if value is None:
         return None
     try:

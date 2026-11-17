@@ -37,9 +37,14 @@ def build_meta_dataset(
     if not df.index.is_unique or not df.index.is_monotonic_increasing:
         raise ValueError("meta-label data index must be unique and chronological")
 
+    if "open" not in df.columns:
+        raise ValueError("meta-label data must contain an open column for next-open entry labels")
     signals = strategy_signals(df)
-    close = df["close"].astype(float)
-    forward_return = close.shift(-int(horizon)) / close - 1.0
+    # Completed-bar signal enters at next open and exits at the open after horizon bars.
+    open_ = df["open"].astype(float)
+    entry_open = open_.shift(-1)
+    exit_open = open_.shift(-(int(horizon) + 1))
+    forward_return = (exit_open / entry_open - 1.0).replace([np.inf, -np.inf], np.nan)
     direction = np.sign(signals["ensemble"].astype(float))
     edge = forward_return * direction
     target = (edge > edge_threshold / 10_000.0).astype(int)
@@ -159,7 +164,7 @@ def meta_label_walk_forward(
     oos_probabilities: list[float] = []
     oos_labels: list[int] = []
     used_folds = 0
-    label_horizon = int(horizon)
+    label_horizon = int(horizon) + 1
 
     for fold_number in range(1, len(splits)):
         train_candidates = np.concatenate(splits[:fold_number])
@@ -168,7 +173,7 @@ def meta_label_walk_forward(
             continue
 
         test_start_bar = int(source_positions[test_candidates[0]])
-        # A training label at position p observes the close at p + horizon.
+        # A training label at position p observes the open at p + horizon + 1.
         # That endpoint must precede the first held-out decision bar.
         train = train_candidates[
             source_positions[train_candidates] + label_horizon < test_start_bar
@@ -252,7 +257,8 @@ def meta_label_walk_forward(
         "current_probability": latest_probability,
         "latest_probability": latest_probability,
         "threshold": float(threshold),
-        "horizon_bars": label_horizon,
+        "horizon_bars": int(horizon),
+        "label_timing": "NEXT_OPEN_ENTRY_TO_OPEN_AT_HORIZON",
         "min_edge_bps": float(min_edge_bps),
         "training_last_label_index": str(features.index[-1]),
         "training_last_label_end_index": str(df.index[label_end_position]),
