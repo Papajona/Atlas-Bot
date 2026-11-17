@@ -245,9 +245,11 @@ def _inspect_lines(lines) -> tuple[int, int]:
                 if line.startswith(dollar_delimiter, i):
                     i += len(dollar_delimiter)
                     dollar_delimiter = ""
+                    record_literal()
                     add_token("__QUOTED_LITERAL__")
                     state = "normal"
                 else:
+                    append_literal_char(char)
                     i += 1
                 continue
 
