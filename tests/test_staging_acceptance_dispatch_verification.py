@@ -15,6 +15,10 @@ from scripts.verify_staging_dispatch import (
     verify_current_main_sha,
     verify_dispatched_workflow_run,
 )
+from scripts.verify_staging_acceptance_deployment import (
+    StagingAcceptanceEvidenceError,
+    verify_staging_acceptance_deployment,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -257,3 +261,160 @@ def test_deployment_workflow_executes_the_same_guards_covered_by_these_tests():
         acceptance_run_pos,
         "PASS: customer-paper acceptance run",
     )
+
+
+ACCEPTANCE_REQUIRED_STEPS = (
+    "Build and push exact commit image to Artifact Registry",
+    "Deploy restricted paper-only Cloud Run service",
+    "Dispatch and require read-only staging identity preflight on this exact commit",
+)
+
+
+def _deployment_payload(**overrides):
+    steps = [{"name": name, "conclusion": "success"} for name in ACCEPTANCE_REQUIRED_STEPS]
+    payload = {
+        "databaseId": 43930000999,
+        "name": "Deploy Paper-Only Atlas Staging",
+        "headSha": SHA,
+        "headBranch": "main",
+        "status": "in_progress",
+        "conclusion": None,
+        "jobs": [{"name": "deploy-paper-staging", "steps": steps}],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _verify_deployment(payload, *, before="3", after="3"):
+    return verify_staging_acceptance_deployment(
+        payload,
+        expected_run_id="43930000999",
+        expected_attempt="3",
+        expected_sha=SHA,
+        attempt_before=before,
+        attempt_after=after,
+    )
+
+
+def test_manual_acceptance_accepts_exact_in_progress_deployment_after_preflight():
+    assert _verify_deployment(_deployment_payload()) == "in_progress"
+
+
+def test_manual_acceptance_accepts_exact_completed_successful_deployment():
+    payload = _deployment_payload(status="completed", conclusion="success")
+    assert _verify_deployment(payload) == "completed"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"databaseId": 43930000123}, "run ID"),
+        ({"name": "Unrelated workflow"}, "workflow identity"),
+        ({"headSha": OTHER_SHA}, "SHA"),
+        ({"headBranch": "feature/test"}, "not on main"),
+        ({"status": "queued"}, "status"),
+        ({"status": "completed", "conclusion": "failure"}, "did not succeed"),
+    ],
+)
+def test_manual_acceptance_rejects_wrong_deployment_identity_or_state(overrides, message):
+    with pytest.raises(StagingAcceptanceEvidenceError, match=message):
+        _verify_deployment(_deployment_payload(**overrides))
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("2", "3"),
+        ("3", "4"),
+        ("", "3"),
+        ("3", "invalid"),
+    ],
+)
+def test_manual_acceptance_rejects_deployment_attempt_drift(before, after):
+    with pytest.raises(StagingAcceptanceEvidenceError, match="attempt"):
+        _verify_deployment(_deployment_payload(), before=before, after=after)
+
+
+@pytest.mark.parametrize("required_step", ACCEPTANCE_REQUIRED_STEPS)
+def test_manual_acceptance_rejects_missing_or_failed_required_deployment_step(required_step):
+    missing = _deployment_payload()
+    missing["jobs"][0]["steps"] = [
+        step for step in missing["jobs"][0]["steps"] if step["name"] != required_step
+    ]
+    with pytest.raises(StagingAcceptanceEvidenceError, match="expected exactly one"):
+        _verify_deployment(missing)
+
+    failed = _deployment_payload()
+    for step in failed["jobs"][0]["steps"]:
+        if step["name"] == required_step:
+            step["conclusion"] = "failure"
+    with pytest.raises(StagingAcceptanceEvidenceError, match="did not succeed"):
+        _verify_deployment(failed)
+
+
+def test_manual_acceptance_rejects_ambiguous_job_or_duplicate_required_step():
+    duplicate_job = _deployment_payload()
+    duplicate_job["jobs"].append(duplicate_job["jobs"][0])
+    with pytest.raises(StagingAcceptanceEvidenceError, match="exactly one deploy-paper-staging"):
+        _verify_deployment(duplicate_job)
+
+    duplicate_step = _deployment_payload()
+    duplicate_step["jobs"][0]["steps"].append(
+        dict(duplicate_step["jobs"][0]["steps"][0])
+    )
+    with pytest.raises(StagingAcceptanceEvidenceError, match="expected exactly one"):
+        _verify_deployment(duplicate_step)
+
+
+def test_manual_acceptance_workflow_executes_the_tested_deployment_evidence_verifier():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/customer-paper-staging-acceptance.yml").read_text(
+            encoding="utf-8"
+        )
+    )
+    on = workflow.get("on", workflow.get(True))
+    inputs = on["workflow_dispatch"]["inputs"]
+    for field in ("target_sha", "deployment_run_id", "deployment_run_attempt", "dispatch_id"):
+        assert inputs[field]["required"] is True
+
+    steps = workflow["jobs"]["customer-paper-acceptance"]["steps"]
+    matches = [
+        step for step in steps
+        if step.get("name") == "Validate exact successful main deployment"
+    ]
+    assert len(matches) == 1
+    run = matches[0]["run"]
+    assert "scripts/verify_staging_acceptance_deployment.py" in run
+    assert '--expected-run-id "$DEPLOYMENT_RUN_ID"' in run
+    assert '--expected-attempt "$DEPLOYMENT_RUN_ATTEMPT"' in run
+    assert '--expected-sha "$TARGET_SHA"' in run
+    assert '--attempt-before "$deployment_attempt_before"' in run
+    assert '--attempt-after "$deployment_attempt_after"' in run
+    assert '<<< "$deployment_json"' in run
+
+
+def test_parent_rechecks_main_after_acceptance_child_completes_before_success():
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/staging-paper-deploy.yml").read_text(encoding="utf-8")
+    )
+    steps = workflow["jobs"]["deploy-paper-staging"]["steps"]
+    matches = [
+        step for step in steps
+        if step.get("name") == "Dispatch and require customer-paper acceptance on this exact deployment"
+    ]
+    assert len(matches) == 1
+    run = matches[0]["run"]
+
+    completed = run.index('if [[ "$run_status" == "completed" ]]; then')
+    fresh_main = run.index(
+        'current_main_sha="$(gh_retry api "/repos/$GITHUB_REPOSITORY/git/ref/heads/main"',
+        completed,
+    )
+    main_guard = run.index(
+        "scripts/verify_staging_dispatch.py main-sha",
+        fresh_main,
+    )
+    success = run.index("PASS: customer-paper acceptance run", main_guard)
+    failure_branch_end = run.index("fi", run.index("then", main_guard))
+    assert completed < fresh_main < main_guard < success
+    assert "exit 1" in run[run.index("then", main_guard):failure_branch_end]
