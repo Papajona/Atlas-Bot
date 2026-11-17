@@ -18,7 +18,7 @@ import pandas as pd
 from sqlalchemy import select
 
 
-LABEL_VERSION = "decision-outcome-v1"
+LABEL_VERSION = "decision-outcome-v2"
 DEFAULT_HORIZONS_BARS = (1, 3, 6)
 _SUPPORTED_YFINANCE_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "1d"}
 _SUPPORTED_OANDA_TIMEFRAMES = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
