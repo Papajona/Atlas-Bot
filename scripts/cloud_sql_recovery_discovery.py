@@ -173,6 +173,13 @@ def discover_resources(
                 statuses[f"cloud_sql_instances.{name}.databases"] = database_status
                 statuses[f"cloud_sql_instances.{name}.backups"] = backup_status
 
+                settings_value = instance.get("settings", {})
+                settings_status = PASS
+                if not isinstance(settings_value, dict):
+                    settings_status = "GCLOUD_RESPONSE_SHAPE_INVALID"
+                    settings_value = {}
+                statuses[f"cloud_sql_instances.{name}.settings"] = settings_status
+
                 sql_inventory.append(
                     {
                         "name": name,
@@ -180,7 +187,7 @@ def discover_resources(
                         "region": instance.get("region"),
                         "state": instance.get("state"),
                         "database_version": instance.get("databaseVersion"),
-                        "tier": (instance.get("settings") or {}).get("tier"),
+                        "tier": settings_value.get("tier"),
                         "databases": databases if database_status == PASS else [],
                         "database_inventory_status": database_status,
                         "backups": backups if backup_status == PASS else [],
@@ -253,8 +260,22 @@ def discover_resources(
     ]
 
     retention = {}
+    retention_status = PASS
     if isinstance(bucket_meta, dict):
-        retention = bucket_meta.get("retentionPolicy") or bucket_meta.get("retention_policy") or {}
+        retention_key = (
+            "retentionPolicy"
+            if "retentionPolicy" in bucket_meta
+            else "retention_policy"
+            if "retention_policy" in bucket_meta
+            else None
+        )
+        if retention_key is not None:
+            retention_value = bucket_meta[retention_key]
+            if not isinstance(retention_value, dict):
+                retention_status = "GCLOUD_RESPONSE_SHAPE_INVALID"
+            else:
+                retention = retention_value
+    statuses["backup_bucket.retention_policy"] = retention_status
 
     passed = sum(status == PASS for status in statuses.values())
     failed = [name for name, status in statuses.items() if status != PASS]
@@ -282,6 +303,7 @@ def discover_resources(
         "atlas_service_accounts": atlas_accounts,
         "backup_bucket": bucket,
         "backup_bucket_status": bucket_status,
+        "bucket_retention_policy_status": retention_status,
         "bucket_retention_policy_locked": (
             retention.get("isLocked", retention.get("is_locked")) is True
         ),
