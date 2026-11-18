@@ -183,7 +183,7 @@ def test_restore_preflight_uses_logged_supabase_pg_dump_source_and_distinct_clou
     assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in workflow
     assert "SOURCE_SUPABASE_DATABASE: postgres" in workflow
     assert "from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source" in workflow
-    assert "source_reference=source_reference" in workflow
+    assert "source_backup_reference=source_reference" in workflow
     assert "source_project_ref=source_project_ref" in workflow
     assert "database.get(\"name\") != expected_database" in workflow
     assert "PRODUCTION_CLOUD_SQL_DATABASE" not in workflow

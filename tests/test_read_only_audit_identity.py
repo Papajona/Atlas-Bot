@@ -80,7 +80,10 @@ def test_read_database_uri_accepts_existing_supabase_session_pooler_format():
     assert host == "aws-0-eu-west-1.pooler.supabase.com"
     assert env["PGUSER"] == f"atlas_audit_reader.{PROJECT_REF}"
     assert env["PGSSLMODE"] == "require"
-    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGOPTIONS"] == (
+        "-c default_transaction_read_only=on -c statement_timeout=15000 "
+        "-c atlas.restore_target_kind=supabase"
+    )
 
 
 def test_read_database_uri_rejects_session_pooler_username_for_another_project():

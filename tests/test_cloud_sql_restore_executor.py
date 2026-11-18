@@ -323,7 +323,7 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
     assert "[.]sql([.]gz)?" in audit_workflow
     assert "RESTORE_TARGET_KIND" in audit_workflow
 
-    assert "verify_cloud_sql_supabase_source_provenance.py" in preflight
+    assert "from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source" in preflight
     assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in preflight
     assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" not in preflight
     assert "require_supported_postgresql_major(" in preflight
