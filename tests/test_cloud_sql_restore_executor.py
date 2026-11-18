@@ -357,6 +357,42 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
 
 
 
+
+
+
+def test_restore_inputs_accept_verified_supabase_pg_dump_source_without_production_cloud_sql_instance():
+    assert validate_restore_inputs(
+        project_id="atlas-staging-510915",
+        region="europe-west1",
+        target_instance=TARGET,
+        target_database="atlas-recovery-db",
+        backup_reference=(
+            "gs://atlas-staging-510915-db-backups/"
+            "atlas-supabase-pre-customer-paper-20261022T153023Z.dump#1792683068959304"
+        ),
+        source_supabase_project_ref="wauaelzyugjuepmrewaw",
+    ) == (
+        "atlas-recovery",
+        "atlas-supabase-pre-customer-paper-20261022T153023Z.dump",
+        "1792683068959304",
+    )
+
+
+def test_restore_inputs_reject_wrong_supabase_source_project_ref():
+    with pytest.raises(ValueError, match="source Supabase project ref"):
+        validate_restore_inputs(
+            project_id="atlas-staging-510915",
+            region="europe-west1",
+            target_instance=TARGET,
+            target_database="atlas-recovery-db",
+            backup_reference=(
+                "gs://atlas-staging-510915-db-backups/"
+                "atlas-supabase-pre-customer-paper-20261022T153023Z.dump#1792683068959304"
+            ),
+            source_supabase_project_ref="wrong-project-ref",
+        )
+
+
 def test_sanitized_backup_reference_accepts_only_generation_pinned_sql_under_sanitized_prefix():
     assert validate_sanitized_backup_reference(
         "gs://atlas-staging-510915-db-backups/sanitized-imports/public-staging-scrubbed.sql#1792683068959305"
