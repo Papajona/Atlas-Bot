@@ -69,6 +69,9 @@ def verify_supabase_pg_dump_source(
     expected_name, expected_generation = SOURCE_BACKUP_REFERENCE.split("gs://" + BACKUP_BUCKET + "/", 1)[1].split("#", 1)
     if str(_get(object_metadata, "name") or "") != expected_name:
         raise ValueError("GCS source object name does not match the authenticated pg_dump evidence")
+    observed_bucket = _get(object_metadata, "bucket")
+    if observed_bucket not in (None, "", BACKUP_BUCKET):
+        raise ValueError("GCS source object bucket does not match the approved backup bucket")
     if str(_get(object_metadata, "generation") or "") != expected_generation:
         raise ValueError("GCS source object generation does not match the authenticated pg_dump evidence")
     try:
