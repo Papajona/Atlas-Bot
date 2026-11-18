@@ -237,6 +237,19 @@ SELECT jsonb_build_object(
         'order_events', 'position_events'
       )
   ),
+  'customer_paper_tenant_policies', (
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'table', p.tablename,
+      'cmd', p.cmd,
+      'permissive', p.permissive,
+      'roles', to_jsonb(p.roles),
+      'qual', p.qual,
+      'with_check', p.with_check
+    ) ORDER BY p.tablename), '[]'::jsonb)
+    FROM pg_policies p
+    WHERE p.schemaname = 'customer_paper'
+      AND p.policyname = 'customer_paper_tenant'
+  ),
   'customer_paper_backend_policy_count', (
     SELECT count(*) FROM pg_policies
     WHERE schemaname = 'customer_paper'
@@ -253,11 +266,11 @@ SELECT jsonb_build_object(
             'accounts', 'journals', 'journal_lines', 'orders', 'fills',
             'order_events', 'position_events'
           )
-          AND NOT ('atlas_customer_paper' = ANY(roles)))
+          AND roles <> ARRAY['atlas_customer_paper']::name[])
         OR
         (policyname = 'customer_paper_bar_budget_backend'
           AND tablename IN ('market_bar_budgets', 'market_bar_allocations')
-          AND NOT ('atlas_customer_paper' = ANY(roles)))
+          AND roles <> ARRAY['atlas_customer_paper']::name[])
       )
   ),
   'customer_paper_runtime_role_valid', EXISTS (
@@ -299,15 +312,18 @@ SELECT jsonb_build_object(
           AND c.relowner = r.oid
       )
   ),
-  'customer_paper_runtime_schema_usage', has_schema_privilege(
-    'atlas_customer_paper', 'customer_paper', 'USAGE'
-  ),
-  'customer_paper_runtime_schema_create', has_schema_privilege(
-    'atlas_customer_paper', 'customer_paper', 'CREATE'
-  ),
-  'customer_paper_runtime_public_schema_usage', has_schema_privilege(
-    'atlas_customer_paper', 'public', 'USAGE'
-  ),
+  'customer_paper_runtime_schema_usage', CASE
+    WHEN to_regrole('atlas_customer_paper') IS NULL THEN false
+    ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'USAGE')
+  END,
+  'customer_paper_runtime_schema_create', CASE
+    WHEN to_regrole('atlas_customer_paper') IS NULL THEN true
+    ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'CREATE')
+  END,
+  'customer_paper_runtime_public_schema_usage', CASE
+    WHEN to_regrole('atlas_customer_paper') IS NULL THEN true
+    ELSE has_schema_privilege('atlas_customer_paper', 'public', 'USAGE')
+  END,
   'customer_paper_runtime_invalid_table_privileges', (
     SELECT count(*)
     FROM unnest(ARRAY[
@@ -316,17 +332,24 @@ SELECT jsonb_build_object(
     ]::text[]) AS required(table_name)
     LEFT JOIN pg_class c
       ON c.oid = to_regclass(format('customer_paper.%I', required.table_name))
-    WHERE c.oid IS NULL
-       OR NOT has_table_privilege('atlas_customer_paper', c.oid, 'SELECT')
-       OR NOT has_table_privilege('atlas_customer_paper', c.oid, 'INSERT')
-       OR has_table_privilege('atlas_customer_paper', c.oid, 'UPDATE')
-       OR has_table_privilege('atlas_customer_paper', c.oid, 'DELETE')
-       OR has_table_privilege('atlas_customer_paper', c.oid, 'TRUNCATE')
-       OR has_table_privilege('atlas_customer_paper', c.oid, 'REFERENCES')
-       OR has_table_privilege('atlas_customer_paper', c.oid, 'TRIGGER')
+    LEFT JOIN pg_roles runtime_role
+      ON runtime_role.rolname = 'atlas_customer_paper'
+    WHERE c.oid IS NULL OR runtime_role.oid IS NULL
        OR CASE
-            WHEN current_setting('server_version_num')::integer >= 170000
-            THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')
+            WHEN c.oid IS NOT NULL AND runtime_role.oid IS NOT NULL THEN (
+              NOT has_table_privilege(runtime_role.oid, c.oid, 'SELECT')
+              OR NOT has_table_privilege(runtime_role.oid, c.oid, 'INSERT')
+              OR has_table_privilege(runtime_role.oid, c.oid, 'UPDATE')
+              OR has_table_privilege(runtime_role.oid, c.oid, 'DELETE')
+              OR has_table_privilege(runtime_role.oid, c.oid, 'TRUNCATE')
+              OR has_table_privilege(runtime_role.oid, c.oid, 'REFERENCES')
+              OR has_table_privilege(runtime_role.oid, c.oid, 'TRIGGER')
+              OR CASE
+                   WHEN current_setting('server_version_num')::integer >= 170000
+                   THEN has_table_privilege(runtime_role.oid, c.oid, 'MAINTAIN')
+                   ELSE false
+                 END
+            )
             ELSE false
           END
   ),
@@ -343,7 +366,11 @@ SELECT jsonb_build_object(
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'customer_paper'
       AND c.relkind = 'S'
-      AND has_sequence_privilege('atlas_customer_paper', c.oid, 'USAGE')
+      AND CASE
+            WHEN c.relkind = 'S' AND to_regrole('atlas_customer_paper') IS NOT NULL
+            THEN has_sequence_privilege('atlas_customer_paper', c.oid, 'USAGE')
+            ELSE false
+          END
   ),
   'customer_paper_runtime_sequences_with_forbidden_privileges', (
     SELECT count(*)
@@ -351,30 +378,37 @@ SELECT jsonb_build_object(
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname = 'customer_paper'
       AND c.relkind = 'S'
-      AND (
-        has_sequence_privilege('atlas_customer_paper', c.oid, 'UPDATE')
-      )
+      AND CASE
+            WHEN c.relkind = 'S' AND to_regrole('atlas_customer_paper') IS NOT NULL
+            THEN has_sequence_privilege('atlas_customer_paper', c.oid, 'UPDATE')
+            ELSE false
+          END
   ),
   'customer_paper_runtime_public_financial_privileges', (
-    SELECT count(*)
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relkind IN ('r', 'p')
-      AND c.relname IN (
-        'customer_ledger_accounts', 'ledger_entries', 'ledger_journals',
-        'ledger_journal_lines', 'withdrawals', 'wallets',
-        'funding_transactions', 'tron_sweeps', 'trades', 'positions'
+    SELECT CASE
+      WHEN to_regrole('atlas_customer_paper') IS NULL THEN 0
+      ELSE (
+        SELECT count(*)
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public'
+          AND c.relkind IN ('r', 'p')
+          AND c.relname IN (
+            'customer_ledger_accounts', 'ledger_entries', 'ledger_journals',
+            'ledger_journal_lines', 'withdrawals', 'wallets',
+            'funding_transactions', 'tron_sweeps', 'trades', 'positions'
+          )
+          AND (
+            has_table_privilege('atlas_customer_paper', c.oid, 'SELECT')
+            OR has_table_privilege('atlas_customer_paper', c.oid, 'INSERT')
+            OR has_table_privilege('atlas_customer_paper', c.oid, 'UPDATE')
+            OR has_table_privilege('atlas_customer_paper', c.oid, 'DELETE')
+            OR has_table_privilege('atlas_customer_paper', c.oid, 'TRUNCATE')
+            OR has_table_privilege('atlas_customer_paper', c.oid, 'REFERENCES')
+            OR has_table_privilege('atlas_customer_paper', c.oid, 'TRIGGER')
+          )
       )
-      AND (
-        has_table_privilege('atlas_customer_paper', c.oid, 'SELECT')
-        OR has_table_privilege('atlas_customer_paper', c.oid, 'INSERT')
-        OR has_table_privilege('atlas_customer_paper', c.oid, 'UPDATE')
-        OR has_table_privilege('atlas_customer_paper', c.oid, 'DELETE')
-        OR has_table_privilege('atlas_customer_paper', c.oid, 'TRUNCATE')
-        OR has_table_privilege('atlas_customer_paper', c.oid, 'REFERENCES')
-        OR has_table_privilege('atlas_customer_paper', c.oid, 'TRIGGER')
-      )
+    END
   ),
   'research_trial_ledger_head_present', to_regclass('public.research_trial_ledger_head') IS NOT NULL,
   'research_holdout_registry_present', to_regclass('public.research_holdout_registry') IS NOT NULL,
@@ -491,31 +525,85 @@ def required_table_failures(value: object) -> list[str]:
     return failures
 
 
+CUSTOMER_PAPER_TENANT_TABLES = (
+    "accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events",
+)
+CUSTOMER_PAPER_TENANT_ROLE = "atlas_customer_paper"
+_TENANT_PREDICATE_REFERENCE = (
+    "customer_id = (SELECT NULLIF(current_setting('app.customer_id', true), '')::bigint)"
+)
+
+
+def _canonical_policy_expression(expr: object) -> str:
+    """Normalize only known PostgreSQL deparser wrappers around the customer predicate."""
+    value = re.sub(r"\s+", "", str(expr or "")).casefold()
+    for token in (
+        "::text", "::bigint", 'as"nullif"', "asnullif", "ascurrent_setting",
+        "select", "(", ")", '"',
+    ):
+        value = value.replace(token, "")
+    return value
+
+
+_TENANT_PREDICATE_CANONICAL = _canonical_policy_expression(_TENANT_PREDICATE_REFERENCE)
+
+
+def customer_paper_tenant_policy_failures(policies: object) -> list[str]:
+    """Require the reviewed customer-id policy on each tenant-owned customer-paper table."""
+    if not isinstance(policies, list):
+        return ["customer_paper_tenant_policies was not reported as a JSON array"]
+    failures: list[str] = []
+    seen_tables: list[str] = []
+    for policy in policies:
+        if not isinstance(policy, dict):
+            failures.append("customer_paper_tenant policy observation is malformed")
+            continue
+        table_value = policy.get("table")
+        table = table_value if isinstance(table_value, str) else ""
+        seen_tables.append(table)
+        problems: list[str] = []
+        if policy.get("cmd") != "ALL":
+            problems.append("command is not ALL")
+        if policy.get("permissive") != "PERMISSIVE":
+            problems.append("policy is not PERMISSIVE")
+        if policy.get("roles") != [CUSTOMER_PAPER_TENANT_ROLE]:
+            problems.append(f"roles are not exactly {CUSTOMER_PAPER_TENANT_ROLE}")
+        if _canonical_policy_expression(policy.get("qual")) != _TENANT_PREDICATE_CANONICAL:
+            problems.append("USING expression is not the tenant predicate")
+        if _canonical_policy_expression(policy.get("with_check")) != _TENANT_PREDICATE_CANONICAL:
+            problems.append("WITH CHECK expression is not the tenant predicate")
+        failures.extend(
+            f"customer_paper_tenant policy on {table or '<unknown>'}: {problem}"
+            for problem in problems
+        )
+    if sorted(seen_tables) != sorted(CUSTOMER_PAPER_TENANT_TABLES):
+        failures.append("customer_paper_tenant policies do not cover exactly the expected tables")
+    return failures
+
+
 def customer_paper_schema_failures(observed: object) -> list[str]:
-    """Require the complete, tenant-isolated customer-paper schema for restore certification."""
+    """Require all customer-paper tables, exact tenant policy definitions, and least-privilege grants."""
     if not isinstance(observed, dict):
         return ["customer-paper schema observations are missing or malformed"]
 
     failures: list[str] = []
+    failures.extend(
+        customer_paper_tenant_policy_failures(observed.get("customer_paper_tenant_policies"))
+    )
     if observed.get("customer_paper_schema_present") is not True:
         failures.append("customer_paper schema is missing")
 
-    failures.extend(
-        f"required customer-paper table missing: {name}"
-        for name in observed.get("customer_paper_tables_missing", [])
-        if isinstance(name, str) and name.strip()
-    )
-    if not isinstance(observed.get("customer_paper_tables_missing"), list):
+    missing_tables = observed.get("customer_paper_tables_missing")
+    if not isinstance(missing_tables, list):
         failures.append("customer_paper_tables_missing was not reported as a JSON array")
+    else:
+        for name in missing_tables:
+            if not isinstance(name, str) or not name.strip():
+                failures.append("customer_paper_tables_missing contains malformed table names")
+            else:
+                failures.append(f"required customer-paper table missing: {name}")
 
-    malformed = [
-        name for name in observed.get("customer_paper_tables_missing", [])
-        if not isinstance(name, str) or not name.strip()
-    ] if isinstance(observed.get("customer_paper_tables_missing"), list) else []
-    if malformed:
-        failures.append("customer_paper_tables_missing contains malformed table names")
-
-    checks = (
+    integer_checks = (
         ("customer_paper_tables_without_forced_rls", 0),
         ("customer_paper_policy_count", 9),
         ("customer_paper_tenant_policy_count", 7),
@@ -527,12 +615,11 @@ def customer_paper_schema_failures(observed: object) -> list[str]:
         ("customer_paper_runtime_sequences_with_forbidden_privileges", 0),
         ("customer_paper_runtime_public_financial_privileges", 0),
     )
-    for key, expected in checks:
-        try:
-            actual = int(observed.get(key, -1))
-        except (TypeError, ValueError):
-            actual = -1
-        if actual != expected:
+    for key, expected in integer_checks:
+        actual = observed.get(key)
+        if type(actual) is not int:
+            failures.append(f"{key} must be a JSON integer, observed {actual!r}")
+        elif actual != expected:
             failures.append(f"{key} expected {expected}, observed {actual}")
 
     boolean_checks = (
@@ -545,7 +632,6 @@ def customer_paper_schema_failures(observed: object) -> list[str]:
         if observed.get(key) is not expected:
             failures.append(f"{key} expected {expected}, observed {observed.get(key)!r}")
     return failures
-
 
 RESEARCH_INTEGRITY_QUERY = r"""
 SELECT jsonb_build_object(
