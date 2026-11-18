@@ -593,7 +593,7 @@ def execute_restore(
         )
 
     result = {
-        "status": "PASS",
+        "status": "IMPORT_COMPLETE",
         "operation_id": operation_id,
         "target_instance_connection_name": target_instance,
         "target_database": target_database,
