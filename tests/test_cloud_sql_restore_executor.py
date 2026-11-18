@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from scripts.execute_cloud_sql_restore import (
     _extract_operation_id,
     _live_backup_generation,
     _pick,
+    _sql_import_suffix,
     _wait_for_operation,
     validate_backup_metadata,
     validate_restore_inputs,
@@ -143,6 +145,44 @@ def test_backup_metadata_accepts_gcloud_snake_case_cli_output():
     )
 
 
+def test_cloud_sql_import_object_suffix_matches_source_compression(tmp_path):
+    plain_dump = tmp_path / "source.sql"
+    gzip_dump = tmp_path / "source.sql.gz"
+    plain_dump.write_bytes(b"-- plain SQL\\nSELECT 1;\\n")
+    gzip_dump.write_bytes(gzip.compress(b"-- compressed SQL\\nSELECT 1;\\n"))
+
+    assert _sql_import_suffix(plain_dump) == ".sql"
+    assert _sql_import_suffix(gzip_dump) == ".sql.gz"
+
+
+def test_recovery_preflight_excludes_generated_import_copies_even_when_no_source_backup_exists():
+    generated_import_objects = [
+        {
+            "name": "restore-imports/" + ("a" * 64) + "-" + ("b" * 32) + ".sql",
+            "generation": "1750000000000000",
+            "size": "12345",
+            "crc32c": "AAAAAA==",
+        },
+        {
+            "name": "restore-imports/" + ("c" * 64) + "-" + ("d" * 32) + ".sql.gz",
+            "generation": "1750000000000001",
+            "size": "12345",
+            "md5Hash": "AAAAAA==",
+        },
+    ]
+
+    candidates = [item for item in generated_import_objects if is_source_backup_candidate(item)]
+
+    assert candidates == []
+    assert not any(is_source_backup_candidate(item) for item in generated_import_objects)
+    assert is_source_backup_candidate({
+        "name": "scheduled/postgres-backup.sql.gz",
+        "generation": "1750000000000002",
+        "size": "54321",
+        "crc32c": "BBBBBB==",
+    })
+
+
 def test_operation_id_extraction_rejects_malformed_resource_names():
     assert _extract_operation_id({"name": "operation-123"}) == "operation-123"
     for document in ({}, {"name": "projects/prod/operations/123"}, {"name": "bad id"}):
@@ -249,6 +289,7 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     workflow = Path(".github/workflows/staging-cloud-sql-restore.yml").read_text(encoding="utf-8")
     audit_workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
     executor = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
+    preflight = Path(".github/workflows/cloud-sql-recovery-preflight.yml").read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
     assert 'confirm_restore_target' in workflow
@@ -278,6 +319,9 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "source_backup_sha256" in executor
     assert "import_sha256 != source_sha256" in executor
     assert "restore-imports/" in executor
+    assert ".sql.gz" in executor
+    assert "is_source_backup_candidate(item)" in preflight
+    assert "scripts.cloud_sql_recovery_inventory" in preflight
 
 
 def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
