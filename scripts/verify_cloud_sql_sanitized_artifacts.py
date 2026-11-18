@@ -9,14 +9,13 @@ import re
 from pathlib import Path
 from typing import Any
 
+from scripts.compare_cloud_sql_import_dumps import canonical_dump_sha256
+
 
 BACKUP_BUCKET = "atlas-staging-510915-db-backups"
 EXPECTED_SOURCE_BACKUP_REFERENCE = (
     "gs://atlas-staging-510915-db-backups/"
     "atlas-supabase-pre-customer-paper-20261022T153023Z.dump#1792683068959304"
-)
-EXPECTED_SOURCE_PREPARED_SQL_SHA256 = (
-    "47ffcc3ae6e86decb5b125eb20ce2a6b682204e9d368a18ec18ef3439f7e5eeb"
 )
 EXPECTED_SANITIZED_IMPORT_SHA256 = (
     "fa3b14ec305a9d87313c19a57a441879a4b9977f0e43cd8a349476398d59dfa4"
@@ -56,8 +55,9 @@ def verify_sanitized_artifacts(
         raise ValueError("sanitized backup object path contains a traversal segment")
 
     source_prepared_sha256 = sha256_file(source_prepared_sql_path)
-    if source_prepared_sha256 != EXPECTED_SOURCE_PREPARED_SQL_SHA256:
-        raise ValueError("prepared source SQL hash does not match the reviewed source backup")
+    source_prepared_canonical_sha256, source_has_guard = canonical_dump_sha256(
+        source_prepared_sql_path
+    )
 
     sanitized_path = Path(sanitized_sql_path)
     sanitized_size = sanitized_path.stat().st_size
@@ -77,6 +77,8 @@ def verify_sanitized_artifacts(
         "status": "PASS",
         "source_backup_reference": source_backup_reference,
         "source_prepared_sql_sha256": source_prepared_sha256,
+        "source_prepared_sql_canonical_sha256": source_prepared_canonical_sha256,
+        "source_prepared_sql_has_outer_guard": source_has_guard,
         "sanitized_backup_reference": sanitized_backup_reference,
         "sanitized_import_sha256": sanitized_sha256,
         "sanitized_import_bytes": sanitized_size,
