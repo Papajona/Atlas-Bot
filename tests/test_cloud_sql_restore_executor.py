@@ -17,6 +17,7 @@ from scripts.execute_cloud_sql_restore import (
     validate_backup_metadata,
     validate_restore_inputs,
 )
+from scripts.cloud_sql_recovery_inventory import is_source_backup_candidate
 
 
 TARGET = "atlas-staging-510915:europe-west1:atlas-recovery"
