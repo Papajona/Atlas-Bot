@@ -1400,7 +1400,7 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
     assert "from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major" in restore_preflight_workflow
     assert (
         'git show "$main_sha:.github/workflows/cloud-sql-recovery-restore-preflight.yml" '
-        '| grep -F \'from scripts.cloud_sql_recovery_inventory import (\' >/dev/null'
+        '| grep -F \'from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major\' >/dev/null'
         in cloud_inventory_case
     )
     assert (
