@@ -110,6 +110,13 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install PostgreSQL client for custom archive conversion
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client
+          command -v pg_restore
+          pg_restore --version
+
       - name: Import the pinned backup into the separate recovery database
         id: restore
         shell: bash
