@@ -386,7 +386,6 @@ def test_sanitized_import_verifier_binds_candidate_to_source_and_imported_bytes(
     import hashlib
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
-    monkeypatch.setattr(verifier, "EXPECTED_SOURCE_PREPARED_SQL_SHA256", source_sha)
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
     monkeypatch.setattr(
@@ -402,6 +401,8 @@ def test_sanitized_import_verifier_binds_candidate_to_source_and_imported_bytes(
         imported_sql_path=imported,
     )
     assert result["status"] == "PASS"
+    assert result["source_prepared_sql_sha256"] == source_sha
+    assert result["source_prepared_sql_canonical_sha256"]
     assert result["sanitized_import_sha256"] == candidate_sha
     assert result["imported_sql_sha256"] == candidate_sha
 
@@ -419,8 +420,6 @@ def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_pat
 
     monkeypatch.setattr(verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
         "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304")
-    monkeypatch.setattr(verifier, "EXPECTED_SOURCE_PREPARED_SQL_SHA256",
-        hashlib.sha256(source.read_bytes()).hexdigest())
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256",
         hashlib.sha256(candidate.read_bytes()).hexdigest())
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
