@@ -13,13 +13,17 @@ def test_cloud_sql_paper_role_bootstrap_is_non_privileged_and_target_database_bo
     assert "GRANT CONNECT ON DATABASE %I TO atlas_customer_paper" in sql
     assert "current_database()" in sql
     assert "ALTER ROLE atlas_customer_paper SET default_transaction_read_only = off" in sql
-    assert "ALTER ROLE atlas_customer_paper SET search_path = pg_catalog, customer_paper" in sql
+    assert "ALTER ROLE atlas_customer_paper SET search_path = 'pg_catalog, customer_paper'" in sql
     assert "current_setting('transaction_read_only')" in sql
     assert "rolcreaterole" in sql
     assert "already exists" in sql
     assert "\\password atlas_customer_paper" in sql
     assert "PASSWORD '" not in sql
     assert "DROP ROLE" not in sql
+    final_readback = sql.split("COMMIT;", 1)[1]
+    assert "to_regnamespace('customer_paper') IS NOT NULL" in final_readback
+    assert "has_schema_privilege('atlas_customer_paper', 'customer_paper'" not in final_readback
+
 
 
 def test_cloud_sql_paper_role_and_schema_are_provisioned_as_separate_reviewed_steps():
