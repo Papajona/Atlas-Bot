@@ -2,14 +2,14 @@ from datetime import datetime, timezone
 
 import pytest
 
-from scripts.verify_cloud_sql_supabase_source_provenance import (
-    SOURCE_BACKUP_REFERENCE,
-    SOURCE_OBJECT_CRC32C,
-    SOURCE_OBJECT_MD5,
-    SOURCE_OBJECT_SIZE_BYTES,
-    SOURCE_PROJECT_REF,
-    verify_supabase_pg_dump_source,
-)
+from scripts import verify_cloud_sql_supabase_source_provenance as source_provenance
+
+SOURCE_BACKUP_REFERENCE = source_provenance.SOURCE_BACKUP_REFERENCE
+SOURCE_OBJECT_CRC32C = source_provenance.SOURCE_OBJECT_CRC32C
+SOURCE_OBJECT_MD5 = source_provenance.SOURCE_OBJECT_MD5
+SOURCE_OBJECT_SIZE_BYTES = source_provenance.SOURCE_OBJECT_SIZE_BYTES
+SOURCE_PROJECT_REF = source_provenance.SOURCE_PROJECT_REF
+verify_supabase_pg_dump_source = source_provenance.verify_supabase_pg_dump_source
 
 
 NOW = datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
@@ -94,3 +94,19 @@ def test_supabase_pg_dump_object_must_follow_the_logged_disconnect_within_ten_se
             bucket_metadata=locked_bucket(),
             now=NOW,
         )
+
+def test_gcs_creation_time_is_observed_not_a_fixed_source_constant():
+    observed_creation_time = "2026-10-22T15:31:09.000Z"
+    evidence = verify_supabase_pg_dump_source(
+        source_backup_reference=SOURCE_BACKUP_REFERENCE,
+        source_project_ref=SOURCE_PROJECT_REF,
+        source_database="postgres",
+        object_metadata=source_object(timeCreated=observed_creation_time),
+        bucket_metadata=locked_bucket(),
+        now=NOW,
+    )
+    assert evidence["status"] == "PASS"
+    assert evidence["source_object_created_at"] == "2026-10-22T15:31:09+00:00"
+    assert evidence["seconds_from_pg_dump_termination_to_object_creation"] == pytest.approx(3.249055)
+    assert not hasattr(source_provenance, "SOURCE_OBJECT_CREATED_AT")
+
