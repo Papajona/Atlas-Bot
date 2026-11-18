@@ -243,6 +243,120 @@ SELECT jsonb_build_object(
       AND policyname = 'customer_paper_bar_budget_backend'
       AND tablename IN ('market_bar_budgets', 'market_bar_allocations')
   ),
+  'customer_paper_wrong_policy_role_count', (
+    SELECT count(*)
+    FROM pg_policies
+    WHERE schemaname = 'customer_paper'
+      AND (
+        (policyname = 'customer_paper_tenant'
+          AND tablename IN (
+            'accounts', 'journals', 'journal_lines', 'orders', 'fills',
+            'order_events', 'position_events'
+          )
+          AND NOT ('atlas_customer_paper' = ANY(roles)))
+        OR
+        (policyname = 'customer_paper_bar_budget_backend'
+          AND tablename IN ('market_bar_budgets', 'market_bar_allocations')
+          AND NOT ('atlas_customer_paper' = ANY(roles)))
+      )
+  ),
+  'customer_paper_runtime_role_valid', EXISTS (
+    SELECT 1 FROM pg_roles r
+    WHERE r.rolname = 'atlas_customer_paper'
+      AND r.rolcanlogin
+      AND NOT r.rolsuper
+      AND NOT r.rolcreaterole
+      AND NOT r.rolcreatedb
+      AND NOT r.rolreplication
+      AND NOT r.rolinherit
+      AND NOT r.rolbypassrls
+      AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid)
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'customer_paper'
+          AND c.relkind IN ('r', 'p')
+          AND c.relowner = r.oid
+      )
+  ),
+  'customer_paper_runtime_schema_usage', has_schema_privilege(
+    'atlas_customer_paper', 'customer_paper', 'USAGE'
+  ),
+  'customer_paper_runtime_schema_create', has_schema_privilege(
+    'atlas_customer_paper', 'customer_paper', 'CREATE'
+  ),
+  'customer_paper_runtime_public_schema_usage', has_schema_privilege(
+    'atlas_customer_paper', 'public', 'USAGE'
+  ),
+  'customer_paper_runtime_invalid_table_privileges', (
+    SELECT count(*)
+    FROM unnest(ARRAY[
+      'accounts', 'journals', 'journal_lines', 'orders', 'fills',
+      'order_events', 'position_events', 'market_bar_budgets', 'market_bar_allocations'
+    ]::text[]) AS required(table_name)
+    LEFT JOIN pg_class c
+      ON c.oid = to_regclass(format('customer_paper.%I', required.table_name))
+    WHERE c.oid IS NULL
+       OR NOT has_table_privilege('atlas_customer_paper', c.oid, 'SELECT')
+       OR NOT has_table_privilege('atlas_customer_paper', c.oid, 'INSERT')
+       OR has_table_privilege('atlas_customer_paper', c.oid, 'UPDATE')
+       OR has_table_privilege('atlas_customer_paper', c.oid, 'DELETE')
+       OR has_table_privilege('atlas_customer_paper', c.oid, 'TRUNCATE')
+       OR has_table_privilege('atlas_customer_paper', c.oid, 'REFERENCES')
+       OR has_table_privilege('atlas_customer_paper', c.oid, 'TRIGGER')
+       OR CASE
+            WHEN current_setting('server_version_num')::integer >= 170000
+            THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')
+            ELSE false
+          END
+  ),
+  'customer_paper_runtime_sequences', (
+    SELECT count(*)
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'customer_paper'
+      AND c.relkind = 'S'
+  ),
+  'customer_paper_runtime_sequences_with_usage', (
+    SELECT count(*)
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'customer_paper'
+      AND c.relkind = 'S'
+      AND has_sequence_privilege('atlas_customer_paper', c.oid, 'USAGE')
+  ),
+  'customer_paper_runtime_sequences_with_forbidden_privileges', (
+    SELECT count(*)
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'customer_paper'
+      AND c.relkind = 'S'
+      AND (
+        has_sequence_privilege('atlas_customer_paper', c.oid, 'UPDATE')
+      )
+  ),
+  'customer_paper_runtime_public_financial_privileges', (
+    SELECT count(*)
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind IN ('r', 'p')
+      AND c.relname IN (
+        'customer_ledger_accounts', 'ledger_entries', 'ledger_journals',
+        'ledger_journal_lines', 'withdrawals', 'wallets',
+        'funding_transactions', 'tron_sweeps', 'trades', 'positions'
+      )
+      AND (
+        has_table_privilege('atlas_customer_paper', c.oid, 'SELECT')
+        OR has_table_privilege('atlas_customer_paper', c.oid, 'INSERT')
+        OR has_table_privilege('atlas_customer_paper', c.oid, 'UPDATE')
+        OR has_table_privilege('atlas_customer_paper', c.oid, 'DELETE')
+        OR has_table_privilege('atlas_customer_paper', c.oid, 'TRUNCATE')
+        OR has_table_privilege('atlas_customer_paper', c.oid, 'REFERENCES')
+        OR has_table_privilege('atlas_customer_paper', c.oid, 'TRIGGER')
+      )
+  ),
   'research_trial_ledger_head_present', to_regclass('public.research_trial_ledger_head') IS NOT NULL,
   'research_holdout_registry_present', to_regclass('public.research_holdout_registry') IS NOT NULL,
   'tables_without_rls', (
@@ -375,11 +489,24 @@ def customer_paper_schema_failures(observed: object) -> list[str]:
     if not isinstance(observed.get("customer_paper_tables_missing"), list):
         failures.append("customer_paper_tables_missing was not reported as a JSON array")
 
+    malformed = [
+        name for name in observed.get("customer_paper_tables_missing", [])
+        if not isinstance(name, str) or not name.strip()
+    ] if isinstance(observed.get("customer_paper_tables_missing"), list) else []
+    if malformed:
+        failures.append("customer_paper_tables_missing contains malformed table names")
+
     checks = (
         ("customer_paper_tables_without_forced_rls", 0),
         ("customer_paper_policy_count", 9),
         ("customer_paper_tenant_policy_count", 7),
         ("customer_paper_backend_policy_count", 2),
+        ("customer_paper_wrong_policy_role_count", 0),
+        ("customer_paper_runtime_invalid_table_privileges", 0),
+        ("customer_paper_runtime_sequences", 4),
+        ("customer_paper_runtime_sequences_with_usage", 4),
+        ("customer_paper_runtime_sequences_with_forbidden_privileges", 0),
+        ("customer_paper_runtime_public_financial_privileges", 0),
     )
     for key, expected in checks:
         try:
@@ -388,6 +515,16 @@ def customer_paper_schema_failures(observed: object) -> list[str]:
             actual = -1
         if actual != expected:
             failures.append(f"{key} expected {expected}, observed {actual}")
+
+    boolean_checks = (
+        ("customer_paper_runtime_role_valid", True),
+        ("customer_paper_runtime_schema_usage", True),
+        ("customer_paper_runtime_schema_create", False),
+        ("customer_paper_runtime_public_schema_usage", False),
+    )
+    for key, expected in boolean_checks:
+        if observed.get(key) is not expected:
+            failures.append(f"{key} expected {expected}, observed {observed.get(key)!r}")
     return failures
 
 
