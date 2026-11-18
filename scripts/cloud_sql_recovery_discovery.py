@@ -235,9 +235,13 @@ def discover_resources(
     keywords = ("backup", "postgres", "database", "supabase", "dump", "atlas")
     suffixes = (".sql", ".sql.gz", ".dump", ".backup", ".gz", ".bak")
     candidates = []
+    generated_restore_import_objects_excluded = 0
     for item in objects:
         object_name = str(item.get("name") or "")
         lower_name = object_name.lower()
+        if lower_name.startswith("restore-imports/"):
+            generated_restore_import_objects_excluded += 1
+            continue
         if any(lower_name.endswith(suffix) for suffix in suffixes) or any(
             word in lower_name for word in keywords
         ):
@@ -310,6 +314,7 @@ def discover_resources(
             retention.get("isLocked", retention.get("is_locked")) is True
         ),
         "gcs_object_versions_listed": len(objects),
+        "generated_restore_import_objects_excluded": generated_restore_import_objects_excluded,
         "database_backup_candidates": candidates[:200],
         "candidate_list_truncated": len(candidates) > 200,
         "note": (
