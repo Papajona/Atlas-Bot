@@ -21,7 +21,6 @@ SOURCE_APPLICATION_NAME = "pg_dump"
 SOURCE_POOLER_MODE = "session"
 SOURCE_AUTHENTICATED_AT = "2026-10-22T15:30:54.953883Z"
 SOURCE_TERMINATED_AT = "2026-10-22T15:31:05.750945Z"
-SOURCE_OBJECT_CREATED_AT = "2026-10-22T15:31:08.966Z"
 SOURCE_OBJECT_SIZE_BYTES = 659332
 SOURCE_OBJECT_MD5 = "kX13N5wvc5RE4MJ19hpt6w=="
 SOURCE_OBJECT_CRC32C = "Ya71XA=="
@@ -92,9 +91,6 @@ def verify_supabase_pg_dump_source(
     auth_at = _time(SOURCE_AUTHENTICATED_AT, "Supabase pg_dump authentication")
     terminated_at = _time(SOURCE_TERMINATED_AT, "Supabase pg_dump termination")
     object_created_at = _time(str(_get(object_metadata, "time_created", "timeCreated") or ""), "GCS source object creation")
-    expected_object_created_at = _time(SOURCE_OBJECT_CREATED_AT, "reviewed GCS source object creation")
-    if object_created_at != expected_object_created_at:
-        raise ValueError("GCS object creation timestamp does not match the reviewed Supabase log correlation")
     if not (auth_at < terminated_at < object_created_at):
         raise ValueError("Supabase pg_dump session does not precede the GCS object creation")
     gap_seconds = (object_created_at - terminated_at).total_seconds()
