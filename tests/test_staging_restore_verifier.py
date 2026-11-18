@@ -383,8 +383,8 @@ def test_restore_audit_rejects_malformed_customer_paper_catalog_observations():
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
     })
     assert "customer_paper_tables_missing was not reported as a JSON array" in failures
-    assert "customer_paper_tables_without_forced_rls expected 0, observed -1" in failures
-    assert "customer_paper_policy_count expected 9, observed -1" in failures
+    assert any("customer_paper_tables_without_forced_rls must be a JSON integer" in item for item in failures)
+    assert any("customer_paper_policy_count must be a JSON integer" in item for item in failures)
 
 
 
