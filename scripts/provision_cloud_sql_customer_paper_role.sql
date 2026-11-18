@@ -1,9 +1,9 @@
-\\set ON_ERROR_STOP on
+\set ON_ERROR_STOP on
 
 -- Create the non-privileged customer-paper login on an isolated Cloud SQL
 -- recovery database. Run this only after reviewing the target and confirming
 -- that the connected operator is allowed to create roles. Set its password
--- interactively with: \\password atlas_customer_paper
+-- interactively with: \password atlas_customer_paper
 BEGIN;
 
 DO $atlas_cloud_sql_paper_role_guard$
