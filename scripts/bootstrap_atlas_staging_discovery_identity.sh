@@ -12,8 +12,8 @@ PROVIDER_ID="github-main"
 DISCOVERY_SA_ID="atlas-staging-discovery"
 BACKUP_BUCKET="atlas-staging-510915-db-backups"
 
-DISCOVERY_SA="\${DISCOVERY_SA_ID}@\${PROJECT_ID}.iam.gserviceaccount.com"
-PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/\${PROJECT_NUMBER}/locations/global/workloadIdentityPools/\${POOL_ID}/attribute.repository/Papajona/Atlas-Bot"
+DISCOVERY_SA="${DISCOVERY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${POOL_ID}/attribute.repository/Papajona/Atlas-Bot"
 
 gcloud config set project "$PROJECT_ID" >/dev/null
 ACTUAL_PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
@@ -34,6 +34,15 @@ fi
 gcloud services enable sqladmin.googleapis.com storage.googleapis.com \
   --project="$PROJECT_ID" >/dev/null
 
+# Do not begin identity/IAM changes when the required inventory bucket is absent.
+# The bucket is intentionally not created here: backup retention and ownership are
+# separately approved infrastructure controls.
+if ! gcloud storage buckets describe "gs://${BACKUP_BUCKET}" \
+    --project="${PROJECT_ID}" --format=json >/dev/null 2>&1; then
+  echo "BLOCKED: required backup bucket gs://${BACKUP_BUCKET} is not provisioned; no bucket IAM binding was applied." >&2
+  exit 1
+fi
+
 if ! gcloud iam service-accounts describe "$DISCOVERY_SA" \
     --project="$PROJECT_ID" >/dev/null 2>&1; then
   gcloud iam service-accounts create "$DISCOVERY_SA_ID" \
@@ -43,16 +52,16 @@ fi
 
 # Project-scoped viewer roles are read-only and limited to inventory APIs.
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:\${DISCOVERY_SA}" \
+  --member="serviceAccount:${DISCOVERY_SA}" \
   --role="roles/cloudsql.viewer" --quiet
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:\${DISCOVERY_SA}" \
+  --member="serviceAccount:${DISCOVERY_SA}" \
   --role="roles/iam.serviceAccountViewer" --quiet
 
 # Bucket-scoped legacyBucketReader permits bucket metadata and object listing,
 # but does not grant object-content reads, object writes, or bucket administration.
 gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
-  --member="serviceAccount:\${DISCOVERY_SA}" \
+  --member="serviceAccount:${DISCOVERY_SA}" \
   --role="roles/storage.legacyBucketReader" --quiet
 
 # Only the protected main-branch repository principal may impersonate this identity.
