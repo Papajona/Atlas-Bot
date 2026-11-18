@@ -22,6 +22,7 @@ jobs:
   discover-recovery-resources:
     # Keep discovery on main. The protected staging environment supplies its optional identity
     # to a step-level guard below, where missing configuration can skip safely.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: staging
