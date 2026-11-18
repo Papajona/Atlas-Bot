@@ -101,7 +101,7 @@ jobs:
               echo "BLOCKED: source backup cannot itself be an import-staging object" >&2
               exit 1
             }
-            [[ "$BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/restore-imports/[a-f0-9]{64}-[a-f0-9]{32}\.sql#[1-9][0-9]*$ ]] || {
+            [[ "$BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/restore-imports/[a-f0-9]{64}-[a-f0-9]{32}[.]sql([.]gz)?#[1-9][0-9]*$ ]] || {
               echo "BLOCKED: Cloud SQL audit reference must identify the immutable import object" >&2
               exit 1
             }
