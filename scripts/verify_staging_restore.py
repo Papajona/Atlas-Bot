@@ -478,6 +478,25 @@ def validate_cloud_sql_target_pair(target_instance: str, production_instance: st
         raise ValueError("Cloud SQL restore target must be distinct from the production instance")
 
 
+def validate_cloud_sql_target_for_supabase_source(
+    target_instance: str,
+    source_supabase_project_ref: str,
+) -> None:
+    """Validate a Cloud SQL recovery target for the separately evidenced Supabase source."""
+    match = re.fullmatch(r"^([a-z0-9-]+):([a-z0-9-]+):([a-z0-9-]+)$", target_instance or "")
+    if match is None:
+        raise ValueError("CLOUD_SQL_INSTANCE_CONNECTION_NAME must be project:region:instance")
+    target_project, target_region, _instance_name = match.groups()
+    if target_project != "atlas-staging-510915" or target_region != "europe-west1":
+        raise ValueError(
+            "Cloud SQL recovery target must be an isolated instance in atlas-staging-510915:europe-west1"
+        )
+    if source_supabase_project_ref != "wauaelzyugjuepmrewaw":
+        raise ValueError(
+            "SOURCE_SUPABASE_PROJECT_REF must match the authenticated October 22 pg_dump evidence"
+        )
+
+
 def read_database_uri(value: str, staging_ref: str = "", production_ref: str = "", *, target_kind: str = "supabase", cloud_sql_instance: str = "", cloud_sql_database: str = "") -> tuple[dict[str, str], str]:
     parsed = urlparse(value)
     if parsed.scheme not in {"postgres", "postgresql", "postgresql+asyncpg", "postgresql+psycopg"} or not parsed.hostname:
@@ -783,7 +802,15 @@ def audit(args: argparse.Namespace) -> dict:
         raise ValueError("full restore audit requires a distinct non-production target; same-project restore could overwrite the active source")
     if target_kind == "cloud_sql":
         production_instance = os.environ.get("PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME", "").strip()
-        validate_cloud_sql_target_pair(cloud_sql_instance, production_instance)
+        source_supabase_project_ref = os.environ.get("SOURCE_SUPABASE_PROJECT_REF", "").strip()
+        if production_instance:
+            # Legacy Cloud SQL-to-Cloud SQL source path remains available only when
+            # an explicit production Cloud SQL instance is configured.
+            validate_cloud_sql_target_pair(cloud_sql_instance, production_instance)
+        else:
+            validate_cloud_sql_target_for_supabase_source(
+                cloud_sql_instance, source_supabase_project_ref
+            )
     database_url = os.environ.get("DATABASE_URL", "")
     env, host = read_database_uri(database_url, staging_ref, production_ref,
         target_kind=target_kind, cloud_sql_instance=cloud_sql_instance, cloud_sql_database=cloud_sql_database)
