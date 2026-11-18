@@ -123,13 +123,9 @@ jobs:
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
-      - name: Install PostgreSQL client for custom archive verification
+      - name: Install pinned PostgreSQL 17 client for custom archive verification
         if: env.RESTORE_TARGET_KIND == 'cloud_sql'
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends postgresql-client
-          command -v pg_restore
-          pg_restore --version
+        run: bash scripts/install_pinned_postgresql_client.sh
       - name: Fetch authenticated Cloud SQL operation and verify immutable GCS backup bytes
         if: env.RESTORE_TARGET_KIND == 'cloud_sql'
         shell: bash
@@ -203,24 +199,9 @@ jobs:
           PYTHONPATH=. python scripts/prepare_cloud_sql_import_dump.py \
             --input "$RUNNER_TEMP/cloud-sql-source-backup" \
             --output "$RUNNER_TEMP/cloud-sql-source-prepared.sql"
-          python3 - "$RUNNER_TEMP/cloud-sql-source-prepared.sql" "$RUNNER_TEMP/cloud-sql-import-source" <<'PY'
-          import hashlib
-          import sys
-          from pathlib import Path
-
-          def digest(path):
-              value = hashlib.sha256()
-              with Path(path).open("rb") as handle:
-                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                      value.update(chunk)
-              return value.hexdigest()
-
-          source_hash = digest(sys.argv[1])
-          imported_hash = digest(sys.argv[2])
-          if source_hash != imported_hash:
-              raise SystemExit("BLOCKED: immutable import SQL does not match the offline conversion of the original pinned backup")
-          print("PASS: immutable import SQL matches the converted original pinned backup")
-          PY
+          PYTHONPATH=. python scripts/compare_cloud_sql_import_dumps.py \
+            --expected "$RUNNER_TEMP/cloud-sql-source-prepared.sql" \
+            --actual "$RUNNER_TEMP/cloud-sql-import-source"
           # The Cloud SQL import object itself must be supported plain/gzip SQL.
           PYTHONPATH=. python scripts/verify_cloud_sql_import_dump.py \
             --input "$RUNNER_TEMP/cloud-sql-import-source" \
