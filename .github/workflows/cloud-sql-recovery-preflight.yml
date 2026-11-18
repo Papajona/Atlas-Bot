@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/cloud-sql-recovery-preflight.yml"
+      - "scripts/cloud_sql_recovery_discovery.py"
+      - "scripts/bootstrap_atlas_paper_staging_gcp.sh"
   workflow_dispatch:
 
 permissions:
@@ -31,6 +33,7 @@ jobs:
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
@@ -38,173 +41,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          : "$GCP_PROJECT_ID"
-          : "$GCP_REGION"
-          : "$GCP_WORKLOAD_IDENTITY_PROVIDER"
           [[ "$GCP_PROJECT_ID" == "atlas-staging-510915" ]]
           [[ "$GCP_REGION" == "europe-west1" ]]
           [[ "$GCP_WORKLOAD_IDENTITY_PROVIDER" == projects/*/locations/global/workloadIdentityPools/*/providers/* ]]
-          gcloud auth print-access-token >/dev/null
-          python - "$RUNNER_TEMP" "$GCP_PROJECT_ID" "$GCP_REGION" "$BACKUP_BUCKET" <<'PY'
-          import json
-          import subprocess
-          import sys
-          from pathlib import Path
-          from urllib.parse import quote, urlencode
-          from urllib.request import Request, urlopen
-          from urllib.error import HTTPError, URLError
-
-          root = Path(sys.argv[1])
-          project, region, bucket = sys.argv[2:]
-
-          def gcloud_json(args):
-              result = subprocess.run(
-                  ["gcloud", *args, "--project", project, "--format=json"],
-                  text=True, capture_output=True, check=False, timeout=90,
-              )
-              if result.returncode:
-                  # Do not publish raw provider errors or credential-related diagnostics.
-                  return None, "GCLOUD_QUERY_FAILED"
-              try:
-                  return json.loads(result.stdout or "null"), None
-              except json.JSONDecodeError:
-                  return None, "GCLOUD_JSON_INVALID"
-
-          instances, instances_error = gcloud_json(["sql", "instances", "list"])
-          accounts, accounts_error = gcloud_json(["iam", "service-accounts", "list"])
-          bucket_meta, bucket_error = gcloud_json(["storage", "buckets", "describe", f"gs://{bucket}"])
-
-          sql_inventory = []
-          instance_rows = instances if isinstance(instances, list) else []
-          for item in instance_rows:
-              name = item.get("name")
-              if not name:
-                  continue
-              databases, db_error = gcloud_json(["sql", "databases", "list", f"--instance={name}"])
-              backups, backup_error = gcloud_json(["sql", "backups", "list", f"--instance={name}"])
-              sql_inventory.append({
-                  "name": name,
-                  "connection_name": item.get("connectionName"),
-                  "region": item.get("region"),
-                  "state": item.get("state"),
-                  "database_version": item.get("databaseVersion"),
-                  "tier": (item.get("settings") or {}).get("tier"),
-                  "databases": [
-                      {"name": db.get("name"), "charset": db.get("charset"), "collation": db.get("collation")}
-                      for db in (databases if isinstance(databases, list) else [])
-                  ],
-                  "database_inventory_status": "PASS" if db_error is None else db_error,
-                  "backups": [
-                      {
-                          "id": b.get("id"),
-                          "status": b.get("status"),
-                          "type": b.get("type"),
-                          "start_time": b.get("startTime"),
-                          "end_time": b.get("endTime"),
-                          "window_start_time": b.get("windowStartTime"),
-                      }
-                      for b in (backups if isinstance(backups, list) else [])
-                  ],
-                  "backup_inventory_status": "PASS" if backup_error is None else backup_error,
-              })
-
-          token = subprocess.run(
-              ["gcloud", "auth", "print-access-token"],
-              text=True, capture_output=True, check=False, timeout=30,
-          )
-          if token.returncode or not token.stdout.strip():
-              raise SystemExit("BLOCKED: workload identity could not produce a Google Cloud access token")
-          access_token = token.stdout.strip()
-
-          objects = []
-          object_inventory_error = None
-          if bucket_error is None and isinstance(bucket_meta, dict):
-              page_token = None
-              try:
-                  while True:
-                      query = {
-                          "versions": "true",
-                          "maxResults": "1000",
-                          "fields": "items(name,generation,size,timeCreated,timeDeleted,md5Hash,crc32c,retentionExpirationTime),nextPageToken",
-                      }
-                      if page_token:
-                          query["pageToken"] = page_token
-                      url = (
-                          "https://storage.googleapis.com/storage/v1/b/"
-                          + quote(bucket, safe="")
-                          + "/o?"
-                          + urlencode(query)
-                      )
-                      request = Request(url, headers={"Authorization": "Bearer " + access_token})
-                      with urlopen(request, timeout=30) as response:
-                          page = json.loads(response.read().decode("utf-8"))
-                      objects.extend(page.get("items", []))
-                      page_token = page.get("nextPageToken")
-                      if not page_token:
-                          break
-              except (HTTPError, URLError, TimeoutError, json.JSONDecodeError):
-                  object_inventory_error = "GCS_OBJECT_LIST_FAILED"
-          else:
-              object_inventory_error = bucket_error or "GCS_BUCKET_METADATA_MISSING"
-
-          # Keep only likely database exports in the report; object metadata is not a backup validation.
-          keywords = ("backup", "postgres", "database", "supabase", "dump", "atlas")
-          suffixes = (".sql", ".sql.gz", ".dump", ".backup", ".gz", ".bak")
-          candidates = []
-          for item in objects:
-              object_name = str(item.get("name") or "")
-              lower_name = object_name.lower()
-              if any(lower_name.endswith(suffix) for suffix in suffixes) or any(word in lower_name for word in keywords):
-                  candidates.append({
-                      "name": object_name,
-                      "generation": item.get("generation"),
-                      "size_bytes": item.get("size"),
-                      "created_at": item.get("timeCreated"),
-                      "deleted_at": item.get("timeDeleted"),
-                      "checksum_present": bool(item.get("md5Hash") or item.get("crc32c")),
-                      "retention_expires_at": item.get("retentionExpirationTime"),
-                  })
-
-          retention = {}
-          if isinstance(bucket_meta, dict):
-              retention = bucket_meta.get("retentionPolicy") or bucket_meta.get("retention_policy") or {}
-          retention_locked = retention.get("isLocked", retention.get("is_locked")) is True
-
-          atlas_accounts = [
-              {"email": a.get("email"), "disabled": a.get("disabled")}
-              for a in (accounts if isinstance(accounts, list) else [])
-              if str(a.get("email", "")).startswith("atlas-")
-          ]
-
-          target_candidates = [
-              row for row in sql_inventory
-              if row.get("region") == region
-              and row.get("state") == "RUNNABLE"
-          ]
-          summary = {
-              "discovery_status": "COMPLETE",
-              "project": project,
-              "region": region,
-              "authenticated_identity": "WORKLOAD_IDENTITY_TOKEN_ISSUED",
-              "cloud_sql_instance_list_status": "PASS" if instances_error is None else instances_error,
-              "cloud_sql_instances": sql_inventory,
-              "runnable_instances_in_expected_region": len(target_candidates),
-              "atlas_service_account_list_status": "PASS" if accounts_error is None else accounts_error,
-              "atlas_service_accounts": atlas_accounts,
-              "backup_bucket": bucket,
-              "backup_bucket_status": "PASS" if bucket_error is None else bucket_error,
-              "bucket_retention_policy_locked": retention_locked,
-              "gcs_object_inventory_status": "PASS" if object_inventory_error is None else object_inventory_error,
-              "gcs_object_versions_listed": len(objects),
-              "database_backup_candidates": candidates[:200],
-              "candidate_list_truncated": len(candidates) > 200,
-              "note": "Inventory only. No restore, database creation, IAM grant, migration, or production write was attempted.",
-          }
-          (root / "recovery-resource-discovery.json").write_text(
-              json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
-          )
-          print(json.dumps(summary, sort_keys=True))
-          PY
+          python scripts/cloud_sql_recovery_discovery.py \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --bucket "$BACKUP_BUCKET" \
+            --output "$RUNNER_TEMP/recovery-resource-discovery.json"
       - name: Preserve sanitized resource-discovery inventory
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
