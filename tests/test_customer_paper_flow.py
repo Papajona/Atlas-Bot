@@ -1669,7 +1669,10 @@ def test_customer_paper_account_initialization_logs_only_safe_failure_metadata(m
     monkeypatch.setattr(settings, "customer_paper_initial_currency", "USDT")
     monkeypatch.setattr(settings, "customer_paper_initial_balance", 100.0)
 
-    async def fail_seed_call(*_args, **_kwargs):
+    async def fail_seed_call(awaitable, *_args, **_kwargs):
+        # _paper_call awaits this coroutine in production; close it in the stub so
+        # the deliberate failure does not leak a never-awaited coroutine warning.
+        awaitable.close()
         raise RuntimeError("postgres://atlas:seed-secret@db.internal/customer_paper")
 
     monkeypatch.setattr(flow, "_paper_call", fail_seed_call)

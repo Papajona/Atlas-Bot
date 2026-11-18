@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     app_encryption_active_key_id: str = "v1"
     admin_token: str = ""
     docs_enabled: bool = False
+    # Maximum accepted HTTP request body size in bytes. Zero disables the cap only in dev/test.
+    max_request_body_bytes: int = 2_097_152
 
     # Customer authentication and funding. Supabase Auth is authoritative for customer identity.
     supabase_url: str = ""
@@ -584,6 +586,14 @@ class Settings(BaseSettings):
             raise ValueError("LIVE_ENABLE_REQUEST_TTL_MINUTES must be >= 1")
         if self.environment == "production" and not self.admin_totp_required:
             raise ValueError("ADMIN_TOTP_REQUIRED must remain true in production")
+        if self.environment == "production" and not self.metrics_require_admin:
+            raise ValueError("METRICS_REQUIRE_ADMIN must remain true in production")
+        if self.environment == "production" and self.docs_enabled:
+            raise ValueError("DOCS_ENABLED must remain false in production")
+        if self.max_request_body_bytes < 0:
+            raise ValueError("MAX_REQUEST_BODY_BYTES must be >= 0")
+        if self.environment in {"staging", "production"} and self.max_request_body_bytes == 0:
+            raise ValueError("MAX_REQUEST_BODY_BYTES must be > 0 in staging and production")
         if self.binance_customer_subaccounts_enabled:
             raise ValueError(
                 "Binance customer subaccounts are disabled by Atlas operating policy; "

@@ -1379,6 +1379,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
     except Exception:
         return False
 from .monitoring import TelemetryMiddleware, metrics_response, logger
+from .body_limit import BodySizeLimitMiddleware
 from .schemas import (
     MarketRequest,
     CustomerPaperMarketRequest,
@@ -1443,6 +1444,8 @@ app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=do
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
+# Keep telemetry outside the body limiter so 413 responses receive the normal security headers.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
 app.add_middleware(TelemetryMiddleware)
 
 _instance_id = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:12]
@@ -7660,6 +7663,8 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
     await auth(x_admin_token, authorization)
     async with SessionLocal() as db:
         s = await db.get(AppState, 1)
+        if s is None:
+            raise HTTPException(503, "Application state has not been provisioned")
         positions = (await db.execute(select(Position).where(Position.quantity != 0))).scalars().all()
         return {
             "mode": s.mode, "equity": s.equity, "cash_equity": s.cash_equity,
