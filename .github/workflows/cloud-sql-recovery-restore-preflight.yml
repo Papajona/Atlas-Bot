@@ -24,9 +24,10 @@ jobs:
       GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT || secrets.GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT }}
       CLOUD_SQL_INSTANCE_CONNECTION_NAME: ${{ vars.ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME }}
       CLOUD_SQL_DATABASE: ${{ vars.ATLAS_STAGING_CLOUD_SQL_DATABASE }}
-      PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME: ${{ vars.ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME }}
-      PRODUCTION_CLOUD_SQL_DATABASE: ${{ vars.ATLAS_PRODUCTION_CLOUD_SQL_DATABASE }}
+      SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}
+      SOURCE_SUPABASE_DATABASE: postgres
       BACKUP_BUCKET: atlas-staging-510915-db-backups
+      SOURCE_BACKUP_REFERENCE: gs://atlas-staging-510915-db-backups/atlas-supabase-pre-customer-paper-20261022T153023Z.dump#1792683068959304
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
@@ -36,140 +37,83 @@ jobs:
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
         with:
           project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
-      - name: Inspect isolated Cloud SQL target and source-associated backup generations
+      - name: Verify isolated Cloud SQL target and Supabase pg_dump source provenance
         shell: bash
         run: |
           set -euo pipefail
           : "${GCP_PROJECT_ID:?Missing GCP_PROJECT_ID}"
           : "${GCP_REGION:?Missing GCP_REGION}"
+          : "${SOURCE_SUPABASE_PROJECT_REF:?Missing ATLAS_PRODUCTION_SUPABASE_PROJECT_REF}"
           : "${CLOUD_SQL_INSTANCE_CONNECTION_NAME:?Missing ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME}"
           : "${CLOUD_SQL_DATABASE:?Missing ATLAS_STAGING_CLOUD_SQL_DATABASE}"
-          : "${PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME:?Missing ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME}"
-          : "${PRODUCTION_CLOUD_SQL_DATABASE:?Missing ATLAS_PRODUCTION_CLOUD_SQL_DATABASE}"
-          [[ "$PRODUCTION_CLOUD_SQL_DATABASE" =~ ^[a-zA-Z_][a-zA-Z0-9_-]{0,62}$ ]]
+          [[ "$GCP_PROJECT_ID" == "atlas-staging-510915" ]]
+          [[ "$GCP_REGION" == "europe-west1" ]]
+          [[ "$SOURCE_SUPABASE_PROJECT_REF" == "wauaelzyugjuepmrewaw" ]]
+          [[ "$SOURCE_SUPABASE_DATABASE" == "postgres" ]]
           [[ "$GCP_WORKLOAD_IDENTITY_PROVIDER" == projects/*/locations/global/workloadIdentityPools/*/providers/* ]]
-          [[ "$GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT" == *@*.iam.gserviceaccount.com ]]
-          [[ "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]]
-          [[ "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]]
-          [[ "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" != "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" ]]
-          [[ "${CLOUD_SQL_INSTANCE_CONNECTION_NAME%%:*}" == "$GCP_PROJECT_ID" ]]
-          [[ "${CLOUD_SQL_INSTANCE_CONNECTION_NAME#*:}" == "$GCP_REGION:"* ]]
+          [[ "$GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT" == atlas-staging-restore-audit@atlas-staging-510915.iam.gserviceaccount.com ]]
+          [[ "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^atlas-staging-510915:europe-west1:[a-z0-9-]+$ ]]
+          [[ "$CLOUD_SQL_DATABASE" =~ ^[A-Za-z_][A-Za-z0-9_-]{0,62}$ ]]
 
           instance_name="${CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}"
           gcloud sql instances describe "$instance_name" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/recovery-instance.json"
           gcloud sql databases describe "$CLOUD_SQL_DATABASE" --instance="$instance_name" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/recovery-database.json"
           gcloud storage buckets describe "gs://$BACKUP_BUCKET" --format=json > "$RUNNER_TEMP/backup-bucket.json"
+          gcloud storage objects describe "$SOURCE_BACKUP_REFERENCE" --project="$GCP_PROJECT_ID" --format=json > "$RUNNER_TEMP/source-backup-object.json"
 
-          python - "$RUNNER_TEMP" "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" "$CLOUD_SQL_DATABASE" "$BACKUP_BUCKET" "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" "$PRODUCTION_CLOUD_SQL_DATABASE" <<'PY'
+          python - "$RUNNER_TEMP" "$CLOUD_SQL_INSTANCE_CONNECTION_NAME" "$CLOUD_SQL_DATABASE" "$BACKUP_BUCKET" "$SOURCE_BACKUP_REFERENCE" "$SOURCE_SUPABASE_PROJECT_REF" "$SOURCE_SUPABASE_DATABASE" <<'PY'
           import json
-          import subprocess
           import sys
           from pathlib import Path
-          from urllib.parse import quote, urlencode
-          from urllib.request import Request, urlopen
 
-          from scripts.cloud_sql_recovery_inventory import (
-              classify_backup_objects,
-              require_supported_postgresql_major,
-          )
+          from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major
+          from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source
 
           root = Path(sys.argv[1])
-          expected_instance, expected_database, bucket, source_instance, source_database = sys.argv[2:]
-          instance = json.loads((root / "recovery-instance.json").read_text())
-          database = json.loads((root / "recovery-database.json").read_text())
-          bucket_meta = json.loads((root / "backup-bucket.json").read_text())
+          expected_instance, expected_database, bucket, source_reference, source_project_ref, source_database = sys.argv[2:]
+          instance = json.loads((root / "recovery-instance.json").read_text(encoding="utf-8"))
+          database = json.loads((root / "recovery-database.json").read_text(encoding="utf-8"))
+          bucket_meta = json.loads((root / "backup-bucket.json").read_text(encoding="utf-8"))
+          object_meta = json.loads((root / "source-backup-object.json").read_text(encoding="utf-8"))
 
-          observed = f'{instance.get("project", "")}:{instance.get("region", "")}:{instance.get("name", "")}'
-          if observed != expected_instance:
-              raise SystemExit("BLOCKED: Cloud SQL recovery instance identity does not match the protected configuration")
+          observed_instance = f'{instance.get("project", "")}:{instance.get("region", "")}:{instance.get("name", "")}'
+          if observed_instance != expected_instance:
+              raise SystemExit("BLOCKED: Cloud SQL recovery instance identity does not match protected configuration")
           if instance.get("state") != "RUNNABLE":
               raise SystemExit("BLOCKED: Cloud SQL recovery instance is not RUNNABLE")
           if database.get("name") != expected_database:
-              raise SystemExit("BLOCKED: Cloud SQL recovery database identity does not match the protected configuration")
+              raise SystemExit("BLOCKED: Cloud SQL recovery database identity does not match protected configuration")
           try:
               postgres_major = require_supported_postgresql_major(instance.get("databaseVersion"))
           except ValueError as exc:
               raise SystemExit(f"BLOCKED: {exc}") from exc
 
-          retention = bucket_meta.get("retentionPolicy") or bucket_meta.get("retention_policy") or {}
-          if not isinstance(retention, dict):
-              raise SystemExit("BLOCKED: bucket retention metadata has an invalid shape")
-          retention_locked = retention.get("isLocked", retention.get("is_locked")) is True
-
-          token = subprocess.check_output(["gcloud", "auth", "print-access-token"], text=True).strip()
-          if not token:
-              raise SystemExit("BLOCKED: Google Cloud access token is unavailable")
-          items = []
-          page_token = None
-          while True:
-              query = {
-                  "versions": "true",
-                  "maxResults": "1000",
-                  "fields": (
-                      "items(name,generation,size,timeCreated,timeDeleted,softDeleteTime,"
-                      "hardDeleteTime,md5Hash,crc32c,retentionExpirationTime,metadata),nextPageToken"
-                  ),
-              }
-              if page_token:
-                  query["pageToken"] = page_token
-              url = (
-                  "https://storage.googleapis.com/storage/v1/b/"
-                  + quote(bucket, safe="")
-                  + "/o?"
-                  + urlencode(query)
+          try:
+              source_evidence = verify_supabase_pg_dump_source(
+                  source_backup_reference=source_reference,
+                  source_project_ref=source_project_ref,
+                  source_database=source_database,
+                  object_metadata=object_meta,
+                  bucket_metadata=bucket_meta,
               )
-              request = Request(url, headers={"Authorization": "Bearer " + token})
-              with urlopen(request, timeout=30) as response:
-                  page = json.loads(response.read().decode("utf-8"))
-              if not isinstance(page, dict) or not isinstance(page.get("items", []), list):
-                  raise SystemExit("BLOCKED: GCS object-version inventory response is malformed")
-              if any(not isinstance(item, dict) for item in page.get("items", [])):
-                  raise SystemExit("BLOCKED: GCS object-version inventory contains malformed entries")
-              items.extend(page.get("items", []))
-              page_token = page.get("nextPageToken")
-              if not page_token:
-                  break
+          except ValueError as exc:
+              raise SystemExit(f"BLOCKED: Supabase source provenance/retention verification failed: {exc}") from exc
 
-          candidates, unverified = classify_backup_objects(
-              items,
-              expected_source_instance=source_instance,
-              expected_source_database=source_database,
-          )
           summary = {
-              "status": "PASS" if retention_locked and candidates else "BLOCKED",
-              "target_instance": observed,
+              "status": "PASS",
+              "target_instance": observed_instance,
               "target_state": instance.get("state"),
               "target_database": database.get("name"),
-              "source_instance": source_instance,
-              "source_database": source_database,
               "database_version": instance.get("databaseVersion"),
               "supported_postgresql_major": postgres_major,
               "region": instance.get("region"),
               "backup_bucket": bucket,
-              "bucket_retention_policy_locked": retention_locked,
-              "listed_object_versions": len(items),
-              "source_associated_backup_candidates": len(candidates),
-              "candidate_objects": candidates[:100],
-              "candidate_list_truncated": len(candidates) > 100,
-              "unverified_backup_like_objects": len(unverified),
-              "unverified_objects": unverified[:100],
-              "unverified_list_truncated": len(unverified) > 100,
-              "source_association_note": (
-                  "Custom metadata match is source association only; it does not prove "
-                  "dump integrity or a completed restore."
-              ),
+              "source_evidence": source_evidence,
           }
           (root / "recovery-preflight-summary.json").write_text(
-              json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+              json.dumps(summary, sort_keys=True, indent=2) + "\\n", encoding="utf-8"
           )
           print(json.dumps(summary, sort_keys=True))
-          if not retention_locked:
-              raise SystemExit("BLOCKED: backup bucket retention policy is not locked")
-          if not candidates:
-              raise SystemExit(
-                  "BLOCKED: no checksummed, retained backup generation with source metadata "
-                  "matching the configured production instance/database was found"
-              )
           PY
       - name: Preserve sanitized recovery resource inventory
         if: always()
