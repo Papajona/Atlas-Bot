@@ -9,7 +9,11 @@ from scripts.compare_cloud_sql_import_dumps import compare_dumps
 
 def _write(path: Path, guard_key: str, payload: str = "CREATE TABLE public.probe(id integer);\n"):
     path.write_text(
-        f"\\restrict {guard_key}\n{payload}\\unrestrict {guard_key}\n",
+        "-- PostgreSQL database dump header\n"
+        f"\\restrict {guard_key}\n"
+        f"{payload}"
+        f"\\unrestrict {guard_key}\n"
+        "-- PostgreSQL database dump complete\n",
         encoding="utf-8",
     )
 
