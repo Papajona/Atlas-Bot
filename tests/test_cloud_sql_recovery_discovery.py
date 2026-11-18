@@ -373,7 +373,7 @@ import sys
 
 args = sys.argv[1:]
 with open(os.environ["GCLOUD_CALL_LOG"], "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(args) + "\n")
+    handle.write(json.dumps(args) + "\\n")
 
 if args[:2] == ["projects", "describe"]:
     print("350896810949")
