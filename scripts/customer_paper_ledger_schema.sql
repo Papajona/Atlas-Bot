@@ -36,7 +36,7 @@ BEGIN
             WHERE m.roleid = r.oid
               AND NOT (
                 member_role.rolname = 'postgres'
-                AND grantor_role.rolname = 'supabase_admin'
+                AND grantor_role.rolname IN ('supabase_admin', 'cloudsqladmin')
                 AND m.admin_option
                 AND (to_jsonb(m) ? 'inherit_option')
                 AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
