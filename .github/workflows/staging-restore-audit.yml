@@ -16,6 +16,10 @@ on:
         description: Original generation-pinned source backup copied into the immutable Cloud SQL import object
         required: false
         type: string
+      sanitized_backup_reference:
+        description: Generation-pinned sanitized SQL candidate used to create the Cloud SQL import object
+        required: false
+        type: string
       restore_evidence_uri:
         description: Supabase provider evidence URL/URI; ignored for Cloud SQL, which fetches the operation from the authenticated Cloud SQL Admin API
         required: false
@@ -52,6 +56,7 @@ jobs:
       RESTORE_OPERATION_ID: ${{ inputs.restore_operation_id }}
       BACKUP_REFERENCE: ${{ inputs.backup_reference }}
       SOURCE_BACKUP_REFERENCE: ${{ inputs.source_backup_reference }}
+      SANITIZED_BACKUP_REFERENCE: ${{ inputs.sanitized_backup_reference }}
       RESTORE_EVIDENCE_URI: ${{ inputs.restore_evidence_uri }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -92,6 +97,11 @@ jobs:
             [[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]] || { echo "BLOCKED: restore target must not be the active production project"; exit 1; }
           elif [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]]; then
             : "${SOURCE_BACKUP_REFERENCE:?Cloud SQL audit requires the original generation-pinned source backup reference}"
+            : "${SANITIZED_BACKUP_REFERENCE:?Cloud SQL audit requires the generation-pinned sanitized SQL candidate reference}"
+            [[ "$SANITIZED_BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/sanitized-imports/[^#]+[.]sql#[1-9][0-9]*$ ]] || {
+              echo "BLOCKED: sanitized candidate must be generation-pinned under sanitized-imports/" >&2
+              exit 1
+            }
             [[ "$SOURCE_BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/.+#([1-9][0-9]*)$ ]] || {
               echo "BLOCKED: original Cloud SQL source backup must be generation-pinned in the approved backup bucket" >&2
               exit 1
@@ -191,18 +201,23 @@ jobs:
             --object-versions "$RUNNER_TEMP/recovery-backup-versions.json" \
             --operation-record "$RUNNER_TEMP/restore-operation-evidence.json" \
             --output "$RUNNER_TEMP/cloud-sql-backup-binding.json"
-          # Re-download the exact source generation and immutable import
-          # generation. Recreate the same offline pg_restore conversion, then
-          # compare prepared SQL bytes with the uploaded object bytes.
+          # Verify source identity and the approved sanitizer result independently.
+          # Sanitized data must differ from the source archive; byte-equality with
+          # the original archive would re-introduce customer credentials and PII.
           gcloud storage cp "$SOURCE_BACKUP_REFERENCE" "$RUNNER_TEMP/cloud-sql-source-backup"
+          gcloud storage cp "$SANITIZED_BACKUP_REFERENCE" "$RUNNER_TEMP/sanitized-candidate.sql"
           gcloud storage cp "$BACKUP_REFERENCE" "$RUNNER_TEMP/cloud-sql-import-source"
           PYTHONPATH=. python scripts/prepare_cloud_sql_import_dump.py \
             --input "$RUNNER_TEMP/cloud-sql-source-backup" \
             --output "$RUNNER_TEMP/cloud-sql-source-prepared.sql"
-          PYTHONPATH=. python scripts/compare_cloud_sql_import_dumps.py \
-            --expected "$RUNNER_TEMP/cloud-sql-source-prepared.sql" \
-            --actual "$RUNNER_TEMP/cloud-sql-import-source"
-          # The Cloud SQL import object itself must be supported plain/gzip SQL.
+          PYTHONPATH=. python scripts/verify_cloud_sql_sanitized_artifacts.py \
+            --source-backup-reference "$SOURCE_BACKUP_REFERENCE" \
+            --source-prepared-sql "$RUNNER_TEMP/cloud-sql-source-prepared.sql" \
+            --sanitized-backup-reference "$SANITIZED_BACKUP_REFERENCE" \
+            --sanitized-sql "$RUNNER_TEMP/sanitized-candidate.sql" \
+            --imported-sql "$RUNNER_TEMP/cloud-sql-import-source" \
+            --output "$RUNNER_TEMP/cloud-sql-sanitized-import-verification.json"
+          # The exact sanitized import object must also pass the database-redirection scanner.
           PYTHONPATH=. python scripts/verify_cloud_sql_import_dump.py \
             --input "$RUNNER_TEMP/cloud-sql-import-source" \
             --output "$RUNNER_TEMP/cloud-sql-import-dump-verification.json"
@@ -338,6 +353,7 @@ jobs:
             "$RUNNER_TEMP/recovery-backup-bucket.json" \
             "$RUNNER_TEMP/recovery-backup-versions.json" \
             "$RUNNER_TEMP/cloud-sql-backup-binding.json" \
+            "$RUNNER_TEMP/cloud-sanitized-import-verification.json" \
             "$RUNNER_TEMP/cloud-sql-import-dump-verification.json"; do
             if [[ -s "$file" ]]; then
               gcloud storage cp "$file" "$out_dir/$(basename "$file")"
@@ -360,6 +376,7 @@ jobs:
             ${{ runner.temp }}/recovery-backup-bucket.json
             ${{ runner.temp }}/recovery-backup-versions.json
             ${{ runner.temp }}/cloud-sql-backup-binding.json
+            ${{ runner.temp }}/cloud-sql-sanitized-import-verification.json
             ${{ runner.temp }}/cloud-sql-import-dump-verification.json
           if-no-files-found: warn
           retention-days: 90
