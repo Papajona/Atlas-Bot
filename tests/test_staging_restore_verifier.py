@@ -485,15 +485,30 @@ def test_customer_paper_restore_audit_handles_null_missing_table_observation():
     assert "customer_paper_tables_missing was not reported as a JSON array" in failures
 
 
-@pytest.mark.parametrize("invalid_count", [False, True, 9.0, 9.9, "9"])
-def test_customer_paper_restore_audit_rejects_non_integer_counts(invalid_count):
+@pytest.mark.parametrize(
+    "count_key",
+    [
+        "customer_paper_tables_without_forced_rls",
+        "customer_paper_policy_count",
+        "customer_paper_tenant_policy_count",
+        "customer_paper_backend_policy_count",
+        "customer_paper_wrong_policy_role_count",
+        "customer_paper_runtime_invalid_table_privileges",
+        "customer_paper_runtime_sequences",
+        "customer_paper_runtime_sequences_with_usage",
+        "customer_paper_runtime_sequences_with_forbidden_privileges",
+        "customer_paper_runtime_public_financial_privileges",
+    ],
+)
+@pytest.mark.parametrize("invalid_count", [False, True, 9.0, 9.9, "9", None])
+def test_customer_paper_restore_audit_rejects_non_integer_counts(count_key, invalid_count):
     observed = {
         "customer_paper_schema_present": True,
         "customer_paper_tables_missing": [],
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
         "customer_paper_tables_without_forced_rls": 0,
-        "customer_paper_policy_count": invalid_count,
+        "customer_paper_policy_count": 9,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_wrong_policy_role_count": 0,
@@ -507,8 +522,9 @@ def test_customer_paper_restore_audit_rejects_non_integer_counts(invalid_count):
         "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
         "customer_paper_runtime_public_financial_privileges": 0,
     }
+    observed[count_key] = invalid_count
     failures = customer_paper_schema_failures(observed)
-    assert any("customer_paper_policy_count must be a JSON integer" in failure for failure in failures)
+    assert any(f"{count_key} must be a JSON integer" in failure for failure in failures)
 
 
 
