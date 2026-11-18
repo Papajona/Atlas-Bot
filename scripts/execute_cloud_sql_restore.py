@@ -25,6 +25,7 @@ from urllib.request import Request, urlopen
 
 from scripts.verify_cloud_sql_backup_binding import verify_backup_binding
 from scripts.verify_cloud_sql_sanitized_artifacts import verify_sanitized_artifacts
+from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source
 from scripts.verify_restore_operation_evidence import verify as verify_restore_operation
 
 
@@ -57,9 +58,10 @@ def validate_restore_inputs(
     project_id: str,
     region: str,
     target_instance: str,
-    production_instance: str,
     target_database: str,
     backup_reference: str,
+    source_supabase_project_ref: str = "",
+    production_instance: str | None = None,
 ) -> tuple[str, str, str]:
     """Validate fixed staging project/region, separate target and pinned GCS object."""
     match = _INSTANCE_RE.fullmatch(target_instance or "")
@@ -70,10 +72,15 @@ def validate_restore_inputs(
         raise ValueError("recovery instance must belong to the configured staging project")
     if target_region != region:
         raise ValueError("recovery instance must belong to the configured staging region")
-    if not _INSTANCE_RE.fullmatch(production_instance or ""):
-        raise ValueError("production Cloud SQL instance identity must be explicitly configured")
-    if target_instance == production_instance:
-        raise ValueError("recovery instance must be different from the production instance")
+    if production_instance:
+        if not _INSTANCE_RE.fullmatch(production_instance):
+            raise ValueError("production Cloud SQL instance identity must be project:region:instance")
+        if target_instance == production_instance:
+            raise ValueError("recovery instance must be different from the production instance")
+    elif source_supabase_project_ref != "wauaelzyugjuepmrewaw":
+        raise ValueError(
+            "source Supabase project ref must match the authenticated pg_dump source wauaelzyugjuepmrewaw"
+        )
     if not _DATABASE_RE.fullmatch(target_database or ""):
         raise ValueError("recovery database name is invalid")
     backup_match = _BACKUP_RE.fullmatch(backup_reference or "")
@@ -329,10 +336,11 @@ def execute_restore(
     project_id: str,
     region: str,
     target_instance: str,
-    production_instance: str,
     target_database: str,
     backup_reference: str,
     sanitized_backup_reference: str,
+    source_supabase_project_ref: str = "",
+    production_instance: str | None = None,
     output_path: str,
     timeout_seconds: int = 14400,
     poll_interval_seconds: int = 15,
@@ -342,9 +350,10 @@ def execute_restore(
         project_id=project_id,
         region=region,
         target_instance=target_instance,
-        production_instance=production_instance,
         target_database=target_database,
         backup_reference=backup_reference,
+        source_supabase_project_ref=source_supabase_project_ref,
+        production_instance=production_instance,
     )
     _sanitized_object_name, _sanitized_generation = validate_sanitized_backup_reference(
         sanitized_backup_reference
@@ -392,6 +401,14 @@ def execute_restore(
         or _pick(source_object_metadata, "crc32c_hash", "crc32c") != "Ya71XA=="
     ):
         raise ValueError("source backup generation does not match the reviewed October 22 archive fingerprint")
+
+    source_provenance = verify_supabase_pg_dump_source(
+        source_backup_reference=backup_reference,
+        source_project_ref=source_supabase_project_ref,
+        source_database="postgres",
+        object_metadata=source_object_metadata,
+        bucket_metadata=bucket_metadata,
+    )
 
     sanitized_object_metadata = _run_json(
         ["gcloud", "storage", "objects", "describe", sanitized_backup_reference, "--format=json"],
@@ -584,6 +601,8 @@ def execute_restore(
         "backup_generation": source_generation,
         "source_backup_reference": backup_reference,
         "source_backup_sha256": source_backup_sha256,
+        "source_supabase_project_ref": source_supabase_project_ref,
+        "source_provenance": source_provenance,
         "source_prepared_sql_sha256": candidate_evidence["source_prepared_sql_sha256"],
         "sanitized_backup_reference": sanitized_backup_reference,
         "sanitized_import_sha256": candidate_evidence["sanitized_import_sha256"],
@@ -607,7 +626,7 @@ def main() -> int:
     parser.add_argument("--project-id", required=True)
     parser.add_argument("--region", required=True)
     parser.add_argument("--target-instance", required=True)
-    parser.add_argument("--production-instance", required=True)
+    parser.add_argument("--source-supabase-project-ref", required=True)
     parser.add_argument("--target-database", required=True)
     parser.add_argument("--backup-reference", required=True)
     parser.add_argument("--sanitized-backup-reference", required=True)
@@ -622,10 +641,10 @@ def main() -> int:
             project_id=args.project_id,
             region=args.region,
             target_instance=args.target_instance,
-            production_instance=args.production_instance,
             target_database=args.target_database,
             backup_reference=args.backup_reference,
             sanitized_backup_reference=args.sanitized_backup_reference,
+            source_supabase_project_ref=args.source_supabase_project_ref,
             output_path=args.output,
             timeout_seconds=args.timeout_seconds,
             poll_interval_seconds=args.poll_interval_seconds,
@@ -635,6 +654,8 @@ def main() -> int:
             "operation_id": result["operation_id"],
             "target_instance_connection_name": result["target_instance_connection_name"],
             "target_database": result["target_database"],
+            "source_supabase_project_ref": result["source_supabase_project_ref"],
+            "source_provenance": result["source_provenance"],
             "backup_reference": result["backup_reference"],
             "backup_generation": result["backup_generation"],
             "import_object_reference": result["import_object_reference"],
