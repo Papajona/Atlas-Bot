@@ -15,6 +15,7 @@ PROVIDER_ID="github-main"
 
 DEPLOY_SA_ID="atlas-staging-deploy"
 PREFLIGHT_SA_ID="atlas-staging-preflight"
+DISCOVERY_SA_ID="atlas-staging-discovery"
 RUNTIME_SA_ID="atlas-staging-runtime"
 ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
@@ -62,10 +63,12 @@ ensure_service_account() {
 
 ensure_service_account "$DEPLOY_SA_ID" "Atlas paper staging GitHub deploy"
 ensure_service_account "$PREFLIGHT_SA_ID" "Atlas staging identity preflight"
+ensure_service_account "$DISCOVERY_SA_ID" "Atlas read-only Cloud SQL and backup discovery"
 ensure_service_account "$RUNTIME_SA_ID" "Atlas paper-only Cloud Run runtime"
 
 DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+DISCOVERY_SA="${DISCOVERY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 if ! gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
@@ -93,8 +96,22 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
 gcloud iam service-accounts add-iam-policy-binding "$PREFLIGHT_SA" \
   --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
   --role="roles/iam.workloadIdentityUser"
+gcloud iam service-accounts add-iam-policy-binding "$DISCOVERY_SA" \
+  --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
+  --role="roles/iam.workloadIdentityUser"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
+
+# The discovery identity is read-only: Cloud SQL inventory, service-account listing,
+# and object/bucket metadata reads only. It receives no resource write roles.
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/cloudsql.viewer" --quiet
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/iam.serviceAccountViewer" --quiet
+gcloud storage buckets add-iam-policy-binding "gs://atlas-staging-510915-db-backups" \
+  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/storage.bucketViewer" --quiet
+gcloud storage buckets add-iam-policy-binding "gs://atlas-staging-510915-db-backups" \
+  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/storage.objectViewer" --quiet
 
 PAPER_URL_FILE="${HOME}/.atlas-customer-paper/database-url"
 USE_PAPER_URL_FILE="false"
@@ -289,6 +306,7 @@ printf 'GCP_REGION=%s\n' "$REGION"
 printf 'GCP_WORKLOAD_IDENTITY_PROVIDER=projects/%s/locations/global/workloadIdentityPools/%s/providers/%s\n' "$PROJECT_NUMBER" "$POOL_ID" "$PROVIDER_ID"
 printf 'GCP_STAGING_DEPLOY_SERVICE_ACCOUNT=%s\n' "$DEPLOY_SA"
 printf 'GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT=%s\n' "$PREFLIGHT_SA"
+printf 'GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT=%s\n' "$DISCOVERY_SA"
 printf 'ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT=%s\n' "$RUNTIME_SA"
 printf 'ATLAS_STAGING_CLOUD_RUN_SERVICE=%s\n' "$CLOUD_RUN_SERVICE"
 printf 'ATLAS_STAGING_DATABASE_SECRET=%s\n' "$PRIMARY_SECRET"
