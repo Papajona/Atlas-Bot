@@ -5,7 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       backup_reference:
-        description: Immutable GCS backup URI pinned with #<generation>
+        description: Exact reviewed source backup URI pinned with #<generation>
+        required: true
+        type: string
+      sanitized_backup_reference:
+        description: Reviewed sanitized SQL candidate in sanitized-imports/ pinned with #<generation>
         required: true
         type: string
       confirm_restore_target:
@@ -42,6 +46,7 @@ jobs:
       AUDIT_DATABASE_ROLE: ${{ vars.ATLAS_STAGING_AUDIT_DB_ROLE }}
       EVIDENCE_BUCKET: ${{ vars.ATLAS_STAGING_EVIDENCE_BUCKET }}
       BACKUP_REFERENCE: ${{ inputs.backup_reference }}
+      SANITIZED_BACKUP_REFERENCE: ${{ inputs.sanitized_backup_reference }}
       CONFIRM_RESTORE_TARGET: ${{ inputs.confirm_restore_target }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -96,6 +101,10 @@ jobs:
             echo "BLOCKED: backup reference must pin a GCS generation in the approved backup bucket" >&2
             exit 1
           }
+          [[ "$SANITIZED_BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/sanitized-imports/[^#]+[.]sql#[1-9][0-9]*$ ]] || {
+            echo "BLOCKED: a generation-pinned sanitized SQL candidate under sanitized-imports/ is required" >&2
+            exit 1
+          }
 
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
@@ -125,6 +134,7 @@ jobs:
             --production-instance "$PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" \
             --target-database "$CLOUD_SQL_DATABASE" \
             --backup-reference "$BACKUP_REFERENCE" \
+            --sanitized-backup-reference "$SANITIZED_BACKUP_REFERENCE" \
             --timeout-seconds 14400 \
             --poll-interval-seconds 15 \
             --output "$RUNNER_TEMP/cloud-sql-restore-execution.json"
@@ -150,7 +160,8 @@ jobs:
             -f ref=main \
             -f "inputs[restore_operation_id]=$RESTORE_OPERATION_ID" \
             -f "inputs[backup_reference]=$IMPORT_OBJECT_REFERENCE" \
-            -f "inputs[source_backup_reference]=$BACKUP_REFERENCE"
+            -f "inputs[source_backup_reference]=$BACKUP_REFERENCE" \
+            -f "inputs[sanitized_backup_reference]=$SANITIZED_BACKUP_REFERENCE"
 
           audit_display_title="Cloud SQL restore audit ($RESTORE_OPERATION_ID)"
           audit_run_id=""
