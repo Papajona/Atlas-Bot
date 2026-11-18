@@ -344,7 +344,7 @@ jobs:
                     && git show "$main_sha:scripts/cloud_sql_recovery_inventory.py" | grep -F '"timeDeleted": item.get("timeDeleted")' >/dev/null \
                     && git show "$main_sha:scripts/cloud_sql_recovery_inventory.py" | grep -F '"source_association": "matched_object_metadata"' >/dev/null \
                     && git show "$main_sha:tests/test_cloud_sql_recovery_inventory.py" | grep -F 'def test_retained_noncurrent_generation_with_time_deleted_is_qualified' >/dev/null \
-                    && git show "$main_sha:.github/workflows/cloud-sql-recovery-preflight.yml" | grep -F 'scripts/cloud_sql_recovery_inventory.py' >/dev/null; then
+                    && git show "$main_sha:.github/workflows/cloud-sql-recovery-restore-preflight.yml" | grep -F 'from scripts.cloud_sql_recovery_inventory import (' >/dev/null; then
                     reviewed_reason="reviewed closed PR #436 superseded by #437; exact old tip rejects every timeDeleted generation, while main qualifies retained noncurrent generations and includes stronger PostgreSQL/source-association checks and regression coverage"
                   fi
                   ;;
