@@ -1398,9 +1398,12 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         repo_root / ".github" / "workflows" / "cloud-sql-recovery-restore-preflight.yml"
     ).read_text(encoding="utf-8")
     assert "from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major" in restore_preflight_workflow
+    # The prune guard checks the base main revision, which still uses a
+    # parenthesized import. The PR branch's restore preflight deliberately
+    # uses the single-line import asserted above; keep those two refs distinct.
     assert (
         'git show "$main_sha:.github/workflows/cloud-sql-recovery-restore-preflight.yml" '
-        '| grep -F \'from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major\' >/dev/null'
+        '| grep -F \'from scripts.cloud_sql_recovery_inventory import (\' >/dev/null'
         in cloud_inventory_case
     )
     assert (
