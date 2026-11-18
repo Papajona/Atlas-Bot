@@ -450,6 +450,11 @@ def test_customer_paper_restore_audit_rejects_unsafe_tenant_policy_attributes():
     valid = _valid_customer_paper_tenant_policies()
     cases = (
         ("qual", "true", "USING expression"),
+        (
+            "qual",
+            "(customer_id = ( SELECT NULLIF(current_setting('app.customer_idselect'::text, true), ''::text)::bigint AS \"nullif\"))",
+            "USING expression",
+        ),
         ("with_check", "true", "WITH CHECK expression"),
         ("roles", ["atlas_customer_paper", "public"], "roles are not exactly"),
         ("cmd", "SELECT", "command is not ALL"),
