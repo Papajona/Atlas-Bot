@@ -36,6 +36,7 @@ def is_source_backup_candidate(item: Mapping[str, Any]) -> bool:
     if not (item.get("md5Hash") or item.get("md5_hash") or item.get("crc32c") or item.get("crc32c_hash")):
         return False
 
-    if item.get("timeDeleted") or item.get("time_deleted"):
-        return False
+    # A listed noncurrent generation carries timeDeleted but remains retrievable
+    # by its pinned generation. Permanently removed generations are absent from
+    # the versions listing, so timeDeleted alone is not evidence of unavailability.
     return True
