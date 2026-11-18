@@ -492,6 +492,9 @@ def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
     assert "gcloud sql instances create" not in bootstrap
     assert "gcloud sql databases create" not in bootstrap
     assert "gcloud sql import" not in bootstrap
+    assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in bootstrap
+    assert "wauaelzyugjuepmrewaw" in bootstrap
+    assert "ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" not in bootstrap
 
 def test_recovery_preflight_accepts_retained_noncurrent_source_backup_generation():
     # GCS reports timeDeleted for an archived object generation. Its presence in
