@@ -36,3 +36,4 @@ def test_cloud_sql_paper_role_and_schema_are_provisioned_as_separate_reviewed_st
     assert "REVOKE ALL ON SCHEMA public FROM %I" in schema
     assert "CREATE POLICY customer_paper_tenant" in schema
     assert "CREATE POLICY customer_paper_bar_budget_backend" in schema
+    assert "grantor_role.rolname IN ('supabase_admin', 'cloudsqladmin')" in schema
