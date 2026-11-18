@@ -9,12 +9,14 @@ completed operation against the existing audit contracts.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -32,6 +34,15 @@ _BACKUP_RE = re.compile(
 )
 _DATABASE_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]{0,62}$")
 _OPERATION_RE = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
+
+
+def _pick(mapping: Mapping[str, Any], *keys: str) -> Any:
+    """Return the first populated alias from provider JSON (snake_case or camelCase)."""
+    for key in keys:
+        value = mapping.get(key)
+        if value not in (None, ""):
+            return value
+    return None
 
 
 def validate_restore_inputs(
@@ -113,32 +124,34 @@ def validate_backup_metadata(
     if not match:
         raise ValueError("backup reference is not generation-pinned")
     object_name, expected_generation = match.groups()
-    if str(object_metadata.get("name") or "") != object_name:
+    if str(_pick(object_metadata, "name") or "") != object_name:
         raise ValueError("GCS object metadata name does not match the backup reference")
-    if str(object_metadata.get("generation") or "") != expected_generation:
+    if str(_pick(object_metadata, "generation") or "") != expected_generation:
         raise ValueError("GCS object metadata generation does not match the backup reference")
-    if int(object_metadata.get("size") or 0) <= 0:
+    if int(_pick(object_metadata, "size") or 0) <= 0:
         raise ValueError("GCS backup object is empty")
-    if not (object_metadata.get("md5Hash") or object_metadata.get("crc32c")):
+    if not (
+        _pick(object_metadata, "md5_hash", "md5Hash")
+        or _pick(object_metadata, "crc32c_hash", "crc32c")
+    ):
         raise ValueError("GCS backup object has no provider checksum metadata")
-    bucket = object_metadata.get("bucket")
+    bucket = _pick(object_metadata, "bucket")
     if bucket and bucket != BACKUP_BUCKET:
         raise ValueError("GCS backup object is outside the approved recovery bucket")
-    retention_policy = bucket_metadata.get("retentionPolicy")
-    if not isinstance(retention_policy, Mapping) or retention_policy.get("isLocked") is not True:
+    retention_policy = _pick(bucket_metadata, "retention_policy", "retentionPolicy")
+    if not isinstance(retention_policy, Mapping) or _pick(retention_policy, "is_locked", "isLocked") is not True:
         raise ValueError("GCS recovery backup bucket retention policy must be locked")
-    retention_expiration = object_metadata.get("retentionExpirationTime")
+    retention_expiration = _pick(object_metadata, "retention_expiration_time", "retentionExpirationTime")
     if not retention_expiration:
-        retention = object_metadata.get("retention")
+        retention = _pick(object_metadata, "retention")
         if isinstance(retention, Mapping):
-            retention_expiration = retention.get("retainUntilTime")
+            retention_expiration = _pick(retention, "retain_until_time", "retainUntilTime")
     expires = _utc_timestamp(retention_expiration, "retention expiration")
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         raise ValueError("clock must be timezone-aware")
     if expires <= current.astimezone(timezone.utc):
         raise ValueError("GCS backup object retention has already expired")
-
 
 def _extract_operation_id(document: Mapping[str, Any]) -> str:
     value = document.get("name") or document.get("operationId") or document.get("operation_id")
@@ -278,6 +291,14 @@ def _wait_for_operation(
         raise RuntimeError(f"Cloud SQL import ended in an unexpected provider state: {status or 'UNKNOWN'}")
 
 
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def execute_restore(
     *,
     project_id: str,
@@ -291,7 +312,7 @@ def execute_restore(
     poll_interval_seconds: int = 15,
     run: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    instance_id, object_name, generation = validate_restore_inputs(
+    instance_id, source_object_name, source_generation = validate_restore_inputs(
         project_id=project_id,
         region=region,
         target_instance=target_instance,
@@ -299,20 +320,6 @@ def execute_restore(
         target_database=target_database,
         backup_reference=backup_reference,
     )
-    object_uri = backup_reference.split("#", 1)[0]
-
-    # Cloud SQL's native import API addresses the object URI rather than a GCS
-    # generation-qualified URL. Require the pinned generation to be the live
-    # version immediately before the import; the post-import binding audit then
-    # proves it remained live for the operation's complete start/end interval.
-    versions_before = _list_object_versions(object_name=object_name, run=run)
-    live_generation_before = _live_backup_generation(
-        versions_before,
-        object_name=object_name,
-        instant=datetime.now(timezone.utc),
-    )
-    if live_generation_before != generation:
-        raise ValueError("pinned GCS generation is not the live backup object before import")
 
     instance = _run_json(
         [
@@ -337,23 +344,26 @@ def execute_restore(
     if str(database.get("name") or "") != target_database:
         raise ValueError("configured recovery database does not exist on the target instance")
 
-    object_metadata = _run_json(
-        ["gcloud", "storage", "objects", "describe", backup_reference, "--format=json"],
-        run=run,
-    )
     bucket_metadata = _run_json(
         ["gcloud", "storage", "buckets", "describe", f"gs://{BACKUP_BUCKET}", "--format=json"],
         run=run,
     )
+    source_object_metadata = _run_json(
+        ["gcloud", "storage", "objects", "describe", backup_reference, "--format=json"],
+        run=run,
+    )
     validate_backup_metadata(
         backup_reference=backup_reference,
-        object_metadata=object_metadata,
+        object_metadata=source_object_metadata,
         bucket_metadata=bucket_metadata,
     )
 
     with tempfile.TemporaryDirectory(prefix="atlas-cloud-sql-restore-") as temp_dir:
-        dump_path = str(Path(temp_dir) / "recovery-import.sql")
-        dump_report = str(Path(temp_dir) / "import-dump-verification.json")
+        dump_path = str(Path(temp_dir) / "source-recovery-import.sql")
+        dump_report = str(Path(temp_dir) / "source-import-dump-verification.json")
+        verified_import_path = str(Path(temp_dir) / "verified-import-copy.sql")
+
+        # Download and scan the exact generation supplied by the operator.
         copy_proc = run(
             ["gcloud", "storage", "cp", backup_reference, dump_path],
             capture_output=True,
@@ -362,6 +372,8 @@ def execute_restore(
         )
         if copy_proc.returncode:
             raise RuntimeError("Could not download the exact generation-pinned recovery SQL dump")
+        source_sha256 = _sha256_file(dump_path)
+
         scan_proc = run(
             [
                 sys.executable,
@@ -376,9 +388,65 @@ def execute_restore(
         if scan_proc.returncode:
             raise ValueError("recovery dump did not pass the existing Cloud SQL import safety scanner")
 
+        # Cloud SQL import accepts only an unversioned gs:// URI. Copy the
+        # scanned bytes to a unique object in the locked-retention bucket.
+        # The executor has objectCreator (not objectAdmin), and the upload is
+        # create-only; the provider therefore cannot race a later generation
+        # into the URI that Cloud SQL reads.
+        import_object_name = f"restore-imports/{source_sha256}-{uuid.uuid4().hex}.sql"
+        import_object_uri = f"gs://{BACKUP_BUCKET}/{import_object_name}"
+        upload_proc = run(
+            [
+                "gcloud", "storage", "cp", "--if-generation-match=0",
+                dump_path, import_object_uri,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if upload_proc.returncode:
+            raise RuntimeError("Could not create the immutable, create-only Cloud SQL import object")
+
+        import_object_metadata = _run_json(
+            ["gcloud", "storage", "objects", "describe", import_object_uri, "--format=json"],
+            run=run,
+        )
+        import_generation = str(_pick(import_object_metadata, "generation") or "")
+        if not import_generation.isdigit() or int(import_generation) <= 0:
+            raise ValueError("immutable Cloud SQL import object has no valid generation")
+        import_reference = f"{import_object_uri}#{import_generation}"
+        validate_backup_metadata(
+            backup_reference=import_reference,
+            object_metadata=import_object_metadata,
+            bucket_metadata=bucket_metadata,
+        )
+
+        # Read back the exact uploaded generation and compare the bytes before
+        # asking Cloud SQL to import its unversioned object URI.
+        verify_copy_proc = run(
+            ["gcloud", "storage", "cp", import_reference, verified_import_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if verify_copy_proc.returncode:
+            raise RuntimeError("Could not read back the immutable Cloud SQL import object")
+        import_sha256 = _sha256_file(verified_import_path)
+        if import_sha256 != source_sha256:
+            raise ValueError("immutable Cloud SQL import object bytes differ from the scanned source generation")
+
+        import_versions_before = _list_object_versions(object_name=import_object_name, run=run)
+        live_import_generation = _live_backup_generation(
+            import_versions_before,
+            object_name=import_object_name,
+            instant=datetime.now(timezone.utc),
+        )
+        if live_import_generation != import_generation:
+            raise ValueError("immutable import object generation is not live immediately before Cloud SQL import")
+
         launch_proc = run(
             [
-                "gcloud", "sql", "import", "sql", instance_id, object_uri,
+                "gcloud", "sql", "import", "sql", instance_id, import_object_uri,
                 f"--database={target_database}",
                 f"--project={project_id}",
                 "--async", "--quiet", "--format=json",
@@ -401,23 +469,23 @@ def execute_restore(
             operation_id=operation_id,
             project_id=project_id,
             target_database=target_database,
-            backup_object_uri=object_uri,
+            backup_object_uri=import_object_uri,
             timeout_seconds=timeout_seconds,
             poll_interval_seconds=poll_interval_seconds,
             run=run,
         )
-        versions = _list_object_versions(object_name=object_name, run=run)
+        import_versions = _list_object_versions(object_name=import_object_name, run=run)
         backup_binding = verify_backup_binding(
-            backup_reference=backup_reference,
-            object_metadata=object_metadata,
+            backup_reference=import_reference,
+            object_metadata=import_object_metadata,
             bucket_metadata=bucket_metadata,
-            object_versions=versions,
+            object_versions=import_versions,
             operation_record=operation,
         )
         restore_evidence = verify_restore_operation(
             operation,
             operation_id=operation_id,
-            backup_reference=backup_reference,
+            backup_reference=import_reference,
             target_kind="cloud_sql",
             target_database=target_database,
             target_instance_connection_name=target_instance,
@@ -429,7 +497,11 @@ def execute_restore(
         "target_instance_connection_name": target_instance,
         "target_database": target_database,
         "backup_reference": backup_reference,
-        "backup_generation": generation,
+        "backup_generation": source_generation,
+        "source_backup_reference": backup_reference,
+        "source_backup_sha256": source_sha256,
+        "import_object_reference": import_reference,
+        "import_object_sha256": import_sha256,
         "backup_binding": backup_binding,
         "restore_evidence": restore_evidence,
         "completed_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -474,6 +546,8 @@ def main() -> int:
             "target_database": result["target_database"],
             "backup_reference": result["backup_reference"],
             "backup_generation": result["backup_generation"],
+            "import_object_reference": result["import_object_reference"],
+            "source_backup_sha256": result["source_backup_sha256"],
         }, sort_keys=True))
         return 0
     except Exception as exc:
