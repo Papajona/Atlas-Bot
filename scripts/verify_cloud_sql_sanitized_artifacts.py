@@ -51,6 +51,9 @@ def verify_sanitized_artifacts(
         raise ValueError(
             "sanitized backup reference must pin a .sql generation under the approved sanitized-imports/ prefix"
         )
+    object_name = sanitized_backup_reference.split("#", 1)[0].split(f"{BACKUP_BUCKET}/", 1)[1]
+    if ".." in object_name.split("/"):
+        raise ValueError("sanitized backup object path contains a traversal segment")
 
     source_prepared_sha256 = sha256_file(source_prepared_sql_path)
     if source_prepared_sha256 != EXPECTED_SOURCE_PREPARED_SQL_SHA256:
