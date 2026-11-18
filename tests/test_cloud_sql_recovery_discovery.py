@@ -568,3 +568,17 @@ def test_paper_staging_bootstrap_does_not_require_recovery_backup_infrastructure
     assert 'ensure_service_account "$PREFLIGHT_SA_ID"' in source
     assert 'ensure_service_account "$RUNTIME_SA_ID"' in source
     assert 'EXPECTED_PROVIDER_CONDITION="assertion.repository == \'Papajona/Atlas-Bot\' && assertion.ref == \'refs/heads/main\'"' in source
+
+
+def test_recovery_discovery_workflow_skips_until_dedicated_identity_is_configured():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "cloud-sql-recovery-preflight.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT != ''" in workflow
+    assert "GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
+    assert "service_account: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
+    assert "atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com" not in workflow
