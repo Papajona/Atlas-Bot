@@ -361,6 +361,15 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
 
 
 
+def test_execute_restore_signature_keeps_required_output_before_optional_source_settings():
+    import inspect
+    from scripts.execute_cloud_sql_restore import execute_restore
+
+    parameters = list(inspect.signature(execute_restore).parameters)
+    assert parameters.index("output_path") < parameters.index("source_supabase_project_ref")
+    assert parameters.index("output_path") < parameters.index("production_instance")
+
+
 def test_restore_inputs_accept_verified_supabase_pg_dump_source_without_production_cloud_sql_instance():
     assert validate_restore_inputs(
         project_id="atlas-staging-510915",
