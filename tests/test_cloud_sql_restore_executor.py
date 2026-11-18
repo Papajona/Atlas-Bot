@@ -364,6 +364,7 @@ def test_sanitized_backup_reference_accepts_only_generation_pinned_sql_under_san
     "gs://atlas-staging-510915-db-backups/public-staging-scrubbed.sql#1792683068959305",
     "gs://atlas-staging-510915-db-backups/sanitized-imports/public-staging-scrubbed.sql",
     "gs://atlas-staging-510915-db-backups/sanitized-imports/../raw.dump#1792683068959305",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/../raw.sql#1792683068959305",
     "gs://wrong-bucket/sanitized-imports/public-staging-scrubbed.sql#1792683068959305",
     "gs://atlas-staging-510915-db-backups/sanitized-imports/raw.dump#1792683068959305",
 ])
