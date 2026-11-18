@@ -371,7 +371,7 @@ def execute_restore(
 
     with tempfile.TemporaryDirectory(prefix="atlas-cloud-sql-restore-") as temp_dir:
         dump_path = str(Path(temp_dir) / "source-recovery-import.sql")
-        dump_report = str(Path(temp_dir) / "source-import-dump-verification.json" )
+        dump_report = str(Path(temp_dir) / "source-import-dump-verification.json")
 
         # Download and scan the exact generation supplied by the operator.
         copy_proc = run(
