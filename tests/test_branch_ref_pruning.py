@@ -1388,6 +1388,49 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         "pending_actionable_decisions_for_version",
     ):
         assert marker in qodo_labels_case
+    
+    cloud_inventory_case = workflow.split(
+        '"fix/pr434-qodo-recovery-inventory-guards:50bad47227e9f4d3da219b8a61f09daf78ef7d64")',
+        1,
+    )[1].split(";;", 1)[0]
+    repo_root = Path(__file__).resolve().parents[1]
+    restore_preflight_workflow = (
+        repo_root / ".github" / "workflows" / "cloud-sql-recovery-restore-preflight.yml"
+    ).read_text(encoding="utf-8")
+    assert "from scripts.cloud_sql_recovery_inventory import (" in restore_preflight_workflow
+    assert (
+        'git show "$main_sha:.github/workflows/cloud-sql-recovery-restore-preflight.yml" '
+        '| grep -F \'from scripts.cloud_sql_recovery_inventory import (\' >/dev/null'
+        in cloud_inventory_case
+    )
+    assert (
+        'git show "$main_sha:.github/workflows/cloud-sql-recovery-preflight.yml"'
+        not in cloud_inventory_case
+    )
+
+    for marker in (
+        'item.get("timeDeleted") or item.get("softDeleteTime") or item.get("hardDeleteTime")',
+        'def require_supported_postgresql_major',
+        'def classify_backup_objects',
+        'test_retained_noncurrent_generation_with_time_deleted_is_qualified',
+        'source_association',
+    ):
+        assert marker in cloud_inventory_case
+
+    qodo_restore_case = workflow.split(
+        '"fix/remediation-3e2f4645-fbdaec:c78a4cf4d9d1e639bb593512901dd559e36d5c89")',
+        1,
+    )[1].split(";;", 1)[0]
+    for marker in (
+        'serviceAccount:$RECOVERY_INSTANCE_SA',
+        '"md5_hash", "md5Hash"',
+        '"crc32c_hash", "crc32c"',
+        "def _pick(",
+        "test_provider_metadata_alias_picker_supports_snake_case_and_camel_case",
+        "Restricts import permission to the configured recovery Cloud SQL instance",
+    ):
+        assert marker in qodo_restore_case
+
 
 
 
