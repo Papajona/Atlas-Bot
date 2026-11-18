@@ -48,7 +48,7 @@ def _pick(mapping: Mapping[str, Any], *keys: str) -> Any:
 def _sql_import_suffix(path: str | Path) -> str:
     """Preserve the gzip marker required by Cloud SQL for compressed SQL imports."""
     with Path(path).open("rb") as handle:
-        return ".sql.gz" if handle.read(2) == b"\\x1f\\x8b" else ".sql"
+        return ".sql.gz" if handle.read(2) == bytes((0x1F, 0x8B)) else ".sql"
 
 
 def validate_restore_inputs(
