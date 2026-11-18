@@ -237,6 +237,19 @@ SELECT jsonb_build_object(
         'order_events', 'position_events'
       )
   ),
+  'customer_paper_backend_policies', (
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'table', p.tablename,
+      'cmd', p.cmd,
+      'permissive', p.permissive,
+      'roles', to_jsonb(p.roles),
+      'qual', p.qual,
+      'with_check', p.with_check
+    ) ORDER BY p.tablename), '[]'::jsonb)
+    FROM pg_policies p
+    WHERE p.schemaname = 'customer_paper'
+      AND p.policyname = 'customer_paper_bar_budget_backend'
+  ),
   'customer_paper_tenant_policies', (
     SELECT coalesce(jsonb_agg(jsonb_build_object(
       'table', p.tablename,
@@ -581,6 +594,44 @@ def customer_paper_tenant_policy_failures(policies: object) -> list[str]:
     return failures
 
 
+def customer_paper_backend_policy_failures(policies: object) -> list[str]:
+    """Require shared market-bar policies to remain scoped to the paper backend role."""
+    expected_tables = {"market_bar_budgets", "market_bar_allocations"}
+    if not isinstance(policies, list):
+        return ["customer_paper_backend_policies was not reported as a JSON array"]
+
+    failures: list[str] = []
+    seen: set[str] = set()
+    for policy in policies:
+        if not isinstance(policy, dict):
+            failures.append("customer_paper backend policy observation is malformed")
+            continue
+        table_value = policy.get("table")
+        table = table_value if isinstance(table_value, str) else ""
+        if table not in expected_tables:
+            failures.append(f"customer_paper backend policy references unexpected table: {table!r}")
+            continue
+        if table in seen:
+            failures.append(f"customer_paper.{table} has duplicate backend policy observations")
+            continue
+        seen.add(table)
+
+        roles = policy.get("roles")
+        if (
+            policy.get("cmd") != "ALL"
+            or policy.get("permissive") != "PERMISSIVE"
+            or roles != [CUSTOMER_PAPER_TENANT_ROLE]
+            or _canonical_policy_expression(policy.get("qual")) != "true"
+            or _canonical_policy_expression(policy.get("with_check")) != "true"
+        ):
+            failures.append(
+                f"customer_paper.{table} backend policy role, command, permissiveness, or predicate is unsafe"
+            )
+    if seen != expected_tables:
+        failures.append("customer_paper backend policies do not cover exactly the expected tables")
+    return failures
+
+
 def customer_paper_schema_failures(observed: object) -> list[str]:
     """Require all customer-paper tables, exact tenant policy definitions, and least-privilege grants."""
     if not isinstance(observed, dict):
@@ -589,6 +640,9 @@ def customer_paper_schema_failures(observed: object) -> list[str]:
     failures: list[str] = []
     failures.extend(
         customer_paper_tenant_policy_failures(observed.get("customer_paper_tenant_policies"))
+    )
+    failures.extend(
+        customer_paper_backend_policy_failures(observed.get("customer_paper_backend_policies"))
     )
     if observed.get("customer_paper_schema_present") is not True:
         failures.append("customer_paper schema is missing")
