@@ -353,7 +353,7 @@ jobs:
             "$RUNNER_TEMP/recovery-backup-bucket.json" \
             "$RUNNER_TEMP/recovery-backup-versions.json" \
             "$RUNNER_TEMP/cloud-sql-backup-binding.json" \
-            "$RUNNER_TEMP/cloud-sanitized-import-verification.json" \
+            "$RUNNER_TEMP/cloud-sql-sanitized-import-verification.json" \
             "$RUNNER_TEMP/cloud-sql-import-dump-verification.json"; do
             if [[ -s "$file" ]]; then
               gcloud storage cp "$file" "$out_dir/$(basename "$file")"
