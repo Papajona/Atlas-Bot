@@ -7,6 +7,7 @@ from urllib.error import URLError
 
 import pytest
 
+from scripts import cloud_sql_recovery_discovery as discovery
 from scripts.cloud_sql_recovery_discovery import (
     _decode_json,
     discover_resources,
@@ -259,3 +260,24 @@ def test_bucket_failure_skips_gcs_and_never_claims_complete():
     )
     assert report["discovery_status"] == "PARTIAL"
     assert report["statuses"]["gcs_object_versions"] == "NOT_RUN_BUCKET_METADATA_FAILED"
+
+
+def test_main_writes_partial_artifact_then_returns_nonzero(tmp_path, monkeypatch, capsys):
+    report = {
+        "discovery_status": "PARTIAL",
+        "statuses": {"service_accounts": "GCLOUD_QUERY_FAILED"},
+        "failed_query_names": ["service_accounts"],
+    }
+    monkeypatch.setattr(discovery, "discover_resources", lambda **_kwargs: report)
+    output = tmp_path / "recovery-resource-discovery.json"
+    exit_code = discovery.main(
+        [
+            "--project", PROJECT,
+            "--region", REGION,
+            "--bucket", BUCKET,
+            "--output", str(output),
+        ]
+    )
+    assert exit_code == 1
+    assert json.loads(output.read_text(encoding="utf-8")) == report
+    assert '"discovery_status": "PARTIAL"' in capsys.readouterr().out
