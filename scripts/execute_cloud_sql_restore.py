@@ -45,6 +45,12 @@ def _pick(mapping: Mapping[str, Any], *keys: str) -> Any:
     return None
 
 
+def _sql_import_suffix(path: str | Path) -> str:
+    """Preserve the gzip marker required by Cloud SQL for compressed SQL imports."""
+    with Path(path).open("rb") as handle:
+        return ".sql.gz" if handle.read(2) == b"\\x1f\\x8b" else ".sql"
+
+
 def validate_restore_inputs(
     *,
     project_id: str,
@@ -365,8 +371,7 @@ def execute_restore(
 
     with tempfile.TemporaryDirectory(prefix="atlas-cloud-sql-restore-") as temp_dir:
         dump_path = str(Path(temp_dir) / "source-recovery-import.sql")
-        dump_report = str(Path(temp_dir) / "source-import-dump-verification.json")
-        verified_import_path = str(Path(temp_dir) / "verified-import-copy.sql")
+        dump_report = str(Path(temp_dir) / "source-import-dump-verification.json" )
 
         # Download and scan the exact generation supplied by the operator.
         copy_proc = run(
@@ -393,12 +398,15 @@ def execute_restore(
         if scan_proc.returncode:
             raise ValueError("recovery dump did not pass the existing Cloud SQL import safety scanner")
 
+        import_suffix = _sql_import_suffix(dump_path)
+        verified_import_path = str(Path(temp_dir) / f"verified-import-copy{import_suffix}")
+
         # Cloud SQL import accepts only an unversioned gs:// URI. Copy the
         # scanned bytes to a unique object in the locked-retention bucket.
         # The executor has objectCreator (not objectAdmin), and the upload is
         # create-only; the provider therefore cannot race a later generation
         # into the URI that Cloud SQL reads.
-        import_object_name = f"restore-imports/{source_sha256}-{uuid.uuid4().hex}.sql"
+        import_object_name = f"restore-imports/{source_sha256}-{uuid.uuid4().hex}{import_suffix}"
         import_object_uri = f"gs://{BACKUP_BUCKET}/{import_object_name}"
         upload_proc = run(
             [
