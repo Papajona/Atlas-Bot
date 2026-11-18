@@ -10,6 +10,7 @@ from pathlib import Path
 
 _RESTRICT = re.compile(rb"^\\restrict[ \t]+([^ \t\r\n]+)([ \t]*\r?\n?)$")
 _UNRESTRICT = re.compile(rb"^\\unrestrict[ \t]+([^ \t\r\n]+)([ \t]*\r?\n?)$")
+_COPY_FROM_STDIN = re.compile(rb"^\s*COPY\b.*\bFROM\s+stdin\b.*;\s*$", re.IGNORECASE)
 _CANONICAL_KEY = b"ATLAS_CANONICAL_PSQL_RESTRICT_KEY"
 
 
@@ -21,58 +22,60 @@ def _command_line(line: bytes, command: bytes) -> bool:
 
 
 def canonical_dump_sha256(path: str | Path) -> tuple[str, bool]:
-    """Hash SQL except for one validated outer pg_dump guard-key pair.
+    """Hash SQL except the values in one balanced outer pg_dump guard pair.
 
-    PostgreSQL 17+ pg_dump emits a random restrict key on the first line
-    and a matching unrestrict key on the last line. Only those key values
-    are normalized. Interior SQL/COPY data is never searched or rewritten.
+    PostgreSQL 17+ places these commands after the dump header and at the end
+    of the SQL file. COPY FROM STDIN payload rows are treated as opaque data,
+    so a row that happens to look like a psql guard is never normalized.
     """
     source = Path(path)
     if not source.is_file() or source.stat().st_size <= 0:
         raise ValueError("SQL dump is missing or empty")
 
     digest = hashlib.sha256()
+    restrict_tokens: list[bytes] = []
+    unrestrict_tokens: list[bytes] = []
+    copy_data = False
+
     with source.open("rb") as handle:
-        first = handle.readline()
-        first_match = _RESTRICT.fullmatch(first)
-        if _command_line(first, b"restrict") and first_match is None:
-            raise ValueError("SQL dump has a malformed leading pg_dump restrict guard")
-        if first_match:
-            first_token = first_match.group(1)
-            digest.update(b"\\restrict " + _CANONICAL_KEY + first_match.group(2))
-        else:
-            first_token = None
-            digest.update(first)
-
-        previous = None
         for line in handle:
-            if previous is not None:
-                digest.update(previous)
-            previous = line
+            if copy_data:
+                digest.update(line)
+                if line.strip() == b"\\.":
+                    copy_data = False
+                continue
 
-    if previous is None:
-        if first_token is not None:
-            raise ValueError("SQL dump has an unbalanced pg_dump restrict guard")
+            if _command_line(line, b"restrict"):
+                match = _RESTRICT.fullmatch(line)
+                if match is None:
+                    raise ValueError("SQL dump has a malformed pg_dump restrict guard")
+                restrict_tokens.append(match.group(1))
+                digest.update(b"\\restrict " + _CANONICAL_KEY + match.group(2))
+                continue
+
+            if _command_line(line, b"unrestrict"):
+                match = _UNRESTRICT.fullmatch(line)
+                if match is None:
+                    raise ValueError("SQL dump has a malformed pg_dump unrestrict guard")
+                unrestrict_tokens.append(match.group(1))
+                digest.update(b"\\unrestrict " + _CANONICAL_KEY + match.group(2))
+                continue
+
+            digest.update(line)
+            if _COPY_FROM_STDIN.fullmatch(line):
+                copy_data = True
+
+    if copy_data:
+        raise ValueError("SQL dump COPY FROM STDIN section has no terminator")
+
+    if not restrict_tokens and not unrestrict_tokens:
         return digest.hexdigest(), False
+    if len(restrict_tokens) != 1 or len(unrestrict_tokens) != 1:
+        raise ValueError("SQL dump must have exactly one pg_dump restrict/unrestrict guard pair")
+    if restrict_tokens[0] != unrestrict_tokens[0]:
+        raise ValueError("SQL dump pg_dump restrict/unrestrict guard keys do not match")
 
-    last_match = _UNRESTRICT.fullmatch(previous)
-    if _command_line(previous, b"unrestrict") and last_match is None:
-        raise ValueError("SQL dump has a malformed trailing pg_dump unrestrict guard")
-
-    if first_token is None and last_match is not None:
-        raise ValueError("SQL dump has an unbalanced pg_dump unrestrict guard")
-    if first_token is not None and last_match is None:
-        raise ValueError("SQL dump has an unbalanced pg_dump restrict guard")
-    if first_token is not None and last_match is not None:
-        if first_token != last_match.group(1):
-            raise ValueError("SQL dump pg_dump restrict/unrestrict guard keys do not match")
-        digest.update(b"\\unrestrict " + _CANONICAL_KEY + last_match.group(2))
-        has_guard = True
-    else:
-        digest.update(previous)
-        has_guard = False
-
-    return digest.hexdigest(), has_guard
+    return digest.hexdigest(), True
 
 
 def compare_dumps(expected_path: str | Path, actual_path: str | Path) -> dict[str, object]:
