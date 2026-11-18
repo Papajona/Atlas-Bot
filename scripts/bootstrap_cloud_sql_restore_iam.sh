@@ -20,12 +20,11 @@ AUDIT_DATABASE_SECRET="${ATLAS_STAGING_AUDIT_DATABASE_SECRET:-atlas-staging-audi
 : "${ATLAS_STAGING_EVIDENCE_BUCKET:?Set ATLAS_STAGING_EVIDENCE_BUCKET to the existing restricted GCS evidence bucket}"
 : "${ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME:?Set the existing non-production recovery Cloud SQL instance connection name}"
 : "${ATLAS_STAGING_CLOUD_SQL_DATABASE:?Set the existing recovery database name}"
-: "${ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME:?Set the production Cloud SQL instance identity for the negative target check}"
+: "${ATLAS_PRODUCTION_SUPABASE_PROJECT_REF:?Set the Supabase project ref evidenced by the original pg_dump log}"
 
 [[ "$ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]]
-[[ "$ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" =~ ^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$ ]]
-[[ "$ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME" != "$ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" ]] || {
-  echo "BLOCKED: recovery and production Cloud SQL instances must be different" >&2
+[[ "$ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" == "wauaelzyugjuepmrewaw" ]] || {
+  echo "BLOCKED: Supabase source ref does not match the original pg_dump log evidence" >&2
   exit 1
 }
 [[ "${ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME%%:*}" == "$PROJECT_ID" ]] || {
@@ -212,7 +211,7 @@ printf 'GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT=%s\n' "$AUDIT_EMAIL"
 printf 'ATLAS_STAGING_RESTORE_TARGET_KIND=cloud_sql\n'
 printf 'ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME=%s\n' "$ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME"
 printf 'ATLAS_STAGING_CLOUD_SQL_DATABASE=%s\n' "$ATLAS_STAGING_CLOUD_SQL_DATABASE"
-printf 'ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME=%s\n' "$ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME"
+printf 'ATLAS_PRODUCTION_SUPABASE_PROJECT_REF=%s\n' "$ATLAS_PRODUCTION_SUPABASE_PROJECT_REF"
 printf 'ATLAS_STAGING_AUDIT_DATABASE_SECRET=%s\n' "$AUDIT_DATABASE_SECRET"
 printf 'ATLAS_STAGING_AUDIT_DB_ROLE=atlas_audit_reader\n'
 printf 'ATLAS_STAGING_EVIDENCE_BUCKET=%s\n' "$ATLAS_STAGING_EVIDENCE_BUCKET"
