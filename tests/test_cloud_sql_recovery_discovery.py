@@ -595,3 +595,16 @@ def test_recovery_discovery_workflow_fails_closed_without_identity_and_gates_aut
     assert 'if [[ "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" != "$expected" ]]' in workflow
     assert workflow.count("if: steps.discovery_identity.outputs.enabled == 'true'") == 3
     assert "service_account: ${{ env.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
+
+
+def test_runbook_discovery_variable_command_targets_explicit_repository_and_staging_environment():
+    runbook = Path(__file__).resolve().parents[1] / "RUNBOOK.md"
+    content = runbook.read_text(encoding="utf-8")
+    expected_command = (
+        "gh variable set GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT "
+        "--repo Papajona/Atlas-Bot --env staging --body "
+        '"atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com"'
+    )
+
+    assert content.count(expected_command) == 1
+
