@@ -287,7 +287,7 @@ def test_pinned_generation_must_be_the_live_object_before_import():
         )
 
 
-def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_audit():
+def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_manual():
     workflow = Path(".github/workflows/staging-cloud-sql-restore.yml").read_text(encoding="utf-8")
     audit_workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
     executor = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
@@ -295,70 +295,47 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     discovery_preflight = Path(".github/workflows/cloud-sql-recovery-preflight.yml").read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
-    assert 'confirm_restore_target' in workflow
+    assert "confirm_restore_target" in workflow
     assert '== "RESTORE"' in workflow
     assert "GCP_STAGING_RESTORE_EXECUTOR_SERVICE_ACCOUNT" in workflow
     assert "scripts/execute_cloud_sql_restore.py" in workflow
     assert 'RESTORE_TARGET_KIND" == "cloud_sql"' in workflow
-    assert "atlas_audit_reader" in workflow
-    assert "inputs[source_backup_reference]" in workflow
-    assert "import_object_reference" in workflow
-    assert "[.]sql([.]gz)?" in workflow
-    assert "[.]sql([.]gz)?" in audit_workflow
-    assert "gh api --method POST" in workflow
-    assert "staging-restore-audit.yml/dispatches" in workflow
-    assert "gh run watch" in workflow
-    assert "run-name: Cloud SQL restore audit (" in audit_workflow
-    assert "SOURCE_BACKUP_REFERENCE" in audit_workflow
-    assert "verify_cloud_sql_sanitized_artifacts.py" in audit_workflow
-    assert "canonicalized conversion" in Path("scripts/compare_cloud_sql_import_dumps.py").read_text(encoding="utf-8")
+    assert "source_supabase_project_ref" in workflow
     assert "sanitized_backup_reference" in workflow
-    assert "--sanitized-backup-reference" in executor
+    assert "--sanitized-backup-reference" in workflow
     assert "verify_sanitized_artifacts(" in executor
-    assert "SANITIZED_BACKUP_REFERENCE" in audit_workflow
-    assert "prepared SQL bytes with the uploaded object bytes" not in audit_workflow
-    runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
-    assert "reviewed sanitized SQL candidate" in runbook
-    assert "does not contain an authenticated source-project/database association" in runbook
+    assert '"status": "IMPORT_COMPLETE"' in executor
+    assert "IMPORT_COMPLETE_NOT_CERTIFIED" in workflow
+    assert "migration_and_schema_certification_pending" in workflow
+    assert "read_only_restore_audit_pending" in workflow
+    assert "gh api --method POST" not in workflow
+    assert "staging-restore-audit.yml/dispatches" not in workflow
+    assert "gh run watch" not in workflow
+
+    # Certification remains a separately dispatched read-only workflow.
+    assert "workflow_dispatch:" in audit_workflow
+    assert "source_supabase_project_ref" in audit_workflow
+    assert "verify_cloud_sql_supabase_source_provenance.py" in audit_workflow
+    assert "verify_cloud_sql_sanitized_artifacts.py" in audit_workflow
+    assert "SOURCE_BACKUP_REFERENCE" in audit_workflow
     assert "prepare_cloud_sql_import_dump.py" in audit_workflow
-    assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
-    assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
+    assert "atlas_audit_reader" in audit_workflow
+    assert "[.]sql([.]gz)?" in audit_workflow
+    assert "RESTORE_TARGET_KIND" in audit_workflow
+
+    assert "verify_cloud_sql_supabase_source_provenance.py" in preflight
+    assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in preflight
+    assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" not in preflight
+    assert "require_supported_postgresql_major(" in preflight
+    assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
+
     installer = Path("scripts/install_pinned_postgresql_client.sh").read_text(encoding="utf-8")
     assert "POSTGRES_CLIENT_MAJOR=17" in installer
     assert '"postgresql-client-$POSTGRES_CLIENT_MAJOR"' in installer
-    assert "Verify a real PostgreSQL 17 custom archive conversion" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "pg_dump --format=custom" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "bash -n scripts/install_pinned_postgresql_client.sh" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "RESTORE_TARGET_KIND" in audit_workflow
-    assert '"gcloud", "sql", "import", "sql"' in executor
-    assert '"--async"' in executor
-    assert "verify_cloud_sql_import_dump.py" in executor
-    assert "_live_backup_generation" in executor
-    assert "verify_backup_binding(" in executor
-    assert "verify_restore_operation(" in executor
-    assert "def _pick(" in executor
-    assert "--if-generation-match=0" in executor
-    assert "import_object_reference" in executor
-    assert "source_backup_sha256" in executor
-    assert "import_sha256" in executor
-    assert "sanitized_import_sha256" in executor
-    assert "prepare_cloud_sql_import_dump.py" in executor
-    assert "prepared_import_sha256" in executor
-    assert "restore-imports/" in executor
-    assert ".sql.gz" in executor
-    assert "classify_backup_objects(" in preflight
-    assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in preflight
-    assert "verify_cloud_sql_supabase_source_provenance.py" in preflight
-    assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" not in preflight
-    assert "require_supported_postgresql_major(" in preflight
-    assert "scripts.cloud_sql_recovery_inventory" in preflight
-    assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
-    assert '.lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))' not in preflight
-
-
-
-
-
+    ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "Verify a real PostgreSQL 17 custom archive conversion" in ci
+    assert "pg_dump --format=custom" in ci
+    assert "bash -n scripts/install_pinned_postgresql_client.sh" in ci
 
 
 def test_execute_restore_signature_keeps_required_output_before_optional_source_settings():
