@@ -578,7 +578,7 @@ def test_recovery_discovery_workflow_skips_until_dedicated_identity_is_configure
         / "cloud-sql-recovery-preflight.yml"
     ).read_text(encoding="utf-8")
 
-    assert "if: github.ref == 'refs/heads/main'" in workflow
+    assert workflow.count("if: github.ref == 'refs/heads/main'") == 1
     assert "vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT != ''" not in workflow
     environment_position = workflow.index("environment: staging")
     guard_position = workflow.index("id: discovery_identity")
