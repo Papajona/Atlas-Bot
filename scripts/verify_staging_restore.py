@@ -308,7 +308,17 @@ SELECT jsonb_build_object(
         WHERE m.roleid = r.oid
           AND NOT (
             member_role.rolname = 'postgres'
-            AND grantor_role.rolname = 'supabase_admin'
+            AND (
+              (
+                COALESCE(current_setting('atlas.restore_target_kind', true), 'supabase') = 'supabase'
+                AND grantor_role.rolname = 'supabase_admin'
+              )
+              OR
+              (
+                current_setting('atlas.restore_target_kind', true) = 'cloud_sql'
+                AND grantor_role.rolname = 'cloudsqladmin'
+              )
+            )
             AND m.admin_option
             AND (to_jsonb(m) ? 'inherit_option')
             AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
@@ -326,11 +336,13 @@ SELECT jsonb_build_object(
       )
   ),
   'customer_paper_runtime_schema_usage', CASE
-    WHEN to_regrole('atlas_customer_paper') IS NULL THEN false
+    WHEN to_regrole('atlas_customer_paper') IS NULL
+      OR to_regnamespace('customer_paper') IS NULL THEN false
     ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'USAGE')
   END,
   'customer_paper_runtime_schema_create', CASE
-    WHEN to_regrole('atlas_customer_paper') IS NULL THEN true
+    WHEN to_regrole('atlas_customer_paper') IS NULL
+      OR to_regnamespace('customer_paper') IS NULL THEN true
     ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'CREATE')
   END,
   'customer_paper_runtime_public_schema_usage', CASE
@@ -419,6 +431,11 @@ SELECT jsonb_build_object(
             OR has_table_privilege('atlas_customer_paper', c.oid, 'TRUNCATE')
             OR has_table_privilege('atlas_customer_paper', c.oid, 'REFERENCES')
             OR has_table_privilege('atlas_customer_paper', c.oid, 'TRIGGER')
+            OR CASE
+                 WHEN current_setting('server_version_num')::integer >= 170000
+                 THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')
+                 ELSE false
+               END
           )
       )
     END
@@ -538,7 +555,10 @@ def read_database_uri(value: str, staging_ref: str = "", production_ref: str = "
         "PGPASSWORD": unquote(parsed.password or ""),
         "PGDATABASE": database,
         "PGSSLMODE": "disable" if target_kind == "cloud_sql" else "require",
-        "PGOPTIONS": "-c default_transaction_read_only=on -c statement_timeout=15000",
+        "PGOPTIONS": (
+            "-c default_transaction_read_only=on "
+            f"-c statement_timeout=15000 -c atlas.restore_target_kind={target_kind}"
+        ),
     })
     if not env["PGUSER"] or not env["PGPASSWORD"]:
         raise ValueError("DATABASE_URL must contain a database username and password")
@@ -567,14 +587,38 @@ _TENANT_PREDICATE_REFERENCE = (
 
 
 def _canonical_policy_expression(expr: object) -> str:
-    """Normalize only known PostgreSQL deparser wrappers around the customer predicate."""
-    value = re.sub(r"\s+", "", str(expr or "")).casefold()
-    for token in (
-        "::text", "::bigint", 'as"nullif"', "asnullif", "ascurrent_setting",
-        "select", "(", ")", '"',
-    ):
-        value = value.replace(token, "")
-    return value
+    """Normalize PostgreSQL deparser wrappers without rewriting quoted GUC names.
+
+    String literals remain intact. Only the SELECT keyword, PostgreSQL's injected
+    text casts, the generated NULLIF alias, and expression-wrapping parentheses
+    are removed before comparing tokens.
+    """
+    source = str(expr or "")
+    tokens = re.findall(
+        r"""'(?:''|[^'])*'|"(?:""|[^"])*"|::[A-Za-z_][A-Za-z0-9_$]*|[A-Za-z_][A-Za-z0-9_$]*|[0-9]+|[(),=.]|[^\s]""",
+        source,
+    )
+    normalized: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        lowered = token.casefold()
+        if lowered in {"select", "(", ")"} or lowered == "::text":
+            index += 1
+            continue
+        if lowered == "as" and index + 1 < len(tokens):
+            alias = tokens[index + 1].strip('"').casefold()
+            if alias == "nullif":
+                index += 2
+                continue
+        if token.startswith("'"):
+            normalized.append(token)
+        elif token.startswith('"'):
+            normalized.append(token[1:-1].replace('""', '"').casefold())
+        else:
+            normalized.append(lowered)
+        index += 1
+    return "".join(normalized)
 
 
 _TENANT_PREDICATE_CANONICAL = _canonical_policy_expression(_TENANT_PREDICATE_REFERENCE)
