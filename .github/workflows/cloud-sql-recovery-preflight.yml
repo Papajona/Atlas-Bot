@@ -70,6 +70,8 @@ jobs:
           from urllib.parse import quote, urlencode
           from urllib.request import Request, urlopen
 
+          from scripts.cloud_sql_recovery_inventory import is_source_backup_candidate
+
           root = Path(sys.argv[1])
           expected_instance, expected_database, bucket = sys.argv[2:]
           instance = json.loads((root / "recovery-instance.json").read_text())
@@ -121,11 +123,14 @@ jobs:
                   "size": item.get("size"),
                   "timeCreated": item.get("timeCreated"),
                   "timeDeleted": item.get("timeDeleted"),
-                  "checksum_present": bool(item.get("md5Hash") or item.get("crc32c")),
+                  "checksum_present": bool(
+                      item.get("md5Hash") or item.get("md5_hash")
+                      or item.get("crc32c") or item.get("crc32c_hash")
+                  ),
                   "retentionExpirationTime": item.get("retentionExpirationTime"),
               }
               for item in items
-              if item.get("name", "").lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))
+              if isinstance(item, dict) and is_source_backup_candidate(item)
           ]
           summary = {
               "status": "PASS" if retention_locked and candidate else "BLOCKED",
