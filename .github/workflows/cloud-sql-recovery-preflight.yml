@@ -7,6 +7,7 @@ on:
       - ".github/workflows/cloud-sql-recovery-preflight.yml"
       - "scripts/cloud_sql_recovery_discovery.py"
       - "scripts/bootstrap_atlas_paper_staging_gcp.sh"
+      - "scripts/bootstrap_atlas_staging_discovery_identity.sh"
   workflow_dispatch:
 
 permissions:
