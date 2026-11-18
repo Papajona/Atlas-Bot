@@ -4,6 +4,7 @@ import os
 import pytest
 
 from scripts.verify_staging_restore import (
+    customer_paper_backend_policy_failures,
     customer_paper_schema_failures,
     customer_paper_tenant_policy_failures,
     read_database_uri,
