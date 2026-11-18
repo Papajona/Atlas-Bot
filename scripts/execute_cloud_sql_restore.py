@@ -79,7 +79,7 @@ def validate_restore_inputs(
             raise ValueError("recovery instance must be different from the production instance")
     elif source_supabase_project_ref != "wauaelzyugjuepmrewaw":
         raise ValueError(
-            "source Supabase project ref must match the authenticated pg_dump source wauaelzyugjuepmrewaw"
+            "source Supabase project ref must be explicitly configured and match the authenticated pg_dump source wauaelzyugjuepmrewaw"
         )
     if not _DATABASE_RE.fullmatch(target_database or ""):
         raise ValueError("recovery database name is invalid")
