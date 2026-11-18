@@ -96,13 +96,21 @@ ensure_service_account "$AUDIT_ID" "Atlas read-only Cloud SQL restore auditor"
 EXECUTOR_EMAIL="${EXECUTOR_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 AUDIT_EMAIL="${AUDIT_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 EXECUTOR_ROLE="atlasCloudSqlRestoreExecutor"
+IMPORT_ROLE="atlasCloudSqlRecoveryImporter"
 AUDIT_ROLE="atlasCloudSqlRestoreAuditor"
+RECOVERY_INSTANCE_ID="${ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}"
 
 # The executor can inspect/import only Cloud SQL resources and operations. GCS
 # access is separately limited to the approved backup bucket below.
 ensure_project_role "$EXECUTOR_ROLE" "Atlas Cloud SQL Restore Executor" \
-  "Starts SQL imports and reads operations for the separately configured recovery instance." \
-  "cloudsql.instances.get,cloudsql.instances.import,cloudsql.operations.get,cloudsql.databases.get,serviceusage.services.use"
+  "Reads Cloud SQL recovery instance, database and operation metadata." \
+  "cloudsql.instances.get,cloudsql.operations.get,cloudsql.databases.get,serviceusage.services.use"
+
+# Keep the import permission in a separate conditional role. A project-wide
+# unconditioned import grant would let this identity import into other instances.
+ensure_project_role "$IMPORT_ROLE" "Atlas Cloud SQL Recovery Importer" \
+  "Imports SQL only into the explicitly configured isolated recovery instance." \
+  "cloudsql.instances.import"
 
 # The auditor can connect through Cloud SQL Auth Proxy and read instance,
 # database, operation and secret metadata. It cannot import, update or delete.
@@ -117,6 +125,31 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:$AUDIT_EMAIL" \
   --role="projects/$PROJECT_ID/roles/$AUDIT_ROLE" --quiet >/dev/null
 
+# Remove any legacy unconditioned binding before granting the import role with
+# a resource-name condition. Failure to remove an old broad binding is fatal.
+IMPORT_ROLE_RESOURCE="projects/$PROJECT_ID/roles/$IMPORT_ROLE"
+if gcloud projects get-iam-policy "$PROJECT_ID" --format=json | python3 -c '
+import json, sys
+email, role = sys.argv[1:]
+policy = json.load(sys.stdin)
+member = "serviceAccount:" + email
+raise SystemExit(0 if any(
+    binding.get("role") == role
+    and member in binding.get("members", [])
+    and not binding.get("condition")
+    for binding in policy.get("bindings", [])
+) else 1)
+' "$EXECUTOR_EMAIL" "$IMPORT_ROLE_RESOURCE"; then
+  gcloud projects remove-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:$EXECUTOR_EMAIL" \
+    --role="$IMPORT_ROLE_RESOURCE" --condition=None --quiet >/dev/null
+fi
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:$EXECUTOR_EMAIL" \
+  --role="$IMPORT_ROLE_RESOURCE" \
+  --condition="expression=resource.name == 'projects/$PROJECT_ID/instances/$RECOVERY_INSTANCE_ID',title=Atlas recovery instance only,description=Restricts import permission to the configured recovery Cloud SQL instance" \
+  --quiet >/dev/null
+
 PRINCIPAL_SET="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$POOL_ID/attribute.repository/Papajona/Atlas-Bot"
 for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
   gcloud iam service-accounts add-iam-policy-binding "$email" \
@@ -125,21 +158,37 @@ for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
     --role="roles/iam.workloadIdentityUser" >/dev/null
 done
 
-# The GitHub executor/auditor and the Cloud SQL service agent can read backup
-# objects. None receives write access to the backup bucket.
+# The executor can read original backups and create new append-only import
+# objects. objectCreator cannot overwrite or delete an existing generation.
 for email in "$EXECUTOR_EMAIL" "$AUDIT_EMAIL"; do
   gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
     --member="serviceAccount:$email" --role="roles/storage.objectViewer" --quiet >/dev/null
   gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
     --member="serviceAccount:$email" --role="roles/storage.legacyBucketReader" --quiet >/dev/null
 done
-
-# Cloud SQL performs the server-side GCS read using its service agent, not the
-# GitHub runner identity.
-gcloud beta services identity create --service=sqladmin.googleapis.com --project="$PROJECT_ID" >/dev/null
-CLOUD_SQL_SERVICE_AGENT="service-$PROJECT_NUMBER@gcp-sa-cloud-sql.iam.gserviceaccount.com"
 gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
-  --member="serviceAccount:$CLOUD_SQL_SERVICE_AGENT" \
+  --member="serviceAccount:$EXECUTOR_EMAIL" --role="roles/storage.objectCreator" --quiet >/dev/null
+
+# Cloud SQL performs the server-side GCS read as the recovery instance's own
+# service account, not the GitHub runner identity. Verify the configured
+# instance is the recovery target before granting bucket access to its account.
+RECOVERY_INSTANCE_ID="${ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME##*:}"
+RECOVERY_INSTANCE_JSON="$(gcloud sql instances describe "$RECOVERY_INSTANCE_ID" \
+  --project="$PROJECT_ID" --format=json)"
+RECOVERY_INSTANCE_SA="$(printf '%s' "$RECOVERY_INSTANCE_JSON" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+expected = sys.argv[1]
+observed = "%s:%s:%s" % (doc.get("project", ""), doc.get("region", ""), doc.get("name", ""))
+if observed != expected:
+    sys.exit("BLOCKED: recovery Cloud SQL instance identity does not match configuration")
+email = doc.get("serviceAccountEmailAddress", "")
+if not email:
+    sys.exit("BLOCKED: recovery Cloud SQL instance has no service account")
+print(email)
+' "$ATLAS_STAGING_CLOUD_SQL_INSTANCE_CONNECTION_NAME")"
+gcloud storage buckets add-iam-policy-binding "gs://$BACKUP_BUCKET" \
+  --member="serviceAccount:$RECOVERY_INSTANCE_SA" \
   --role="roles/storage.objectViewer" --quiet >/dev/null
 
 # Auditor is read-only on the backup source and can create audit evidence only
