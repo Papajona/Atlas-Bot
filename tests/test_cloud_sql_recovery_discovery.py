@@ -595,3 +595,49 @@ def test_recovery_discovery_workflow_fails_closed_without_identity_and_gates_aut
     assert 'if [[ "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" != "$expected" ]]' in workflow
     assert workflow.count("if: steps.discovery_identity.outputs.enabled == 'true'") == 3
     assert "service_account: ${{ env.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
+
+
+@pytest.mark.parametrize(
+    "retention_policy, expected_retention_status, expected_discovery_status",
+    [
+        (None, "BUCKET_RETENTION_POLICY_MISSING", "PARTIAL"),
+        ({"isLocked": False}, "BUCKET_RETENTION_NOT_LOCKED", "PARTIAL"),
+        ({"isLocked": True}, "PASS", "COMPLETE"),
+        ({"is_locked": True}, "PASS", "COMPLETE"),
+    ],
+)
+def test_discovery_does_not_report_missing_or_unlocked_bucket_retention_as_pass(
+    retention_policy, expected_retention_status, expected_discovery_status
+):
+    def runner(command, **_kwargs):
+        if command[1:3] == ["sql", "instances"]:
+            return response([])
+        if command[1:3] == ["iam", "service-accounts"]:
+            return response([])
+        if command[1:4] == ["storage", "buckets", "describe"]:
+            metadata = {"name": BUCKET}
+            if retention_policy is not None:
+                metadata["retentionPolicy"] = retention_policy
+            return response(metadata)
+        if command[1:3] == ["auth", "print-access-token"]:
+            return SimpleNamespace(returncode=0, stdout="token", stderr="")
+        raise AssertionError(command)
+
+    report = discover_resources(
+        project=PROJECT,
+        region=REGION,
+        bucket=BUCKET,
+        runner=runner,
+        opener=lambda *_args, **_kwargs: make_response({"items": []}),
+    )
+
+    assert report["bucket_retention_policy_status"] == expected_retention_status
+    assert report["statuses"]["backup_bucket.retention_policy"] == expected_retention_status
+    assert report["bucket_retention_policy_locked"] is (retention_policy in (
+        {"isLocked": True}, {"is_locked": True}
+    ))
+    assert report["discovery_status"] == expected_discovery_status
+    if expected_discovery_status == "PARTIAL":
+        assert "backup_bucket.retention_policy" in report["failed_query_names"]
+    else:
+        assert report["failed_query_names"] == []
