@@ -47,7 +47,7 @@ def test_cloud_sql_target_supabase_source_pair_fails_closed(target, source_ref):
 def test_restore_audit_accepts_explicit_staging_host():
     env, host = read_database_uri(url(STAGING), STAGING, PRODUCTION)
     assert host == f"db.{STAGING}.supabase.co"
-    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000 -c atlas.restore_target_kind=supabase"
     assert env["PGSSLMODE"] == "require"
 
 
@@ -579,6 +579,150 @@ def test_research_integrity_query_executes_against_postgres():
     assert result["research_holdout_registry_invalid_rows"] == 0
 
 
+
+
+
+def test_restore_audit_sql_covers_cloud_sql_and_supabase_managed_membership_shapes():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "current_setting('atlas.restore_target_kind', true)" in QUERY
+    assert "grantor_role.rolname = 'supabase_admin'" in QUERY
+    assert "grantor_role.rolname = 'cloudsqladmin'" in QUERY
+    assert "member_role.rolname = 'postgres'" in QUERY
+    assert "m.admin_option" in QUERY
+    assert "inherit_option" in QUERY
+    assert "set_option" in QUERY
+
+
+def test_restore_audit_handles_missing_customer_paper_schema_with_existing_role():
+    from scripts.verify_staging_restore import QUERY
+
+    usage_guard = (
+        "'customer_paper_runtime_schema_usage', CASE "
+        "WHEN to_regrole('atlas_customer_paper') IS NULL "
+        "OR to_regnamespace('customer_paper') IS NULL THEN false "
+        "ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'USAGE') END"
+    )
+    create_guard = (
+        "'customer_paper_runtime_schema_create', CASE "
+        "WHEN to_regrole('atlas_customer_paper') IS NULL "
+        "OR to_regnamespace('customer_paper') IS NULL THEN true "
+        "ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'CREATE') END"
+    )
+    assert "to_regnamespace('customer_paper') IS NULL THEN false" in QUERY
+    assert "to_regnamespace('customer_paper') IS NULL THEN true" in QUERY
+    assert usage_guard.replace(" ", "") in QUERY.replace("\\n", "").replace(" ", "")
+    assert create_guard.replace(" ", "") in QUERY.replace("\\n", "").replace(" ", "")
+
+
+def test_restore_audit_rejects_a_maintain_only_public_financial_grant():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "current_setting('server_version_num')::integer >= 170000" in QUERY
+    assert "THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')" in QUERY
+    observed = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        # A MAINTAIN-only grant is included in this forbidden effective-privilege count.
+        "customer_paper_runtime_public_financial_privileges": 1,
+    }
+    failures = customer_paper_schema_failures(observed)
+    assert "customer_paper_runtime_public_financial_privileges expected 0, observed 1" in failures
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    _configured_postgres_dsn() is None,
+    reason="requires the disposable PostgreSQL service provisioned by CI",
+)
+def test_postgres17_maintain_only_grant_is_detectable():
+    import asyncio
+    import uuid
+    import asyncpg
+    from scripts.verify_staging_restore import QUERY
+
+    dsn = _configured_postgres_dsn()
+
+    async def verify_grant():
+        connection = await asyncpg.connect(dsn)
+        role = "atlas_qodo_maintain_" + uuid.uuid4().hex[:12]
+        table = "atlas_qodo_maintain_probe_" + uuid.uuid4().hex[:12]
+        transaction = connection.transaction()
+        await transaction.start()
+        try:
+            version = await connection.fetchval("SELECT current_setting('server_version_num')::int")
+            if version < 170000:
+                pytest.skip("MAINTAIN table privilege exists only on PostgreSQL 17+")
+            await connection.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            await connection.execute(f'CREATE TEMP TABLE "{table}" (id integer)')
+            await connection.execute(f'GRANT MAINTAIN ON TABLE pg_temp."{table}" TO "{role}"')
+            result = await connection.fetchrow(
+                "SELECT has_table_privilege($1, to_regclass($2), 'MAINTAIN') AS maintain, "
+                "has_table_privilege($1, to_regclass($2), 'SELECT') AS can_select",
+                role, f"pg_temp.{table}",
+            )
+            assert result["maintain"] is True
+            assert result["can_select"] is False
+            assert "THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')" in QUERY
+        finally:
+            await transaction.rollback()
+            await connection.close()
+
+    asyncio.run(verify_grant())
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    _configured_postgres_dsn() is None,
+    reason="requires the disposable PostgreSQL service provisioned by CI",
+)
+def test_full_restore_audit_query_reports_missing_customer_paper_schema_instead_of_error():
+    import asyncio
+    import json
+    import asyncpg
+    from scripts.verify_staging_restore import QUERY
+
+    dsn = _configured_postgres_dsn()
+
+    async def execute_without_paper_schema():
+        connection = await asyncpg.connect(dsn)
+        transaction = connection.transaction()
+        await transaction.start()
+        try:
+            await connection.execute(
+                "DO $ BEGIN "
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper') THEN "
+                "CREATE ROLE atlas_customer_paper NOLOGIN; "
+                "END IF; END $"
+            )
+            await connection.execute("DROP SCHEMA IF EXISTS customer_paper CASCADE")
+            payload = await connection.fetchval(QUERY)
+            return json.loads(payload)
+        finally:
+            await transaction.rollback()
+            await connection.close()
+
+    observed = asyncio.run(execute_without_paper_schema())
+    assert observed["customer_paper_schema_present"] is False
+    assert observed["customer_paper_runtime_schema_usage"] is False
+    assert observed["customer_paper_runtime_schema_create"] is True
+
+
 def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     env, host = read_database_uri(
         "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
@@ -588,7 +732,7 @@ def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     )
     assert host == "127.0.0.1"
     assert env["PGDATABASE"] == "atlas_recovery"
-    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000 -c atlas.restore_target_kind=cloud_sql"
     assert env["PGSSLMODE"] == "disable"  # TLS terminates in the Cloud SQL Auth Proxy
 
 
