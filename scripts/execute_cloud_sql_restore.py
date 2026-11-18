@@ -75,8 +75,13 @@ def validate_restore_inputs(
             f"backup reference must use the approved recovery bucket gs://{BACKUP_BUCKET}/<object>#<generation>"
         )
     object_name, generation = backup_match.groups()
-    if not object_name or object_name.startswith("/") or ".." in object_name.split("/"):
-        raise ValueError("backup object path is invalid")
+    if (
+        not object_name
+        or object_name.startswith("/")
+        or ".." in object_name.split("/")
+        or object_name.startswith("restore-imports/")
+    ):
+        raise ValueError("backup object path is invalid or points to an import-staging object")
     return instance_id, object_name, generation
 
 
@@ -312,7 +317,7 @@ def execute_restore(
     poll_interval_seconds: int = 15,
     run: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
-    instance_id, source_object_name, source_generation = validate_restore_inputs(
+    instance_id, _source_object_name, source_generation = validate_restore_inputs(
         project_id=project_id,
         region=region,
         target_instance=target_instance,
