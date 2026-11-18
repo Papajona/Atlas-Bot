@@ -124,8 +124,8 @@ def verify_supabase_pg_dump_source(
         "bucket_retention_policy_locked": True,
         "source_association_evidence": (
             "Supabase supavisor_logs reported exactly one pg_dump client session for this project/database "
-            "on 2026-10-22; its authenticated and terminate events bracketed the matching GCS generation, "
-            "created 3.215055 seconds after client termination."
+            "on 2026-10-22; its authenticated and terminate events bracket the generation-pinned GCS object "
+            "creation within the verified maximum 10-second correlation window."
         ),
         "evidence_source": "Supabase unified logs, source=supavisor_logs, UTC window 2026-10-22",
         "peer_ip_omitted": True,
