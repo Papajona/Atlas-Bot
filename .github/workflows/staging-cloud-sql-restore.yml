@@ -59,12 +59,24 @@ jobs:
           : "${GCP_REGION:?Missing GCP_REGION}"
           : "${GCP_WORKLOAD_IDENTITY_PROVIDER:?Missing GCP_WORKLOAD_IDENTITY_PROVIDER}"
           : "${GCP_STAGING_RESTORE_EXECUTOR_SERVICE_ACCOUNT:?Missing GCP_STAGING_RESTORE_EXECUTOR_SERVICE_ACCOUNT}"
+          [[ "$GCP_PROJECT_ID" == "atlas-staging-510915" && "$GCP_REGION" == "europe-west1" ]] || {
+            echo "BLOCKED: restore execution is restricted to atlas-staging-510915/europe-west1" >&2
+            exit 1
+          }
+          [[ "$GCP_STAGING_RESTORE_EXECUTOR_SERVICE_ACCOUNT" == "atlas-staging-restore-executor@atlas-staging-510915.iam.gserviceaccount.com" ]] || {
+            echo "BLOCKED: restore executor must use the dedicated staging restore identity" >&2
+            exit 1
+          }
           : "${RESTORE_TARGET_KIND:?Missing ATLAS_STAGING_RESTORE_TARGET_KIND}"
           [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]] || {
             echo "BLOCKED: staging restore audit must be configured for cloud_sql before any import" >&2
             exit 1
           }
           : "${AUDIT_SERVICE_ACCOUNT:?Missing GCP_STAGING_RESTORE_AUDIT_SERVICE_ACCOUNT}"
+          [[ "$AUDIT_SERVICE_ACCOUNT" == "atlas-staging-restore-audit@atlas-staging-510915.iam.gserviceaccount.com" ]] || {
+            echo "BLOCKED: audit must use the dedicated staging restore-auditor identity" >&2
+            exit 1
+          }
           : "${AUDIT_DATABASE_SECRET:?Missing ATLAS_STAGING_AUDIT_DATABASE_SECRET}"
           [[ "$AUDIT_DATABASE_ROLE" == "atlas_audit_reader" ]] || {
             echo "BLOCKED: Cloud SQL restore audit must use atlas_audit_reader" >&2
