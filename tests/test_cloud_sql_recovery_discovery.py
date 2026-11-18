@@ -368,3 +368,46 @@ def test_discovery_bootstrap_checks_bucket_before_applying_bucket_iam():
     )
     assert bucket_check < first_bucket_binding
     assert "BLOCKED: required backup bucket" in source
+
+
+def test_all_failed_inventory_queries_report_failed_without_synthetic_pass(
+    tmp_path, monkeypatch, capsys
+):
+    def runner(*_args, **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="PERMISSION_DENIED",
+        )
+
+    original_discover = discovery.discover_resources
+
+    def discover_with_failed_queries(**kwargs):
+        return original_discover(
+            **kwargs,
+            runner=runner,
+            opener=lambda *_args, **_kwargs: pytest.fail(
+                "GCS listing must not run after bucket metadata lookup fails"
+            ),
+        )
+
+    monkeypatch.setattr(discovery, "discover_resources", discover_with_failed_queries)
+    output = tmp_path / "recovery-resource-discovery.json"
+    exit_code = discovery.main(
+        [
+            "--project", PROJECT,
+            "--region", REGION,
+            "--bucket", BUCKET,
+            "--output", str(output),
+        ]
+    )
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert report["discovery_status"] == "FAILED"
+    assert all(status != "PASS" for status in report["statuses"].values())
+    assert report["statuses"]["backup_bucket.retention_policy"] == (
+        "NOT_AVAILABLE_BUCKET_METADATA_FAILED"
+    )
+    assert report["failed_or_unavailable_queries"] == len(report["statuses"])
+    assert '"discovery_status": "FAILED"' in capsys.readouterr().out
