@@ -346,7 +346,7 @@ def execute_restore(
         target_database=target_database,
         backup_reference=backup_reference,
     )
-    sanitized_object_name, sanitized_generation = validate_sanitized_backup_reference(
+    _sanitized_object_name, _sanitized_generation = validate_sanitized_backup_reference(
         sanitized_backup_reference
     )
 
