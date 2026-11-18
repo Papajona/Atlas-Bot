@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   discover-recovery-resources:
+    if: github.ref == 'refs/heads/main'
     # Keep discovery on main. The protected staging environment supplies its optional identity
     # to a step-level guard below, where missing configuration can skip safely.
     if: github.ref == 'refs/heads/main'
