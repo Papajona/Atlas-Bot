@@ -1393,6 +1393,21 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
         '"fix/pr434-qodo-recovery-inventory-guards:50bad47227e9f4d3da219b8a61f09daf78ef7d64")',
         1,
     )[1].split(";;", 1)[0]
+    repo_root = Path(__file__).resolve().parents[1]
+    restore_preflight_workflow = (
+        repo_root / ".github" / "workflows" / "cloud-sql-recovery-restore-preflight.yml"
+    ).read_text(encoding="utf-8")
+    assert "from scripts.cloud_sql_recovery_inventory import (" in restore_preflight_workflow
+    assert (
+        'git show "$main_sha:.github/workflows/cloud-sql-recovery-restore-preflight.yml" '
+        '| grep -F \'from scripts.cloud_sql_recovery_inventory import (\' >/dev/null'
+        in cloud_inventory_case
+    )
+    assert (
+        'git show "$main_sha:.github/workflows/cloud-sql-recovery-preflight.yml"'
+        not in cloud_inventory_case
+    )
+
     for marker in (
         'item.get("timeDeleted") or item.get("softDeleteTime") or item.get("hardDeleteTime")',
         'def require_supported_postgresql_major',
