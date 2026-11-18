@@ -148,6 +148,8 @@ The running staging service and paper-trading schema must use the existing free 
 
 A full-project restore is a separate recovery exercise. Never restore a backup over the only active database just to make a workflow pass. There are two supported restore targets:
 
+A **restore audit target** for the Supabase route must be a distinct non-production Supabase project reference; the current single-project Free setup has no verified target. The Cloud SQL route instead uses the separately configured, isolated recovery instance described below.
+
 - **Supabase:** use a distinct non-production Supabase project reference. Equal staging/production references are rejected by the audit workflow and verifier. The current Free single-project setup has no verified separate restore target, so keep *full restore certification* explicitly BLOCKED for this Supabase path rather than creating another project/paid branch or risking the active source.
 - **Cloud SQL:** use an already-existing, isolated recovery instance in `atlas-staging-510915:europe-west1`, with a recovery connection name and database that differ from the explicitly configured production Cloud SQL instance. The executor does not create instances or databases and does not touch the production database. Its inputs are checked against the configured project, region, production instance and exact immutable GCS generation before import.
 
