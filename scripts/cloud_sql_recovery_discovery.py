@@ -260,8 +260,10 @@ def discover_resources(
     ]
 
     retention = {}
-    retention_status = PASS
-    if isinstance(bucket_meta, dict):
+    retention_status = (
+        PASS if bucket_status == PASS else "NOT_AVAILABLE_BUCKET_METADATA_FAILED"
+    )
+    if bucket_status == PASS and isinstance(bucket_meta, dict):
         retention_key = (
             "retentionPolicy"
             if "retentionPolicy" in bucket_meta
