@@ -249,6 +249,27 @@ def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference(
     assert result["research_holdout_registry_invalid_rows"] is None
 
 
+def _valid_customer_paper_tenant_policies():
+    predicate = (
+        "(customer_id = (NULLIF(( SELECT current_setting('app.customer_id'::text, true) "
+        "AS current_setting), ''::text))::bigint)"
+    )
+    return [
+        {
+            "table": table,
+            "cmd": "ALL",
+            "permissive": "PERMISSIVE",
+            "roles": ["atlas_customer_paper"],
+            "qual": predicate,
+            "with_check": predicate,
+        }
+        for table in (
+            "accounts", "journals", "journal_lines", "orders", "fills",
+            "order_events", "position_events",
+        )
+    ]
+
+
 def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies():
     from scripts.verify_staging_restore import QUERY
 
@@ -271,6 +292,7 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
         "customer_paper_policy_count": 9,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_wrong_policy_role_count": 0,
         "customer_paper_runtime_role_valid": True,
         "customer_paper_runtime_schema_usage": True,
@@ -316,6 +338,7 @@ def test_restore_audit_rejects_malformed_customer_paper_catalog_observations():
         "customer_paper_policy_count": None,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
     })
     assert "customer_paper_tables_missing was not reported as a JSON array" in failures
     assert "customer_paper_tables_without_forced_rls expected 0, observed -1" in failures
@@ -333,6 +356,7 @@ def test_customer_paper_restore_audit_rejects_unsafe_runtime_role_and_acl():
         "customer_paper_policy_count": 9,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_wrong_policy_role_count": 0,
         "customer_paper_runtime_role_valid": True,
         "customer_paper_runtime_schema_usage": True,
@@ -373,8 +397,68 @@ def test_customer_paper_restore_audit_rejects_malformed_missing_table_names():
         "customer_paper_policy_count": 9,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
     })
     assert "customer_paper_tables_missing contains malformed table names" in failures
+
+
+def test_customer_paper_restore_audit_rejects_unsafe_tenant_policy_attributes():
+    valid = _valid_customer_paper_tenant_policies()
+    cases = (
+        ("qual", "true", "USING expression"),
+        ("with_check", "true", "WITH CHECK expression"),
+        ("roles", ["atlas_customer_paper", "public"], "roles are not exactly"),
+        ("cmd", "SELECT", "command is not ALL"),
+        ("permissive", "RESTRICTIVE", "policy is not PERMISSIVE"),
+    )
+    for field, value, expected in cases:
+        policies = [dict(policy) for policy in valid]
+        policies[0][field] = value
+        failures = customer_paper_tenant_policy_failures(policies)
+        assert any(expected in failure for failure in failures)
+
+
+def test_customer_paper_restore_audit_rejects_wrong_tenant_policy_coverage():
+    policies = _valid_customer_paper_tenant_policies()
+    policies.pop()
+    failures = customer_paper_tenant_policy_failures(policies)
+    assert "customer_paper_tenant policies do not cover exactly the expected tables" in failures
+
+
+def test_customer_paper_restore_audit_handles_null_missing_table_observation():
+    observed = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": None,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+    }
+    failures = customer_paper_schema_failures(observed)
+    assert "customer_paper_tables_missing was not reported as a JSON array" in failures
+
+
+@pytest.mark.parametrize("invalid_count", [False, True, 9.0, 9.9, "9"])
+def test_customer_paper_restore_audit_rejects_non_integer_counts(invalid_count):
+    observed = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": invalid_count,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        "customer_paper_runtime_public_financial_privileges": 0,
+    }
+    failures = customer_paper_schema_failures(observed)
+    assert any("customer_paper_policy_count must be a JSON integer" in failure for failure in failures)
+
 
 def _configured_postgres_dsn() -> str | None:
     """Return only an explicitly PostgreSQL DSN, never an application SQLite fallback."""
