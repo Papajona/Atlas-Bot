@@ -46,6 +46,45 @@ jobs:
           python -m pip check
       - name: Wait for PostgreSQL
         run: until pg_isready -h 127.0.0.1 -p 5432 -U atlas -d atlas_test; do sleep 1; done
+      - name: Install pinned PostgreSQL 17 archive tooling
+        run: bash scripts/install_pinned_postgresql_client.sh
+      - name: Verify a real PostgreSQL 17 custom archive conversion
+        env:
+          PGHOST: 127.0.0.1
+          PGPORT: "5432"
+          PGUSER: atlas
+          PGPASSWORD: test_password
+        shell: bash
+        run: |
+          set -euo pipefail
+          database="atlas_archive_conversion_$GITHUB_RUN_ID"
+          archive="$RUNNER_TEMP/atlas-postgresql-17-custom.dump"
+          prepared_one="$RUNNER_TEMP/atlas-postgresql-17-prepared-one.sql"
+          prepared_two="$RUNNER_TEMP/atlas-postgresql-17-prepared-two.sql"
+          trap 'dropdb --if-exists "$database"' EXIT
+
+          createdb "$database"
+          psql --set ON_ERROR_STOP=1 --dbname "$database" <<'SQL'
+          CREATE TABLE public.archive_conversion_probe (
+              id bigint PRIMARY KEY,
+              payload text NOT NULL
+          );
+          INSERT INTO public.archive_conversion_probe(id, payload)
+          VALUES (1, 'archive conversion test');
+          SQL
+
+          pg_dump --format=custom --no-owner --no-privileges \
+            --file "$archive" "$database"
+          pg_restore --list "$archive" | sed -n '1,18p'
+
+          PYTHONPATH=. python scripts/prepare_cloud_sql_import_dump.py \
+            --input "$archive" --output "$prepared_one"
+          PYTHONPATH=. python scripts/prepare_cloud_sql_import_dump.py \
+            --input "$archive" --output "$prepared_two"
+          PYTHONPATH=. python scripts/verify_cloud_sql_import_dump.py \
+            --input "$prepared_one" --output "$RUNNER_TEMP/atlas-postgresql-17-scan.json"
+          PYTHONPATH=. python scripts/compare_cloud_sql_import_dumps.py \
+            --expected "$prepared_one" --actual "$prepared_two"
       - name: Provision isolated customer paper-ledger test database
         shell: bash
         run: |
@@ -615,6 +654,7 @@ jobs:
           bash -n deploy/cloud-run-canary.sh
           bash -n deploy/cloud-run-rollback.sh
           bash -n scripts/apply_final_fixes.sh
+          bash -n scripts/install_pinned_postgresql_client.sh
           bash -n deploy/verify-deployed-release.sh
 
   android-security-and-build:
