@@ -9,6 +9,7 @@ from scripts.verify_staging_restore import (
     read_database_uri,
     required_table_failures,
     truthy,
+    validate_cloud_sql_target_for_supabase_source,
     validate_cloud_sql_target_pair,
 )
 
@@ -19,6 +20,27 @@ PRODUCTION = "uvwxyzabcdefghijklmn"
 
 def url(project):
     return f"postgresql://atlas_runtime:unit-test-password@db.{project}.supabase.co:5432/postgres"
+
+
+def test_cloud_sql_target_isolated_from_supabase_pg_dump_source():
+    validate_cloud_sql_target_for_supabase_source(
+        "atlas-staging-510915:europe-west1:atlas-recovery",
+        "wauaelzyugjuepmrewaw",
+    )
+
+
+@pytest.mark.parametrize(
+    "target,source_ref",
+    [
+        ("atlas-production:europe-west1:atlas-primary", "wauaelzyugjuepmrewaw"),
+        ("atlas-staging-510915:us-east1:atlas-recovery", "wauaelzyugjuepmrewaw"),
+        ("atlas-staging-510915:europe-west1:atlas-recovery", "wrong-project-ref"),
+        ("", "wauaelzyugjuepmrewaw"),
+    ],
+)
+def test_cloud_sql_target_supabase_source_pair_fails_closed(target, source_ref):
+    with pytest.raises(ValueError):
+        validate_cloud_sql_target_for_supabase_source(target, source_ref)
 
 
 def test_restore_audit_accepts_explicit_staging_host():
