@@ -309,7 +309,17 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "gh run watch" in workflow
     assert "run-name: Cloud SQL restore audit (" in audit_workflow
     assert "SOURCE_BACKUP_REFERENCE" in audit_workflow
-    assert "source_hash != imported_hash" in audit_workflow
+    assert "compare_cloud_sql_import_dumps.py" in audit_workflow
+    assert "canonicalized conversion" in Path("scripts/compare_cloud_sql_import_dumps.py").read_text(encoding="utf-8")
+    assert "prepare_cloud_sql_import_dump.py" in audit_workflow
+    assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
+    assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
+    installer = Path("scripts/install_pinned_postgresql_client.sh").read_text(encoding="utf-8")
+    assert "POSTGRES_CLIENT_MAJOR=17" in installer
+    assert '"postgresql-client-$POSTGRES_CLIENT_MAJOR"' in installer
+    assert "Verify a real PostgreSQL 17 custom archive conversion" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "pg_dump --format=custom" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "bash -n scripts/install_pinned_postgresql_client.sh" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "RESTORE_TARGET_KIND" in audit_workflow
     assert '"gcloud", "sql", "import", "sql"' in executor
     assert '"--async"' in executor
@@ -321,7 +331,9 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "--if-generation-match=0" in executor
     assert "import_object_reference" in executor
     assert "source_backup_sha256" in executor
-    assert "import_sha256 != source_sha256" in executor
+    assert "import_sha256 != prepared_import_sha256" in executor
+    assert "prepare_cloud_sql_import_dump.py" in executor
+    assert "prepared_import_sha256" in executor
     assert "restore-imports/" in executor
     assert ".sql.gz" in executor
     assert "classify_backup_objects(" in preflight

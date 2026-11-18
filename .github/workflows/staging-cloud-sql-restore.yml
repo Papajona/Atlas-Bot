@@ -110,6 +110,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install pinned PostgreSQL 17 client for custom archive conversion
+        run: bash scripts/install_pinned_postgresql_client.sh
+
       - name: Import the pinned backup into the separate recovery database
         id: restore
         shell: bash
