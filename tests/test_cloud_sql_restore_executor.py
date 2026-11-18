@@ -309,10 +309,12 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "gh run watch" in workflow
     assert "run-name: Cloud SQL restore audit (" in audit_workflow
     assert "SOURCE_BACKUP_REFERENCE" in audit_workflow
-    assert "source_hash != imported_hash" in audit_workflow
+    assert "compare_cloud_sql_import_dumps.py" in audit_workflow
+    assert "canonicalized conversion" in Path("scripts/compare_cloud_sql_import_dumps.py").read_text(encoding="utf-8")
     assert "prepare_cloud_sql_import_dump.py" in audit_workflow
-    assert "Install PostgreSQL client for custom archive verification" in audit_workflow
-    assert "Install PostgreSQL client for custom archive conversion" in workflow
+    assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
+    assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
+    assert "postgresql-client-17" in Path("scripts/install_pinned_postgresql_client.sh").read_text(encoding="utf-8")
     assert "RESTORE_TARGET_KIND" in audit_workflow
     assert '"gcloud", "sql", "import", "sql"' in executor
     assert '"--async"' in executor
