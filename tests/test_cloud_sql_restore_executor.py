@@ -16,6 +16,7 @@ from scripts.execute_cloud_sql_restore import (
     _wait_for_operation,
     validate_backup_metadata,
     validate_restore_inputs,
+    validate_sanitized_backup_reference,
 )
 from scripts.cloud_sql_recovery_inventory import is_source_backup_candidate
 
@@ -309,8 +310,13 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "gh run watch" in workflow
     assert "run-name: Cloud SQL restore audit (" in audit_workflow
     assert "SOURCE_BACKUP_REFERENCE" in audit_workflow
-    assert "compare_cloud_sql_import_dumps.py" in audit_workflow
+    assert "verify_cloud_sql_sanitized_artifacts.py" in audit_workflow
     assert "canonicalized conversion" in Path("scripts/compare_cloud_sql_import_dumps.py").read_text(encoding="utf-8")
+    assert "sanitized_backup_reference" in workflow
+    assert "--sanitized-backup-reference" in executor
+    assert "verify_sanitized_artifacts(" in executor
+    assert "SANITIZED_BACKUP_REFERENCE" in audit_workflow
+    assert "prepared SQL bytes with the uploaded object bytes" not in audit_workflow
     assert "prepare_cloud_sql_import_dump.py" in audit_workflow
     assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
     assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
@@ -331,7 +337,8 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "--if-generation-match=0" in executor
     assert "import_object_reference" in executor
     assert "source_backup_sha256" in executor
-    assert "import_sha256 != prepared_import_sha256" in executor
+    assert "import_sha256" in executor
+    assert "sanitized_import_sha256" in executor
     assert "prepare_cloud_sql_import_dump.py" in executor
     assert "prepared_import_sha256" in executor
     assert "restore-imports/" in executor
@@ -343,6 +350,88 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "scripts.cloud_sql_recovery_inventory" in preflight
     assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
     assert '.lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))' not in preflight
+
+
+
+
+def test_sanitized_backup_reference_accepts_only_generation_pinned_sql_under_sanitized_prefix():
+    assert validate_sanitized_backup_reference(
+        "gs://atlas-staging-510915-db-backups/sanitized-imports/public-staging-scrubbed.sql#1792683068959305"
+    ) == ("sanitized-imports/public-staging-scrubbed.sql", "1792683068959305")
+
+
+@pytest.mark.parametrize("reference", [
+    "gs://atlas-staging-510915-db-backups/public-staging-scrubbed.sql#1792683068959305",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/public-staging-scrubbed.sql",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/../raw.dump#1792683068959305",
+    "gs://wrong-bucket/sanitized-imports/public-staging-scrubbed.sql#1792683068959305",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/raw.dump#1792683068959305",
+])
+def test_sanitized_backup_reference_rejects_unpinned_or_unapproved_objects(reference):
+    with pytest.raises(ValueError):
+        validate_sanitized_backup_reference(reference)
+
+
+def test_sanitized_import_verifier_binds_candidate_to_source_and_imported_bytes(tmp_path, monkeypatch):
+    from scripts import verify_cloud_sql_sanitized_artifacts as verifier
+
+    source = tmp_path / "source-prepared.sql"
+    candidate = tmp_path / "candidate.sql"
+    imported = tmp_path / "imported.sql"
+    source.write_bytes(b"reviewed source prepared SQL")
+    candidate.write_bytes(b"scrubbed candidate SQL")
+    imported.write_bytes(b"scrubbed candidate SQL")
+
+    import hashlib
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    monkeypatch.setattr(verifier, "EXPECTED_SOURCE_PREPARED_SQL_SHA256", source_sha)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
+    monkeypatch.setattr(
+        verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
+        "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+    )
+
+    result = verifier.verify_sanitized_artifacts(
+        source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+        source_prepared_sql_path=source,
+        sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
+        sanitized_sql_path=candidate,
+        imported_sql_path=imported,
+    )
+    assert result["status"] == "PASS"
+    assert result["sanitized_import_sha256"] == candidate_sha
+    assert result["imported_sql_sha256"] == candidate_sha
+
+
+def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_path, monkeypatch):
+    from scripts import verify_cloud_sql_sanitized_artifacts as verifier
+    import hashlib
+
+    source = tmp_path / "source-prepared.sql"
+    candidate = tmp_path / "candidate.sql"
+    imported = tmp_path / "imported.sql"
+    source.write_bytes(b"reviewed source prepared SQL")
+    candidate.write_bytes(b"scrubbed candidate SQL")
+    imported.write_bytes(b"original unsanitized source SQL")
+
+    monkeypatch.setattr(verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
+        "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304")
+    monkeypatch.setattr(verifier, "EXPECTED_SOURCE_PREPARED_SQL_SHA256",
+        hashlib.sha256(source.read_bytes()).hexdigest())
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256",
+        hashlib.sha256(candidate.read_bytes()).hexdigest())
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
+
+    with pytest.raises(ValueError, match="immutable import object bytes differ"):
+        verifier.verify_sanitized_artifacts(
+            source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+            source_prepared_sql_path=source,
+            sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
+            sanitized_sql_path=candidate,
+            imported_sql_path=imported,
+        )
 
 
 def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
