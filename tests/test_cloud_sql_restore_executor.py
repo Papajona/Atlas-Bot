@@ -315,6 +315,9 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
     assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
     assert "postgresql-client-17" in Path("scripts/install_pinned_postgresql_client.sh").read_text(encoding="utf-8")
+    assert "Verify a real PostgreSQL 17 custom archive conversion" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "pg_dump --format=custom" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "bash -n scripts/install_pinned_postgresql_client.sh" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "RESTORE_TARGET_KIND" in audit_workflow
     assert '"gcloud", "sql", "import", "sql"' in executor
     assert '"--async"' in executor
