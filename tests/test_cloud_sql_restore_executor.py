@@ -347,3 +347,16 @@ def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
     assert "gcloud sql instances create" not in bootstrap
     assert "gcloud sql databases create" not in bootstrap
     assert "gcloud sql import" not in bootstrap
+
+def test_recovery_preflight_accepts_retained_noncurrent_source_backup_generation():
+    # GCS reports timeDeleted for an archived object generation. Its presence in
+    # the versions listing means this exact generation remains retrievable.
+    retained_generation = {
+        "name": "scheduled/postgres-backup.sql.gz",
+        "generation": "1750000000000003",
+        "size": "54321",
+        "crc32c": "CCCCCC==",
+        "timeDeleted": "2026-11-17T10:00:00Z",
+    }
+
+    assert is_source_backup_candidate(retained_generation)
