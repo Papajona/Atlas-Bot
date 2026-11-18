@@ -1,4 +1,4 @@
-name: Execute isolated Cloud SQL recovery restore
+name: Import sanitized Cloud SQL recovery snapshot
 run-name: Cloud SQL recovery restore (${{ inputs.backup_reference }})
 
 on:
@@ -149,45 +149,51 @@ jobs:
           echo "RESTORE_OPERATION_ID=$operation_id" >> "$GITHUB_ENV"
           echo "RESTORE_OPERATION_ID=$operation_id" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch the existing read-only restore audit
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Record import completion and pending certification gates
         shell: bash
         run: |
           set -euo pipefail
-          gh api --method POST \
-            "/repos/$GITHUB_REPOSITORY/actions/workflows/staging-restore-audit.yml/dispatches" \
-            -f ref=main \
-            -f "inputs[restore_operation_id]=$RESTORE_OPERATION_ID" \
-            -f "inputs[backup_reference]=$IMPORT_OBJECT_REFERENCE" \
-            -f "inputs[source_backup_reference]=$BACKUP_REFERENCE" \
-            -f "inputs[sanitized_backup_reference]=$SANITIZED_BACKUP_REFERENCE" \
-            -f "inputs[source_supabase_project_ref]=$SOURCE_SUPABASE_PROJECT_REF"
+          python - "$RUNNER_TEMP/cloud-sql-restore-execution.json" <<'PY'
+          import json
+          import sys
 
-          audit_display_title="Cloud SQL restore audit ($RESTORE_OPERATION_ID)"
-          audit_run_id=""
-          for attempt in $(seq 1 90); do
-            audit_run_id="$(gh api \
-              "/repos/$GITHUB_REPOSITORY/actions/workflows/staging-restore-audit.yml/runs?event=workflow_dispatch&branch=main&per_page=20" \
-              --jq ".workflow_runs[] | select(.display_title == \"$audit_display_title\") | .id" | head -n 1)"
-            if [[ -n "$audit_run_id" ]]; then break; fi
-            sleep 2
-          done
-          [[ "$audit_run_id" =~ ^[0-9]+$ ]] || {
-            echo "BLOCKED: restore audit was dispatched but its workflow run could not be correlated" >&2
-            exit 1
-          }
-          echo "RESTORE_AUDIT_RUN_ID=$audit_run_id" >> "$GITHUB_ENV"
-          gh run watch "$audit_run_id" --exit-status
-          audit_url="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$audit_run_id" --jq .html_url)"
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              result = json.load(stream)
+          if result.get("status") != "IMPORT_COMPLETE":
+              raise SystemExit("BLOCKED: restore executor did not return IMPORT_COMPLETE")
+          required = (
+              "operation_id", "target_instance_connection_name", "target_database",
+              "source_backup_reference", "source_supabase_project_ref",
+              "sanitized_backup_reference", "sanitized_import_sha256",
+              "import_object_reference", "import_object_sha256",
+          )
+          missing = [key for key in required if not result.get(key)]
+          if missing:
+              raise SystemExit("BLOCKED: restore receipt omitted required import evidence: " + ", ".join(missing))
+          print(json.dumps({
+              "status": "IMPORT_COMPLETE_NOT_CERTIFIED",
+              "operation_id": result["operation_id"],
+              "target_instance": result["target_instance_connection_name"],
+              "target_database": result["target_database"],
+              "source_backup_reference": result["source_backup_reference"],
+              "source_supabase_project_ref": result["source_supabase_project_ref"],
+              "sanitized_backup_reference": result["sanitized_backup_reference"],
+              "import_object_reference": result["import_object_reference"],
+              "migration_and_schema_certification_pending": True,
+              "read_only_restore_audit_pending": True,
+          }, sort_keys=True))
+          PY
           {
-            echo "### Cloud SQL recovery restore"
+            echo "### Cloud SQL sanitized import completed — restore not certified"
             echo
-            echo "- Restore operation: `$RESTORE_OPERATION_ID`"
+            echo "- Import operation: `$RESTORE_OPERATION_ID`"
             echo "- Recovery target: `$CLOUD_SQL_INSTANCE_CONNECTION_NAME / $CLOUD_SQL_DATABASE`"
-            echo "- Source backup reference: `$BACKUP_REFERENCE`"
-            echo "- Immutable Cloud SQL import object: `$IMPORT_OBJECT_REFERENCE`"
-            echo "- Read-only audit: $audit_url"
+            echo "- Source project/database: `$SOURCE_SUPABASE_PROJECT_REF / postgres`"
+            echo "- Original backup generation: `$BACKUP_REFERENCE`"
+            echo "- Sanitized candidate: `$SANITIZED_BACKUP_REFERENCE`"
+            echo "- Immutable import object: `$IMPORT_OBJECT_REFERENCE`"
+            echo
+            echo "**NOT CERTIFIED:** this workflow imports the reviewed 0049 snapshot only. Apply migrations 0050–0059, provision the API/audit/customer-paper roles and schema, verify RLS/ACLs and then manually run `Audit restored staging database`. A green import job is not a successful restore drill."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Archive restore execution receipt
