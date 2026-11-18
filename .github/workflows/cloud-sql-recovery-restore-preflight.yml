@@ -111,7 +111,7 @@ jobs:
               "source_evidence": source_evidence,
           }
           (root / "recovery-preflight-summary.json").write_text(
-              json.dumps(summary, sort_keys=True, indent=2) + "\\n", encoding="utf-8"
+              json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
           )
           print(json.dumps(summary, sort_keys=True))
           PY
