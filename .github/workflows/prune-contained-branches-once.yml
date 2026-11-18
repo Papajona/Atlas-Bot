@@ -332,6 +332,39 @@ jobs:
                     reviewed_reason="reviewed Qodo fixer #432 branch; its exact simplified line-based scanner is superseded by main's quote/comment-aware stateful psql parser and inline-connect regression"
                   fi
                   ;;
+                "fix/pr434-qodo-recovery-inventory-guards:50bad47227e9f4d3da219b8a61f09daf78ef7d64")
+                  # Closed PR #436 was explicitly superseded by #437. Pin the exact
+                  # old tip and require main's evolved inventory plus the regression
+                  # proving retained noncurrent generations remain eligible.
+                  if git show "$sha:scripts/cloud_sql_recovery_inventory.py" | grep -F 'if item.get("timeDeleted") or item.get("softDeleteTime") or item.get("hardDeleteTime"):' >/dev/null \
+                    && ! git show "$sha:tests/test_cloud_sql_recovery_inventory.py" | grep -F 'def test_retained_noncurrent_generation_with_time_deleted_is_qualified' >/dev/null \
+                    && git show "$main_sha:scripts/cloud_sql_recovery_inventory.py" | grep -F 'def require_supported_postgresql_major' >/dev/null \
+                    && git show "$main_sha:scripts/cloud_sql_recovery_inventory.py" | grep -F 'def classify_backup_objects' >/dev/null \
+                    && git show "$main_sha:scripts/cloud_sql_recovery_inventory.py" | grep -F 'if item.get("softDeleteTime") or item.get("hardDeleteTime"):' >/dev/null \
+                    && git show "$main_sha:scripts/cloud_sql_recovery_inventory.py" | grep -F '"timeDeleted": item.get("timeDeleted")' >/dev/null \
+                    && git show "$main_sha:tests/test_cloud_sql_recovery_inventory.py" | grep -F 'def test_retained_noncurrent_generation_with_time_deleted_is_qualified' >/dev/null \
+                    && git show "$main_sha:.github/workflows/cloud-sql-recovery-preflight.yml" | grep -F 'scripts/cloud_sql_recovery_inventory.py' >/dev/null; then
+                    reviewed_reason="reviewed closed PR #436 superseded by #437; exact old tip rejects every timeDeleted generation, while main qualifies retained noncurrent generations and includes stronger PostgreSQL/source-association checks and regression coverage"
+                  fi
+                  ;;
+                "fix/remediation-3e2f4645-fbdaec:c78a4cf4d9d1e639bb593512901dd559e36d5c89")
+                  # Closed Qodo fixer #438 is superseded by merged #437 and its
+                  # follow-up hardening. Require its two material fixes on current
+                  # main, the provider-shape regression coverage, and scoped IAM.
+                  if git show "$sha:scripts/bootstrap_cloud_sql_restore_iam.sh" | grep -F 'serviceAccount:$RECOVERY_INSTANCE_SA' >/dev/null \
+                    && git show "$main_sha:scripts/bootstrap_cloud_sql_restore_iam.sh" | grep -F 'serviceAccount:$RECOVERY_INSTANCE_SA' >/dev/null \
+                    && git show "$sha:scripts/execute_cloud_sql_restore.py" | grep -F '"md5_hash", "md5Hash"' >/dev/null \
+                    && git show "$sha:scripts/execute_cloud_sql_restore.py" | grep -F '"crc32c_hash", "crc32c"' >/dev/null \
+                    && git show "$main_sha:scripts/execute_cloud_sql_restore.py" | grep -F 'def _pick(' >/dev/null \
+                    && git show "$main_sha:scripts/execute_cloud_sql_restore.py" | grep -F '"md5_hash", "md5Hash"' >/dev/null \
+                    && git show "$main_sha:scripts/execute_cloud_sql_restore.py" | grep -F '"crc32c_hash", "crc32c"' >/dev/null \
+                    && git show "$main_sha:tests/test_cloud_sql_restore_executor.py" | grep -F 'def test_provider_metadata_alias_picker_supports_snake_case_and_camel_case' >/dev/null \
+                    && git show "$main_sha:tests/test_cloud_sql_restore_executor.py" | grep -F 'def test_backup_metadata_accepts_gcloud_snake_case_cli_output' >/dev/null \
+                    && ! git show "$sha:tests/test_cloud_sql_restore_executor.py" | grep -F 'def test_provider_metadata_alias_picker_supports_snake_case_and_camel_case' >/dev/null \
+                    && git show "$main_sha:scripts/bootstrap_cloud_sql_restore_iam.sh" | grep -F 'Restricts import permission to the configured recovery Cloud SQL instance' >/dev/null; then
+                    reviewed_reason="reviewed closed Qodo fixer #438; current main retains its recovery-instance bucket IAM and snake_case metadata fixes, adds a real alias parser and provider-shape tests, and scopes import IAM to the recovery instance"
+                  fi
+                  ;;
                 "fix/remediation-cb26b1b0-9e1868:4084ad2f8c9688b84c026a2f05c2d1aec238804e")
                   # Qodo fixer #427/#428 introduced label version v2, but main has
                   # since added bounded history, transactional serialization, prepared
