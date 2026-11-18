@@ -301,6 +301,8 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "atlas_audit_reader" in workflow
     assert "inputs[source_backup_reference]" in workflow
     assert "import_object_reference" in workflow
+    assert "[.]sql([.]gz)?" in workflow
+    assert "[.]sql([.]gz)?" in audit_workflow
     assert "gh api --method POST" in workflow
     assert "staging-restore-audit.yml/dispatches" in workflow
     assert "gh run watch" in workflow
@@ -323,6 +325,7 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert ".sql.gz" in executor
     assert "is_source_backup_candidate(item)" in preflight
     assert "scripts.cloud_sql_recovery_inventory" in preflight
+    assert '.lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))' not in preflight
 
 
 def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
