@@ -925,3 +925,12 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
             assert "atlas_audit_reader" in source, (
                 f"{path.name} grants privileges to BYPASSRLS roles but does not exclude atlas_audit_reader"
             )
+
+
+
+def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
+    src = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
+    assert 'if self.environment == "production" and not self.metrics_require_admin:' in src
+    assert 'if self.environment == "production" and self.docs_enabled:' in src
+    assert 'if self.max_request_body_bytes < 0:' in src
+    assert 'if self.environment in {"staging", "production"} and self.max_request_body_bytes == 0:' in src

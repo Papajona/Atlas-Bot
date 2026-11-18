@@ -19,6 +19,8 @@ from pydantic import Field
 from sqlalchemy import select, text
 
 from .config import settings
+from .body_limit import BodySizeLimitMiddleware
+from .monitoring import TelemetryMiddleware
 from .db import AppState, CustomerProfile, SessionLocal, engine
 from .customer_paper_api import _paper_feature_flags, build_customer_paper_router
 from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
@@ -340,6 +342,9 @@ app = FastAPI(
     openapi_url=None,
 )
 
+# Reject oversized customer-paper request bodies before auth/route handlers buffer them.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+
 # Preserve the existing per-IP plus per-authenticated-identity rate limiter without
 # mounting the main application's production routes or lifespan.
 app.middleware("http")(api_rate_limit)
@@ -379,6 +384,11 @@ async def _paper_customer_api_rate_limit(request: Request, call_next):
                 headers={"Retry-After": "60"},
             )
     return await call_next(request)
+
+
+# Keep telemetry outermost so 413 and 429 responses receive the security headers,
+# request ID, and metrics used by the main application.
+app.add_middleware(TelemetryMiddleware)
 
 
 @app.get("/healthz")
