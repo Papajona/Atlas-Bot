@@ -49,7 +49,7 @@ END
 $atlas_cloud_sql_paper_connect$;
 
 ALTER ROLE atlas_customer_paper SET default_transaction_read_only = off;
-ALTER ROLE atlas_customer_paper SET search_path = pg_catalog, customer_paper;
+ALTER ROLE atlas_customer_paper SET search_path = 'pg_catalog, customer_paper';
 
 COMMIT;
 
