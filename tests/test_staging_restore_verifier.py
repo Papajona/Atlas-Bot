@@ -3,7 +3,13 @@ import os
 
 import pytest
 
-from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy, validate_cloud_sql_target_pair
+from scripts.verify_staging_restore import (
+    customer_paper_schema_failures,
+    read_database_uri,
+    required_table_failures,
+    truthy,
+    validate_cloud_sql_target_pair,
+)
 
 
 STAGING = "abcdefghijklmnopqrst"
@@ -241,6 +247,65 @@ def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference(
     assert result["research_trial_ledger_head_rows"] is None
     assert result["research_trial_ledger_head_valid"] is False
     assert result["research_holdout_registry_invalid_rows"] is None
+
+
+def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "'customer_paper_schema_present'" in QUERY
+    assert "'customer_paper_tables_missing'" in QUERY
+    assert "'customer_paper_tables_without_forced_rls'" in QUERY
+    assert "'customer_paper_policy_count'" in QUERY
+    assert "'customer_paper_tenant_policy_count'" in QUERY
+    assert "'customer_paper_backend_policy_count'" in QUERY
+
+    valid = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+    }
+    assert customer_paper_schema_failures(valid) == []
+
+    missing_schema = {
+        **valid,
+        "customer_paper_schema_present": False,
+        "customer_paper_tables_missing": [
+            "accounts", "journals", "journal_lines", "orders", "fills",
+            "order_events", "position_events", "market_bar_budgets", "market_bar_allocations",
+        ],
+        "customer_paper_tables_without_forced_rls": 9,
+        "customer_paper_policy_count": 0,
+        "customer_paper_tenant_policy_count": 0,
+        "customer_paper_backend_policy_count": 0,
+    }
+    failures = customer_paper_schema_failures(missing_schema)
+    assert "customer_paper schema is missing" in failures
+    assert "required customer-paper table missing: accounts" in failures
+    assert "customer_paper_tables_without_forced_rls expected 0, observed 9" in failures
+    assert "customer_paper_policy_count expected 9, observed 0" in failures
+    assert "customer_paper_tenant_policy_count expected 7, observed 0" in failures
+    assert "customer_paper_backend_policy_count expected 2, observed 0" in failures
+
+
+def test_restore_audit_rejects_malformed_customer_paper_catalog_observations():
+    assert customer_paper_schema_failures(None) == [
+        "customer-paper schema observations are missing or malformed"
+    ]
+    failures = customer_paper_schema_failures({
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": "accounts",
+        "customer_paper_tables_without_forced_rls": "invalid",
+        "customer_paper_policy_count": None,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+    })
+    assert "customer_paper_tables_missing was not reported as a JSON array" in failures
+    assert "customer_paper_tables_without_forced_rls expected 0, observed -1" in failures
+    assert "customer_paper_policy_count expected 9, observed -1" in failures
+
 
 def _configured_postgres_dsn() -> str | None:
     """Return only an explicitly PostgreSQL DSN, never an application SQLite fallback."""
