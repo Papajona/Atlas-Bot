@@ -20,10 +20,8 @@ concurrency:
 
 jobs:
   discover-recovery-resources:
-    # The standalone read-only identity is provisioned only after the backup bucket exists.
-    # Until its exact service-account variable is configured, skip discovery rather than
-    # trying to impersonate a service account that has not been created.
-    if: github.ref == 'refs/heads/main' && vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT != ''
+    # Keep discovery on main. The protected staging environment supplies its optional identity
+    # to a step-level guard below, where missing configuration can skip safely.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: staging
@@ -35,14 +33,39 @@ jobs:
       BACKUP_BUCKET: atlas-staging-510915-db-backups
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check whether the dedicated read-only discovery identity is provisioned
+        id: discovery_identity
+        shell: bash
+        env:
+          GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          expected="atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com"
+          if [[ -z "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Cloud SQL resource discovery"
+              echo
+              echo "Skipped: the dedicated read-only discovery identity is not provisioned in the protected staging environment."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" != "$expected" ]]; then
+            echo "BLOCKED: GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT must equal the dedicated read-only identity $expected." >&2
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        if: steps.discovery_identity.outputs.enabled == 'true'
         with:
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}
+          service_account: ${{ env.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        if: steps.discovery_identity.outputs.enabled == 'true'
         with:
           project_id: ${{ vars.GCP_PROJECT_ID || secrets.GCP_PROJECT_ID }}
       - name: Discover Cloud SQL instances, databases, backups, service accounts and GCS objects
+        if: steps.discovery_identity.outputs.enabled == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -55,7 +78,7 @@ jobs:
             --bucket "$BACKUP_BUCKET" \
             --output "$RUNNER_TEMP/recovery-resource-discovery.json"
       - name: Preserve sanitized resource-discovery inventory
-        if: always()
+        if: always() && steps.discovery_identity.outputs.enabled == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: atlas-cloud-sql-resource-discovery-${{ github.run_id }}
