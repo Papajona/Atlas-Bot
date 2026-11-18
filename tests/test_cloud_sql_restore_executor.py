@@ -290,7 +290,8 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     workflow = Path(".github/workflows/staging-cloud-sql-restore.yml").read_text(encoding="utf-8")
     audit_workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
     executor = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
-    preflight = Path(".github/workflows/cloud-sql-recovery-preflight.yml").read_text(encoding="utf-8")
+    preflight = Path(".github/workflows/cloud-sql-recovery-restore-preflight.yml").read_text(encoding="utf-8")
+    discovery_preflight = Path(".github/workflows/cloud-sql-recovery-preflight.yml").read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
     assert 'confirm_restore_target' in workflow
@@ -323,8 +324,10 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "import_sha256 != source_sha256" in executor
     assert "restore-imports/" in executor
     assert ".sql.gz" in executor
-    assert "is_source_backup_candidate(item)" in preflight
+    assert "classify_backup_objects(" in preflight
+    assert "require_supported_postgresql_major(" in preflight
     assert "scripts.cloud_sql_recovery_inventory" in preflight
+    assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
     assert '.lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))' not in preflight
 
 
