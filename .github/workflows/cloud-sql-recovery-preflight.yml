@@ -43,13 +43,14 @@ jobs:
           set -euo pipefail
           expected="atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com"
           if [[ -z "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" ]]; then
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
             {
               echo "### Cloud SQL resource discovery"
               echo
-              echo "Skipped: the dedicated read-only discovery identity is not provisioned in the protected staging environment."
+              echo "BLOCKED: the dedicated read-only discovery identity is not provisioned in the protected staging environment."
+              echo "Discovery and recovery certification cannot proceed until GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT is configured."
             } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            echo "BLOCKED: set GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT to the dedicated read-only identity before discovery can run." >&2
+            exit 1
           fi
           if [[ "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" != "$expected" ]]; then
             echo "BLOCKED: GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT must equal the dedicated read-only identity $expected." >&2
