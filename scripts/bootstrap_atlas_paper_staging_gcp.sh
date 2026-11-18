@@ -51,6 +51,9 @@ if [[ "$PROVIDER_CONDITION" != *"assertion.repository == 'Papajona/Atlas-Bot'"* 
   exit 1
 fi
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+bash "${SCRIPT_DIR}/bootstrap_atlas_staging_discovery_identity.sh"
+
 ensure_service_account() {
   local account_id="$1"
   local display_name="$2"
@@ -63,7 +66,6 @@ ensure_service_account() {
 
 ensure_service_account "$DEPLOY_SA_ID" "Atlas paper staging GitHub deploy"
 ensure_service_account "$PREFLIGHT_SA_ID" "Atlas staging identity preflight"
-ensure_service_account "$DISCOVERY_SA_ID" "Atlas read-only Cloud SQL and backup discovery"
 ensure_service_account "$RUNTIME_SA_ID" "Atlas paper-only Cloud Run runtime"
 
 DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
@@ -96,22 +98,11 @@ gcloud iam service-accounts add-iam-policy-binding "$DEPLOY_SA" \
 gcloud iam service-accounts add-iam-policy-binding "$PREFLIGHT_SA" \
   --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
   --role="roles/iam.workloadIdentityUser"
-gcloud iam service-accounts add-iam-policy-binding "$DISCOVERY_SA" \
-  --project="$PROJECT_ID" --member="$PRINCIPAL_SET" \
-  --role="roles/iam.workloadIdentityUser"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
 
 # The discovery identity is read-only: Cloud SQL inventory, service-account listing,
 # and object/bucket metadata reads only. It receives no resource write roles.
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/cloudsql.viewer" --quiet
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/iam.serviceAccountViewer" --quiet
-gcloud storage buckets add-iam-policy-binding "gs://atlas-staging-510915-db-backups" \
-  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/storage.bucketViewer" --quiet
-gcloud storage buckets add-iam-policy-binding "gs://atlas-staging-510915-db-backups" \
-  --member="serviceAccount:${DISCOVERY_SA}" --role="roles/storage.objectViewer" --quiet
 
 PAPER_URL_FILE="${HOME}/.atlas-customer-paper/database-url"
 USE_PAPER_URL_FILE="false"
