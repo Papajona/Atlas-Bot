@@ -353,21 +353,62 @@ def test_malformed_nested_metadata_writes_partial_artifact(
     assert '"discovery_status": "PARTIAL"' in capsys.readouterr().out
 
 
-def test_discovery_bootstrap_checks_bucket_before_applying_bucket_iam():
+def test_discovery_bootstrap_stops_before_iam_when_backup_bucket_is_missing(
+    tmp_path, monkeypatch
+):
+    import os
+
     bootstrap = (
         Path(__file__).resolve().parents[1]
         / "scripts"
         / "bootstrap_atlas_staging_discovery_identity.sh"
     )
-    source = bootstrap.read_text(encoding="utf-8")
-    bucket_check = source.index(
-        'if ! gcloud storage buckets describe "gs://$' + '{BACKUP_BUCKET}"'
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls_file = tmp_path / "gcloud-calls.jsonl"
+    fake_gcloud = fake_bin / "gcloud"
+    fake_gcloud.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["GCLOUD_CALL_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\\\\n")
+
+if args[:2] == ["projects", "describe"]:
+    print("350896810949")
+elif args[:4] == ["iam", "workload-identity-pools", "providers", "describe"]:
+    print(
+        "assertion.repository == 'Papajona/Atlas-Bot' && "
+        "assertion.ref == 'refs/heads/main'"
     )
-    first_bucket_binding = source.index(
-        "gcloud storage buckets add-iam-policy-binding"
+elif args[:3] == ["storage", "buckets", "describe"]:
+    print("bucket not found", file=sys.stderr)
+    raise SystemExit(3)
+""",
+        encoding="utf-8",
     )
-    assert bucket_check < first_bucket_binding
-    assert "BLOCKED: required backup bucket" in source
+    fake_gcloud.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+    env["GCLOUD_CALL_LOG"] = str(calls_file)
+
+    result = subprocess.run(
+        ["bash", str(bootstrap)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "required backup bucket" in result.stderr
+    calls = [json.loads(line) for line in calls_file.read_text(encoding="utf-8").splitlines()]
+    assert any(call[:3] == ["storage", "buckets", "describe"] for call in calls)
+    assert not any("add-iam-policy-binding" in call for call in calls)
+    assert not any(call[:3] == ["iam", "service-accounts", "create"] for call in calls)
 
 
 def test_all_failed_inventory_queries_report_failed_without_synthetic_pass(
