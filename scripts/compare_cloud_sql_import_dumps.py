@@ -70,6 +70,8 @@ def canonical_dump_sha256(path: str | Path) -> tuple[str, bool]:
 
     if not restrict_tokens and not unrestrict_tokens:
         return digest.hexdigest(), False
+    if bool(restrict_tokens) != bool(unrestrict_tokens):
+        raise ValueError("SQL dump has an unbalanced pg_dump restrict/unrestrict guard pair")
     if len(restrict_tokens) != 1 or len(unrestrict_tokens) != 1:
         raise ValueError("SQL dump must have exactly one pg_dump restrict/unrestrict guard pair")
     if restrict_tokens[0] != unrestrict_tokens[0]:
