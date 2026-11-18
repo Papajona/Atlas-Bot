@@ -156,11 +156,11 @@ def test_plain_sql_with_paired_guard_text_inside_function_is_not_treated_as_wrap
     source = tmp_path / "source.sql"
     uploaded = tmp_path / "uploaded.sql"
     source.write_text(
-        "CREATE FUNCTION public.guard_text() RETURNS text\\n"
-        "LANGUAGE sql AS $body$\\n"
-        "\\\\restrict literal-key\\n"
-        "\\\\unrestrict literal-key\\n"
-        "$body$;\\n",
+        "CREATE FUNCTION public.guard_text() RETURNS text\n"
+        "LANGUAGE sql AS $body$\n"
+        "\\restrict literal-key\n"
+        "\\unrestrict literal-key\n"
+        "$body$;\n",
         encoding="utf-8",
     )
     uploaded.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
@@ -168,4 +168,3 @@ def test_plain_sql_with_paired_guard_text_inside_function_is_not_treated_as_wrap
     result = compare_dumps(source, uploaded)
     assert result["status"] == "PASS"
     assert result["pg_dump_guard_keys_normalized"] is False
-
