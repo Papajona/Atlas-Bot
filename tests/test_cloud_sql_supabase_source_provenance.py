@@ -5,7 +5,6 @@ import pytest
 from scripts.verify_cloud_sql_supabase_source_provenance import (
     SOURCE_BACKUP_REFERENCE,
     SOURCE_OBJECT_CRC32C,
-    SOURCE_OBJECT_CREATED_AT,
     SOURCE_OBJECT_MD5,
     SOURCE_OBJECT_SIZE_BYTES,
     SOURCE_PROJECT_REF,
@@ -23,7 +22,7 @@ def source_object(**overrides):
         "size": str(SOURCE_OBJECT_SIZE_BYTES),
         "md5Hash": SOURCE_OBJECT_MD5,
         "crc32c": SOURCE_OBJECT_CRC32C,
-        "timeCreated": SOURCE_OBJECT_CREATED_AT,
+        "timeCreated": "2026-10-22T15:31:08.966Z",
         "retentionExpirationTime": "2027-10-22T15:31:08.966Z",
     }
     value.update(overrides)
