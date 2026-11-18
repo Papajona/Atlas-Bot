@@ -450,3 +450,121 @@ def test_all_failed_inventory_queries_report_failed_without_synthetic_pass(
     )
     assert report["failed_or_unavailable_queries"] == len(report["statuses"])
     assert '"discovery_status": "FAILED"' in capsys.readouterr().out
+
+def test_discovery_inventory_excludes_generated_restore_import_copies_from_backup_candidates():
+    generated_import = {
+        "name": "restore-imports/" + ("a" * 64) + "-" + ("b" * 32) + ".sql.gz",
+        "generation": "1750000000000000",
+        "size": "4096",
+        "timeCreated": "2026-11-17T10:00:00Z",
+        "crc32c": "AAAAAA==",
+    }
+    real_backup = {
+        "name": "scheduled/production-postgres-backup.sql.gz",
+        "generation": "1750000000000001",
+        "size": "8192",
+        "timeCreated": "2026-11-17T11:00:00Z",
+        "crc32c": "BBBBBB==",
+    }
+
+    def runner(command, **_kwargs):
+        if command[1:3] == ["sql", "instances"]:
+            return response([])
+        if command[1:3] == ["iam", "service-accounts"]:
+            return response([])
+        if command[1:4] == ["storage", "buckets", "describe"]:
+            return response({"name": BUCKET, "retentionPolicy": {"isLocked": True}})
+        if command[1:3] == ["auth", "print-access-token"]:
+            return SimpleNamespace(returncode=0, stdout="token", stderr="")
+        raise AssertionError(command)
+
+    report = discover_resources(
+        project=PROJECT,
+        region=REGION,
+        bucket=BUCKET,
+        runner=runner,
+        opener=lambda *_args, **_kwargs: make_response(
+            {"items": [generated_import, real_backup]}
+        ),
+    )
+
+    assert report["discovery_status"] == "COMPLETE"
+    assert report["generated_restore_import_objects_excluded"] == 1
+    assert [item["name"] for item in report["database_backup_candidates"]] == [
+        "scheduled/production-postgres-backup.sql.gz"
+    ]
+
+
+def test_discovery_bootstrap_rejects_broadened_workload_identity_condition_before_iam(tmp_path):
+    import os
+
+    bootstrap = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "bootstrap_atlas_staging_discovery_identity.sh"
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls_file = tmp_path / "gcloud-calls.jsonl"
+    fake_gcloud = fake_bin / "gcloud"
+    fake_gcloud.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+with open(os.environ["GCLOUD_CALL_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(args) + "\\n")
+
+if args[:2] == ["projects", "describe"]:
+    print("350896810949")
+elif args[:4] == ["iam", "workload-identity-pools", "providers", "describe"]:
+    print(
+        "assertion.repository == 'Papajona/Atlas-Bot' && "
+        "assertion.ref == 'refs/heads/main' || "
+        "assertion.repository == 'Papajona/Atlas-Bot' && "
+        "assertion.ref.startsWith('refs/heads/')"
+    )
+""",
+        encoding="utf-8",
+    )
+    fake_gcloud.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+    env["GCLOUD_CALL_LOG"] = str(calls_file)
+
+    result = subprocess.run(
+        ["bash", str(bootstrap)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+
+    assert result.returncode != 0
+    assert "condition must exactly restrict" in result.stderr
+    calls = [
+        json.loads(line)
+        for line in calls_file.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(call[:4] == ["iam", "workload-identity-pools", "providers", "describe"] for call in calls)
+    assert not any("add-iam-policy-binding" in call for call in calls)
+    assert not any(call[:3] == ["iam", "service-accounts", "create"] for call in calls)
+    assert not any(call[:3] == ["storage", "buckets", "describe"] for call in calls)
+
+
+def test_paper_staging_bootstrap_does_not_require_recovery_backup_infrastructure():
+    bootstrap = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "bootstrap_atlas_paper_staging_gcp.sh"
+    )
+    source = bootstrap.read_text(encoding="utf-8")
+
+    assert "bootstrap_atlas_staging_discovery_identity.sh" not in source
+    assert "atlas-staging-discovery" not in source
+    assert 'ensure_service_account "$DEPLOY_SA_ID"' in source
+    assert 'ensure_service_account "$PREFLIGHT_SA_ID"' in source
+    assert 'ensure_service_account "$RUNTIME_SA_ID"' in source
+    assert 'EXPECTED_PROVIDER_CONDITION="assertion.repository == \'Papajona/Atlas-Bot\' && assertion.ref == \'refs/heads/main\'"' in source

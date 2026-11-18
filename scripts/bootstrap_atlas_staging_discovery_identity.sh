@@ -25,9 +25,10 @@ fi
 PROVIDER_CONDITION="$(gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
   --workload-identity-pool="$POOL_ID" --location=global --project="$PROJECT_ID" \
   --format='value(attributeCondition)')"
-if [[ "$PROVIDER_CONDITION" != *"assertion.repository == 'Papajona/Atlas-Bot'"* ]] ||
-   [[ "$PROVIDER_CONDITION" != *"assertion.ref == 'refs/heads/main'"* ]]; then
-  echo "BLOCKED: GitHub Workload Identity must be restricted to Papajona/Atlas-Bot on refs/heads/main." >&2
+PROVIDER_CONDITION="$(printf '%s' "$PROVIDER_CONDITION" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+EXPECTED_PROVIDER_CONDITION="assertion.repository == 'Papajona/Atlas-Bot' && assertion.ref == 'refs/heads/main'"
+if [[ "$PROVIDER_CONDITION" != "$EXPECTED_PROVIDER_CONDITION" ]]; then
+  echo "BLOCKED: GitHub Workload Identity condition must exactly restrict Papajona/Atlas-Bot to refs/heads/main." >&2
   exit 1
 fi
 

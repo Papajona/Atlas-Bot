@@ -15,7 +15,6 @@ PROVIDER_ID="github-main"
 
 DEPLOY_SA_ID="atlas-staging-deploy"
 PREFLIGHT_SA_ID="atlas-staging-preflight"
-DISCOVERY_SA_ID="atlas-staging-discovery"
 RUNTIME_SA_ID="atlas-staging-runtime"
 ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
@@ -45,14 +44,12 @@ fi
 PROVIDER_CONDITION="$(gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
   --workload-identity-pool="$POOL_ID" --location=global --project="$PROJECT_ID" \
   --format='value(attributeCondition)')"
-if [[ "$PROVIDER_CONDITION" != *"assertion.repository == 'Papajona/Atlas-Bot'"* ]] ||
-   [[ "$PROVIDER_CONDITION" != *"assertion.ref == 'refs/heads/main'"* ]]; then
-  echo "BLOCKED: expected GitHub provider is missing or is not restricted to Papajona/Atlas-Bot on refs/heads/main."
+PROVIDER_CONDITION="$(printf '%s' "$PROVIDER_CONDITION" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+EXPECTED_PROVIDER_CONDITION="assertion.repository == 'Papajona/Atlas-Bot' && assertion.ref == 'refs/heads/main'"
+if [[ "$PROVIDER_CONDITION" != "$EXPECTED_PROVIDER_CONDITION" ]]; then
+  echo "BLOCKED: expected GitHub provider condition must exactly restrict Papajona/Atlas-Bot to refs/heads/main."
   exit 1
 fi
-
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-bash "${SCRIPT_DIR}/bootstrap_atlas_staging_discovery_identity.sh"
 
 ensure_service_account() {
   local account_id="$1"
@@ -70,7 +67,6 @@ ensure_service_account "$RUNTIME_SA_ID" "Atlas paper-only Cloud Run runtime"
 
 DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-DISCOVERY_SA="${DISCOVERY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 if ! gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
@@ -100,9 +96,6 @@ gcloud iam service-accounts add-iam-policy-binding "$PREFLIGHT_SA" \
   --role="roles/iam.workloadIdentityUser"
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${PREFLIGHT_SA}" --role="roles/run.viewer" --quiet
-
-# The discovery identity is read-only: Cloud SQL inventory, service-account listing,
-# and object/bucket metadata reads only. It receives no resource write roles.
 
 PAPER_URL_FILE="${HOME}/.atlas-customer-paper/database-url"
 USE_PAPER_URL_FILE="false"
@@ -297,7 +290,6 @@ printf 'GCP_REGION=%s\n' "$REGION"
 printf 'GCP_WORKLOAD_IDENTITY_PROVIDER=projects/%s/locations/global/workloadIdentityPools/%s/providers/%s\n' "$PROJECT_NUMBER" "$POOL_ID" "$PROVIDER_ID"
 printf 'GCP_STAGING_DEPLOY_SERVICE_ACCOUNT=%s\n' "$DEPLOY_SA"
 printf 'GCP_STAGING_PREFLIGHT_SERVICE_ACCOUNT=%s\n' "$PREFLIGHT_SA"
-printf 'GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT=%s\n' "$DISCOVERY_SA"
 printf 'ATLAS_STAGING_RUNTIME_SERVICE_ACCOUNT=%s\n' "$RUNTIME_SA"
 printf 'ATLAS_STAGING_CLOUD_RUN_SERVICE=%s\n' "$CLOUD_RUN_SERVICE"
 printf 'ATLAS_STAGING_DATABASE_SECRET=%s\n' "$PRIMARY_SECRET"
