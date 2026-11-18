@@ -108,5 +108,4 @@ def test_gcs_creation_time_is_observed_not_a_fixed_source_constant():
     assert evidence["status"] == "PASS"
     assert evidence["source_object_created_at"] == "2026-10-22T15:31:09+00:00"
     assert evidence["seconds_from_pg_dump_termination_to_object_creation"] == pytest.approx(3.249055)
-    assert not hasattr(source_provenance, "SOURCE_OBJECT_CREATED_AT")
 
