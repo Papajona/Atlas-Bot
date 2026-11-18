@@ -46,7 +46,7 @@ def require_supported_postgresql_major(database_version: Any) -> int:
     """Return the Cloud SQL PostgreSQL major version or reject unsupported engines."""
     if not isinstance(database_version, str):
         raise ValueError("Cloud SQL instance databaseVersion is missing or not a string")
-    match = re.fullmatch(r"POSTGRES_(\\d+)(?:_(\\d+))?", database_version.strip().upper())
+    match = re.fullmatch(r"POSTGRES_(\d+)(?:_(\d+))?", database_version.strip().upper())
     if match is None:
         raise ValueError(
             f"Cloud SQL recovery target must use a supported PostgreSQL engine; "
