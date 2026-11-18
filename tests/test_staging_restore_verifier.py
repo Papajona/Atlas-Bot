@@ -266,6 +266,16 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
         "customer_paper_policy_count": 9,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        "customer_paper_runtime_public_financial_privileges": 0,
     }
     assert customer_paper_schema_failures(valid) == []
 
@@ -306,6 +316,60 @@ def test_restore_audit_rejects_malformed_customer_paper_catalog_observations():
     assert "customer_paper_tables_without_forced_rls expected 0, observed -1" in failures
     assert "customer_paper_policy_count expected 9, observed -1" in failures
 
+
+
+
+
+def test_customer_paper_restore_audit_rejects_unsafe_runtime_role_and_acl():
+    good = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        "customer_paper_runtime_public_financial_privileges": 0,
+    }
+    assert customer_paper_schema_failures(good) == []
+    unsafe = {
+        **good,
+        "customer_paper_wrong_policy_role_count": 1,
+        "customer_paper_runtime_role_valid": False,
+        "customer_paper_runtime_schema_create": True,
+        "customer_paper_runtime_public_schema_usage": True,
+        "customer_paper_runtime_invalid_table_privileges": 2,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 1,
+        "customer_paper_runtime_public_financial_privileges": 1,
+    }
+    failures = customer_paper_schema_failures(unsafe)
+    assert "customer_paper_wrong_policy_role_count expected 0, observed 1" in failures
+    assert "customer_paper_runtime_role_valid expected True, observed False" in failures
+    assert "customer_paper_runtime_schema_create expected False, observed True" in failures
+    assert "customer_paper_runtime_public_schema_usage expected False, observed True" in failures
+    assert "customer_paper_runtime_invalid_table_privileges expected 0, observed 2" in failures
+    assert "customer_paper_runtime_sequences_with_forbidden_privileges expected 0, observed 1" in failures
+    assert "customer_paper_runtime_public_financial_privileges expected 0, observed 1" in failures
+
+
+def test_customer_paper_restore_audit_rejects_malformed_missing_table_names():
+    failures = customer_paper_schema_failures({
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [None],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+    })
+    assert "customer_paper_tables_missing contains malformed table names" in failures
 
 def _configured_postgres_dsn() -> str | None:
     """Return only an explicitly PostgreSQL DSN, never an application SQLite fallback."""
