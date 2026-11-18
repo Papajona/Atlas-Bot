@@ -206,6 +206,43 @@ SELECT jsonb_build_object(
     ]::text[]) AS required(table_name)
     WHERE to_regclass(format('public.%I', required.table_name)) IS NULL
   ),
+  'customer_paper_schema_present', to_regnamespace('customer_paper') IS NOT NULL,
+  'customer_paper_tables_missing', (
+    SELECT coalesce(jsonb_agg(required.table_name ORDER BY required.table_name), '[]'::jsonb)
+    FROM unnest(ARRAY[
+      'accounts', 'journals', 'journal_lines', 'orders', 'fills',
+      'order_events', 'position_events', 'market_bar_budgets', 'market_bar_allocations'
+    ]::text[]) AS required(table_name)
+    WHERE to_regclass(format('customer_paper.%I', required.table_name)) IS NULL
+  ),
+  'customer_paper_tables_without_forced_rls', (
+    SELECT count(*)
+    FROM unnest(ARRAY[
+      'accounts', 'journals', 'journal_lines', 'orders', 'fills',
+      'order_events', 'position_events', 'market_bar_budgets', 'market_bar_allocations'
+    ]::text[]) AS required(table_name)
+    LEFT JOIN pg_class c
+      ON c.oid = to_regclass(format('customer_paper.%I', required.table_name))
+    WHERE c.oid IS NULL OR NOT c.relrowsecurity OR NOT c.relforcerowsecurity
+  ),
+  'customer_paper_policy_count', (
+    SELECT count(*) FROM pg_policies WHERE schemaname = 'customer_paper'
+  ),
+  'customer_paper_tenant_policy_count', (
+    SELECT count(*) FROM pg_policies
+    WHERE schemaname = 'customer_paper'
+      AND policyname = 'customer_paper_tenant'
+      AND tablename IN (
+        'accounts', 'journals', 'journal_lines', 'orders', 'fills',
+        'order_events', 'position_events'
+      )
+  ),
+  'customer_paper_backend_policy_count', (
+    SELECT count(*) FROM pg_policies
+    WHERE schemaname = 'customer_paper'
+      AND policyname = 'customer_paper_bar_budget_backend'
+      AND tablename IN ('market_bar_budgets', 'market_bar_allocations')
+  ),
   'research_trial_ledger_head_present', to_regclass('public.research_trial_ledger_head') IS NOT NULL,
   'research_holdout_registry_present', to_regclass('public.research_holdout_registry') IS NOT NULL,
   'tables_without_rls', (
@@ -318,6 +355,39 @@ def required_table_failures(value: object) -> list[str]:
             failures.append("required_tables_missing contained a malformed table name")
         else:
             failures.append(f"required staging table missing: {table_name}")
+    return failures
+
+
+def customer_paper_schema_failures(observed: object) -> list[str]:
+    """Require the complete, tenant-isolated customer-paper schema for restore certification."""
+    if not isinstance(observed, dict):
+        return ["customer-paper schema observations are missing or malformed"]
+
+    failures: list[str] = []
+    if observed.get("customer_paper_schema_present") is not True:
+        failures.append("customer_paper schema is missing")
+
+    failures.extend(
+        f"required customer-paper table missing: {name}"
+        for name in observed.get("customer_paper_tables_missing", [])
+        if isinstance(name, str) and name.strip()
+    )
+    if not isinstance(observed.get("customer_paper_tables_missing"), list):
+        failures.append("customer_paper_tables_missing was not reported as a JSON array")
+
+    checks = (
+        ("customer_paper_tables_without_forced_rls", 0),
+        ("customer_paper_policy_count", 9),
+        ("customer_paper_tenant_policy_count", 7),
+        ("customer_paper_backend_policy_count", 2),
+    )
+    for key, expected in checks:
+        try:
+            actual = int(observed.get(key, -1))
+        except (TypeError, ValueError):
+            actual = -1
+        if actual != expected:
+            failures.append(f"{key} expected {expected}, observed {actual}")
     return failures
 
 
@@ -464,6 +534,7 @@ def audit(args: argparse.Namespace) -> dict:
     if int(observed.get("public_table_count", 0)) < 1:
         failures.append("public schema has no tables")
     failures.extend(required_table_failures(observed.get("required_tables_missing")))
+    failures.extend(customer_paper_schema_failures(observed))
     try:
         head_rows = int(observed.get("research_trial_ledger_head_rows", -1))
     except (TypeError, ValueError):
