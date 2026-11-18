@@ -51,7 +51,9 @@ def canonical_dump_sha256(path: str | Path) -> tuple[str, bool]:
             previous = line
 
     if previous is None:
-        raise ValueError("SQL dump contains no content after its first line")
+        if first_token is not None:
+            raise ValueError("SQL dump has an unbalanced pg_dump restrict guard")
+        return digest.hexdigest(), False
 
     last_match = _UNRESTRICT.fullmatch(previous)
     if _command_line(previous, b"unrestrict") and last_match is None:
