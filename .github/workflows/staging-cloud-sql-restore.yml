@@ -128,7 +128,7 @@ jobs:
           operation_id="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["operation_id"])' "$RUNNER_TEMP/cloud-sql-restore-execution.json")"
           import_reference="$(python -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["import_object_reference"])' "$RUNNER_TEMP/cloud-sql-restore-execution.json")"
           [[ "$operation_id" =~ ^[A-Za-z0-9._-]{1,256}$ ]]
-          [[ "$import_reference" =~ ^gs://atlas-staging-510915-db-backups/restore-imports/[a-f0-9]{64}-[a-f0-9]{32}\.sql#[1-9][0-9]*$ ]] || {
+          [[ "$import_reference" =~ ^gs://atlas-staging-510915-db-backups/restore-imports/[a-f0-9]{64}-[a-f0-9]{32}[.]sql([.]gz)?#[1-9][0-9]*$ ]] || {
             echo "BLOCKED: executor did not return a unique generation-pinned immutable import object" >&2
             exit 1
           }
