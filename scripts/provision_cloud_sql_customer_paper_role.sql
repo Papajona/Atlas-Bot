@@ -56,8 +56,6 @@ COMMIT;
 SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper,
        r.rolcreaterole, r.rolcreatedb, r.rolreplication, r.rolbypassrls,
        has_database_privilege(r.rolname, current_database(), 'CONNECT') AS database_connect,
-       has_schema_privilege(r.rolname, 'public', 'USAGE') AS public_schema_usage,
-       has_schema_privilege(r.rolname, 'public', 'CREATE') AS public_schema_create,
-       has_schema_privilege(r.rolname, 'customer_paper', 'USAGE') AS paper_schema_usage
+       to_regnamespace('customer_paper') IS NOT NULL AS paper_schema_present
 FROM pg_roles r
 WHERE r.rolname = 'atlas_customer_paper';
