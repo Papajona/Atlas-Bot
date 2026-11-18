@@ -608,7 +608,7 @@ def _canonical_policy_expression(expr: object) -> str:
             continue
         if lowered == "as" and index + 1 < len(tokens):
             alias = tokens[index + 1].strip('"').casefold()
-            if alias == "nullif":
+            if alias in {"nullif", "current_setting"}:
                 index += 2
                 continue
         if token.startswith("'"):
