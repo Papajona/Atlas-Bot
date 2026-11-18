@@ -578,7 +578,15 @@ def test_recovery_discovery_workflow_skips_until_dedicated_identity_is_configure
         / "cloud-sql-recovery-preflight.yml"
     ).read_text(encoding="utf-8")
 
-    assert "vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT != ''" in workflow
+    assert "if: github.ref == 'refs/heads/main'" in workflow
+    assert "vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT != ''" not in workflow
+    environment_position = workflow.index("environment: staging")
+    guard_position = workflow.index("id: discovery_identity")
+    auth_position = workflow.index("google-github-actions/auth@")
+    assert environment_position < guard_position < auth_position
     assert "GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
-    assert "service_account: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
-    assert "atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com" not in workflow
+    assert 'expected="atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com"' in workflow
+    assert 'if [[ -z "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" ]]' in workflow
+    assert 'if [[ "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" != "$expected" ]]' in workflow
+    assert workflow.count("if: steps.discovery_identity.outputs.enabled == 'true'") == 3
+    assert "service_account: ${{ env.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
