@@ -276,7 +276,7 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "--if-generation-match=0" in executor
     assert "import_object_reference" in executor
     assert "source_backup_sha256" in executor
-    assert "source_hash != import_sha256" in executor
+    assert "import_sha256 != source_sha256" in executor
     assert "restore-imports/" in executor
 
 
