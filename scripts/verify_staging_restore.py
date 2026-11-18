@@ -237,6 +237,19 @@ SELECT jsonb_build_object(
         'order_events', 'position_events'
       )
   ),
+  'customer_paper_tenant_policies', (
+    SELECT coalesce(jsonb_agg(jsonb_build_object(
+      'table', p.tablename,
+      'cmd', p.cmd,
+      'permissive', p.permissive,
+      'roles', to_jsonb(p.roles),
+      'qual', p.qual,
+      'with_check', p.with_check
+    ) ORDER BY p.tablename), '[]'::jsonb)
+    FROM pg_policies p
+    WHERE p.schemaname = 'customer_paper'
+      AND p.policyname = 'customer_paper_tenant'
+  ),
   'customer_paper_backend_policy_count', (
     SELECT count(*) FROM pg_policies
     WHERE schemaname = 'customer_paper'
@@ -358,12 +371,66 @@ def required_table_failures(value: object) -> list[str]:
     return failures
 
 
+CUSTOMER_PAPER_TENANT_TABLES = (
+    "accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events",
+)
+CUSTOMER_PAPER_TENANT_ROLE = "atlas_customer_paper"
+_TENANT_PREDICATE_REFERENCE = (
+    "customer_id = (SELECT NULLIF(current_setting('app.customer_id', true), '')::bigint)"
+)
+
+
+def _canonical_policy_expression(expr: object) -> str:
+    """Normalize a pg_get_expr/reference predicate so only cosmetic differences are ignored."""
+    text = re.sub(r"\s+", "", str(expr or "")).lower()
+    for token in ("::text", "::bigint", 'as"nullif"', "select", "(", ")", '"'):
+        text = text.replace(token, "")
+    return text
+
+
+_TENANT_PREDICATE_CANONICAL = _canonical_policy_expression(_TENANT_PREDICATE_REFERENCE)
+
+
+def customer_paper_tenant_policy_failures(policies: object) -> list[str]:
+    """Reject tenant policies that are not the exact customer-id boundary for the runtime role."""
+    if not isinstance(policies, list):
+        return ["customer_paper_tenant_policies was not reported as a JSON array"]
+    failures: list[str] = []
+    seen_tables: list[str] = []
+    for policy in policies:
+        if not isinstance(policy, dict):
+            failures.append("customer_paper_tenant policy observation is malformed")
+            continue
+        table = str(policy.get("table") or "")
+        seen_tables.append(table)
+        problems = []
+        if str(policy.get("cmd") or "").upper() != "ALL":
+            problems.append("command is not ALL")
+        if str(policy.get("permissive") or "").upper() != "PERMISSIVE":
+            problems.append("policy is not PERMISSIVE")
+        roles = policy.get("roles")
+        role_names = (
+            {str(item).casefold() for item in roles} if isinstance(roles, list) else None
+        )
+        if role_names != {CUSTOMER_PAPER_TENANT_ROLE}:
+            problems.append(f"roles are not exactly {CUSTOMER_PAPER_TENANT_ROLE}")
+        if _canonical_policy_expression(policy.get("qual")) != _TENANT_PREDICATE_CANONICAL:
+            problems.append("USING expression is not the tenant predicate")
+        if _canonical_policy_expression(policy.get("with_check")) != _TENANT_PREDICATE_CANONICAL:
+            problems.append("WITH CHECK expression is not the tenant predicate")
+        failures.extend(f"customer_paper_tenant policy on {table or '<unknown>'}: {p}" for p in problems)
+    if sorted(seen_tables) != sorted(CUSTOMER_PAPER_TENANT_TABLES):
+        failures.append("customer_paper_tenant policies do not cover exactly the expected tables")
+    return failures
+
+
 def customer_paper_schema_failures(observed: object) -> list[str]:
     """Require the complete, tenant-isolated customer-paper schema for restore certification."""
     if not isinstance(observed, dict):
         return ["customer-paper schema observations are missing or malformed"]
 
     failures: list[str] = []
+    failures.extend(customer_paper_tenant_policy_failures(observed.get("customer_paper_tenant_policies")))
     if observed.get("customer_paper_schema_present") is not True:
         failures.append("customer_paper schema is missing")
 

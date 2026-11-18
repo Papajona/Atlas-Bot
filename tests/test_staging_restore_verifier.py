@@ -266,8 +266,27 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
         "customer_paper_policy_count": 9,
         "customer_paper_tenant_policy_count": 7,
         "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": [
+            {
+                "table": table,
+                "cmd": "ALL",
+                "permissive": "PERMISSIVE",
+                "roles": ["atlas_customer_paper"],
+                "qual": "(customer_id = ( SELECT NULLIF(current_setting('app.customer_id'::text, true), ''::text)::bigint AS \"nullif\"))",
+                "with_check": "(customer_id = ( SELECT NULLIF(current_setting('app.customer_id'::text, true), ''::text)::bigint AS \"nullif\"))",
+            }
+            for table in (
+                "accounts", "journals", "journal_lines", "orders", "fills",
+                "order_events", "position_events",
+            )
+        ],
     }
     assert customer_paper_schema_failures(valid) == []
+
+    open_policies = [dict(p, qual="true", with_check="true") for p in valid["customer_paper_tenant_policies"]]
+    open_failures = customer_paper_schema_failures({**valid, "customer_paper_tenant_policies": open_policies})
+    assert any("USING expression is not the tenant predicate" in f for f in open_failures)
+    assert any("WITH CHECK expression is not the tenant predicate" in f for f in open_failures)
 
     missing_schema = {
         **valid,
