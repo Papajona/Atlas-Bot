@@ -347,8 +347,9 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "restore-imports/" in executor
     assert ".sql.gz" in executor
     assert "classify_backup_objects(" in preflight
-    assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" in preflight
-    assert "expected_source_database=source_database" in preflight
+    assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in preflight
+    assert "verify_cloud_sql_supabase_source_provenance.py" in preflight
+    assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" not in preflight
     assert "require_supported_postgresql_major(" in preflight
     assert "scripts.cloud_sql_recovery_inventory" in preflight
     assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
