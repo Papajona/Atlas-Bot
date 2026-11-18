@@ -570,7 +570,7 @@ def test_paper_staging_bootstrap_does_not_require_recovery_backup_infrastructure
     assert 'EXPECTED_PROVIDER_CONDITION="assertion.repository == \'Papajona/Atlas-Bot\' && assertion.ref == \'refs/heads/main\'"' in source
 
 
-def test_recovery_discovery_workflow_preserves_main_guard_and_gates_identity_after_environment():
+def test_recovery_discovery_workflow_fails_closed_without_identity_and_gates_auth_after_environment():
     workflow = (
         Path(__file__).resolve().parents[1]
         / ".github"
@@ -586,7 +586,12 @@ def test_recovery_discovery_workflow_preserves_main_guard_and_gates_identity_aft
     assert environment_position < guard_position < auth_position
     assert "GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT: ${{ vars.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
     assert 'expected="atlas-staging-discovery@atlas-staging-510915.iam.gserviceaccount.com"' in workflow
-    assert 'if [[ -z "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" ]]' in workflow
+    guard_start = workflow.index('if [[ -z "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" ]]')
+    guard_end = workflow.index("\n          fi", guard_start)
+    missing_identity_guard = workflow[guard_start:guard_end]
+    assert "BLOCKED:" in missing_identity_guard
+    assert "exit 1" in missing_identity_guard
+    assert "enabled=false" not in missing_identity_guard
     assert 'if [[ "$GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT" != "$expected" ]]' in workflow
     assert workflow.count("if: steps.discovery_identity.outputs.enabled == 'true'") == 3
     assert "service_account: ${{ env.GCP_STAGING_DISCOVERY_SERVICE_ACCOUNT }}" in workflow
