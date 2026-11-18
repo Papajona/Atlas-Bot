@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import URLError
 
@@ -281,3 +282,89 @@ def test_main_writes_partial_artifact_then_returns_nonzero(tmp_path, monkeypatch
     assert exit_code == 1
     assert json.loads(output.read_text(encoding="utf-8")) == report
     assert '"discovery_status": "PARTIAL"' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("malformed_field", ["settings", "retentionPolicy"])
+def test_malformed_nested_metadata_writes_partial_artifact(
+    malformed_field, tmp_path, monkeypatch, capsys
+):
+    def runner(command, **_kwargs):
+        if command[1:3] == ["sql", "instances"]:
+            settings = "not-an-object" if malformed_field == "settings" else {}
+            return response(
+                [
+                    {
+                        "name": "atlas-recovery",
+                        "region": REGION,
+                        "state": "RUNNABLE",
+                        "settings": settings,
+                    }
+                ]
+            )
+        if command[1:3] == ["sql", "databases"]:
+            return response([{"name": "postgres"}])
+        if command[1:3] == ["sql", "backups"]:
+            return response([])
+        if command[1:3] == ["iam", "service-accounts"]:
+            return response([])
+        if command[1:4] == ["storage", "buckets", "describe"]:
+            retention = (
+                "not-an-object"
+                if malformed_field == "retentionPolicy"
+                else {"isLocked": True}
+            )
+            return response({"name": BUCKET, "retentionPolicy": retention})
+        if command[1:3] == ["auth", "print-access-token"]:
+            return SimpleNamespace(returncode=0, stdout="token", stderr="")
+        raise AssertionError(command)
+
+    def opener(*_args, **_kwargs):
+        return make_response({"items": []})
+
+    original_discover = discovery.discover_resources
+
+    def discover_with_fakes(**kwargs):
+        return original_discover(**kwargs, runner=runner, opener=opener)
+
+    monkeypatch.setattr(discovery, "discover_resources", discover_with_fakes)
+    output = tmp_path / "recovery-resource-discovery.json"
+    exit_code = discovery.main(
+        [
+            "--project", PROJECT,
+            "--region", REGION,
+            "--bucket", BUCKET,
+            "--output", str(output),
+        ]
+    )
+
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert exit_code == 1
+    assert report["discovery_status"] == "PARTIAL"
+    assert report["failed_or_unavailable_queries"] >= 1
+    if malformed_field == "settings":
+        assert report["statuses"]["cloud_sql_instances.atlas-recovery.settings"] == (
+            "GCLOUD_RESPONSE_SHAPE_INVALID"
+        )
+        assert report["cloud_sql_instances"][0]["name"] == "atlas-recovery"
+    else:
+        assert report["statuses"]["backup_bucket.retention_policy"] == (
+            "GCLOUD_RESPONSE_SHAPE_INVALID"
+        )
+    assert '"discovery_status": "PARTIAL"' in capsys.readouterr().out
+
+
+def test_discovery_bootstrap_checks_bucket_before_applying_bucket_iam():
+    bootstrap = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "bootstrap_atlas_staging_discovery_identity.sh"
+    )
+    source = bootstrap.read_text(encoding="utf-8")
+    bucket_check = source.index(
+        'if ! gcloud storage buckets describe "gs://$' + '{BACKUP_BUCKET}"'
+    )
+    first_bucket_binding = source.index(
+        "gcloud storage buckets add-iam-policy-binding"
+    )
+    assert bucket_check < first_bucket_binding
+    assert "BLOCKED: required backup bucket" in source
