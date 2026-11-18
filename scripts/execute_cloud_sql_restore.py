@@ -370,25 +370,43 @@ def execute_restore(
     )
 
     with tempfile.TemporaryDirectory(prefix="atlas-cloud-sql-restore-") as temp_dir:
-        dump_path = str(Path(temp_dir) / "source-recovery-import.sql")
+        source_backup_path = str(Path(temp_dir) / "source-recovery-backup")
+        prepared_dump_path = str(Path(temp_dir) / "prepared-recovery-import.sql")
         dump_report = str(Path(temp_dir) / "source-import-dump-verification.json")
 
-        # Download and scan the exact generation supplied by the operator.
+        # Download the exact source generation. Custom pg_dump archives are
+        # converted to database-neutral SQL before the existing lexical safety
+        # scanner runs. The conversion is offline and never connects to a DB.
         copy_proc = run(
-            ["gcloud", "storage", "cp", backup_reference, dump_path],
+            ["gcloud", "storage", "cp", backup_reference, source_backup_path],
             capture_output=True,
             text=True,
             check=False,
         )
         if copy_proc.returncode:
-            raise RuntimeError("Could not download the exact generation-pinned recovery SQL dump")
-        source_sha256 = _sha256_file(dump_path)
+            raise RuntimeError("Could not download the exact generation-pinned recovery backup")
+        source_backup_sha256 = _sha256_file(source_backup_path)
 
+        prepare_proc = run(
+            [
+                sys.executable,
+                "scripts/prepare_cloud_sql_import_dump.py",
+                "--input", source_backup_path,
+                "--output", prepared_dump_path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if prepare_proc.returncode:
+            raise ValueError("recovery backup could not be converted into a supported SQL import")
+
+        prepared_import_sha256 = _sha256_file(prepared_dump_path)
         scan_proc = run(
             [
                 sys.executable,
                 "scripts/verify_cloud_sql_import_dump.py",
-                "--input", dump_path,
+                "--input", prepared_dump_path,
                 "--output", dump_report,
             ],
             capture_output=True,
@@ -396,9 +414,9 @@ def execute_restore(
             check=False,
         )
         if scan_proc.returncode:
-            raise ValueError("recovery dump did not pass the existing Cloud SQL import safety scanner")
+            raise ValueError("prepared recovery SQL did not pass the Cloud SQL import safety scanner")
 
-        import_suffix = _sql_import_suffix(dump_path)
+        import_suffix = _sql_import_suffix(prepared_dump_path)
         verified_import_path = str(Path(temp_dir) / f"verified-import-copy{import_suffix}")
 
         # Cloud SQL import accepts only an unversioned gs:// URI. Copy the
@@ -406,12 +424,12 @@ def execute_restore(
         # The executor has objectCreator (not objectAdmin), and the upload is
         # create-only; the provider therefore cannot race a later generation
         # into the URI that Cloud SQL reads.
-        import_object_name = f"restore-imports/{source_sha256}-{uuid.uuid4().hex}{import_suffix}"
+        import_object_name = f"restore-imports/{prepared_import_sha256}-{uuid.uuid4().hex}{import_suffix}"
         import_object_uri = f"gs://{BACKUP_BUCKET}/{import_object_name}"
         upload_proc = run(
             [
                 "gcloud", "storage", "cp", "--if-generation-match=0",
-                dump_path, import_object_uri,
+                prepared_dump_path, import_object_uri,
             ],
             capture_output=True,
             text=True,
@@ -445,8 +463,8 @@ def execute_restore(
         if verify_copy_proc.returncode:
             raise RuntimeError("Could not read back the immutable Cloud SQL import object")
         import_sha256 = _sha256_file(verified_import_path)
-        if import_sha256 != source_sha256:
-            raise ValueError("immutable Cloud SQL import object bytes differ from the scanned source generation")
+        if import_sha256 != prepared_import_sha256:
+            raise ValueError("immutable Cloud SQL import object bytes differ from the prepared and scanned SQL import")
 
         import_versions_before = _list_object_versions(object_name=import_object_name, run=run)
         live_import_generation = _live_backup_generation(
@@ -512,7 +530,8 @@ def execute_restore(
         "backup_reference": backup_reference,
         "backup_generation": source_generation,
         "source_backup_reference": backup_reference,
-        "source_backup_sha256": source_sha256,
+        "source_backup_sha256": source_backup_sha256,
+        "prepared_import_sha256": prepared_import_sha256,
         "import_object_reference": import_reference,
         "import_object_sha256": import_sha256,
         "backup_binding": backup_binding,
@@ -561,6 +580,7 @@ def main() -> int:
             "backup_generation": result["backup_generation"],
             "import_object_reference": result["import_object_reference"],
             "source_backup_sha256": result["source_backup_sha256"],
+            "prepared_import_sha256": result["prepared_import_sha256"],
         }, sort_keys=True))
         return 0
     except Exception as exc:
