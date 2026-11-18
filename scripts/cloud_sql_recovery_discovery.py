@@ -275,12 +275,20 @@ def discover_resources(
             if "retention_policy" in bucket_meta
             else None
         )
-        if retention_key is not None:
+        if retention_key is None:
+            retention_status = "BUCKET_RETENTION_POLICY_MISSING"
+        else:
             retention_value = bucket_meta[retention_key]
             if not isinstance(retention_value, dict):
                 retention_status = "GCLOUD_RESPONSE_SHAPE_INVALID"
             else:
                 retention = retention_value
+                retention_locked = retention.get(
+                    "isLocked", retention.get("is_locked")
+                ) is True
+                retention_status = (
+                    PASS if retention_locked else "BUCKET_RETENTION_NOT_LOCKED"
+                )
     statuses["backup_bucket.retention_policy"] = retention_status
 
     passed = sum(status == PASS for status in statuses.values())
