@@ -258,6 +258,11 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
     assert "'customer_paper_policy_count'" in QUERY
     assert "'customer_paper_tenant_policy_count'" in QUERY
     assert "'customer_paper_backend_policy_count'" in QUERY
+    assert "member_role.rolname = 'postgres'" in QUERY
+    assert "grantor_role.rolname = 'supabase_admin'" in QUERY
+    assert "m.admin_option" in QUERY
+    assert "inherit_option" in QUERY
+    assert "set_option" in QUERY
 
     valid = {
         "customer_paper_schema_present": True,
