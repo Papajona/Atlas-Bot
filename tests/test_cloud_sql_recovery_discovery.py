@@ -353,9 +353,7 @@ def test_malformed_nested_metadata_writes_partial_artifact(
     assert '"discovery_status": "PARTIAL"' in capsys.readouterr().out
 
 
-def test_discovery_bootstrap_stops_before_iam_when_backup_bucket_is_missing(
-    tmp_path, monkeypatch
-):
+def test_discovery_bootstrap_stops_before_iam_when_backup_bucket_is_missing(tmp_path):
     import os
 
     bootstrap = (
@@ -375,7 +373,7 @@ import sys
 
 args = sys.argv[1:]
 with open(os.environ["GCLOUD_CALL_LOG"], "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(args) + "\\\\n")
+    handle.write(json.dumps(args) + "\n")
 
 if args[:2] == ["projects", "describe"]:
     print("350896810949")
