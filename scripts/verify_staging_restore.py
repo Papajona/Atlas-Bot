@@ -271,6 +271,25 @@ SELECT jsonb_build_object(
       AND NOT r.rolinherit
       AND NOT r.rolbypassrls
       AND NOT EXISTS (SELECT 1 FROM pg_auth_members m WHERE m.member = r.oid)
+      AND (
+        SELECT count(*) FROM pg_auth_members m WHERE m.roleid = r.oid
+      ) <= 1
+      AND NOT EXISTS (
+        SELECT 1
+        FROM pg_auth_members m
+        JOIN pg_roles member_role ON member_role.oid = m.member
+        JOIN pg_roles grantor_role ON grantor_role.oid = m.grantor
+        WHERE m.roleid = r.oid
+          AND NOT (
+            member_role.rolname = 'postgres'
+            AND grantor_role.rolname = 'supabase_admin'
+            AND m.admin_option
+            AND (to_jsonb(m) ? 'inherit_option')
+            AND COALESCE((to_jsonb(m)->>'inherit_option')::boolean, false) = false
+            AND (to_jsonb(m) ? 'set_option')
+            AND COALESCE((to_jsonb(m)->>'set_option')::boolean, false) = false
+          )
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM pg_class c
