@@ -570,7 +570,7 @@ def test_paper_staging_bootstrap_does_not_require_recovery_backup_infrastructure
     assert 'EXPECTED_PROVIDER_CONDITION="assertion.repository == \'Papajona/Atlas-Bot\' && assertion.ref == \'refs/heads/main\'"' in source
 
 
-def test_recovery_discovery_workflow_skips_until_dedicated_identity_is_configured():
+def test_recovery_discovery_workflow_preserves_main_guard_and_gates_identity_after_environment():
     workflow = (
         Path(__file__).resolve().parents[1]
         / ".github"
