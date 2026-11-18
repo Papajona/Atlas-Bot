@@ -611,8 +611,9 @@ def test_restore_audit_handles_missing_customer_paper_schema_with_existing_role(
     )
     assert "to_regnamespace('customer_paper') IS NULL THEN false" in QUERY
     assert "to_regnamespace('customer_paper') IS NULL THEN true" in QUERY
-    assert usage_guard.replace(" ", "") in QUERY.replace("\\n", "").replace(" ", "")
-    assert create_guard.replace(" ", "") in QUERY.replace("\\n", "").replace(" ", "")
+    normalized_query = "".join(QUERY.split())
+    assert "".join(usage_guard.split()) in normalized_query
+    assert "".join(create_guard.split()) in normalized_query
 
 
 def test_restore_audit_rejects_a_maintain_only_public_financial_grant():
