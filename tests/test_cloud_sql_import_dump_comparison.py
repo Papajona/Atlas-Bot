@@ -28,7 +28,7 @@ def test_random_pg_dump_guard_keys_are_the_only_normalized_bytes(tmp_path):
 
     assert result["status"] == "PASS"
     assert result["pg_dump_guard_keys_normalized"] is True
-    assert result["only_guard_key_values_normalized"] is True
+    assert result["only_outer_guard_key_values_normalized"] is True
 
 
 def test_import_sql_payload_mismatch_is_not_hidden_by_guard_normalization(tmp_path):
@@ -103,3 +103,69 @@ def test_unwrapped_sql_is_compared_byte_for_byte(tmp_path):
 
     with pytest.raises(ValueError, match="differs from the canonicalized conversion"):
         compare_dumps(source, uploaded)
+
+def test_guard_like_lines_inside_dollar_quoted_function_are_hashed_verbatim(tmp_path):
+    source = tmp_path / "source.sql"
+    uploaded = tmp_path / "uploaded.sql"
+    source_payload = (
+        "CREATE FUNCTION public.guard_text() RETURNS text\n"
+        "LANGUAGE sql AS $body$\n"
+        "\\restrict function-literal-key-one\n"
+        "\\unrestrict function-literal-key-one\n"
+        "$body$;\n"
+    )
+    changed_payload = (
+        "CREATE FUNCTION public.guard_text() RETURNS text\n"
+        "LANGUAGE sql AS $body$\n"
+        "\\restrict function-literal-key-two\n"
+        "\\unrestrict function-literal-key-two\n"
+        "$body$;\n"
+    )
+    _write(source, "outer-source-key", source_payload)
+    _write(uploaded, "outer-upload-key", changed_payload)
+
+    with pytest.raises(ValueError, match="differs from the canonicalized conversion"):
+        compare_dumps(source, uploaded)
+
+
+def test_guard_like_lines_inside_sql_block_comments_are_hashed_verbatim(tmp_path):
+    source = tmp_path / "source.sql"
+    uploaded = tmp_path / "uploaded.sql"
+    source_payload = (
+        "/* begin preserved comment\n"
+        "\\restrict comment-key-one\n"
+        "\\unrestrict comment-key-one\n"
+        "end preserved comment */\n"
+        "CREATE TABLE public.probe(id integer);\n"
+    )
+    changed_payload = (
+        "/* begin preserved comment\n"
+        "\\restrict comment-key-two\n"
+        "\\unrestrict comment-key-two\n"
+        "end preserved comment */\n"
+        "CREATE TABLE public.probe(id integer);\n"
+    )
+    _write(source, "outer-source-key", source_payload)
+    _write(uploaded, "outer-upload-key", changed_payload)
+
+    with pytest.raises(ValueError, match="differs from the canonicalized conversion"):
+        compare_dumps(source, uploaded)
+
+
+def test_plain_sql_with_paired_guard_text_inside_function_is_not_treated_as_wrapper(tmp_path):
+    source = tmp_path / "source.sql"
+    uploaded = tmp_path / "uploaded.sql"
+    source.write_text(
+        "CREATE FUNCTION public.guard_text() RETURNS text\\n"
+        "LANGUAGE sql AS $body$\\n"
+        "\\\\restrict literal-key\\n"
+        "\\\\unrestrict literal-key\\n"
+        "$body$;\\n",
+        encoding="utf-8",
+    )
+    uploaded.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = compare_dumps(source, uploaded)
+    assert result["status"] == "PASS"
+    assert result["pg_dump_guard_keys_normalized"] is False
+
