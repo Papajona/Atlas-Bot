@@ -317,6 +317,9 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     assert "verify_sanitized_artifacts(" in executor
     assert "SANITIZED_BACKUP_REFERENCE" in audit_workflow
     assert "prepared SQL bytes with the uploaded object bytes" not in audit_workflow
+    runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
+    assert "reviewed sanitized SQL candidate" in runbook
+    assert "does not contain an authenticated source-project/database association" in runbook
     assert "prepare_cloud_sql_import_dump.py" in audit_workflow
     assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
     assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
