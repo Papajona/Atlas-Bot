@@ -827,6 +827,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
+    closing_decimal = Decimal("0")
     if not position:
         position = Position(customer_id=trade.customer_id, trading_account_id=trade.trading_account_id, exchange=trade.exchange, symbol=trade.symbol, quantity=signed,
                             average_entry_price=Decimal(str(fill_price)), mark_price=Decimal(str(fill_price)),
@@ -1080,7 +1081,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             # Keep the exact Decimal result through the custodial-ledger boundary;
             # do not round-trip the realized amount through a binary float first.
             await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized_decimal, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-        if closing > 0:
+        if closing_decimal > 0:
             # Persist every closing fill, including zero-PnL fills, so weighted
             # per-trade returns use the full completed notional.
             # This avoids attributing a close to the strategy of the closing order.
