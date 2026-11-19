@@ -443,6 +443,72 @@ def test_fee_only_live_snapshot_true_up_updates_last_closing_outcome():
 
 
 
+def test_late_fee_true_up_from_earlier_partial_close_updates_final_aggregate_once():
+    partial = SimpleNamespace(
+        id=1, trade_id=55, sequence=1, lifecycle_status="PARTIAL_CLOSED",
+        closing_trade_id=77, fee=Decimal("0.10"), net_pnl=Decimal("4.90"),
+        net_return_bps=490.0,
+        metadata_json=json.dumps({"closing_notional": "100", "net_pnl": "4.90"}),
+    )
+    final = SimpleNamespace(
+        id=2, trade_id=55, sequence=2, lifecycle_status="CLOSED",
+        closing_trade_id=78, fee=Decimal("0.20"), net_pnl=Decimal("9.70"),
+        net_return_bps=485.0,
+        metadata_json=json.dumps({
+            "closing_notional": "100",
+            "aggregate_closing_notional": "200",
+            "aggregate_notional_complete": True,
+            "aggregate_net_pnl": "9.70",
+            "aggregate_net_return_bps": "485.0",
+        }),
+    )
+
+    class Scalars:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def scalars(self):
+            return Scalars(self.rows)
+
+    class Database:
+        calls = 0
+
+        async def execute(self, _statement):
+            self.calls += 1
+            return Result([partial] if self.calls == 1 else [final])
+
+    trade = SimpleNamespace(
+        id=77, filled_quantity=2.0, average_fill_price=100.0,
+    )
+    applied = asyncio.run(
+        execution._apply_late_closing_fee_true_up(
+            Database(), trade, Decimal("2.00")
+        )
+    )
+
+    # Half of the reconciled order notional belongs to this closing fill.
+    assert applied == Decimal("1.00")
+    assert partial.net_pnl == Decimal("3.90")
+    assert partial.fee == Decimal("1.10")
+    # The later completed summary receives the same delta once, so dashboard
+    # and risk-gate reads of the final row cannot retain the old net return.
+    assert final.net_pnl == Decimal("8.70")
+    assert final.fee == Decimal("1.20")
+    assert final.net_return_bps == 435.0
+    metadata = json.loads(final.metadata_json)
+    assert metadata["aggregate_net_pnl"] == "8.70"
+    assert metadata["aggregate_net_return_bps"] == "435.0"
+    assert metadata["late_fee_true_up_total"] == "1.00"
+
+
+
 def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
     close_time = datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc)
     partial = SimpleNamespace(

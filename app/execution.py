@@ -184,6 +184,51 @@ async def _apply_late_closing_fee_true_up(db, trade: Trade, fee_delta: Decimal |
         metadata["aggregate_net_pnl"] = str(target.net_pnl)
         metadata["aggregate_net_return_bps"] = str(target.net_return_bps)
     target.metadata_json = json.dumps(metadata, default=str)
+
+    # If the corrected fill is an earlier partial close, risk consumers read the
+    # final aggregate row, not this partial row. Carry this fee delta into that
+    # completed summary exactly once and recalculate its whole-trade return.
+    if str(getattr(target, "lifecycle_status", "CLOSED")).upper() != "CLOSED":
+        aggregate_rows = (await db.execute(
+            select(StrategyOutcome)
+            .where(
+                StrategyOutcome.trade_id == target.trade_id,
+                StrategyOutcome.lifecycle_status == "CLOSED",
+            )
+            .order_by(StrategyOutcome.sequence.desc(), StrategyOutcome.id.desc())
+            .limit(1)
+            .with_for_update()
+        )).scalars().all()
+        if aggregate_rows:
+            aggregate = aggregate_rows[0]
+            aggregate.net_pnl = Decimal(str(aggregate.net_pnl or 0)) - allocated_fee
+            aggregate.fee = Decimal(str(aggregate.fee or 0)) + allocated_fee
+            try:
+                aggregate_metadata = json.loads(aggregate.metadata_json or "{}")
+            except (TypeError, ValueError):
+                aggregate_metadata = {}
+            if not isinstance(aggregate_metadata, dict):
+                aggregate_metadata = {}
+            aggregate_denominator = Decimal(str(
+                aggregate_metadata.get("aggregate_closing_notional")
+                or aggregate_metadata.get("closing_notional")
+                or 0
+            ))
+            if aggregate_denominator > 0:
+                aggregate.net_return_bps = float(
+                    aggregate.net_pnl / aggregate_denominator * Decimal("10000")
+                )
+            aggregate_metadata["aggregate_net_pnl"] = str(aggregate.net_pnl)
+            aggregate_metadata["aggregate_net_return_bps"] = str(
+                aggregate.net_return_bps
+            )
+            aggregate_metadata["aggregate_fee"] = str(aggregate.fee)
+            aggregate_metadata["late_fee_true_up_total"] = str(
+                Decimal(str(aggregate_metadata.get("late_fee_true_up_total") or 0))
+                + allocated_fee
+            )
+            aggregate.metadata_json = json.dumps(aggregate_metadata, default=str)
+
     return allocated_fee
 
 
@@ -1003,7 +1048,6 @@ async def _apply_fill_to_position(
                     + Decimal(str(delta)) * Decimal(str(fill_price))
                 )
         else:
-            closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
             closing_decimal = min(abs(Decimal(str(old_qty))), abs(Decimal(str(signed))))
             realized_decimal = _exact_realized_pnl(
@@ -1210,7 +1254,6 @@ async def _apply_fill_to_position(
                 if episode_entry_qty > 0 else Decimal("0")
             )
             net_pnl_decimal = realized_decimal - closing_fee_decimal - allocated_entry_fee_decimal
-            net_pnl = float(net_pnl_decimal)
             net_return_bps = float(
                 net_pnl_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
