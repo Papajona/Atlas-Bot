@@ -3914,6 +3914,44 @@ def approver_auth(admin_id: str, approver_token: str | None, admin_token: str | 
     return True
 
 
+_CUSTOMER_AUTH_PII_CACHE: dict[str, tuple[float, str, str, bool]] = {}
+_CUSTOMER_AUTH_PII_CACHE_TTL_SECONDS = 60.0
+
+
+async def _customer_auth_pii(auth_user_id: str, authorization: str | None):
+    """Return confirmed Auth email and optional name, briefly caching unconfirmed outcomes."""
+    uid = str(auth_user_id or "").strip()
+    cached = _CUSTOMER_AUTH_PII_CACHE.get(uid)
+    now = time.monotonic()
+    if cached:
+        expires_at, email, name, confirmed = cached
+        if expires_at > now:
+            return email, name, confirmed
+        _CUSTOMER_AUTH_PII_CACHE.pop(uid, None)
+
+    user = await _supabase_user(_bearer_token(authorization))
+    if str(user.get("id") or "") != uid:
+        raise HTTPException(401, "Customer Auth identity could not be verified")
+    confirmed = bool(user.get("email_confirmed_at"))
+    email = str(user.get("email") or "").strip().lower()[:320] if confirmed else ""
+    user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
+    name = str(user_metadata.get("full_name") or user_metadata.get("name") or "").strip()[:160]
+
+    if len(_CUSTOMER_AUTH_PII_CACHE) >= 2000:
+        for key, value in list(_CUSTOMER_AUTH_PII_CACHE.items()):
+            if value[0] <= now:
+                _CUSTOMER_AUTH_PII_CACHE.pop(key, None)
+        if len(_CUSTOMER_AUTH_PII_CACHE) >= 2000:
+            _CUSTOMER_AUTH_PII_CACHE.pop(next(iter(_CUSTOMER_AUTH_PII_CACHE)))
+    _CUSTOMER_AUTH_PII_CACHE[uid] = (
+        now + _CUSTOMER_AUTH_PII_CACHE_TTL_SECONDS,
+        email,
+        name,
+        confirmed,
+    )
+    return email, name, confirmed
+
+
 async def get_customer(
     authorization: str | None,
     db,
@@ -3939,30 +3977,21 @@ async def get_customer(
     if profile is None:
         # A new profile is created only after an authoritative Auth lookup confirms
         # the subject and email.
-        user = await _supabase_user(_bearer_token(authorization))
-        if str(user.get("id") or "") != uid:
-            raise HTTPException(401, "Customer Auth identity could not be verified")
-        if not user.get("email_confirmed_at"):
+        email, auth_name, confirmed = await _customer_auth_pii(uid, authorization)
+        if not confirmed or not email:
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or "").strip().lower()[:320]
-        user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
-        name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
-        if not email:
-            raise HTTPException(403, "A confirmed email address is required")
+        name = auth_name or name
     elif not email:
         # An existing ACTIVE user remains available if Auth is temporarily down or
         # the latest address is still unconfirmed. Do not persist an unconfirmed
         # replacement address into the encrypted profile.
         try:
-            user = await _supabase_user(_bearer_token(authorization))
-            if str(user.get("id") or "") != uid:
-                raise HTTPException(401, "Customer Auth identity could not be verified")
-            if user.get("email_confirmed_at"):
-                email = str(user.get("email") or "").strip().lower()[:320]
+            auth_email, auth_name, confirmed = await _customer_auth_pii(uid, authorization)
+            if confirmed:
+                email = auth_email
             else:
                 logger.info("customer_auth_pii_backfill_unconfirmed auth_user_id=%s", uid)
-            user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
-            name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
+            name = auth_name or name
         except HTTPException as exc:
             if exc.status_code == 401:
                 raise
