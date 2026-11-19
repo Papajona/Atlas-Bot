@@ -319,7 +319,10 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
     window = max(1, int(settings.execution_health_window_orders))
     outcomes_q = (
         select(StrategyOutcome.net_return_bps)
-        .where(StrategyOutcome.lifecycle_status == "CLOSED")
+        .where(
+            StrategyOutcome.lifecycle_status == "CLOSED",
+            StrategyOutcome.closing_notional > 0,
+        )
         .order_by(StrategyOutcome.created_at.desc())
         .limit(int(settings.max_consecutive_losses))
     )
@@ -560,7 +563,10 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             # Reducing/closing orders always pass. Resumes automatically once the rolling window recovers; a human decides about live.
             qout = (
                 select(StrategyOutcome.net_return_bps)
-                .where(StrategyOutcome.lifecycle_status == "CLOSED")
+                .where(
+                    StrategyOutcome.lifecycle_status == "CLOSED",
+                    StrategyOutcome.closing_notional > 0,
+                )
                 .order_by(StrategyOutcome.created_at.desc())
                 .limit(int(settings.edge_decay_window_trades))
             )
@@ -1804,7 +1810,10 @@ async def advance_platform_paper_orders(
                                 fill_quantity * fill_price * Decimal(str(profile.taker_bps))
                                 / Decimal("10000")
                             )
-                            await _apply_fill_to_position(db, trade, float(new_filled), float(fill_price))
+                            await _apply_fill_to_position(
+                                db, trade, float(new_filled), float(fill_price),
+                                current_fill_fee=fee_decimal,
+                            )
                             weighted_average = (
                                 (old_filled * old_average + fill_quantity * fill_price) / new_filled
                                 if new_filled > 0 else fill_price
@@ -2662,7 +2671,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             t = await db.get(Trade, trade_id)
             t.broker_order_id = broker_id
             fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(t, order, filled, fill_price, PROFILES.get(asset, PROFILES["crypto"]).taker_bps)
-            await _apply_fill_to_position(db, t, filled, fill_price)
+            await _apply_fill_to_position(db, t, filled, fill_price, current_fill_fee=fee_delta)
             await _post_live_fee(db, t, fee_delta, fee_cum, fee_quality, fee_note)
             if customer_id is not None and str(t.mode or "").upper() == "LIVE":
                 await _refresh_live_customer_equity(db, customer_id)
