@@ -88,7 +88,7 @@ def test_paper_switch_still_reconciles_an_outstanding_platform_order_without_syn
         reconciliation_account={"paper": True},
     )
 
-    assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
+    assert ("reconcile", main_module.settings.default_exchange, None) in calls
     assert ("loss_limits",) not in calls
     assert "platform-loss-limits" in successes
     assert not failures
@@ -115,7 +115,7 @@ def test_live_mode_records_broker_account_sync_error_in_crypto_scope(monkeypatch
         reconciliation_account={"error": "broker balance unavailable"},
     )
 
-    assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
+    assert ("reconcile", main_module.settings.default_exchange, None) in calls
     assert ("loss_limits",) not in calls
     assert any(
         scope == "crypto" and "account synchronization failed" in message
@@ -132,7 +132,7 @@ def test_live_mode_records_missing_live_equity_as_loss_limit_failure(monkeypatch
         reconciliation_account={"balance": 12_500.0},
     )
 
-    assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
+    assert ("reconcile", main_module.settings.default_exchange, None) in calls
     assert ("loss_limits",) not in calls
     assert any(
         scope == "platform-loss-limits" and "fresh live-equity snapshot" in message
