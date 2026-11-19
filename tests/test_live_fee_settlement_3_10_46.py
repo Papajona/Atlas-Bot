@@ -478,3 +478,48 @@ def test_reversal_order_fee_true_up_accounts_for_closed_opposite_leg():
             assert new_episode.net_pnl == pytest.approx(2.45)
 
     asyncio.run(with_database(check))
+
+
+def test_open_add_on_fee_true_up_updates_aggregate_position_and_learning_episode():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, side="buy", quantity=1.0,
+                requested_quantity=1.0, filled_quantity=1.0, fee=0.10,
+                status="FILLED",
+            )
+            add_on = _trade(
+                customer_id=None, side="buy", quantity=0.5,
+                requested_quantity=0.5, filled_quantity=0.5, fee=0,
+                status="FILLED", fee_reconciliation_pending=False,
+            )
+            db.add_all([entry, add_on])
+            await db.flush()
+            position = Position(
+                customer_id=None, exchange="binance", symbol="BTC/USDT",
+                quantity=1.5, average_entry_price=100, entry_trade_id=entry.id,
+                entry_fee=Decimal("0.10"), entry_fee_basis_known=True,
+            )
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                symbol="BTC/USDT", side="buy", entry_quantity=1.5,
+                entry_price=100, gross_pnl=0, total_fees=Decimal("0.10"),
+                net_pnl=Decimal("-0.10"), status="OPEN",
+            )
+            db.add_all([position, episode])
+            await db.commit()
+
+            await execution._apply_reconciled_live_fee_basis(
+                db, add_on, Decimal("0.05")
+            )
+            await db.commit()
+            await db.refresh(position)
+            await db.refresh(episode)
+
+            assert position.entry_trade_id == entry.id
+            assert position.entry_fee == Decimal("0.15")
+            assert position.entry_fee_basis_known is True
+            assert episode.total_fees == Decimal("0.15")
+            assert episode.net_pnl == Decimal("-0.15")
+
+    asyncio.run(with_database(check))
