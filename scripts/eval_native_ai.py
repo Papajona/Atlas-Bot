@@ -139,6 +139,33 @@ def _unwrap_prediction(value: Any) -> dict[str, Any] | None:
     return nested if isinstance(nested, dict) else value
 
 
+def _valid_condition_list(value: Any, *, minimum: int, maximum: int) -> bool:
+    """Reject empty/blank condition fields before Pydantic error aggregation.
+
+    Pydantic's nested model errors can be reported at a parent/root location;
+    checking each public condition collection here ensures a malformed exit list
+    cannot be hidden by a separate entry-list validation error.
+    """
+    from app.strategy_ai import ALLOWED_TIMEFRAMES
+
+    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
+        return False
+    allowed = {"type", "rule", "timeframe"}
+    for item in value:
+        if not isinstance(item, dict) or set(item) - allowed:
+            return False
+        kind = item.get("type")
+        rule = item.get("rule")
+        timeframe = item.get("timeframe")
+        if not isinstance(kind, str) or not 2 <= len(kind.strip()) <= 60:
+            return False
+        if not isinstance(rule, str) or not 3 <= len(rule.strip()) <= 500:
+            return False
+        if timeframe is not None and timeframe not in ALLOWED_TIMEFRAMES:
+            return False
+    return True
+
+
 def _contract_failures(spec: dict[str, Any] | None) -> list[str]:
     """Validate both systems against the exact application output schema.
 
@@ -150,9 +177,18 @@ def _contract_failures(spec: dict[str, Any] | None) -> list[str]:
     from pydantic import ValidationError
     from app.strategy_ai import AIStrategySpec
 
+    condition_labels = {
+        "entry_conditions": (1, 12, "entry conditions violate the Atlas strategy output contract"),
+        "exit_conditions": (1, 8, "exit conditions violate the Atlas strategy output contract"),
+    }
+    condition_failures = [
+        message
+        for field, (minimum, maximum, message) in condition_labels.items()
+        if not _valid_condition_list(spec.get(field), minimum=minimum, maximum=maximum)
+    ]
     try:
         AIStrategySpec.model_validate(spec)
-        return []
+        return condition_failures
     except ValidationError as exc:
         labels = {
             "title": "title",
@@ -179,9 +215,13 @@ def _contract_failures(spec: dict[str, Any] | None) -> list[str]:
             str(error.get("loc", ("",))[0])
             for error in exc.errors()
         }
-        failures = []
+        failures = list(condition_failures)
         for field in sorted(fields):
-            if field in labels:
+            if field in condition_labels:
+                message = condition_labels[field][2]
+                if message not in failures:
+                    failures.append(message)
+            elif field in labels:
                 failures.append(f"{labels[field]} violate the Atlas strategy output contract")
             else:
                 failures.append("output includes unsupported fields or invalid structure")
