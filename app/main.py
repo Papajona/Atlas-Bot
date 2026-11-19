@@ -3269,7 +3269,10 @@ async def _reconciliation_loop():
                 customer_exchanges = (await db.execute(
                     select(Trade.exchange).where(
                         Trade.customer_id.is_not(None),
-                        Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                        or_(
+                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                            Trade.fee_reconciliation_pending.is_(True),
+                        ),
                     ).distinct()
                 )).scalars().all()
             selected = [
