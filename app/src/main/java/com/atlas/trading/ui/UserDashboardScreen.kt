@@ -232,7 +232,8 @@ fun UserDashboardScreen(
                                             }
                                         }
                                     }
-                                )                            } else {
+                                )
+                            } else {
                                 TextButton(onClick = {
                                     activeCustomerToken = null
                                     customerSnapshot = null
@@ -559,7 +560,7 @@ private fun CustomerSignInCard(
                     onValueChange = { password = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Password") },
-                    visualTransformation = PasswordVisualTransformation(),
+                    visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
                     singleLine = true,
                     enabled = !busy
                 )
