@@ -1,4 +1,5 @@
-"""Native AI veto/composer hardening. Pure-Python: no network, no app settings."""from datetime import datetime, timezone
+"""Native AI veto/composer hardening. Pure-Python: no network, no app settings."""
+from datetime import datetime, timezone
 
 from app.native_ai import (
     NativeAIError,
