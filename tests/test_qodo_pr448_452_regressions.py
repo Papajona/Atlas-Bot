@@ -6,7 +6,8 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
-from app import execution, main
+import app.execution as execution
+import app.main as main
 
 
 ROOT = Path(__file__).resolve().parents[1]
