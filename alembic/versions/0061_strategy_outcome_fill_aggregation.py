@@ -138,8 +138,21 @@ def upgrade() -> None:
     position_columns = {
         column["name"] for column in inspector.get_columns("positions")
     }
+    trade_columns = {
+        column["name"] for column in inspector.get_columns("trades")
+    }
 
     financial_type = sa.Numeric(38, 18, asdecimal=False)
+    if "fee_reconciliation_pending" not in trade_columns:
+        op.add_column(
+            "trades",
+            sa.Column(
+                "fee_reconciliation_pending",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("false"),
+            ),
+        )
     if "closing_quantity" not in outcome_columns:
         op.add_column(
             "strategy_outcomes",
@@ -482,6 +495,15 @@ def upgrade() -> None:
             "ix_strategy_outcome_platform_completed",
             "strategy_outcomes",
             ["customer_id", "lifecycle_status", "created_at"],
+        )
+    trade_index_names = {
+        item["name"] for item in inspector.get_indexes("trades")
+    }
+    if "ix_trade_fee_reconciliation_pending" not in trade_index_names:
+        op.create_index(
+            "ix_trade_fee_reconciliation_pending",
+            "trades",
+            ["fee_reconciliation_pending", "updated_at"],
         )
 
 
