@@ -35,38 +35,49 @@ class BodySizeLimitMiddleware:
                 await self._reject(send, close_connection=close_connection)
                 return
 
-        # Buffer before invoking the app. Raising from receive() after the app
-        # starts can be translated by framework/body-parsing middleware into
-        # 400/500; pre-buffering guarantees an oversized chunked request gets 413.
-        messages = []
-        received = 0
+        # Fully check the body before invoking the app. Raising from receive()
+        # after framework parsing begins can leak a 400/500 instead of HTTP 413.
+        # A single concatenated ASGI request message also bounds memory when an
+        # attacker sends an unbounded number of empty chunks.
+        buffered = bytearray()
+        disconnected = False
+        other_message = None
+        request_complete = False
         while True:
             message = await receive()
             message_type = message.get("type")
             if message_type == "http.disconnect":
-                messages.append(message)
+                disconnected = True
                 break
             if message_type != "http.request":
-                messages.append(message)
-                continue
-
-            received += len(message.get("body") or b"")
-            if received > self.max_bytes:
-                await self._reject(send, close_connection=close_connection)
-                return
-
-            messages.append(message)
-            if not message.get("more_body", False):
+                other_message = message
                 break
 
-        index = 0
+            buffered.extend(message.get("body") or b"")
+            if len(buffered) > self.max_bytes:
+                await self._reject(send, close_connection=close_connection)
+                return
+            if not message.get("more_body", False):
+                request_complete = True
+                break
+
+        first_message_sent = False
+        other_message_sent = False
 
         async def replay_receive():
-            nonlocal index
-            if index < len(messages):
-                message = messages[index]
-                index += 1
-                return message
+            nonlocal first_message_sent, other_message_sent
+            if not first_message_sent:
+                first_message_sent = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(buffered),
+                    "more_body": not request_complete,
+                }
+            if disconnected:
+                return {"type": "http.disconnect"}
+            if other_message is not None and not other_message_sent:
+                other_message_sent = True
+                return other_message
             return await receive()
 
         await self.app(scope, replay_receive, send)
