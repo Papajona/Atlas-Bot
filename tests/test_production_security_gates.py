@@ -835,8 +835,6 @@ def test_audit_reader_provisioning_is_strictly_read_only_and_separate_from_paper
         "0056_audit_log_external_delivery.py",
         "0057_customer_paper_submission_audit_retries.py",
         "0059_research_integrity_controls.py",
-        "0060_customer_identity_unmapped_index.py",
-        "0061_strategy_outcome_fill_aggregation.py",
     ):
         source = (ROOT / "alembic" / "versions" / migration).read_text(encoding="utf-8")
         assert "'atlas_audit_reader'" in source

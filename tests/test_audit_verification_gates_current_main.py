@@ -32,7 +32,9 @@ def test_strategy_outcome_closed_state_is_explicit_and_fail_closed():
 
     assert "lifecycle_status: Mapped[str]" in db
     assert 'default="OPEN"' in db
-    assert 'outcome.lifecycle_status = "CLOSED"' in execution
+    assert 'final.lifecycle_status = "CLOSED"' in execution
+    assert 'row.lifecycle_status = "PARTIAL_CLOSED"' in execution
+    assert "_aggregate_completed_strategy_outcomes(completed_outcomes)" in execution
     assert 'StrategyOutcome.lifecycle_status == "CLOSED"' in main
     assert 'revision = "0047_strategy_outcome_lifecycle"' in migration
     assert 'down_revision = "0046_subscription_ai_usage"' in migration
@@ -61,3 +63,8 @@ def test_normal_position_exit_closes_strategy_outcomes():
     assert 'lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN"' in execution
     assert 'if abs(float(position.quantity or 0.0)) < 1e-12:' in execution
     assert 'outcome.lifecycle_status = "CLOSED"' in execution
+def test_normal_position_exit_closes_strategy_outcomes():
+    execution = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    assert 'lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN"' in execution
+    assert 'if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12:' in execution
+    assert "_aggregate_completed_strategy_outcomes(completed_outcomes)" in execution

@@ -388,7 +388,7 @@ def test_paper_customer_auth_returns_only_an_active_existing_profile(monkeypatch
         async def execute(self, query):
             self.statements.append(query)
             selected = {column.name for column in query.selected_columns}
-            if selected == {"id", "auth_user_id", "status"}:
+            if selected == {"id", "auth_user_id", "status", "has_stored_email"}:
                 return QueryResult(
                     row=SimpleNamespace(
                         id=profile.id,

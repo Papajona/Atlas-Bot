@@ -393,6 +393,7 @@ def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
                 symbol=symbol, quantity=2.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
                 reserved_capital=0.0, entry_fee=Decimal("2.00"),
+                    entry_fee_basis_known=True,
                 strategy="fee-regression", entry_regime="UNKNOWN",
                 entry_trade_id=entry.id,
             ))

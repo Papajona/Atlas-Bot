@@ -1,4 +1,5 @@
 import asyncio
+import json
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -269,8 +270,11 @@ def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain(
     assert 'op("!~*")' in gate
     assert 'op("GLOB")' in gate
     assert ".limit(1)" in gate
-    assert "_legacy_customer_email_conflict(db, uid, str(stored_email))" in gate
-    assert 'str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"' in gate
+    assert '"has_stored_email"' in gate
+    assert 'status = str(row.status or "").upper()' in gate
+    assert 'identity_review_required = status == "PENDING_IDENTITY_REVIEW"' in gate
+    assert 'status == "ACTIVE" and not has_stored_email' in gate
+    assert "await _has_unmapped_legacy_customer_profile(db, uid)" in gate
     assert "Paper access is paused until legacy customer identities are manually reviewed" in gate
 
 
@@ -290,8 +294,8 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
     ]
     assert "if identity_review_required and not allow_identity_review_summary:" in access
     assert "identity_review_required=identity_review_required" in access
-    assert "effective_status = (" in access
-    assert "and not identity_review_required" in access
+    assert "effective_status = row.status" in access
+    assert "identity_review_required=identity_review_required" in access
     assert "status=effective_status" in access
 
 
@@ -339,7 +343,7 @@ def test_outcome_aggregation_excludes_unknown_quantity_or_notional():
 
 def test_revision_0060_is_batched_online_only_and_refuses_a_false_downgrade():
     migration = (
-        ROOT / "alembic/versions/0060_strategy_outcome_fill_aggregation.py"
+        ROOT / "alembic/versions/0061_strategy_outcome_fill_aggregation.py"
     ).read_text(encoding="utf-8")
     assert "context.is_offline_mode()" in migration
     assert "SELECT DISTINCT trade_id" in migration
@@ -364,7 +368,9 @@ def test_fill_outcomes_use_per_fill_fees_and_reversal_close_only_quantity():
     assert "closing_order_fee_decimal" in function
     assert "closing_quantity=closing_decimal" in function
     assert "position_flipped or abs(float(position.quantity or 0.0)) < 1e-12" in function
-    assert "Decimal(str(trade.fee or 0))" not in function
+    assert "current_fee_decimal = Decimal(str(current_fill_fee or 0))" in function
+    assert "closing_fee_decimal = closing_order_fee_decimal" in function
+    assert "fee_for_completed_trade = closing_fee_decimal + allocated_entry_fee_decimal" in function
     assert "for outcome in completed_outcomes:" not in function
 
 
