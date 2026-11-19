@@ -390,6 +390,7 @@ class Position(Base):
     reserved_capital: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     # Fee basis still attached to the remaining open position after partial exits.
     entry_fee: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    entry_fee_basis_known: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     strategy: Mapped[str] = mapped_column(String(40), default="")
     entry_regime: Mapped[str] = mapped_column(String(40), default="UNKNOWN")
     entry_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -1224,6 +1225,7 @@ class StrategyOutcome(Base):
     # Exact closed quantity/notional support complete, weighted trade returns.
     closing_quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
     closing_notional: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    fee_basis_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     lifecycle_status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN")
     mode: Mapped[str] = mapped_column(String(20), default="")
     sequence: Mapped[int] = mapped_column(Integer, default=1)

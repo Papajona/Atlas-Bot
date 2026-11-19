@@ -366,3 +366,32 @@ def test_fill_outcomes_use_per_fill_fees_and_reversal_close_only_quantity():
     assert "position_flipped or abs(float(position.quantity or 0.0)) < 1e-12" in function
     assert "Decimal(str(trade.fee or 0))" not in function
     assert "for outcome in completed_outcomes:" not in function
+
+
+
+def test_strategy_outcome_aggregates_only_current_lifecycle_and_carries_fee_completeness():
+    partial = SimpleNamespace(
+        id=10, sequence=2, lifecycle_status="OPEN",
+        closing_notional=Decimal("100"), closing_quantity=Decimal("1"),
+        net_pnl=Decimal("0.8"), realized_pnl=Decimal("1"), fee=Decimal("0.2"),
+        fee_basis_complete=True, metadata_json="{}",
+    )
+    final = SimpleNamespace(
+        id=11, sequence=3, lifecycle_status="CLOSED",
+        closing_notional=Decimal("100"), closing_quantity=Decimal("1"),
+        net_pnl=Decimal("-1.2"), realized_pnl=Decimal("-1"), fee=Decimal("0.2"),
+        fee_basis_complete=False, metadata_json="{}",
+    )
+    old_lifecycle = SimpleNamespace(
+        id=9, sequence=1, lifecycle_status="CLOSED",
+        closing_notional=Decimal("500"), closing_quantity=Decimal("5"),
+        net_pnl=Decimal("4"), realized_pnl=Decimal("5"), fee=Decimal("1"),
+        fee_basis_complete=True, metadata_json="{}",
+    )
+
+    aggregate = execution._aggregate_completed_strategy_outcomes([partial, final])
+    assert aggregate is final
+    assert final.fee_basis_complete is False
+    metadata = json.loads(final.metadata_json)
+    assert metadata["aggregate_fee_basis_complete"] is False
+    assert old_lifecycle.lifecycle_status == "CLOSED"

@@ -36,7 +36,7 @@ from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
 # app is not mounted or served; its startup/lifespan is never executed in this process.
 from .main import (
     MarketRequest, _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
-    _customer_paper_group_mark_prices, _legacy_customer_email_conflict,
+    _customer_paper_group_mark_prices,
     _supabase_request, _supabase_user, _trusted_client_ip, api_rate_limit,
     customer_claims, market_data,
 )
@@ -351,6 +351,9 @@ async def get_existing_customer(
                 CustomerProfile.id,
                 CustomerProfile.auth_user_id,
                 CustomerProfile.status,
+                (
+                    ~(CustomerProfile.email.is_(None) | (CustomerProfile.email == ""))
+                ).label("has_stored_email"),
             ).where(CustomerProfile.auth_user_id == uid)
         )
     ).one_or_none()
@@ -359,25 +362,17 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
-    # Existing active customers are not locked by unrelated legacy IDs.
-    # Only a profile already in review is resolved against its own Auth email.
-    # New customer provisioning remains globally fail-closed elsewhere.
-    identity_review_required = False
-    if str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW":
-        stored_email = (await db.execute(
-            select(CustomerProfile.email).where(CustomerProfile.auth_user_id == uid)
-        )).scalar_one_or_none()
-        identity_review_required = (
-            await _legacy_customer_email_conflict(db, uid, str(stored_email))
-            if stored_email
-            else await _has_unmapped_legacy_customer_profile(db, uid)
-        )
-    effective_status = (
-        "ACTIVE"
-        if str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-        and not identity_review_required
-        else row.status
-    )
+    # Never select/decrypt email in this keyless service. SQL returns only a
+    # boolean presence expression; ciphertext is not materialized by the ORM.
+    # Pending identities remain pending until the key-bearing customer service
+    # makes a verified decision. Active profiles with no stored email fail closed
+    # when any unmapped legacy Auth identity remains.
+    status = str(row.status or "").upper()
+    has_stored_email = bool(getattr(row, "has_stored_email", False))
+    identity_review_required = status == "PENDING_IDENTITY_REVIEW"
+    if status == "ACTIVE" and not has_stored_email:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+    effective_status = row.status
     if identity_review_required and not allow_identity_review_summary:
         raise HTTPException(
             409,

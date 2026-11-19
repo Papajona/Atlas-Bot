@@ -103,6 +103,9 @@ def _aggregate_completed_strategy_outcomes(outcomes):
     final.net_pnl = total_net_pnl
     final.realized_pnl = total_realized_pnl
     final.fee = total_fee
+    final.fee_basis_complete = bool(
+        all(bool(getattr(row, "fee_basis_complete", False)) for row in rows)
+    )
     for row in rows[:-1]:
         row.lifecycle_status = "PARTIAL_CLOSED"
     final.lifecycle_status = "CLOSED"
@@ -114,6 +117,7 @@ def _aggregate_completed_strategy_outcomes(outcomes):
         metadata["aggregate_fill_count"] = len(rows)
         metadata["total_closing_notional"] = str(final.closing_notional)
         metadata["net_pnl"] = str(total_net_pnl)
+        metadata["aggregate_fee_basis_complete"] = bool(final.fee_basis_complete)
         final.metadata_json = json.dumps(metadata, default=str)
     return final
 
@@ -864,6 +868,7 @@ async def _apply_fill_to_position(
                                 else Decimal("0")
                             ),
                             entry_fee=current_fee_decimal,
+                            entry_fee_basis_known=current_fill_fee is not None,
                         )
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
@@ -901,8 +906,12 @@ async def _apply_fill_to_position(
                 position.strategy = str(trade_context.get("strategy") or "unknown")
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
                 position.entry_fee = current_fee_decimal
+                position.entry_fee_basis_known = current_fill_fee is not None
             else:
                 position.entry_fee = Decimal(str(position.entry_fee or 0)) + current_fee_decimal
+                position.entry_fee_basis_known = bool(
+                    position.entry_fee_basis_known and current_fill_fee is not None
+                )
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))
             fill_price_d = Decimal(str(fill_price))
@@ -920,7 +929,6 @@ async def _apply_fill_to_position(
                     + Decimal(str(delta)) * Decimal(str(fill_price))
                 )
         else:
-            closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
             closing_decimal = min(abs(Decimal(str(old_qty))), abs(Decimal(str(signed))))
             realized_decimal = _exact_realized_pnl(
@@ -938,14 +946,16 @@ async def _apply_fill_to_position(
                 current_fee_decimal * closing_decimal / abs(Decimal(str(signed)))
                 if signed != 0 else Decimal("0")
             )
+            entry_fee_basis_known = bool(position.entry_fee_basis_known)
             allocated_entry_fee_decimal = (
                 old_entry_fee_decimal * closing_decimal / old_qty_decimal
-                if old_qty_decimal > 0 else Decimal("0")
+                if old_qty_decimal > 0 and entry_fee_basis_known else Decimal("0")
             )
             position.quantity = old_qty + signed
             position_flipped = bool(position.quantity) and (old_qty * position.quantity < 0)
             if position_flipped:
                 position.entry_fee = current_fee_decimal - closing_order_fee_decimal
+                position.entry_fee_basis_known = current_fill_fee is not None
             elif abs(float(position.quantity or 0.0)) < 1e-12:
                 position.entry_fee = Decimal("0")
             else:
@@ -1139,7 +1149,6 @@ async def _apply_fill_to_position(
             closing_fee_decimal = closing_order_fee_decimal
             fee_for_completed_trade = closing_fee_decimal + allocated_entry_fee_decimal
             net_pnl_decimal = realized_decimal - fee_for_completed_trade
-            net_pnl = float(net_pnl_decimal)
             net_return_bps = float(
                 net_pnl_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
@@ -1152,13 +1161,16 @@ async def _apply_fill_to_position(
                 net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
                 closing_quantity=closing_decimal,
                 closing_notional=notional_decimal,
+                fee_basis_complete=bool(entry_fee_basis_known and current_fill_fee is not None),
                 lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({
                     "entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id,
                     "fill_price": str(fill_price),
                     "allocated_entry_fee": str(allocated_entry_fee_decimal),
-                    "closing_fee": str(closing_fee_decimal), "net_pnl": str(net_pnl_decimal),
+                    "closing_fee": str(closing_fee_decimal),
+                    "fee_basis_complete": bool(entry_fee_basis_known and current_fill_fee is not None),
+                    "net_pnl": str(net_pnl_decimal),
                 }, default=str),
             )
             db.add(outcome_row)
@@ -1166,7 +1178,11 @@ async def _apply_fill_to_position(
                 await db.flush()
                 completed_outcomes = (await db.execute(
                     select(StrategyOutcome).where(
-                        StrategyOutcome.trade_id == attribution_trade_id
+                        StrategyOutcome.trade_id == attribution_trade_id,
+                        or_(
+                            StrategyOutcome.lifecycle_status == "OPEN",
+                            StrategyOutcome.id == outcome_row.id,
+                        ),
                     ).with_for_update()
                 )).scalars().all()
                 _aggregate_completed_strategy_outcomes(completed_outcomes)
@@ -2808,7 +2824,9 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
         )
 
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
-    realized_delta = await _apply_fill_to_position(db, trade, filled, avg)
+    realized_delta = await _apply_fill_to_position(
+        db, trade, filled, avg, current_fill_fee=fee_delta
+    )
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
 
     if status in {"closed", "filled"} and remaining <= 0:
