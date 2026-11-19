@@ -275,8 +275,6 @@ def test_existing_profile_auth_backfill_never_persists_unconfirmed_email():
 
 
 def test_same_direction_position_additions_have_a_defined_zero_close_quantity():
-    from app import execution
-
     source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
     block = source[
         source.index("async def _apply_fill_to_position"):
@@ -524,6 +522,7 @@ def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
             "closing_notional": "4000",
             "aggregate_closing_notional": "5000",
             "aggregate_notional_complete": True,
+            "aggregate_fee_basis_complete": True,
             "aggregate_net_pnl": "39",
             "aggregate_net_return_bps": "78",
         }),
