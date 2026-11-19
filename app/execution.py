@@ -878,12 +878,13 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
 async def _apply_reconciled_live_fee_basis(
     db, trade: Trade, fee_delta: Decimal | float
 ) -> None:
-    """Apply an authoritative fee correction when the broker reports no new fill.
+    """Apply an authoritative fee correction to every affected fill and aggregate.
 
-    The ledger debit and this correction run in the same database transaction.
-    If the existing position/outcome records cannot prove how the fee belongs to
-    an entry or close, raise so neither the debit nor the cumulative trade fee
-    is committed with stale net-return evidence.
+    A completed StrategyOutcome's final row stores the aggregate quantity/notional
+    for the whole lifecycle, while its metadata retains that row's own fill-level
+    fee allocation. Reconciliation must use the underlying fill quantities once,
+    update the component rows, and then refresh the aggregate row without counting
+    the aggregate a second time.
     """
     delta_fee = Decimal(str(fee_delta or 0))
     if not delta_fee.is_finite() or delta_fee < 0:
@@ -897,7 +898,7 @@ async def _apply_reconciled_live_fee_basis(
             StrategyOutcome.trade_id == trade.id,
             StrategyOutcome.closing_trade_id == trade.id,
         ))
-        .order_by(StrategyOutcome.sequence, StrategyOutcome.id)
+        .order_by(StrategyOutcome.trade_id, StrategyOutcome.sequence, StrategyOutcome.id)
         .with_for_update()
     )).scalars().all()
     entry_rows = [row for row in rows if int(row.trade_id) == int(trade.id)]
@@ -936,66 +937,108 @@ async def _apply_reconciled_live_fee_basis(
             raise ValueError(
                 f"cannot allocate recovered fee: outcome {row.id} metadata is unreadable"
             ) from exc
-        if not isinstance(value, dict) or not {
-            "allocated_entry_fee", "closing_fee"
-        }.issubset(value):
+        if not isinstance(value, dict):
             raise ValueError(
-                f"cannot allocate recovered fee: outcome {row.id} lacks fee allocation evidence"
+                f"cannot allocate recovered fee: outcome {row.id} metadata is not an object"
             )
         return value
 
+    def _source_fill_quantities(group: list[StrategyOutcome]) -> dict[int, Decimal]:
+        """Recover per-fill quantities when the final row stores a lifecycle aggregate."""
+        ordered = sorted(group, key=lambda row: (int(row.sequence or 0), int(row.id or 0)))
+        if not ordered:
+            return {}
+        quantities = {int(row.id): _qty(row) for row in ordered}
+        final = ordered[-1]
+        final_meta = _metadata(final)
+        aggregate_count = final_meta.get("aggregate_fill_count")
+        try:
+            aggregate_count = int(aggregate_count) if aggregate_count is not None else 0
+        except (TypeError, ValueError):
+            aggregate_count = 0
+        if aggregate_count > 1:
+            aggregate_quantity = quantities[int(final.id)]
+            prior_quantity = sum(
+                (quantities[int(row.id)] for row in ordered[:-1]),
+                Decimal("0"),
+            )
+            # New writes preserve the original final-fill quantity. For existing
+            # aggregates, derive it from the aggregate total less the prior rows.
+            raw_final_quantity = final_meta.get("final_fill_closing_quantity")
+            final_quantity = (
+                Decimal(str(raw_final_quantity))
+                if raw_final_quantity is not None
+                else aggregate_quantity - prior_quantity
+            )
+            if (
+                not final_quantity.is_finite()
+                or final_quantity <= 0
+                or abs((prior_quantity + final_quantity) - aggregate_quantity)
+                    > Decimal("0.000001")
+            ):
+                raise ValueError(
+                    f"cannot safely allocate recovered fee: aggregate outcome {final.id} "
+                    "does not reconcile to its source fills"
+                )
+            quantities[int(final.id)] = final_quantity
+        return quantities
+
+    entry_fill_quantities = _source_fill_quantities(entry_rows)
+    closing_fill_quantities = _source_fill_quantities(closing_rows)
     entry_fee_by_row: dict[int, Decimal] = {}
     closing_fee_by_row: dict[int, Decimal] = {}
     position_entry_fee_delta = Decimal("0")
 
+    trade_quantity = Decimal(str(trade.filled_quantity or 0))
+    if not trade_quantity.is_finite() or trade_quantity <= 0:
+        raise ValueError(
+            f"cannot safely allocate recovered fee for trade {trade.id}: "
+            "authoritative filled quantity is unavailable"
+        )
+
     if entry_rows:
-        # The original entry order can be apportioned only if its own filled
-        # quantity is the lifecycle quantity. If other add-on orders were mixed
-        # into the position, legacy outcomes do not retain lot-level attribution.
+        # A reversal order can open a smaller opposite-side lifecycle than the
+        # order's total fill quantity. Reconcile the new-leg quantity separately;
+        # its fee share still uses the entire broker order as denominator.
         episode = (await db.execute(
             select(TradeLearningEpisode).where(
                 TradeLearningEpisode.entry_trade_id == trade.id
             ).with_for_update()
         )).scalar_one_or_none()
-        entry_quantity = Decimal(str(
-            episode.entry_quantity if episode is not None else trade.filled_quantity
+        lifecycle_quantity = Decimal(str(
+            episode.entry_quantity if episode is not None else trade_quantity
         ))
-        trade_quantity = Decimal(str(trade.filled_quantity or 0))
-        if (
-            not entry_quantity.is_finite()
-            or not trade_quantity.is_finite()
-            or entry_quantity <= 0
-            or abs(entry_quantity - trade_quantity) > Decimal("0.000001")
-        ):
+        if not lifecycle_quantity.is_finite() or lifecycle_quantity <= 0:
             raise ValueError(
                 f"cannot safely apportion recovered entry fee for trade {trade.id}: "
-                "position includes other entry fills"
+                "position lifecycle quantity is unavailable"
             )
-        closed_quantity = sum((_qty(row) for row in entry_rows), Decimal("0"))
+        closed_quantity = sum(entry_fill_quantities.values(), Decimal("0"))
         remaining_quantity = Decimal("0")
         if position is not None and int(position.entry_trade_id or 0) == int(trade.id):
             remaining_quantity = abs(Decimal(str(position.quantity or 0)))
-        if abs((closed_quantity + remaining_quantity) - trade_quantity) > Decimal("0.000001"):
+        if (
+            not remaining_quantity.is_finite()
+            or abs((closed_quantity + remaining_quantity) - lifecycle_quantity)
+                > Decimal("0.000001")
+            or lifecycle_quantity > trade_quantity + Decimal("0.000001")
+        ):
             raise ValueError(
                 f"cannot safely apportion recovered entry fee for trade {trade.id}: "
-                "closed and open quantities do not reconcile"
+                "closed and open lifecycle quantities do not reconcile"
             )
-        for row in entry_rows:
-            entry_fee_by_row[row.id] = delta_fee * _qty(row) / trade_quantity
-        position_entry_fee_delta += (
-            delta_fee * remaining_quantity / trade_quantity
-            if remaining_quantity > 0 else Decimal("0")
-        )
+        for row_id, quantity in entry_fill_quantities.items():
+            entry_fee_by_row[row_id] = delta_fee * quantity / trade_quantity
+        if remaining_quantity > 0:
+            position_entry_fee_delta += delta_fee * remaining_quantity / trade_quantity
 
     if closing_rows:
-        closed_quantity = sum((_qty(row) for row in closing_rows), Decimal("0"))
+        closed_quantity = sum(closing_fill_quantities.values(), Decimal("0"))
         reversal_position_quantity = Decimal("0")
         if position is not None and int(position.entry_trade_id or 0) == int(trade.id):
             reversal_position_quantity = abs(Decimal(str(position.quantity or 0)))
-        trade_quantity = Decimal(str(trade.filled_quantity or 0))
         if (
-            not trade_quantity.is_finite()
-            or trade_quantity <= 0
+            not reversal_position_quantity.is_finite()
             or abs((closed_quantity + reversal_position_quantity) - trade_quantity)
                 > Decimal("0.000001")
         ):
@@ -1003,17 +1046,16 @@ async def _apply_reconciled_live_fee_basis(
                 f"cannot safely apportion recovered closing fee for trade {trade.id}: "
                 "closing and reversal quantities do not reconcile"
             )
-        for row in closing_rows:
-            closing_fee_by_row[row.id] = delta_fee * _qty(row) / trade_quantity
-        position_entry_fee_delta += (
-            delta_fee * reversal_position_quantity / trade_quantity
-            if reversal_position_quantity > 0 else Decimal("0")
-        )
+        for row_id, quantity in closing_fill_quantities.items():
+            closing_fee_by_row[row_id] = delta_fee * quantity / trade_quantity
+        if reversal_position_quantity > 0:
+            position_entry_fee_delta += (
+                delta_fee * reversal_position_quantity / trade_quantity
+            )
 
     if not entry_rows and not closing_rows:
-        # A fee on an add-on entry can be attached to the still-open aggregate
-        # position only before any closes exist. Once closes have occurred, the
-        # historical data has no lot attribution for that add-on order.
+        # A fee on an add-on entry can be attached to an open aggregate position
+        # only while no closing outcome has made its lot attribution ambiguous.
         if (
             position is None
             or abs(float(position.quantity or 0.0)) <= 1e-12
@@ -1035,41 +1077,42 @@ async def _apply_reconciled_live_fee_basis(
         position_entry_fee_delta = delta_fee
 
     if position_entry_fee_delta:
-        if position is None or (
-            int(position.entry_trade_id or 0) != int(trade.id)
-            and (entry_rows or closing_rows)
-        ):
+        if position is None or int(position.entry_trade_id or 0) != int(trade.id):
             raise ValueError(
                 f"cannot attach recovered fee for trade {trade.id} to its position"
             )
-        position.entry_fee = Decimal(str(position.entry_fee or 0)) + position_entry_fee_delta
-        # Preserve an existing unknown basis for earlier entry orders; for the
-        # directly corrected sole entry/reversal, the broker's exact fee closes it.
-        if int(position.entry_trade_id or 0) == int(trade.id):
-            position.entry_fee_basis_known = True
+        position.entry_fee = (
+            Decimal(str(position.entry_fee or 0)) + position_entry_fee_delta
+        )
+        position.entry_fee_basis_known = True
 
+    changed_row_ids = set(entry_fee_by_row) | set(closing_fee_by_row)
     affected_entry_ids: set[int] = set()
     for row in rows:
-        entry_add = entry_fee_by_row.get(row.id, Decimal("0"))
-        close_add = closing_fee_by_row.get(row.id, Decimal("0"))
-        if entry_add == 0 and close_add == 0:
+        if int(row.id) not in changed_row_ids:
             continue
+        entry_add = entry_fee_by_row.get(int(row.id), Decimal("0"))
+        close_add = closing_fee_by_row.get(int(row.id), Decimal("0"))
         meta = _metadata(row)
         try:
-            allocated = Decimal(str(meta["allocated_entry_fee"]))
-            close_fee = Decimal(str(meta["closing_fee"]))
+            allocated = Decimal(str(meta.get("allocated_entry_fee", "0"))) + entry_add
+            close_fee = Decimal(str(meta.get("closing_fee", "0"))) + close_add
         except (TypeError, ValueError, ArithmeticError) as exc:
             raise ValueError(
                 f"cannot allocate recovered fee: outcome {row.id} has invalid fee metadata"
             ) from exc
-        if not allocated.is_finite() or not close_fee.is_finite():
+        if (
+            not allocated.is_finite() or allocated < 0
+            or not close_fee.is_finite() or close_fee < 0
+        ):
             raise ValueError(
-                f"cannot allocate recovered fee: outcome {row.id} has non-finite fee metadata"
+                f"cannot allocate recovered fee: outcome {row.id} has invalid fee amounts"
             )
-        allocated += entry_add
-        close_fee += close_add
         total_fee = allocated + close_fee
-        entry_trade = trade if int(row.trade_id) == int(trade.id) else await db.get(Trade, row.trade_id)
+        entry_trade = (
+            trade if int(row.trade_id) == int(trade.id)
+            else await db.get(Trade, row.trade_id)
+        )
         close_trade = (
             trade if int(row.closing_trade_id or 0) == int(trade.id)
             else await db.get(Trade, row.closing_trade_id)
@@ -1082,65 +1125,118 @@ async def _apply_reconciled_live_fee_basis(
         )
         row.fee = total_fee
         row.fee_basis_complete = basis_known
-        if basis_known:
-            net = Decimal(str(row.realized_pnl or 0)) - total_fee
-            notional = Decimal(str(row.closing_notional or 0))
-            row.net_pnl = net
-            row.net_return_bps = (
-                float(net / notional * Decimal("10000"))
-                if notional > 0 else None
-            )
-            meta["fee_basis_complete"] = True
-            meta["net_pnl"] = str(net)
-        else:
-            row.net_pnl = None
-            row.net_return_bps = None
-            meta["fee_basis_complete"] = False
-            meta["net_pnl"] = None
+        row.net_pnl = (
+            Decimal(str(row.realized_pnl or 0)) - total_fee
+            if basis_known else None
+        )
+        notional = Decimal(str(row.closing_notional or 0))
+        row.net_return_bps = (
+            float(row.net_pnl / notional * Decimal("10000"))
+            if basis_known and notional > 0 else None
+        )
         meta["allocated_entry_fee"] = str(allocated)
         meta["closing_fee"] = str(close_fee)
+        meta["fee_basis_complete"] = basis_known
+        meta["net_pnl"] = str(row.net_pnl) if basis_known else None
         row.metadata_json = json.dumps(meta, separators=(",", ":"), default=str)
         affected_entry_ids.add(int(row.trade_id))
 
-    # Keep the post-trade learning record aligned with the now-corrected outcome
-    # ledger. Do not publish a net figure until every outcome in the episode has
-    # an authoritative fee basis.
+    # The final CLOSED row stores an aggregate across its PARTIAL_CLOSED peers.
+    # Rebuild its aggregate fee/net fields from per-fill metadata after correcting
+    # every component. The final row's fee metadata itself remains fill-scoped.
     for entry_id in affected_entry_ids:
+        all_rows = (await db.execute(
+            select(StrategyOutcome).where(
+                StrategyOutcome.trade_id == entry_id,
+                StrategyOutcome.closing_trade_id.is_not(None),
+            ).order_by(StrategyOutcome.sequence, StrategyOutcome.id).with_for_update()
+        )).scalars().all()
+        if not all_rows:
+            continue
+        final = all_rows[-1]
+        final_meta = _metadata(final)
+        aggregate_count = final_meta.get("aggregate_fill_count")
+        try:
+            aggregate_count = int(aggregate_count) if aggregate_count is not None else 0
+        except (TypeError, ValueError):
+            aggregate_count = 0
+        if aggregate_count > 1:
+            component_fees = []
+            for row in all_rows:
+                meta = _metadata(row)
+                try:
+                    component_fees.append(
+                        Decimal(str(meta.get("allocated_entry_fee", "0")))
+                        + Decimal(str(meta.get("closing_fee", "0")))
+                    )
+                except (TypeError, ValueError, ArithmeticError) as exc:
+                    raise ValueError(
+                        f"cannot rebuild aggregate fee for outcome {row.id}: invalid component fee"
+                    ) from exc
+            aggregate_fee = sum(component_fees, Decimal("0"))
+            aggregate_basis_known = all(
+                bool(row.fee_basis_complete) for row in all_rows
+            )
+            final.fee = aggregate_fee
+            final.fee_basis_complete = aggregate_basis_known
+            final.net_pnl = (
+                Decimal(str(final.realized_pnl or 0)) - aggregate_fee
+                if aggregate_basis_known else None
+            )
+            aggregate_notional = Decimal(str(final.closing_notional or 0))
+            final.net_return_bps = (
+                float(final.net_pnl / aggregate_notional * Decimal("10000"))
+                if aggregate_basis_known and aggregate_notional > 0 else None
+            )
+            final_meta["aggregate_fee"] = str(aggregate_fee)
+            final_meta["aggregate_fee_basis_complete"] = aggregate_basis_known
+            final_meta["aggregate_net_pnl"] = (
+                str(final.net_pnl) if aggregate_basis_known else None
+            )
+            final_meta["net_pnl"] = (
+                str(final.net_pnl) if aggregate_basis_known else None
+            )
+            final.metadata_json = json.dumps(
+                final_meta, separators=(",", ":"), default=str
+            )
+
         episode = (await db.execute(
             select(TradeLearningEpisode).where(
                 TradeLearningEpisode.entry_trade_id == entry_id
             ).with_for_update()
         )).scalar_one_or_none()
-        if episode is None:
+        if episode is None or not all(bool(row.fee_basis_complete) for row in all_rows):
             continue
-        all_rows = (await db.execute(
-            select(StrategyOutcome).where(
-                StrategyOutcome.trade_id == entry_id,
-                StrategyOutcome.closing_trade_id.is_not(None),
-            ).order_by(StrategyOutcome.sequence, StrategyOutcome.id)
-        )).scalars().all()
-        if all_rows and all(bool(row.fee_basis_complete) for row in all_rows):
-            total_fees = sum(
-                (Decimal(str(row.fee or 0)) for row in all_rows),
-                Decimal("0"),
-            )
-            if position is not None and int(position.entry_trade_id or 0) == entry_id:
-                if not bool(position.entry_fee_basis_known):
-                    continue
-                total_fees += Decimal(str(position.entry_fee or 0))
-            episode.total_fees = total_fees
-            episode.net_pnl = (
-                Decimal(str(episode.gross_pnl or 0)) - total_fees
-            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
-            notional = abs(
-                Decimal(str(episode.entry_quantity or 0))
-                * Decimal(str(episode.entry_price or 0))
-            )
-            episode.return_bps = (
-                float(Decimal(str(episode.net_pnl)) / notional * Decimal("10000"))
-                if notional > 0 else 0.0
-            )
-            episode.updated_at = utcnow()
+        # Use per-fill metadata, never sum the final aggregate row's fee twice.
+        total_fees = Decimal("0")
+        for row in all_rows:
+            meta = _metadata(row)
+            try:
+                total_fees += (
+                    Decimal(str(meta.get("allocated_entry_fee", "0")))
+                    + Decimal(str(meta.get("closing_fee", "0")))
+                )
+            except (TypeError, ValueError, ArithmeticError) as exc:
+                raise ValueError(
+                    f"cannot rebuild learning-episode fee total for outcome {row.id}"
+                ) from exc
+        if position is not None and int(position.entry_trade_id or 0) == entry_id:
+            if not bool(position.entry_fee_basis_known):
+                continue
+            total_fees += Decimal(str(position.entry_fee or 0))
+        episode.total_fees = total_fees
+        episode.net_pnl = (
+            Decimal(str(episode.gross_pnl or 0)) - total_fees
+        ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+        episode_notional = abs(
+            Decimal(str(episode.entry_quantity or 0))
+            * Decimal(str(episode.entry_price or 0))
+        )
+        episode.return_bps = (
+            float(Decimal(str(episode.net_pnl)) / episode_notional * Decimal("10000"))
+            if episode_notional > 0 else 0.0
+        )
+        episode.updated_at = utcnow()
 
 
 async def _apply_fill_to_position(
