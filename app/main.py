@@ -6462,7 +6462,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 outcomes = []
                 if profile.id:
                     outcomes = list((await state_db.execute(
-                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED")
+                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED", StrategyOutcome.closing_notional > 0)
                         .order_by(desc(StrategyOutcome.created_at)).limit(200)
                     )).scalars().all())
                 current_strategy = bot_row.active_strategy if bot_row else None
@@ -8098,6 +8098,7 @@ async def risk_dashboard_metrics(
             .where(
                 StrategyOutcome.customer_id.is_(None),
                 StrategyOutcome.lifecycle_status == "CLOSED",
+                StrategyOutcome.closing_notional > 0,
             )
             .group_by(StrategyOutcome.trade_id)
             .subquery()
