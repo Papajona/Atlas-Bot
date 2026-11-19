@@ -1020,13 +1020,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             # Keep the exact Decimal result through the custodial-ledger boundary;
             # do not round-trip the realized amount through a binary float first.
             await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized_decimal, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-        if realized_decimal != 0:
-            # Store observed outcome against the strategy that opened the position.
+        if closing > 0:
+            # Store every closing fill against the strategy that opened the position,
+            # including zero-PnL fills needed for a correct weighted denominator.
             # This avoids attributing a close to the strategy of the closing order.
             attribution_trade_id = int(entry_trade_id or trade.id)
             existing_count = await db.execute(select(func.count(StrategyOutcome.id)).where(StrategyOutcome.trade_id == attribution_trade_id))
             sequence = int(existing_count.scalar_one() or 0) + 1
-            notional_decimal = abs(Decimal(str(delta)) * Decimal(str(fill_price)))
+            notional_decimal = abs(Decimal(str(closing)) * Decimal(str(fill_price)))
             return_bps = float(
                 realized_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
@@ -1054,7 +1055,8 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({
                     "entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id,
-                    "fill_price": str(fill_price), "entry_fee": str(entry_fee_decimal),
+                    "fill_price": str(fill_price), "closing_notional": str(notional_decimal),
+                    "entry_fee": str(entry_fee_decimal),
                     "allocated_entry_fee": str(allocated_entry_fee_decimal), "net_pnl": str(net_pnl_decimal),
                 }, default=str),
             ))
