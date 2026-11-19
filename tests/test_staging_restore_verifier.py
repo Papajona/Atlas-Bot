@@ -722,10 +722,10 @@ def test_full_restore_audit_query_reports_missing_customer_paper_schema_instead_
         await transaction.start()
         try:
             await connection.execute(
-                "DO $ BEGIN "
+                "DO $block$ BEGIN "
                 "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper') THEN "
                 "CREATE ROLE atlas_customer_paper NOLOGIN; "
-                "END IF; END $"
+                "END IF; END $block$"
             )
             await connection.execute("DROP SCHEMA IF EXISTS customer_paper CASCADE")
             payload = await connection.fetchval(QUERY)
