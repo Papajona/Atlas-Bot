@@ -5512,7 +5512,8 @@ async def customer_me(authorization: str | None = Header(default=None)):
         )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
-        return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
+        return {"id": profile.id, "auth_user_id": profile.auth_user_id,
+                "email": getattr(profile, "auth_identity_email", "") or profile.email,
                 "display_name": profile.display_name, "status": (
                     "PENDING_IDENTITY_REVIEW"
                     if bool(getattr(profile, "identity_review_required", False))
