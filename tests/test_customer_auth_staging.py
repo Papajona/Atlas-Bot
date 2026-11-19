@@ -36,7 +36,9 @@ def test_customer_profile_provision_function_requires_verified_user_totp_aal2_an
     ).read_text(encoding="utf-8")
 
     assert "withSupabase({ auth: \"user\" }" in source
-    assert 'claims.aal !== "aal2"' in source
+    assert 'jwtClaims.aal !== "aal2"' in source
+    assert 'String(userClaims.id ?? "").trim()' in source
+    assert 'String(jwtClaims.sub ?? "").trim()' in source
     assert "ctx.supabase.auth.getUser()" in source
     assert "user.email_confirmed_at" in source
     assert "ctx.supabase.auth.mfa.listFactors()" in source
@@ -57,7 +59,8 @@ def test_customer_profile_provision_uses_only_authenticated_identity_and_never_r
         ROOT / "supabase/functions/customer-profile-provision/index.ts"
     ).read_text(encoding="utf-8")
 
-    assert 'const userId = String(claims.sub ?? "").trim()' in source
+    assert 'const userId = String(userClaims.id ?? "").trim()' in source
+    assert 'const jwtSubject = String(jwtClaims.sub ?? "").trim()' in source
     assert 'user.id !== userId' in source
     assert 'auth_user_id: userId' in source
     assert 'email: email.slice(0, 320)' in source
