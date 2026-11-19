@@ -847,6 +847,7 @@ async def _apply_fill_to_position(
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
     closing_decimal = Decimal("0")
+    old_qty = 0.0
     current_fee_decimal = Decimal(str(current_fill_fee or 0))
     position_flipped = False
     allocated_entry_fee_decimal = Decimal("0")
