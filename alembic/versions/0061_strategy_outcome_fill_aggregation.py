@@ -177,7 +177,7 @@ def upgrade() -> None:
 
 
     # Revision 0061 writes NULL when the historical fee basis cannot be
-    # established. These two fields were introduced as NOT NULL in 0035,
+    # established. These three result fields were introduced as NOT NULL in 0035,
     # so relax the existing columns before any historical row is updated.
     # Keep the server defaults for mixed-version writers; only nullability
     # changes here.
@@ -197,6 +197,13 @@ def upgrade() -> None:
                     existing_nullable=False,
                     nullable=True,
                 )
+            if "return_bps" in outcome_columns:
+                batch_op.alter_column(
+                    "return_bps",
+                    existing_type=sa.Float(),
+                    existing_nullable=False,
+                    nullable=True,
+                )
     else:
         if "net_pnl" in outcome_columns:
             op.alter_column(
@@ -210,6 +217,14 @@ def upgrade() -> None:
             op.alter_column(
                 "strategy_outcomes",
                 "net_return_bps",
+                existing_type=sa.Float(),
+                existing_nullable=False,
+                nullable=True,
+            )
+        if "return_bps" in outcome_columns:
+            op.alter_column(
+                "strategy_outcomes",
+                "return_bps",
                 existing_type=sa.Float(),
                 existing_nullable=False,
                 nullable=True,
