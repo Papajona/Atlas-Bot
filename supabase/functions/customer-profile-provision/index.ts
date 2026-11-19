@@ -1,20 +1,5 @@
 import { withSupabase } from "npm:@supabase/server@^1";
 
-type FunctionContext = {
-  userClaims?: Record<string, unknown>;
-  supabase: {
-    auth: {
-      getUser: () => Promise<{ data: { user: Record<string, unknown> | null }; error: { message: string } | null }>;
-      mfa: {
-        listFactors: () => Promise<{ data: { totp?: Array<{ id: string; status: string }> }; error: { message: string } | null }>;
-      };
-    };
-  };
-  supabaseAdmin: {
-    from: (table: string) => any;
-  };
-};
-
 const response = (body: Record<string, unknown>, status = 200) =>
   Response.json(body, {
     status,
@@ -22,7 +7,7 @@ const response = (body: Record<string, unknown>, status = 200) =>
   });
 
 export default {
-  fetch: withSupabase({ auth: "user" }, async (req: Request, ctx: FunctionContext) => {
+  fetch: withSupabase({ auth: "user" }, async (req, ctx) => {
     if (req.method !== "POST") {
       return response({ error: "Method not allowed" }, 405);
     }
@@ -73,6 +58,21 @@ export default {
         customer_id: existing.id,
         account_status: existing.status,
       });
+    }
+
+    // Do not silently create a second identity for an email already present on
+    // one of the 18 legacy profiles whose old Tron-based Auth reference is not a
+    // Supabase UUID. Such accounts require manual identity proof and mapping.
+    const { data: emailMatches, error: emailLookupError } = await profiles
+      .select("id,auth_user_id")
+      .ilike("email", email)
+      .limit(2);
+
+    if (emailLookupError) {
+      return response({ error: "Existing customer identity check failed" }, 503);
+    }
+    if ((emailMatches ?? []).some((profile: { auth_user_id: string }) => profile.auth_user_id !== userId)) {
+      return response({ error: "This email is already associated with an existing customer profile; manual identity review is required" }, 409);
     }
 
     const metadata = (user.user_metadata ?? {}) as Record<string, unknown>;
