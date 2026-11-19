@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -19,14 +20,55 @@ AIProviderError = NativeAIError  # compatibility alias; no provider is called
 _ALLOWED_TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")
 _ALLOWED_ASSETS = ("crypto", "forex", "commodity")
 _ALLOWED_FAMILIES = ("TREND", "MOMENTUM", "BREAKOUT", "MEAN_REVERSION", "ENSEMBLE")
+_TIMEFRAME_SECONDS = {"5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+_SPREAD_CEILING_BPS = 300.0
+_MAX_ENTRY_DEVIATION = 0.10
+_MAX_STOP_DISTANCE = 0.50
+_FUTURE_SKEW_SECONDS = 300
+_SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9/_:.\-]{0,79}$")
+_NEGATED_DIRECTION = re.compile(
+    r"\b(?:do\s+not|don'?t|never|no|not|avoid|without|except|exclude|excluding)\s+"
+    r"(?:(?:to|going|go|be|take|open|any)\s+)*"
+    r"(?:buy\w*|long\w*|short\w*|sell\w*|bearish|bullish)\b"
+)
 
 
 def _number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         number = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
     return number if math.isfinite(number) else None
+
+
+def _parse_market_time(value: Any) -> datetime | None:
+    """Parse ISO-8601 text, datetime or epoch seconds/milliseconds into aware UTC."""
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, bool):
+            return None
+        elif isinstance(value, (int, float)):
+            number = float(value)
+            if not math.isfinite(number) or number <= 0:
+                return None
+            parsed = datetime.fromtimestamp(number / 1000.0 if number > 1e11 else number, tz=timezone.utc)
+        elif isinstance(value, str) and value.strip():
+            text = value.strip().replace("Z", "+00:00").replace("z", "+00:00")
+            text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+            parsed = datetime.fromisoformat(text)
+        else:
+            return None
+    except (ValueError, OverflowError, OSError):
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+
+
+def _strip_negated_direction(text: str) -> str:
+    """Remove negated direction phrases before detecting a requested trade side."""
+    return _NEGATED_DIRECTION.sub(" ", text)
 
 
 def _classify_asset(text: str, requested: str | None) -> str:
@@ -130,7 +172,9 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     title = re.sub(r"\s+", " ", str(name or "Atlas Native Strategy").strip())[:120] or "Atlas Native Strategy"
     asset_kind = _classify_asset(f"{text} {symbol or ''}", asset)
     if symbol and symbol.strip():
-        selected_symbol = symbol.strip()[:80]
+        selected_symbol = symbol.strip()
+        if not _SYMBOL_PATTERN.fullmatch(selected_symbol):
+            raise NativeAIError("Symbol may contain only letters, digits and / _ : . - (max 80 characters).")
     else:
         upper = text.upper()
         match = next(((pattern, label) for pattern, label in (
@@ -158,7 +202,9 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     tf = requested_timeframes[0]
     family = _classify_family(text)
     lower = text.lower()
-    asks_both = any(x in lower for x in ("both directions", "long and short", "long/short", "both sides"))
+    direction_text = _strip_negated_direction(lower)
+    negated_direction = direction_text != lower
+    asks_both = any(x in direction_text for x in ("both directions", "long and short", "long/short", "both sides"))
     # "short EMA" and "long EMA" describe indicator periods, while "sell when RSI"
     # describes an exit. Only explicit direction phrases or a known instrument imply side.
     known_symbol = (
@@ -166,14 +212,14 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         r"eur\s*[/_-]?\s*usd|gbp\s*[/_-]?\s*usd|xau(?:\s*[/_-]?\s*usd)?|gold|wti|crude\s+oil)"
     )
     asks_short = bool(
-        re.search(r"\b(?:bearish|downtrend|shorting|go\s+short|short\s+only|short[-\s]sell)\b", lower)
-        or re.search(rf"\bshort\s+(?:the\s+)?{known_symbol}\b", lower)
-        or re.search(r"\bsell\s+only\b", lower)
-        or re.search(rf"\bsell\s+(?:the\s+)?{known_symbol}\b", lower)
+        re.search(r"\b(?:bearish|downtrend|shorting|go\s+short|short\s+only|short[-\s]sell)\b", direction_text)
+        or re.search(rf"\bshort\s+(?:the\s+)?{known_symbol}\b", direction_text)
+        or re.search(r"\bsell\s+only\b", direction_text)
+        or re.search(rf"\bsell\s+(?:the\s+)?{known_symbol}\b", direction_text)
     )
     asks_long = bool(
-        re.search(r"\b(?:buy|bullish|uptrend)\b", lower)
-        or re.search(r"\blong\b(?!\s+(?:ema|sma|ma|moving\s+average|window|period|lookback|average)\b)", lower)
+        re.search(r"\b(?:buy|bullish|uptrend)\b", direction_text)
+        or re.search(r"\blong\b(?!\s+(?:ema|sma|ma|moving\s+average|window|period|lookback|average)\b)", direction_text)
     )
     direction = "BOTH" if asks_both or (asks_short and asks_long) else ("SHORT" if asks_short else "LONG")
     direction_ambiguous = not (asks_both or asks_short or asks_long)
@@ -185,6 +231,8 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         "This draft is not backtest evidence; cost-aware out-of-sample and walk-forward validation remain mandatory before paper promotion."]
     if direction_ambiguous:
         warnings.append("No trading direction was explicit in the prompt; LONG is only a draft default and must be confirmed before use.")
+    if negated_direction:
+        warnings.append("Negated direction wording (for example 'do not short') was detected and excluded from side detection; confirm the direction before use.")
     if explicit_timeframe and len(prompt_timeframes) > 1 and any(
         prompt_timeframe != explicit_timeframe for prompt_timeframe in prompt_timeframes
     ):
@@ -278,20 +326,37 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
                 "engine": "atlas-native-safety-v1", "execution_authority": False}
     if not str(packet.get("symbol") or "").strip() or packet.get("asset") not in _ALLOWED_ASSETS or not str(packet.get("exchange") or "").strip():
         reasons.append("invalid_market_identity")
-    if packet.get("timeframe") not in _ALLOWED_TIMEFRAMES or not packet.get("market_timestamp"): reasons.append("invalid_market_time_context")
+    if packet.get("timeframe") not in _ALLOWED_TIMEFRAMES or not packet.get("market_timestamp"):
+        reasons.append("invalid_market_time_context")
+    else:
+        market_time = _parse_market_time(packet.get("market_timestamp"))
+        if market_time is None:
+            reasons.append("invalid_market_timestamp")
+        elif market_time > datetime.now(timezone.utc) + timedelta(seconds=_TIMEFRAME_SECONDS[packet["timeframe"]] + _FUTURE_SKEW_SECONDS):
+            reasons.append("market_timestamp_in_future")
     plan = packet.get("trade_plan")
     if not isinstance(plan, dict): plan = {}; reasons.append("trade_plan_not_object")
     quality = packet.get("data_quality")
     if not isinstance(quality, dict) or quality.get("safe") is not True: reasons.append("market_data_quality_not_safe")
     elif quality.get("reasons"): reasons.append("market_data_quality_has_reasons")
-    if not isinstance(packet.get("deterministic_rules"), dict): reasons.append("deterministic_rules_missing")
+    rules = packet.get("deterministic_rules")
+    if not isinstance(rules, dict) or not rules:
+        reasons.append("deterministic_rules_missing")
     price = packet.get("price_context")
     if not isinstance(price, dict): price = {}; reasons.append("price_context_missing")
     close, spread = _number(price.get("latest_close")), _number(price.get("spread_bps"))
     bars = price.get("bars")
     if close is None or close <= 0: reasons.append("invalid_latest_close")
     if isinstance(bars, bool) or not isinstance(bars, int) or bars < 1: reasons.append("invalid_bar_count")
-    if spread is None or spread < 0: reasons.append("invalid_spread")
+    if spread is None or spread < 0:
+        reasons.append("invalid_spread")
+    else:
+        spread_limit = _SPREAD_CEILING_BPS
+        configured_limit = _number(price.get("max_spread_bps"))
+        if configured_limit is not None and 0 < configured_limit < spread_limit:
+            spread_limit = configured_limit
+        if spread > spread_limit:
+            reasons.append("spread_exceeds_limit")
     adaptive = packet.get("adaptive_model")
     if not isinstance(adaptive, dict) or not adaptive: reasons.append("adaptive_model_evidence_missing")
     ml = packet.get("ml_signal")
@@ -318,8 +383,19 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
         if not target < entry < stop: reasons.append("short_target_entry_stop_order_invalid")
         if not adaptive_disabled and signal is not None and signal >= 0: reasons.append("ml_signal_direction_mismatch")
     if entry is not None and stop is not None and target is not None and abs(entry - stop) > 0:
-        if abs(target - entry) / abs(entry - stop) < 1.5: reasons.append("reward_risk_below_native_minimum")
-    else: reasons.append("risk_distance_invalid")
+        if abs(target - entry) / abs(entry - stop) < 1.5:
+            reasons.append("reward_risk_below_native_minimum")
+        stop_fraction = abs(entry - stop) / entry if entry > 0 else None
+        if stop_fraction is not None:
+            if stop_fraction > _MAX_STOP_DISTANCE:
+                reasons.append("stop_distance_extreme")
+            if spread is not None and spread >= 0 and stop_fraction * 10000.0 <= spread:
+                reasons.append("stop_distance_not_above_spread")
+    else:
+        reasons.append("risk_distance_invalid")
+    if entry is not None and entry > 0 and close is not None and close > 0:
+        if abs(entry - close) / close > _MAX_ENTRY_DEVIATION:
+            reasons.append("entry_price_far_from_latest_close")
 
     groq_required = packet.get("groq_trade_review_required", False)
     if type(groq_required) is not bool:
@@ -415,10 +491,27 @@ def native_ai_health_check() -> dict[str, Any]:
     keys = {"strategy_family", "entry_conditions", "exit_conditions", "requires_backtest", "requires_walk_forward", "execution_mode"}
     incomplete = evaluate_native_trade_packet({"symbol": "BTC/USDT"})["safe"] is False
     review = native_research_review({}, {})
-    ok = keys.issubset(draft) and draft["strategy_family"] in _ALLOWED_FAMILIES and draft["execution_mode"] == "PAPER_SHADOW_ONLY" and incomplete and review["execution_authority"] is False and review["network_calls"] == 0
+    golden = {
+        "symbol": "BTC/USDT", "asset": "crypto", "exchange": "binance", "timeframe": "1h",
+        "market_timestamp": datetime.now(timezone.utc).isoformat(),
+        "trade_plan": {"side": "buy", "entry_price": 100.0, "stop_loss_price": 98.0, "take_profit_price": 104.0},
+        "deterministic_rules": {"self_check": "ok"},
+        "price_context": {"latest_close": 100.0, "bars": 300, "spread_bps": 2.0},
+        "data_quality": {"safe": True, "reasons": []}, "adaptive_model": {"status": "OK"}, "ml_signal": {"signal": 0.5},
+    }
+    valid_passes = evaluate_native_trade_packet(golden)["safe"] is True
+    inverted = dict(golden, trade_plan={"side": "buy", "entry_price": 100.0, "stop_loss_price": 104.0, "take_profit_price": 98.0})
+    stale_future = dict(golden, market_timestamp="2999-01-01T00:00:00+00:00")
+    unsafe_vetoed = (
+        evaluate_native_trade_packet(inverted)["safe"] is False
+        and evaluate_native_trade_packet(stale_future)["safe"] is False
+    )
+    negation_ok = compose_strategy_spec(prompt="Never go long BTC, short only on 1h", name="n")["direction"] == "SHORT"
+    ok = valid_passes and unsafe_vetoed and negation_ok and keys.issubset(draft) and draft["strategy_family"] in _ALLOWED_FAMILIES and draft["execution_mode"] == "PAPER_SHADOW_ONLY" and incomplete and review["execution_authority"] is False and review["network_calls"] == 0
     return {"status": "PASS" if ok else "FAIL", "engine": "atlas-native-ai-v1", "network_calls": 0,
         "external_model_credentials_required": False, "checks": {"strategy_composer": keys.issubset(draft),
-        "incomplete_trade_fails_closed": incomplete, "research_is_advisory": review["execution_authority"] is False}}
+        "incomplete_trade_fails_closed": incomplete, "research_is_advisory": review["execution_authority"] is False,
+        "valid_trade_passes": valid_passes, "unsafe_trades_vetoed": unsafe_vetoed, "negated_direction_not_misread": negation_ok}}
 
 
 async def dual_ai_trade_safety_review(trade_packet: dict[str, Any]) -> dict[str, Any]:
