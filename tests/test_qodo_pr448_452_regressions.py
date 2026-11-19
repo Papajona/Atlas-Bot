@@ -14,8 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_customer_profile_backfill_uses_auth_claims_without_name_only_network_calls():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     block = source[source.index("async def get_customer("):source.index("def _funding_signature_valid")]
-    assert "_supabase_user(_bearer_token(authorization))" in block
-    assert 'user.get("email_confirmed_at")' in block
+    auth_helper = source[source.index("async def _customer_auth_pii"):source.index("async def get_customer(")]
+    assert "_customer_auth_pii(uid, authorization)" in block
+    assert "_supabase_user(_bearer_token(authorization))" in auth_helper
+    assert 'confirmed = bool(user.get("email_confirmed_at"))' in auth_helper
+    assert "if confirmed else \"\"" in auth_helper
+    assert "_CUSTOMER_AUTH_PII_CACHE_TTL_SECONDS = 60.0" in source
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
     assert "if not profile.display_name and name:" in block
@@ -263,9 +267,10 @@ def test_existing_profile_auth_backfill_never_persists_unconfirmed_email():
         source.index("async def get_customer("):
         source.index("def _funding_signature_valid")
     ]
-    assert 'if user.get("email_confirmed_at"):' in block
+    auth_helper = source[source.index("async def _customer_auth_pii"):source.index("async def get_customer(")]
+    assert 'confirmed = bool(user.get("email_confirmed_at"))' in auth_helper
     assert 'logger.info("customer_auth_pii_backfill_unconfirmed' in block
-    assert "email = str(user.get(\"email\") or \"\").strip().lower()[:320]" in block
+    assert "auth_email, auth_name, confirmed = await _customer_auth_pii(uid, authorization)" in block
 
 
 def test_same_direction_position_additions_have_a_defined_zero_close_quantity():
