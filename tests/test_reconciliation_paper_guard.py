@@ -1,9 +1,4 @@
-"""The exchange reconciliation loop must never touch exchange state in paper mode.
-
-``sync_live_account`` overwrites AppState equity/positions with the exchange account. Every other
-live gate (execution.py, live_execution.py, readiness) requires ``not paper_trading``; the
-reconciliation loop must too, so a stray LIVE_TRADING_ENABLED=true cannot replace paper equity.
-"""
+"""Paper-mode reconciliation must resolve existing platform live orders safely."""
 import asyncio
 
 import pytest
@@ -33,8 +28,9 @@ class _FakeSession:
         return _Result()
 
 
-def _run_one_cycle(monkeypatch, *, paper: bool):
+def _run_one_cycle(monkeypatch, *, paper: bool, reconciliation_account: dict):
     calls = []
+    failures = []
     monkeypatch.setattr(main_module.settings, "live_trading_enabled", True)
     monkeypatch.setattr(main_module.settings, "paper_trading", paper)
     monkeypatch.setattr(main_module.settings, "exchange_api_key", "k")
@@ -49,44 +45,80 @@ def _run_one_cycle(monkeypatch, *, paper: bool):
         if sleeps["n"] > 1:
             raise _StopLoop()
 
-    async def record(name, *_a, **_k):
-        calls.append(name)
+    async def reconcile(exchange, symbol):
+        calls.append(("reconcile", exchange, symbol))
+        # Model an existing platform order being resolved from its broker snapshot.
+        return {
+            "results": [{"trade_id": 42, "status": "FILLED", "resolved": True}],
+            "account": reconciliation_account,
+        }
 
-    async def reconcile(*_a, **_k):
-        calls.append("reconcile")
+    async def sync_live_account(*_args, **_kwargs):
+        calls.append(("sync_live_account",))
 
-    async def sync_live_account(*_a, **_k):
-        calls.append("sync_live_account")
+    async def enforce_loss_limits():
+        calls.append(("loss_limits",))
 
-    async def loss_limits(*_a, **_k):
-        calls.append("loss_limits")
-
-    async def noop(*_a, **_k):
+    async def noop(*_args, **_kwargs):
         return 0
+
+    async def record_failure(scope, exc):
+        failures.append((scope, str(exc)))
+        return 1
 
     monkeypatch.setattr(main_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(main_module, "reconcile", reconcile)
     monkeypatch.setattr(main_module, "sync_live_account", sync_live_account)
-    monkeypatch.setattr(main_module, "enforce_platform_loss_limits", loss_limits)
+    monkeypatch.setattr(main_module, "enforce_platform_loss_limits", enforce_loss_limits)
     monkeypatch.setattr(main_module, "reconcile_customer_live_orders", noop)
     monkeypatch.setattr(main_module, "_record_reconciliation_success", noop)
-    monkeypatch.setattr(main_module, "_record_reconciliation_failure", noop)
-    monkeypatch.setattr(main_module, "_mark_worker_loop_success", lambda *_a, **_k: None)
-    monkeypatch.setattr(main_module, "_mark_worker_loop_failure", lambda *_a, **_k: None)
+    monkeypatch.setattr(main_module, "_record_reconciliation_failure", record_failure)
+    monkeypatch.setattr(main_module, "_mark_worker_loop_success", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(main_module, "_mark_worker_loop_failure", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main_module, "SessionLocal", lambda: _FakeSession())
 
     with pytest.raises(_StopLoop):
         asyncio.run(main_module._reconciliation_loop())
-    return calls
+    return calls, failures
 
 
-def test_paper_mode_never_syncs_exchange_account_even_if_live_flag_and_keys_are_set(monkeypatch):
-    calls = _run_one_cycle(monkeypatch, paper=True)
-    assert "sync_live_account" not in calls
-    assert "reconcile" not in calls
-    assert "loss_limits" not in calls
+def test_paper_switch_still_reconciles_an_outstanding_platform_order_without_syncing_live_equity(monkeypatch):
+    calls, failures = _run_one_cycle(
+        monkeypatch,
+        paper=True,
+        reconciliation_account={"paper": True},
+    )
+
+    assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
+    assert ("sync_live_account",) not in calls
+    assert ("loss_limits",) not in calls
+    assert not failures
 
 
-def test_live_mode_still_reconciles_and_syncs_exchange_account(monkeypatch):
-    calls = _run_one_cycle(monkeypatch, paper=False)
-    assert "reconcile" in calls and "sync_live_account" in calls
+def test_live_mode_enforces_loss_limits_only_after_reconciliation_returns_fresh_live_equity(monkeypatch):
+    calls, failures = _run_one_cycle(
+        monkeypatch,
+        paper=False,
+        reconciliation_account={"equity": 12_500.0, "positions_synced": 0},
+    )
+
+    assert calls[0][0] == "reconcile"
+    assert ("loss_limits",) in calls
+    # The worker must not issue a second account sync: reconcile() owns the guarded sync.
+    assert ("sync_live_account",) not in calls
+    assert not failures
+
+
+def test_live_mode_skips_loss_limits_and_records_failure_when_live_equity_is_unavailable(monkeypatch):
+    calls, failures = _run_one_cycle(
+        monkeypatch,
+        paper=False,
+        reconciliation_account={"error": "broker balance unavailable"},
+    )
+
+    assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
+    assert ("loss_limits",) not in calls
+    assert any(
+        scope == "platform-loss-limits" and "fresh live-equity snapshot" in message
+        for scope, message in failures
+    )
