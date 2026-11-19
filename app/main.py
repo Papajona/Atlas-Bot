@@ -8199,7 +8199,8 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                     [item[0] for item in usable],
                     [item[1] for item in usable],
                     current_dd,
-                )                sharpe = ratios["sharpe"]
+                )
+                sharpe = ratios["sharpe"]
                 calmar = ratios["calmar"]
                 sortino = ratios["sortino"]
                 edge_decay_z = ratios["edge_decay_z"]
