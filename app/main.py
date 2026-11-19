@@ -3619,6 +3619,65 @@ async def _supabase_request(path: str, payload: dict | None = None, method: str 
     return data if isinstance(data, dict) else {"data": data}
 
 
+_WITHDRAWAL_AUTH_EMAIL_CACHE: dict[str, tuple[float, str, str]] = {}
+_WITHDRAWAL_AUTH_EMAIL_CACHE_TTL_SECONDS = 300.0
+_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST = 50
+_WITHDRAWAL_AUTH_LOOKUP_DEADLINE_SECONDS = 12.0
+
+
+def _cached_withdrawal_auth_email(auth_user_id: str):
+    cached = _WITHDRAWAL_AUTH_EMAIL_CACHE.get(auth_user_id)
+    if not cached:
+        return None
+    expires_at, email, status = cached
+    if expires_at <= time.monotonic():
+        _WITHDRAWAL_AUTH_EMAIL_CACHE.pop(auth_user_id, None)
+        return None
+    return email, status
+
+
+def _store_withdrawal_auth_email(auth_user_id: str, email: str, status: str, ttl: float | None = None):
+    now = time.monotonic()
+    for key, value in list(_WITHDRAWAL_AUTH_EMAIL_CACHE.items()):
+        if value[0] <= now:
+            _WITHDRAWAL_AUTH_EMAIL_CACHE.pop(key, None)
+    if len(_WITHDRAWAL_AUTH_EMAIL_CACHE) >= 2000:
+        _WITHDRAWAL_AUTH_EMAIL_CACHE.pop(next(iter(_WITHDRAWAL_AUTH_EMAIL_CACHE)))
+    _WITHDRAWAL_AUTH_EMAIL_CACHE[auth_user_id] = (
+        now + (ttl if ttl is not None else _WITHDRAWAL_AUTH_EMAIL_CACHE_TTL_SECONDS),
+        email,
+        status,
+    )
+
+
+async def _resolve_withdrawal_auth_email(auth_user_id: str) -> tuple[str, str]:
+    """Fetch only confirmed Auth email, cache the result, and separate identity issues from outages."""
+    try:
+        normalized_id = str(uuid.UUID(auth_user_id))
+    except (ValueError, TypeError, AttributeError):
+        return "", "LEGACY_IDENTITY_UNMAPPED"
+
+    cached = _cached_withdrawal_auth_email(normalized_id)
+    if cached is not None:
+        return cached
+    try:
+        user = await _supabase_admin_user(normalized_id)
+    except HTTPException:
+        return "", "AUTH_LOOKUP_UNAVAILABLE"
+    if not user:
+        result = ("", "AUTH_EMAIL_UNAVAILABLE")
+        _store_withdrawal_auth_email(normalized_id, *result, ttl=60.0)
+        return result
+    if not user.get("email_confirmed_at"):
+        result = ("", "AUTH_EMAIL_UNCONFIRMED")
+        _store_withdrawal_auth_email(normalized_id, *result, ttl=60.0)
+        return result
+    email = str(user.get("email") or "").strip()
+    result = (email, "SUPABASE_AUTH" if email else "AUTH_EMAIL_UNAVAILABLE")
+    _store_withdrawal_auth_email(normalized_id, *result)
+    return result
+
+
 async def _supabase_admin_user(auth_user_id: str) -> dict:
     """Resolve a customer through Supabase Auth Admin API using a server-only key."""
     admin_key = str(settings.supabase_auth_admin_key or "").strip()
@@ -8332,81 +8391,152 @@ async def list_withdrawals(status: str = "PENDING", x_admin_token: str | None = 
     allowed = {"PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN", "FAILED", "REJECTED", "RELEASED", "ALL"}
     if status not in allowed:
         raise HTTPException(400, "Invalid withdrawal status")
+
+    # Read the withdrawal rows and encrypted profiles, then release the database
+    # connection before any external Auth request.
     async with SessionLocal() as db:
-        q = select(Withdrawal).order_by(desc(Withdrawal.created_at)).limit(500)
+        query = select(Withdrawal).order_by(desc(Withdrawal.created_at)).limit(500)
         if status != "ALL":
-            q = q.where(Withdrawal.status == status)
-        rows = (await db.execute(q)).scalars().all()
-        customer_ids = {r.customer_id for r in rows if r.customer_id}
+            query = query.where(Withdrawal.status == status)
+        withdrawals = (await db.execute(query)).scalars().all()
+        customer_ids = {row.customer_id for row in withdrawals if row.customer_id}
         profiles = {}
         if customer_ids:
             profiles = {
-                p.id: p for p in (
-                    await db.execute(select(CustomerProfile).where(CustomerProfile.id.in_(customer_ids)))
+                profile.id: profile
+                for profile in (
+                    await db.execute(
+                        select(CustomerProfile).where(CustomerProfile.id.in_(customer_ids))
+                    )
                 ).scalars().all()
             }
-
-        missing_auth_ids = {
-            str(profile.auth_user_id)
-            for profile in profiles.values()
-            if not str(profile.email or "").strip() and profile.auth_user_id
-        }
-        auth_users: dict[str, dict] = {}
-        auth_lookup_failures: set[str] = set()
-        if missing_auth_ids and settings.supabase_auth_admin_key:
-            semaphore = asyncio.Semaphore(8)
-
-            async def lookup_auth_user(auth_id: str):
-                async with semaphore:
-                    try:
-                        return auth_id, await _supabase_admin_user(auth_id), False
-                    except HTTPException:
-                        return auth_id, {}, True
-
-            for auth_id, user, failed in await asyncio.gather(
-                *(lookup_auth_user(auth_id) for auth_id in sorted(missing_auth_ids))
-            ):
-                if failed:
-                    auth_lookup_failures.add(auth_id)
-                elif user:
-                    auth_users[auth_id] = user
-
-        result = []
-        for r in rows:
-            profile = profiles.get(r.customer_id)
-            profile_email = str(profile.email or "").strip() if profile is not None else ""
-            auth_id = str(profile.auth_user_id or "") if profile is not None else ""
-            auth_user = auth_users.get(auth_id) or {}
-            auth_email = (
-                str(auth_user.get("email") or "").strip()
-                if str(auth_user.get("id") or "") == auth_id else ""
-            )
-            customer_email = profile_email or auth_email
-            if profile_email:
-                email_status = "PROFILE_ENCRYPTED"
-            elif auth_email:
-                email_status = "SUPABASE_AUTH"
-            elif not settings.supabase_auth_admin_key:
-                email_status = "AUTH_LOOKUP_NOT_CONFIGURED"
-            elif auth_id in auth_lookup_failures:
-                email_status = "AUTH_LOOKUP_UNAVAILABLE"
-            else:
-                email_status = "AUTH_EMAIL_UNAVAILABLE"
-            result.append({
-                "id": r.id, "request_id": r.request_id, "customer_id": r.customer_id,
-                "customer_email": customer_email, "customer_email_status": email_status,
-                "account_ref": r.account_ref,
-                "amount": r.amount, "currency": r.currency, "destination_masked": r.destination_masked,
-                "status": r.status, "risk_score": r.risk_score,
-                "risk_flags": json_loads(r.risk_flags), "required_approvals": r.required_approvals,
-                "approval_count": r.approval_count, "first_approved_by": r.first_approved_by,
-                "provider": r.provider, "provider_id": r.provider_id, "provider_status": r.provider_status,
-                "execution_status": r.status, "proposal_digest": r.proposal_digest, "execution_operator": r.execution_operator,
-                "second_approved_by": r.second_approved_by, "rejected_by": r.rejected_by,
-                "rejection_reason": r.rejection_reason, "created_at": r.created_at.isoformat(),
-                "updated_at": r.updated_at.isoformat() if r.updated_at else None,
+        snapshot = []
+        for row in withdrawals:
+            profile = profiles.get(row.customer_id)
+            snapshot.append({
+                "id": row.id,
+                "request_id": row.request_id,
+                "customer_id": row.customer_id,
+                "profile_email": str(profile.email or "").strip() if profile is not None else "",
+                "auth_user_id": str(profile.auth_user_id or "") if profile is not None else "",
+                "account_ref": row.account_ref,
+                "amount": row.amount,
+                "currency": row.currency,
+                "destination_masked": row.destination_masked,
+                "status": row.status,
+                "risk_score": row.risk_score,
+                "risk_flags": json_loads(row.risk_flags),
+                "required_approvals": row.required_approvals,
+                "approval_count": row.approval_count,
+                "first_approved_by": row.first_approved_by,
+                "provider": row.provider,
+                "provider_id": row.provider_id,
+                "provider_status": row.provider_status,
+                "execution_status": row.status,
+                "proposal_digest": row.proposal_digest,
+                "execution_operator": row.execution_operator,
+                "second_approved_by": row.second_approved_by,
+                "rejected_by": row.rejected_by,
+                "rejection_reason": row.rejection_reason,
+                "created_at": row.created_at.isoformat(),
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             })
-        return result
+
+    missing_auth_ids = {
+        row["auth_user_id"]
+        for row in snapshot
+        if not row["profile_email"] and row["auth_user_id"]
+    }
+    auth_email_results: dict[str, tuple[str, str]] = {}
+    legacy_ids: set[str] = set()
+    lookup_candidates: list[str] = []
+
+    for auth_id in sorted(missing_auth_ids):
+        try:
+            normalized_id = str(uuid.UUID(auth_id))
+        except (ValueError, TypeError, AttributeError):
+            legacy_ids.add(auth_id)
+            auth_email_results[auth_id] = ("", "LEGACY_IDENTITY_UNMAPPED")
+            continue
+        cached = _cached_withdrawal_auth_email(normalized_id)
+        if cached is not None:
+            auth_email_results[auth_id] = cached
+        else:
+            lookup_candidates.append(normalized_id)
+
+    # Bound both outbound concurrency and per-request work. Uncached records after
+    # the cap are clearly marked for a later page/request instead of causing hundreds
+    # of repeated Auth Admin calls.
+    deferred_ids = set(lookup_candidates[_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST:])
+    pending_ids = lookup_candidates[:_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST]
+    failed_ids: set[str] = set()
+    if pending_ids and settings.supabase_auth_admin_key:
+        semaphore = asyncio.Semaphore(8)
+
+        async def lookup_one(auth_id: str):
+            async with semaphore:
+                return auth_id, await _resolve_withdrawal_auth_email(auth_id)
+
+        try:
+            completed = await asyncio.wait_for(
+                asyncio.gather(*(lookup_one(auth_id) for auth_id in pending_ids)),
+                timeout=_WITHDRAWAL_AUTH_LOOKUP_DEADLINE_SECONDS,
+            )
+            auth_email_results.update({auth_id: result for auth_id, result in completed})
+            failed_ids.update(
+                auth_id for auth_id, (_email, result_status) in completed
+                if result_status == "AUTH_LOOKUP_UNAVAILABLE"
+            )
+        except asyncio.TimeoutError:
+            failed_ids.update(pending_ids)
+
+    result = []
+    for row in snapshot:
+        profile_email = row["profile_email"]
+        auth_id = row["auth_user_id"]
+        auth_email, auth_status = auth_email_results.get(auth_id, ("", "AUTH_EMAIL_UNAVAILABLE"))
+        customer_email = profile_email or auth_email
+        if profile_email:
+            email_status = "PROFILE_ENCRYPTED"
+        elif auth_id in legacy_ids:
+            email_status = "LEGACY_IDENTITY_UNMAPPED"
+        elif not settings.supabase_auth_admin_key:
+            email_status = "AUTH_LOOKUP_NOT_CONFIGURED"
+        elif auth_id in deferred_ids:
+            email_status = "AUTH_LOOKUP_DEFERRED"
+        elif auth_id in failed_ids or auth_status == "AUTH_LOOKUP_UNAVAILABLE":
+            email_status = "AUTH_LOOKUP_UNAVAILABLE"
+        else:
+            email_status = auth_status
+        result.append({
+            "id": row["id"],
+            "request_id": row["request_id"],
+            "customer_id": row["customer_id"],
+            "customer_email": customer_email,
+            "customer_email_status": email_status,
+            "account_ref": row["account_ref"],
+            "amount": row["amount"],
+            "currency": row["currency"],
+            "destination_masked": row["destination_masked"],
+            "status": row["status"],
+            "risk_score": row["risk_score"],
+            "risk_flags": row["risk_flags"],
+            "required_approvals": row["required_approvals"],
+            "approval_count": row["approval_count"],
+            "first_approved_by": row["first_approved_by"],
+            "provider": row["provider"],
+            "provider_id": row["provider_id"],
+            "provider_status": row["provider_status"],
+            "execution_status": row["execution_status"],
+            "proposal_digest": row["proposal_digest"],
+            "execution_operator": row["execution_operator"],
+            "second_approved_by": row["second_approved_by"],
+            "rejected_by": row["rejected_by"],
+            "rejection_reason": row["rejection_reason"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+    return result
 
 
 @app.post("/api/admin/withdrawals")
