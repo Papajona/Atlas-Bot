@@ -239,6 +239,45 @@ def test_benchmark_contract_rejects_blank_or_malformed_conditions():
     assert "exit conditions violate the Atlas strategy output contract" in failures
 
 
+def test_malformed_condition_timeframe_is_scored_as_invalid_not_raised():
+    spec = compose_strategy_spec(
+        prompt="BTC breakout on 1h",
+        name="Malformed timeframe",
+    )
+    spec["exit_conditions"][0]["timeframe"] = {"unexpected": "object"}
+
+    failures = _EVAL._contract_failures(spec)
+
+    assert "exit conditions violate the Atlas strategy output contract" in failures
+
+
+def test_condition_text_is_normalized_before_application_contract_scoring():
+    spec = compose_strategy_spec(
+        prompt="BTC breakout on 1h",
+        name="Condition normalization",
+    )
+    spec["entry_conditions"][0]["type"] = "  RSI  "
+    spec["entry_conditions"][0]["rule"] = "  close above 20  "
+
+    failures = _EVAL._contract_failures(spec)
+
+    assert failures == []
+    assert spec["entry_conditions"][0]["type"] == "  RSI  "
+
+
+def test_condition_text_that_is_only_whitespace_or_too_short_is_rejected():
+    spec = compose_strategy_spec(
+        prompt="BTC breakout on 1h",
+        name="Short condition text",
+    )
+    spec["entry_conditions"][0]["type"] = " a "
+    spec["entry_conditions"][0]["rule"] = " ab "
+
+    failures = _EVAL._contract_failures(spec)
+
+    assert "entry conditions violate the Atlas strategy output contract" in failures
+
+
 def test_malformed_comparator_symbols_and_warnings_are_scored_not_raised():
     spec = compose_strategy_spec(prompt="BTC breakout on 1h", name="Malformed comparator")
     spec["symbols"] = "BTC/USDT"
