@@ -161,7 +161,9 @@ def _valid_condition_list(value: Any, *, minimum: int, maximum: int) -> bool:
             return False
         if not isinstance(rule, str) or not 3 <= len(rule.strip()) <= 500:
             return False
-        if timeframe is not None and timeframe not in ALLOWED_TIMEFRAMES:
+        if timeframe is not None and (
+            not isinstance(timeframe, str) or timeframe not in ALLOWED_TIMEFRAMES
+        ):
             return False
     return True
 
