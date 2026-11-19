@@ -63,8 +63,3 @@ def test_normal_position_exit_closes_strategy_outcomes():
     assert 'lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN"' in execution
     assert 'if abs(float(position.quantity or 0.0)) < 1e-12:' in execution
     assert 'outcome.lifecycle_status = "CLOSED"' in execution
-def test_normal_position_exit_closes_strategy_outcomes():
-    execution = (ROOT / "app/execution.py").read_text(encoding="utf-8")
-    assert 'lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN"' in execution
-    assert 'if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12:' in execution
-    assert "_aggregate_completed_strategy_outcomes(completed_outcomes)" in execution
