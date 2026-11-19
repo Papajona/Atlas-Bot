@@ -3866,49 +3866,64 @@ async def get_customer(
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
-    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
-    # verified Auth identity here, then let the ORM encrypt values on write.
-    if (profile is not None and (
-        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
-    )) or not email:
+    # Prefer already-persisted encrypted PII when the verified JWT omits a
+    # field. A missing display name is not a reason to call Supabase Auth:
+    # users without name metadata would otherwise trigger an Auth request on
+    # every customer endpoint.
+    if profile is not None:
+        email = email or str(profile.email or "").strip().lower()[:320]
+        name = name or str(profile.display_name or "").strip()[:160]
+
+    # The keyless Edge provisioner leaves encrypted PII empty. Fetch Auth only
+    # when an email is actually needed and neither the JWT nor the encrypted
+    # profile can supply one. Existing ACTIVE profiles remain usable even when
+    # their Auth email is unconfirmed; new profiles still require confirmation.
+    if not email and (profile is None or not str(profile.email or "").strip()):
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
-        if not user.get("email_confirmed_at"):
+        auth_email = str(user.get("email") or "").strip().lower()[:320]
+        if profile is None and (not auth_email or not user.get("email_confirmed_at")):
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or email).strip().lower()[:320]
+        email = auth_email or email
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
         name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    identity_review_required = (
+    persisted_identity_review = (
         profile is not None
         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     )
-    if identity_review_required and not allow_identity_review_summary:
-        raise HTTPException(
-            409,
-            "This customer identity is pending manual review. Contact support before using the account.",
-        )
+    identity_review_required = persisted_identity_review
 
-    # Check legacy non-UUID identities before inserting or activating a new
-    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
+    # A blank legacy identity is not proof that this customer is the same
+    # person. Quarantine is calculated per request, never persisted because a
+    # profile page was opened. New UUID profiles remain blocked until mapping
+    # is complete; existing summaries can explain the temporary review state.
     if profile is None or not str(profile.email or "").strip():
-        if await _legacy_customer_email_conflict(db, uid, email):
-            if profile is None:
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
-            profile.status = "PENDING_IDENTITY_REVIEW"
+        legacy_conflict = await _legacy_customer_email_conflict(db, uid, email)
+        if profile is None and legacy_conflict:
+            raise HTTPException(
+                409,
+                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+            )
+        if profile is not None and legacy_conflict:
             identity_review_required = True
             if not allow_identity_review_summary:
-                await db.commit()
                 raise HTTPException(
                     409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before using this account.",
                 )
+        elif profile is not None and persisted_identity_review:
+            # Older code persisted a quarantine for any blank-email legacy row.
+            # Restore access automatically once the identity mapping is complete.
+            profile.status = "ACTIVE"
+            identity_review_required = False
+
+    if profile is not None:
+        # Transient attribute only; never persisted by SQLAlchemy.
+        profile.identity_review_required = identity_review_required
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -5440,7 +5455,7 @@ async def customer_me(authorization: str | None = Header(default=None)):
         await db.commit()
         return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
                 "display_name": profile.display_name, "status": profile.status,
-                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
@@ -7946,6 +7961,20 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
         }
 
 
+async def _recent_closed_platform_outcome_returns(db):
+    """Read a bounded sample of one-row-per-trade completion summaries."""
+    return (await db.execute(
+        select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+        .where(
+            StrategyOutcome.customer_id.is_(None),
+            StrategyOutcome.lifecycle_status == "CLOSED",
+            StrategyOutcome.closing_notional > 0,
+        )
+        .order_by(StrategyOutcome.created_at.desc())
+        .limit(100)
+    )).all()
+
+
 @app.get("/api/risk-dashboard/metrics")
 async def risk_dashboard_metrics(
     x_admin_token: str | None = Header(default=None),
@@ -7971,32 +8000,7 @@ async def risk_dashboard_metrics(
         worker_health = await _worker_health_snapshot(db)
 
         # Annualise only from the observed cadence of closed strategy outcomes.
-        latest_closed = (
-            select(
-                StrategyOutcome.trade_id.label("trade_id"),
-                func.max(StrategyOutcome.sequence).label("latest_sequence"),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .group_by(StrategyOutcome.trade_id)
-            .subquery()
-        )
-        rows = (await db.execute(
-            select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-            .join(
-                latest_closed,
-                (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .order_by(StrategyOutcome.created_at.desc())
-            .limit(100)
-        )).all()
+rows = await _recent_closed_platform_outcome_returns(db)
         usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
         ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
         sharpe = ratios["sharpe"]
@@ -8111,32 +8115,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                latest_closed = (
-                    select(
-                        StrategyOutcome.trade_id.label("trade_id"),
-                        func.max(StrategyOutcome.sequence).label("latest_sequence"),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .group_by(StrategyOutcome.trade_id)
-                    .subquery()
-                )
-                rows = (await db.execute(
-                    select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-                    .join(
-                        latest_closed,
-                        (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                        & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .order_by(StrategyOutcome.created_at.desc())
-                    .limit(100)
-                )).all()
+        rows = await _recent_closed_platform_outcome_returns(db)
                 usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
                 ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
                 sharpe = ratios["sharpe"]
