@@ -53,10 +53,11 @@ class BodySizeLimitMiddleware:
                 other_message = message
                 break
 
-            buffered.extend(message.get("body") or b"")
-            if len(buffered) > self.max_bytes:
+            chunk = message.get("body") or b""
+            if len(buffered) + len(chunk) > self.max_bytes:
                 await self._reject(send, close_connection=close_connection)
                 return
+            buffered.extend(chunk)
             if not message.get("more_body", False):
                 request_complete = True
                 break
