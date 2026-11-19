@@ -978,6 +978,7 @@ async def _apply_fill_to_position(
     ).with_for_update()
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized_decimal = Decimal("0")
+    closing_decimal = Decimal("0")
     realized = 0.0
     # Same-direction position additions do not close quantity. Initialize this
     # unconditionally because all fills reach the outcome-recording condition.
