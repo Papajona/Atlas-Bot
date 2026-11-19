@@ -1380,6 +1380,7 @@ def verify_local_signature(signature: str, digest: str) -> bool:
         return False
 from .monitoring import TelemetryMiddleware, metrics_response, logger
 from .body_limit import BodySizeLimitMiddleware
+from .risk_metrics import performance_ratios
 from .schemas import (
     MarketRequest,
     CustomerPaperMarketRequest,
@@ -1605,6 +1606,11 @@ def _trusted_client_ip(request: Request) -> str:
 async def startup():
     global _background_task, _usdt_task
     assert_multidict_safe_backend()
+    if settings.environment.lower() == "staging" and not settings.redis_url:
+        logger.warning(
+            "Staging is running without REDIS_URL: distributed rate limiting fails open; "
+            "provision Redis if staging must mirror production."
+        )
     if settings.forex_live_enabled:
         raise RuntimeError("OANDA live trading is permanently disabled in AtlasRisk; use OANDA practice/demo for learning and backtesting")
     if settings.deriv_live_enabled:
@@ -2401,7 +2407,7 @@ async def _run_persisted_adaptive_bot_cycle(
     # daily_research.latest_macro_context). This is advisory context for the veto review
     # only -- it does not gate on its own and never blocks a trade by itself.
     macro_context = await latest_macro_context()
-    packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "strategy_router": deterministic.get("strategy_router", {}), "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context, "derivatives_context": derivatives_context}
+    packet = {"symbol": req.symbol, "asset": req.asset, "exchange": req.exchange, "timeframe": req.timeframe, "market_timestamp": deterministic["timestamp"], "trade_plan": plan, "deterministic_rules": deterministic["rules"], "strategy_router": deterministic.get("strategy_router", {}), "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps, "max_spread_bps": float(settings.max_spread_bps)}, "data_quality": deterministic["data_quality"], "adaptive_model": adaptive, "ml_signal": ml_signal, "macro_context": macro_context, "derivatives_context": derivatives_context}
     try:
         ai_review = await _run_trade_safety_review(packet)
     except asyncio.TimeoutError:
@@ -5680,7 +5686,10 @@ async def funding_webhook(
     raw = await request.body()
     if not _funding_signature_valid(raw, x_funding_signature, x_funding_timestamp):
         raise HTTPException(401, "Invalid funding webhook signature")
-    payload = FundingWebhook.model_validate(json.loads(raw))
+    try:
+        payload = FundingWebhook.model_validate(json.loads(raw))
+    except ValueError as exc:
+        raise HTTPException(422, "Invalid funding webhook payload") from exc
     if payload.currency.strip().upper() != "USDT":
         raise HTTPException(422, "Only USDT funding is supported by the customer trading ledger")
     funding_amount = Decimal(str(payload.amount))
@@ -6442,7 +6451,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
             "deterministic_rules": deterministic["rules"],
             "strategy_router": router,
             "derivatives_context": derivatives_context,
-            "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps},
+            "price_context": {"latest_close": float(df.close.iloc[-1]), "bars": int(len(df)), "spread_bps": spread_bps, "max_spread_bps": float(settings.max_spread_bps)},
             "data_quality": deterministic["data_quality"],
             "adaptive_model": adaptive or {"status": "DISABLED"},
             "ml_signal": ml_signal if settings.adaptive_ai_enabled else {"status": "DISABLED"},
@@ -7085,7 +7094,18 @@ async def receive_customer_webhook(endpoint_id:int, request:Request, x_atlas_web
         except Exception: raise HTTPException(400,"Webhook body must be JSON")
         db.add(WebhookEvent(endpoint_id=endpoint.id,event_id=event_id,payload_json=json.dumps(payload,separators=(",",":")),status="RECEIVED"))
         endpoint.last_used_at=datetime.now(timezone.utc)
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError:
+            # A parallel delivery of the same event won the unique endpoint/event race.
+            await db.rollback()
+            raced = (await db.execute(select(WebhookEvent).where(
+                WebhookEvent.endpoint_id == endpoint_id,
+                WebhookEvent.event_id == event_id,
+            ))).scalar_one_or_none()
+            if raced is None:
+                raise
+            return {"accepted": True, "duplicate": True, "event_id": event_id}
         return {"accepted":True,"duplicate":False,"event_id":event_id,"action":"RECEIVED_ONLY"}
 
 
@@ -7811,24 +7831,17 @@ async def risk_dashboard_metrics(
         kill = bool(s.kill_switch) if s else True
         worker_health = await _worker_health_snapshot(db)
 
-        # Compute empirical performance from trailing closed strategy outcomes
-        rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
-        returns = [r / 10000.0 for r in rows if r is not None]
-        if len(returns) >= 10:
-            mean_ret = sum(returns) / len(returns)
-            variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns) if len(returns) > 1 else 0.0001
-            vol = math.sqrt(variance)
-            sharpe = (mean_ret / vol * math.sqrt(8760)) if vol > 0 else 1.84
-            calmar = (mean_ret * 8760 / max(0.01, current_dd / 100.0)) if current_dd > 0 else 2.12
-            downside = [r for r in returns if r < 0]
-            downside_vol = math.sqrt(sum(r**2 for r in downside) / max(1, len(downside)))
-            sortino = (mean_ret / downside_vol * math.sqrt(8760)) if downside_vol > 0 else 2.45
-            edge_decay_z = (mean_ret / (vol / math.sqrt(len(returns)))) if vol > 0 else 0.84
-        else:
-            sharpe = 0.0
-            calmar = 0.0
-            sortino = 0.0
-            edge_decay_z = 0.0
+        # Annualise only from the observed cadence of closed strategy outcomes.
+        rows = (await db.execute(
+            select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+            .order_by(StrategyOutcome.created_at.desc()).limit(100)
+        )).all()
+        usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
+        ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
+        sharpe = ratios["sharpe"]
+        calmar = ratios["calmar"]
+        sortino = ratios["sortino"]
+        edge_decay_z = ratios["edge_decay_z"]
 
         return {
             "equity": round(equity, 2),
@@ -7842,6 +7855,8 @@ async def risk_dashboard_metrics(
             "sharpe_ratio": round(sharpe, 2),
             "calmar_ratio": round(calmar, 2),
             "sortino_ratio": round(sortino, 2),
+            "ratios_annualized": ratios["annualized"],
+            "ratio_sample_size": ratios["sample_size"],
             "deflated_sharpe_ratio": 0.0,
             "edge_decay_z_score": round(edge_decay_z, 2),
             "regime": "UNKNOWN",
@@ -7935,20 +7950,16 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                rows = (await db.execute(select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(100))).scalars().all()
-                returns = [r / 10000.0 for r in rows if r is not None]
-                if len(returns) >= 10:
-                    mean_ret = sum(returns) / len(returns)
-                    variance = sum((r - mean_ret) ** 2 for r in returns) / len(returns)
-                    vol = math.sqrt(variance)
-                    sharpe = (mean_ret / vol * math.sqrt(8760)) if vol > 0 else 0.0
-                    calmar = (mean_ret * 8760 / max(0.01, current_dd / 100.0)) if current_dd > 0 else 0.0
-                    downside = [r for r in returns if r < 0]
-                    downside_vol = math.sqrt(sum(r**2 for r in downside) / max(1, len(downside)))
-                    sortino = (mean_ret / downside_vol * math.sqrt(8760)) if downside_vol > 0 else 0.0
-                    edge_decay_z = (mean_ret / (vol / math.sqrt(len(returns)))) if vol > 0 else 0.0
-                else:
-                    sharpe = calmar = sortino = edge_decay_z = 0.0
+                rows = (await db.execute(
+                    select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+                    .order_by(StrategyOutcome.created_at.desc()).limit(100)
+                )).all()
+                usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
+                ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
+                sharpe = ratios["sharpe"]
+                calmar = ratios["calmar"]
+                sortino = ratios["sortino"]
+                edge_decay_z = ratios["edge_decay_z"]
 
             payload = {
                 "equity": round(equity, 2),

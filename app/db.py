@@ -698,8 +698,8 @@ class LedgerJournalLine(Base):
     account_code: Mapped[str] = mapped_column(String(180), nullable=False)
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
-    debit: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
-    credit: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    debit: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    credit: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -714,9 +714,9 @@ class LedgerEntry(Base):
     customer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
     entry_type: Mapped[str] = mapped_column(String(40), nullable=False)
-    debit: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
-    credit: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
-    amount: Mapped[float] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    debit: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    credit: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
+    amount: Mapped[Decimal] = mapped_column(Numeric(38, 6), nullable=False, default=0)
     reference_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")
     reference_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
     idempotency_key: Mapped[str] = mapped_column(String(220), nullable=False)
