@@ -184,7 +184,7 @@ def test_restore_preflight_uses_logged_supabase_pg_dump_source_and_distinct_clou
     assert "SOURCE_SUPABASE_DATABASE: postgres" in workflow
     assert "from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source" in workflow
     verify_call = workflow.split(
-        "source_provenance = verify_supabase_pg_dump_source(", 1
+        "source_evidence = verify_supabase_pg_dump_source(", 1
     )[1].split(")", 1)[0]
     assert "source_backup_reference=source_reference" in verify_call
     assert "source_reference=source_reference" not in verify_call
