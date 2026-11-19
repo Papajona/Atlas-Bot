@@ -358,9 +358,12 @@ async def get_existing_customer(
         )
     # A bounded indexed existence query detects any unmapped non-UUID
     # reference; do not transfer every customer identity to Python per request.
-    identity_review_required = (
-        str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-        or await _has_unmapped_legacy_customer_profile(db, uid)
+    identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+    effective_status = (
+        "ACTIVE"
+        if str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        and not identity_review_required
+        else row.status
     )
     if identity_review_required and not allow_identity_review_summary:
         raise HTTPException(
@@ -373,7 +376,7 @@ async def get_existing_customer(
     profile = SimpleNamespace(
         id=row.id,
         auth_user_id=row.auth_user_id,
-        status=row.status,
+        status=effective_status,
         identity_review_required=identity_review_required,
     )
     if str(getattr(profile, "status", "")).upper() != "ACTIVE" and not (
