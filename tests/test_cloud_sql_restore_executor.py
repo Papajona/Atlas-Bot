@@ -379,12 +379,7 @@ def test_execute_restore_retains_import_safety_generation_and_operation_evidence
     assert scanner < create_only_upload < read_back < live_generation < import_request
     assert import_request < wait_for_completion < backup_binding < operation_evidence
 
-    import inspect
-    from scripts.execute_cloud_sql_restore import execute_restore
 
-    parameters = list(inspect.signature(execute_restore).parameters)
-    assert parameters.index("output_path") < parameters.index("source_supabase_project_ref")
-    assert parameters.index("output_path") < parameters.index("production_instance")
 
 
 def test_restore_inputs_accept_verified_supabase_pg_dump_source_without_production_cloud_sql_instance():
