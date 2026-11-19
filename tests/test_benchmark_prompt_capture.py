@@ -225,6 +225,8 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     marker = uuid.uuid4().hex
     customer_id = None
+    primary_error: BaseException | None = None
+    cleanup_error: BaseException | None = None
     try:
         async with sessions() as db:
             customer = CustomerProfile(
@@ -255,9 +257,17 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
                 await db.commit()
                 return result["status"]
 
-        statuses = await asyncio.gather(
-            *(submit(index) for index in range(MAX_CAPTURES_PER_24_HOURS + 5))
+        submissions = await asyncio.gather(
+            *(submit(index) for index in range(MAX_CAPTURES_PER_24_HOURS + 5)),
+            return_exceptions=True,
         )
+        submission_errors = [
+            result for result in submissions if isinstance(result, BaseException)
+        ]
+        assert not submission_errors, (
+            f"{len(submission_errors)} concurrent capture transaction(s) failed"
+        )
+        statuses = submissions
         assert statuses.count("STORED") == MAX_CAPTURES_PER_24_HOURS
         assert statuses.count("SKIPPED_DAILY_LIMIT") == 5
 
@@ -270,7 +280,11 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
                 )).scalar_one()
             )
             assert stored == MAX_CAPTURES_PER_24_HOURS
-    finally:
+    except BaseException as exc:
+        # Preserve the actual assertion/submission failure while cleanup proceeds.
+        primary_error = exc
+
+    try:
         if customer_id is not None:
             async with sessions() as db:
                 await db.execute(
@@ -282,4 +296,16 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
                     delete(CustomerProfile).where(CustomerProfile.id == customer_id)
                 )
                 await db.commit()
-        await engine.dispose()
+    except BaseException as exc:
+        cleanup_error = exc
+    finally:
+        try:
+            await engine.dispose()
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_error is not None:
+        raise cleanup_error
