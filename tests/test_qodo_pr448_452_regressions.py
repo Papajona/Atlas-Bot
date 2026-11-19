@@ -118,11 +118,15 @@ def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
 
 def test_execution_safety_windows_use_only_completed_trade_outcomes():
     source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
-    assert source.count('StrategyOutcome.lifecycle_status == "CLOSED"') >= 2
-    assert "PARTIAL_CLOSED" not in source[
-        source.index("def _execution_health_block_reason"):
-        source.index("async def ")
-    ] if "def _execution_health_block_reason" in source else True
+    health_start = source.index("async def _execution_health_block")
+    health_end = source.index("\nasync def ", health_start + 1)
+    health = source[health_start:health_end]
+    assert 'StrategyOutcome.lifecycle_status == "CLOSED"' in health
+
+    edge_start = source.index("qout = (")
+    edge_end = source.index("realized =", edge_start)
+    edge_decay = source[edge_start:edge_end]
+    assert 'StrategyOutcome.lifecycle_status == "CLOSED"' in edge_decay
 
 
 def test_risk_websocket_publishes_annualization_and_sample_metadata():
