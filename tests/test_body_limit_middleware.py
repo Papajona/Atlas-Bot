@@ -135,3 +135,62 @@ def test_http3_oversize_rejection_omits_connection_header():
     ))
     assert sent[0]["status"] == 413
     assert all(name != b"connection" for name, _value in sent[0]["headers"])
+
+
+def test_slowly_delivered_unterminated_body_times_out_before_route():
+    sent = []
+    route_called = []
+
+    async def receive():
+        await asyncio.sleep(0.05)
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def send(message):
+        sent.append(message)
+
+    async def route(scope, receive, send):
+        route_called.append(True)
+
+    middleware = BodySizeLimitMiddleware(
+        route,
+        max_bytes=10,
+        body_idle_timeout_seconds=0.01,
+        body_total_timeout_seconds=0.05,
+    )
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "path": "/slow",
+        "headers": [],
+    }
+    _run(middleware(scope, receive, send))
+
+    assert sent[0]["status"] == 408
+    assert route_called == []
+    assert sent[-1]["body"] == b'{"detail":"Request body timed out"}'
+
+
+def test_bodyless_get_route_is_not_blocked_waiting_for_request_body():
+    sent = []
+
+    async def receive():
+        raise AssertionError("bodyless GET must not pre-read the request stream")
+
+    async def route(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok"})
+
+    middleware = BodySizeLimitMiddleware(route, max_bytes=10)
+    scope = {
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "path": "/healthz",
+        "headers": [],
+    }
+    async def capture(message):
+        sent.append(message)
+
+    _run(middleware(scope, receive, capture))
+    assert sent[0]["status"] == 200
