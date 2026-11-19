@@ -51,6 +51,34 @@ def upgrade() -> None:
             sqlite_where=sa.text(f"lower(auth_user_id) NOT GLOB '{_UUID_GLOB}'"),
         )
 
+    outcome_indexes = {
+        item["name"]
+        for item in inspector.get_indexes(
+            "strategy_outcomes",
+            schema="public" if bind.dialect.name == "postgresql" else None,
+        )
+    }
+    outcome_index = "ix_strategy_outcome_platform_closed_trade_time"
+    if outcome_index not in outcome_indexes:
+        outcome_where = sa.text("customer_id IS NULL AND lifecycle_status = 'CLOSED'")
+        if bind.dialect.name == "postgresql":
+            op.create_index(
+                outcome_index,
+                "strategy_outcomes",
+                ["trade_id", "created_at"],
+                unique=False,
+                schema="public",
+                postgresql_where=outcome_where,
+            )
+        elif bind.dialect.name == "sqlite":
+            op.create_index(
+                outcome_index,
+                "strategy_outcomes",
+                ["trade_id", "created_at"],
+                unique=False,
+                sqlite_where=outcome_where,
+            )
+
 
 def downgrade() -> None:
     bind = op.get_bind()
@@ -63,5 +91,16 @@ def downgrade() -> None:
         op.drop_index(
             "ix_customer_profiles_unmapped_auth_user_id",
             table_name="customer_profiles",
+            schema=schema,
+        )
+
+    outcome_indexes = {
+        item["name"]
+        for item in sa.inspect(bind).get_indexes("strategy_outcomes", schema=schema)
+    }
+    if "ix_strategy_outcome_platform_closed_trade_time" in outcome_indexes:
+        op.drop_index(
+            "ix_strategy_outcome_platform_closed_trade_time",
+            table_name="strategy_outcomes",
             schema=schema,
         )
