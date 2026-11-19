@@ -7983,15 +7983,18 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
         }
 
 
-_RISK_OUTCOME_CANDIDATE_ROW_LIMIT = 20000
 _RISK_OUTCOME_SAMPLE_SIZE = 100
+_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250
 
 
-def _aggregate_closed_outcome_fills(outcomes):
+def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
     """Aggregate closing fills into one fee-adjusted return per completed trade."""
+    incomplete = set(incomplete_trade_ids or ())
     grouped = {}
     for outcome in outcomes:
         trade_id = int(outcome.trade_id)
+        if trade_id in incomplete:
+            continue
         state = grouped.setdefault(trade_id, {
             "net_pnl": Decimal("0"), "notional": Decimal("0"),
             "closed_at": None, "valid": True,
@@ -8007,6 +8010,8 @@ def _aggregate_closed_outcome_fills(outcomes):
         except Exception:
             notional = Decimal("0")
         if notional <= 0:
+            # Older rows predate persisted closing_notional. Their raw return_bps
+            # reconstructs each non-zero fill's notional from realized_pnl.
             try:
                 realized = Decimal(str(outcome.realized_pnl or "0"))
                 raw_return_bps = Decimal(str(outcome.return_bps or "0"))
@@ -8038,37 +8043,64 @@ def _aggregate_closed_outcome_fills(outcomes):
 
 
 async def _recent_closed_platform_trade_returns(db):
-    """Select recent completed trades by indexed time, then retrieve every fill."""
-    recent_trade_ids = (await db.execute(
-        select(StrategyOutcome.trade_id)
+    """Select distinct recent completed trades and bound the fills loaded per trade."""
+    final_close = func.max(StrategyOutcome.created_at).label("final_close_at")
+    recent_trades = (await db.execute(
+        select(StrategyOutcome.trade_id, final_close)
         .where(
             StrategyOutcome.customer_id.is_(None),
             StrategyOutcome.lifecycle_status == "CLOSED",
         )
-        .order_by(StrategyOutcome.created_at.desc(), StrategyOutcome.id.desc())
-        .limit(_RISK_OUTCOME_CANDIDATE_ROW_LIMIT)
-    )).scalars().all()
-    selected = []
-    seen = set()
-    for value in recent_trade_ids:
-        if value is None or value in seen:
-            continue
-        seen.add(value)
-        selected.append(value)
-        if len(selected) >= _RISK_OUTCOME_SAMPLE_SIZE:
-            break
+        .group_by(StrategyOutcome.trade_id)
+        .order_by(final_close.desc(), StrategyOutcome.trade_id.desc())
+        .limit(_RISK_OUTCOME_SAMPLE_SIZE)
+    )).all()
+    selected = [row.trade_id for row in recent_trades if row.trade_id is not None]
     if not selected:
-        return []
-    fills = (await db.execute(
-        select(StrategyOutcome)
+        return [], 0
+
+    # Fetch at most MAX+1 rows per selected trade. The sentinel row detects a
+    # trade whose history exceeds the budget; its partial data is never used.
+    ranked_fills = (
+        select(
+            StrategyOutcome.id.label("outcome_id"),
+            StrategyOutcome.trade_id.label("trade_id"),
+            func.row_number().over(
+                partition_by=StrategyOutcome.trade_id,
+                order_by=(StrategyOutcome.created_at.asc(), StrategyOutcome.id.asc()),
+            ).label("fill_rank"),
+        )
         .where(
             StrategyOutcome.trade_id.in_(selected),
             StrategyOutcome.customer_id.is_(None),
             StrategyOutcome.lifecycle_status == "CLOSED",
         )
-        .order_by(StrategyOutcome.trade_id, StrategyOutcome.created_at, StrategyOutcome.id)
-    )).scalars().all()
-    return _aggregate_closed_outcome_fills(fills)
+        .subquery()
+    )
+    fill_rows = (await db.execute(
+        select(StrategyOutcome, ranked_fills.c.fill_rank)
+        .join(ranked_fills, StrategyOutcome.id == ranked_fills.c.outcome_id)
+        .where(ranked_fills.c.fill_rank <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1)
+        .order_by(StrategyOutcome.trade_id, ranked_fills.c.fill_rank)
+    )).all()
+
+    incomplete_trade_ids = {
+        int(outcome.trade_id)
+        for outcome, fill_rank in fill_rows
+        if int(fill_rank) > _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE
+    }
+    complete_fills = [
+        outcome for outcome, fill_rank in fill_rows
+        if int(fill_rank) <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE
+        and int(outcome.trade_id) not in incomplete_trade_ids
+    ]
+    return (
+        _aggregate_closed_outcome_fills(
+            complete_fills,
+            incomplete_trade_ids=incomplete_trade_ids,
+        ),
+        len(incomplete_trade_ids),
+    )
 
 
 @app.get("/api/risk-dashboard/metrics")
@@ -8095,7 +8127,7 @@ async def risk_dashboard_metrics(
         kill = bool(s.kill_switch) if s else True
         worker_health = await _worker_health_snapshot(db)
 
-        usable = await _recent_closed_platform_trade_returns(db)
+        usable, ratio_sample_incomplete_trades = await _recent_closed_platform_trade_returns(db)
         ratios = performance_ratios(
             [item[0] for item in usable],
             [item[1] for item in usable],
@@ -8120,6 +8152,7 @@ async def risk_dashboard_metrics(
             "sortino_ratio": round(sortino, 2),
             "ratios_annualized": ratios["annualized"],
             "ratio_sample_size": ratios["sample_size"],
+            "ratio_sample_incomplete_trades": ratio_sample_incomplete_trades,
             "deflated_sharpe_ratio": 0.0,
             "edge_decay_z_score": round(edge_decay_z, 2),
             "regime": "UNKNOWN",
@@ -8213,7 +8246,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                usable = await _recent_closed_platform_trade_returns(db)
+                usable, ratio_sample_incomplete_trades = await _recent_closed_platform_trade_returns(db)
                 ratios = performance_ratios(
                     [item[0] for item in usable],
                     [item[1] for item in usable],
