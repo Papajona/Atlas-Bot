@@ -93,13 +93,13 @@ def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
         id=1, sequence=1, closing_notional=Decimal("100"),
         net_pnl=Decimal("1.90"), realized_pnl=Decimal("2.00"),
         fee=Decimal("0.10"), return_bps=200.0, net_return_bps=190.0,
-        lifecycle_status="OPEN", metadata_json="{}",
+        closing_quantity=Decimal("1"), lifecycle_status="OPEN", metadata_json="{}",
     )
     final = SimpleNamespace(
         id=2, sequence=2, closing_notional=Decimal("300"),
         net_pnl=Decimal("5.70"), realized_pnl=Decimal("6.00"),
         fee=Decimal("0.30"), return_bps=200.0, net_return_bps=190.0,
-        lifecycle_status="CLOSED", metadata_json="{}",
+        closing_quantity=Decimal("3"), lifecycle_status="CLOSED", metadata_json="{}",
     )
 
     result = execution._aggregate_completed_strategy_outcomes([first, final])
@@ -108,6 +108,7 @@ def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
     assert first.lifecycle_status == "PARTIAL_CLOSED"
     assert final.lifecycle_status == "CLOSED"
     assert final.closing_notional == Decimal("400")
+    assert final.closing_quantity == Decimal("4")
     assert final.net_pnl == Decimal("7.60")
     assert final.realized_pnl == Decimal("8.00")
     assert final.fee == Decimal("0.40")
@@ -127,6 +128,14 @@ def test_execution_safety_windows_use_only_completed_trade_outcomes():
     edge_end = source.index("realized =", edge_start)
     edge_decay = source[edge_start:edge_end]
     assert 'StrategyOutcome.lifecycle_status == "CLOSED"' in edge_decay
+    assert "StrategyOutcome.closing_notional > 0" in health
+    assert "StrategyOutcome.closing_notional > 0" in edge_decay
+    router = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    adaptive = router[
+        router.index("if settings.adaptive_strategy_router_enabled"):
+        router.index("current_strategy =")
+    ]
+    assert "StrategyOutcome.closing_notional > 0" in adaptive
 
 
 def test_risk_websocket_publishes_annualization_and_sample_metadata():
@@ -241,7 +250,10 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index("def _funding_signature_valid")
     ]
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
-    assert "await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
+    assert "if profile is None:" in get_customer
+    assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
+    assert "await _legacy_customer_email_conflict(db, uid, email)" in get_customer
+    assert "await _customer_profile_effectively_active(db, current_profile)" in source
     assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in get_customer
     assert "if not identity_review_required:" in get_customer
     assert "allow_identity_review_summary" in get_customer
@@ -257,7 +269,8 @@ def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain(
     assert 'op("!~*")' in gate
     assert 'op("GLOB")' in gate
     assert ".limit(1)" in gate
-    assert "_has_unmapped_legacy_customer_profile(db, uid)" in gate
+    assert "_legacy_customer_email_conflict(db, uid, str(stored_email))" in gate
+    assert "str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"" in gate
     assert "Paper access is paused until legacy customer identities are manually reviewed" in gate
 
 
@@ -306,3 +319,50 @@ def test_edge_legacy_identity_offset_paging_has_a_stable_order():
     ]
     assert '.order("id", { ascending: true })' in paging
     assert paging.index('.order("id", { ascending: true })') < paging.index(".range(offset, offset + pageSize - 1)")
+
+
+def test_outcome_aggregation_excludes_unknown_quantity_or_notional():
+    unknown = SimpleNamespace(
+        id=3, sequence=1, closing_quantity=Decimal("0"),
+        closing_notional=Decimal("0"), net_pnl=Decimal("0"),
+        realized_pnl=Decimal("0"), fee=Decimal("0"),
+        return_bps=0.0, net_return_bps=0.0,
+        lifecycle_status="OPEN", metadata_json="{}",
+    )
+    result = execution._aggregate_completed_strategy_outcomes([unknown])
+    assert result is unknown
+    assert result.lifecycle_status == "CLOSED"
+    assert result.closing_quantity == Decimal("0")
+    assert result.closing_notional == Decimal("0")
+    assert result.net_return_bps == 0.0
+
+
+def test_revision_0060_is_batched_online_only_and_refuses_a_false_downgrade():
+    migration = (
+        ROOT / "alembic/versions/0060_strategy_outcome_fill_aggregation.py"
+    ).read_text(encoding="utf-8")
+    assert "context.is_offline_mode()" in migration
+    assert "SELECT DISTINCT trade_id" in migration
+    assert "_BATCH_SIZE = 100" in migration
+    assert "lifecycle_status IN ('OPEN', 'CLOSED')" in migration
+    assert "return_bps" in migration and "realized_pnl" in migration
+    assert "filled_quantity" in migration and "average_fill_price" in migration
+    assert ".mappings().all()" in migration
+    assert "raise RuntimeError(" in migration
+    assert 'sa.Column("closing_quantity"' in migration
+    assert 'sa.Column("entry_fee"' in migration
+
+
+def test_fill_outcomes_use_per_fill_fees_and_reversal_close_only_quantity():
+    source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    function = source[
+        source.index("async def _apply_fill_to_position"):
+        source.index("async def _release_unneeded_order_reserve")
+    ]
+    assert "current_fill_fee" in function
+    assert "current_fee_decimal" in function
+    assert "closing_order_fee_decimal" in function
+    assert "closing_quantity=closing_decimal" in function
+    assert "position_flipped or abs(float(position.quantity or 0.0)) < 1e-12" in function
+    assert "Decimal(str(trade.fee or 0))" not in function
+    assert "for outcome in completed_outcomes:" not in function
