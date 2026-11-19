@@ -3926,6 +3926,12 @@ async def get_customer(
         # Transient attribute only; never persisted by SQLAlchemy.
         profile.identity_review_required = identity_review_required
 
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "An unmapped legacy customer identity prevents safe access. Manual identity review is required before using this account.",
+        )
+
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
         # the unique auth_user_id constraint resolves the loser without poisoning
