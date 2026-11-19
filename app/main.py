@@ -3901,7 +3901,7 @@ async def get_customer(
     # person. Quarantine is calculated per request, never persisted because a
     # profile page was opened. New UUID profiles remain blocked until mapping
     # is complete; existing summaries can explain the temporary review state.
-    if profile is None or not str(profile.email or "").strip():
+    if profile is None or not str(profile.email or "").strip() or persisted_identity_review:
         legacy_conflict = await _legacy_customer_email_conflict(db, uid, email)
         if profile is None and legacy_conflict:
             raise HTTPException(
@@ -3917,7 +3917,8 @@ async def get_customer(
                 )
         elif profile is not None and persisted_identity_review:
             # Older code persisted a quarantine for any blank-email legacy row.
-            # Restore access automatically once the identity mapping is complete.
+            # Recheck the actual encrypted legacy identities, then restore access
+            # when no unresolved or matching identity remains.
             profile.status = "ACTIVE"
             identity_review_required = False
 
