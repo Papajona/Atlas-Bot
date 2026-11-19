@@ -3910,6 +3910,14 @@ async def get_customer(
             409,
             "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
         )
+    # The global legacy-row result must not block existing ACTIVE, identified
+    # customers whose profiles were never subject to the review gate.
+    existing_active_identified = (
+        profile is not None
+        and str(profile.status or "").upper() == "ACTIVE"
+        and bool(profile.email)
+    )
+    profile_review_required = identity_review_required and not existing_active_identified
 
     # Older releases persisted PENDING_IDENTITY_REVIEW for the global legacy-row
     # condition. Once those rows are mapped, restore the account's prior ACTIVE
@@ -3921,7 +3929,7 @@ async def get_customer(
             profile.status = "ACTIVE"
             await db.flush()
 
-    if identity_review_required and not allow_identity_review_summary:
+    if profile_review_required and not allow_identity_review_summary:
         raise HTTPException(
             409,
             "An unmapped legacy customer identity requires manual review before customer trading or ledger access.",
@@ -3960,14 +3968,14 @@ async def get_customer(
             profile.display_name = name
         await db.flush()
 
-    profile.identity_review_required = identity_review_required
+    profile.identity_review_required = profile_review_required
     if profile.status != "ACTIVE" and not (
         allow_identity_review_summary
         and identity_review_required
         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     ):
         raise HTTPException(403, "Customer account is not active")
-    if not identity_review_required:
+    if not profile_review_required:
         await _ensure_customer_subscription(db, profile)
     return profile, claims
 
