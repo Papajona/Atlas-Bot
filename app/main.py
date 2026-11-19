@@ -3848,6 +3848,41 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     return False
 
 
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Return whether any non-UUID legacy Auth reference remains unmapped."""
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    if dialect == "sqlite":
+        uuid_glob = (
+            "[0-9a-fA-F]" * 8 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 12
+        )
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    # Conservative fallback for a non-production/test dialect.
+    references = (await db.execute(
+        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
+    )).scalars()
+    for reference in references:
+        try:
+            uuid.UUID(str(reference))
+        except (ValueError, TypeError, AttributeError):
+            return True
+    return False
+
+
 async def get_customer(
     authorization: str | None,
     db,
@@ -3892,39 +3927,20 @@ async def get_customer(
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    persisted_identity_review = (
-        profile is not None
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    )
-    identity_review_required = persisted_identity_review
+    # Re-evaluate unmapped legacy Auth references for every customer request.
+    # This is deliberately independent of blank encrypted profile PII: a prior
+    # Auth-backed email backfill must not let the next request bypass review.
+    identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
 
-    # A blank legacy identity is not proof that this customer is the same
-    # person. Quarantine is calculated per request, never persisted because a
-    # profile page was opened. New UUID profiles remain blocked until mapping
-    # is complete; existing summaries can explain the temporary review state.
-    if profile is None or not str(profile.email or "").strip() or persisted_identity_review:
-        legacy_conflict = await _legacy_customer_email_conflict(db, uid, email)
-        if profile is None and legacy_conflict:
-            raise HTTPException(
-                409,
-                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-            )
-        if profile is not None and legacy_conflict:
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before using this account.",
-                )
-        elif profile is not None and persisted_identity_review:
-            # Older code persisted a quarantine for any blank-email legacy row.
-            # Recheck the actual encrypted legacy identities, then restore access
-            # when no unresolved or matching identity remains.
-            profile.status = "ACTIVE"
-            identity_review_required = False
+    if profile is None and identity_review_required:
+        raise HTTPException(
+            409,
+            "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+        )
 
     if profile is not None:
-        # Transient attribute only; never persisted by SQLAlchemy.
+        # Transient request-local state only; never persist a quarantine because
+        # the customer opened their profile page.
         profile.identity_review_required = identity_review_required
 
     if identity_review_required and not allow_identity_review_summary:
@@ -3965,10 +3981,14 @@ async def get_customer(
             profile.display_name = name
         await db.flush()
 
+    stale_legacy_quarantine = (
+        str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        and not identity_review_required
+    )
     if profile.status != "ACTIVE" and not (
-        allow_identity_review_summary
-        and identity_review_required
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        (allow_identity_review_summary and identity_review_required
+         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW")
+        or stale_legacy_quarantine
     ):
         raise HTTPException(403, "Customer account is not active")
     if not identity_review_required:
