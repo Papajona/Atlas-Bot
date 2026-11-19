@@ -797,7 +797,10 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
         account.daily_start_equity = account.equity
 
 
-async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_price: float):
+async def _apply_fill_to_position(
+    db, trade: Trade, new_filled: float, fill_price: float,
+    *, current_fill_fee: Decimal | float | None = None,
+):
     delta = max(0.0, new_filled - trade.filled_quantity)
     if delta <= 0 or fill_price <= 0:
         trade.filled_quantity = new_filled
@@ -828,6 +831,10 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
     closing_decimal = Decimal("0")
+    current_fee_decimal = Decimal(str(current_fill_fee or 0))
+    position_flipped = False
+    allocated_entry_fee_decimal = Decimal("0")
+    closing_order_fee_decimal = Decimal("0")
     if not position:
         position = Position(customer_id=trade.customer_id, trading_account_id=trade.trading_account_id, exchange=trade.exchange, symbol=trade.symbol, quantity=signed,
                             average_entry_price=Decimal(str(fill_price)), mark_price=Decimal(str(fill_price)),
@@ -838,7 +845,9 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                                 Decimal(str(delta)) * Decimal(str(fill_price))
                                 if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE"
                                 else Decimal("0")
-                            ))
+                            ),
+                            entry_fee=current_fee_decimal,
+                        )
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
         # facts must be populated from the first actual fill, not order submission.
@@ -874,6 +883,9 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 position.entry_trade_id = trade.id
                 position.strategy = str(trade_context.get("strategy") or "unknown")
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
+                position.entry_fee = current_fee_decimal
+            else:
+                position.entry_fee = Decimal(str(position.entry_fee or 0)) + current_fee_decimal
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))
             fill_price_d = Decimal(str(fill_price))
@@ -903,7 +915,24 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 # exact amount that the ledger credits/debits for this fill.
                 realized_decimal = realized_decimal.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
             realized = float(realized_decimal)
+            old_entry_fee_decimal = Decimal(str(position.entry_fee or 0))
+            old_qty_decimal = abs(Decimal(str(old_qty)))
+            closing_order_fee_decimal = (
+                current_fee_decimal * closing_decimal / abs(Decimal(str(signed)))
+                if signed != 0 else Decimal("0")
+            )
+            allocated_entry_fee_decimal = (
+                old_entry_fee_decimal * closing_decimal / old_qty_decimal
+                if old_qty_decimal > 0 else Decimal("0")
+            )
             position.quantity = old_qty + signed
+            position_flipped = bool(position.quantity) and (old_qty * position.quantity < 0)
+            if position_flipped:
+                position.entry_fee = current_fee_decimal - closing_order_fee_decimal
+            elif abs(float(position.quantity or 0.0)) < 1e-12:
+                position.entry_fee = Decimal("0")
+            else:
+                position.entry_fee = old_entry_fee_decimal - allocated_entry_fee_decimal
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and old_qty != 0:
                 old_qty_decimal = abs(Decimal(str(old_qty)))
                 full_allocation_release = closing_decimal >= old_qty_decimal
@@ -953,18 +982,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         episode = (await db.execute(
             select(TradeLearningEpisode).where(TradeLearningEpisode.entry_trade_id == episode_trade_id).with_for_update()
         )).scalar_one_or_none()
-        position_flipped = bool(old_qty if 'old_qty' in locals() else 0) and bool(position.quantity) and (old_qty * position.quantity < 0 if 'old_qty' in locals() else False)
         if position_flipped and episode is not None:
             # The previous position lifecycle has ended even though a new opposite
             # position was opened by the same order. Close the old episode before
             # initializing the new one below.
             episode.status = "COMPLETED"
             episode.closing_trade_id = trade.id
-            completed_outcomes = (await db.execute(
-                select(StrategyOutcome).where(StrategyOutcome.trade_id == episode_trade_id).with_for_update()
-            )).scalars().all()
-            for outcome in completed_outcomes:
-                outcome.lifecycle_status = "CLOSED"
+            # Finalize all partial-fill outcome rows together after this closing
+            # fill has been persisted; individual rows are not completed trades.
             episode.exit_price = float(fill_price)
             episode.exit_at = utcnow()
 
@@ -1092,15 +1117,11 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             return_bps = float(
                 realized_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
-            closing_fee_decimal = Decimal(str(trade.fee or 0))
-            entry_row = await db.get(Trade, attribution_trade_id)
-            entry_fee_decimal = Decimal(str(entry_row.fee or 0)) if entry_row else Decimal("0")
-            episode_entry_qty = Decimal(str(episode.entry_quantity or 0)) if 'episode' in locals() and episode is not None else Decimal("0")
-            allocated_entry_fee_decimal = (
-                entry_fee_decimal * Decimal(str(closing)) / episode_entry_qty
-                if episode_entry_qty > 0 else Decimal("0")
-            )
-            net_pnl_decimal = realized_decimal - closing_fee_decimal - allocated_entry_fee_decimal
+            # Use only this fill's fee delta, allocated to the quantity that
+            # closed the old position (not the cumulative Trade.fee balance).
+            closing_fee_decimal = closing_order_fee_decimal
+            fee_for_completed_trade = closing_fee_decimal + allocated_entry_fee_decimal
+            net_pnl_decimal = realized_decimal - fee_for_completed_trade
             net_pnl = float(net_pnl_decimal)
             net_return_bps = float(
                 net_pnl_decimal / notional_decimal * Decimal("10000")
@@ -1110,19 +1131,21 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 bot_id=int(trade_context.get("bot_id")) if str(trade_context.get("bot_id", "")).isdigit() else None,
                 strategy=realized_strategy, regime=realized_regime, asset=str(trade_context.get("asset") or "crypto"),
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
-                realized_pnl=realized_decimal, fee=closing_fee_decimal, return_bps=return_bps,
+                realized_pnl=realized_decimal, fee=fee_for_completed_trade, return_bps=return_bps,
                 net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
+                closing_quantity=closing_decimal,
                 closing_notional=notional_decimal,
-                lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
+                lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({
                     "entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id,
-                    "fill_price": str(fill_price), "entry_fee": str(entry_fee_decimal),
-                    "allocated_entry_fee": str(allocated_entry_fee_decimal), "net_pnl": str(net_pnl_decimal),
+                    "fill_price": str(fill_price),
+                    "allocated_entry_fee": str(allocated_entry_fee_decimal),
+                    "closing_fee": str(closing_fee_decimal), "net_pnl": str(net_pnl_decimal),
                 }, default=str),
             )
             db.add(outcome_row)
-            if abs(float(position.quantity or 0.0)) < 1e-12:
+            if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12:
                 await db.flush()
                 completed_outcomes = (await db.execute(
                     select(StrategyOutcome).where(
