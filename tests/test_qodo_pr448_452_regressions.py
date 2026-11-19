@@ -522,7 +522,6 @@ def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
             "closing_notional": "4000",
             "aggregate_closing_notional": "5000",
             "aggregate_notional_complete": True,
-            "aggregate_fee_basis_complete": True,
             "aggregate_net_pnl": "39",
             "aggregate_net_return_bps": "78",
         }),
