@@ -2875,8 +2875,11 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                            market_type=settings.default_market_type, timeout_ms=settings.exchange_timeout_ms)
         broker = Broker.get(cfg)
     async with SessionLocal() as db:
-        query = select(Trade).where(Trade.exchange == exchange,
-                                    Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]))
+        query = select(Trade).where(
+            Trade.exchange == exchange,
+            Trade.mode == "LIVE",
+            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+        )
         if symbol:
             query = query.where(Trade.symbol == symbol)
         trades = (await db.execute(query)).scalars().all()
