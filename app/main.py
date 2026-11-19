@@ -3909,21 +3909,31 @@ async def get_customer(
         select(CustomerProfile).where(CustomerProfile.auth_user_id == uid)
     )).scalar_one_or_none()
 
-    email = str(claims.get("email") or "").strip().lower()[:320]
+    stored_email = (
+        str(profile.email or "").strip().lower()[:320]
+        if profile is not None else ""
+    )
+    email = stored_email or str(claims.get("email") or "").strip().lower()[:320]
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
-    name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
+    name = str(
+        metadata.get("full_name") or metadata.get("name")
+        or (profile.display_name if profile is not None else "")
+        or ""
+    ).strip()[:160]
 
-    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
-    # verified Auth identity here, then let the ORM encrypt values on write.
-    if (profile is not None and (
-        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
-    )) or not email:
+    # Only an absent profile or empty encrypted email requires an Auth Admin/user
+    # lookup. A missing optional display name must not trigger a repeated network
+    # request on every customer API call.
+    needs_auth_identity = profile is None or not stored_email
+    if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
         if not user.get("email_confirmed_at"):
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or email).strip().lower()[:320]
+        auth_email = str(user.get("email") or "").strip().lower()[:320]
+        if auth_email:
+            email = auth_email
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
         name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
     if not email:
