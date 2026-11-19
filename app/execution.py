@@ -767,21 +767,21 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
     observed_cumulative, quality, note = extract_order_fee_quote_decimal(
         order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
     )
+    pending_fee = bool(getattr(trade, "fee_reconciliation_pending", False))
+    if float(filled or 0) <= 0 and pending_fee:
+        # A zero-fill snapshot says nothing about a fee withheld on an earlier
+        # partial fill. Never let it clear the reconciliation queue or incident.
+        quality = UNVERIFIED
+        note = (
+            "zero-filled snapshot cannot reconcile a previously withheld live fee"
+        )
     if not fee_quality_is_verified(quality):
-        # Persist an unresolved denomination across broker snapshots. If a later
-        # snapshot omits fee data, its taker-rate estimate must not replace the
-        # previously reported-but-unverifiable fee or lose the reconciliation need.
-        if quality == UNVERIFIED:
-            trade.fee_reconciliation_pending = True
-        elif bool(getattr(trade, "fee_reconciliation_pending", False)):
-            quality = UNVERIFIED
-            note = (
-                "previously reported fee still has an unresolved denomination; "
-                "estimated fallback withheld pending authoritative reconciliation"
-            )
+        # Estimated amounts are not customer debits either. Queue them for a
+        # broker trade-history true-up just like an unknown denomination.
+        trade.fee_reconciliation_pending = True
         return Decimal("0"), prev, quality, note
-    # Only an authoritative denomination clears the pending state. The flag is
-    # changed in the same transaction as the eventual ledger settlement.
+    # Only an authoritative fee for an executed fill clears the pending state.
+    # The flag changes in the same transaction as ledger settlement.
     trade.fee_reconciliation_pending = False
     # Match ledger Numeric(38,6) booking semantics on the cumulative amount, not
     # by rounding each raw delta independently. This avoids repeated sub-micro fees
@@ -832,16 +832,20 @@ async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, 
     # The broker's authoritative denomination is now known and the fee delta
     # has been settled successfully (or was already settled by idempotency).
     # Resolve the matching incident in this same database transaction.
-    incident = (await db.execute(
+    incidents = (await db.execute(
         select(Incident).where(
-            Incident.incident_key == f"LIVE_FEE_UNVERIFIED:{trade.id}"
+            Incident.incident_key.in_([
+                f"LIVE_FEE_UNVERIFIED:{trade.id}",
+                f"LIVE_FEE_ESTIMATED:{trade.id}",
+            ])
         ).with_for_update()
-    )).scalar_one_or_none()
-    if incident and str(incident.status or "").upper() not in {"RESOLVED", "CLOSED"}:
-        incident.status = "RESOLVED"
-        incident.resolved_at = utcnow()
-        incident.resolved_by = "system:broker-fee-reconciliation"
-        incident.updated_at = utcnow()
+    )).scalars().all()
+    for incident in incidents:
+        if str(incident.status or "").upper() not in {"RESOLVED", "CLOSED"}:
+            incident.status = "RESOLVED"
+            incident.resolved_at = utcnow()
+            incident.resolved_by = "system:broker-fee-reconciliation"
+            incident.updated_at = utcnow()
 
 
 async def _refresh_live_customer_equity(db, customer_id: int) -> None:
