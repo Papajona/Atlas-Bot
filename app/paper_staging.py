@@ -36,8 +36,9 @@ from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
 # app is not mounted or served; its startup/lifespan is never executed in this process.
 from .main import (
     MarketRequest, _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
-    _customer_paper_group_mark_prices, _supabase_request, _supabase_user,
-    _trusted_client_ip, api_rate_limit, customer_claims, market_data,
+    _customer_paper_group_mark_prices, _legacy_customer_email_conflict,
+    _supabase_request, _supabase_user, _trusted_client_ip, api_rate_limit,
+    customer_claims, market_data,
 )
 
 
@@ -358,9 +359,19 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
-    # A bounded indexed existence query detects any unmapped non-UUID
-    # reference; do not transfer every customer identity to Python per request.
-    identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+    # Existing active customers are not locked by unrelated legacy IDs.
+    # Only a profile already in review is resolved against its own Auth email.
+    # New customer provisioning remains globally fail-closed elsewhere.
+    identity_review_required = False
+    if str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW":
+        stored_email = (await db.execute(
+            select(CustomerProfile.email).where(CustomerProfile.auth_user_id == uid)
+        )).scalar_one_or_none()
+        identity_review_required = (
+            await _legacy_customer_email_conflict(db, uid, str(stored_email))
+            if stored_email
+            else await _has_unmapped_legacy_customer_profile(db, uid)
+        )
     effective_status = (
         "ACTIVE"
         if str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
