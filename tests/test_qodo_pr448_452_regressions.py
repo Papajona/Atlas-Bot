@@ -270,7 +270,8 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
         source.index("def _funding_signature_valid")
     ]
     assert "not str(profile.display_name or" not in customer
-    assert "if not email and (profile is None or not str(profile.email or \"\").strip()):" in customer
+    assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
+    assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
     assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in customer
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" in customer
