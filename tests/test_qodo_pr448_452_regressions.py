@@ -201,3 +201,21 @@ def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain(
     assert "legacy_auth_refs" in gate
     assert "uuid.UUID" in gate
     assert "Paper access is paused until legacy customer identities are manually reviewed" in gate
+
+
+
+def test_paper_customer_summary_is_read_only_and_marks_identity_review():
+    source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
+    summary = source[
+        source.index("async def paper_customer_me"):
+        source.index('@app.get("/api/customer/portfolio")')
+    ]
+    assert "allow_identity_review_summary=True" in summary
+    assert '"identity_review_required": bool(profile.identity_review_required)' in summary
+
+    access = source[
+        source.index("async def get_existing_customer"):
+        source.index("async def _paper_state_guard")
+    ]
+    assert "if not allow_identity_review_summary:" in access
+    assert "identity_review_required=identity_review_required" in access

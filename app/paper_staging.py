@@ -295,7 +295,10 @@ async def _paper_runtime_preflight() -> dict[str, Any]:
 
 
 async def get_existing_customer(
-    authorization: str | None, db, require_aal2: bool = True
+    authorization: str | None,
+    db,
+    require_aal2: bool = True,
+    allow_identity_review_summary: bool = False,
 ):
     """Verify MFA and an already-provisioned customer using SELECTs only; never self-register."""
     claims = await customer_claims(authorization, require_aal2=require_aal2)
@@ -327,14 +330,18 @@ async def get_existing_customer(
             select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
         )
     ).scalars().all()
+    identity_review_required = str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     for legacy_auth_ref in legacy_auth_refs:
         try:
             uuid.UUID(str(legacy_auth_ref))
         except (ValueError, TypeError, AttributeError):
-            raise HTTPException(
-                409,
-                "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
-            )
+            identity_review_required = True
+            if not allow_identity_review_summary:
+                raise HTTPException(
+                    409,
+                    "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
+                )
+            break
 
     # Keep PII/encrypted columns out of the query: this service has no encryption
     # keyring and only needs the numeric tenant ID and active status.
@@ -342,8 +349,13 @@ async def get_existing_customer(
         id=row.id,
         auth_user_id=row.auth_user_id,
         status=row.status,
+        identity_review_required=identity_review_required,
     )
-    if str(getattr(profile, "status", "")).upper() != "ACTIVE":
+    if str(getattr(profile, "status", "")).upper() != "ACTIVE" and not (
+        allow_identity_review_summary
+        and identity_review_required
+        and str(getattr(profile, "status", "")).upper() == "PENDING_IDENTITY_REVIEW"
+    ):
         raise HTTPException(403, "Customer account is not active")
     return profile, claims
 
@@ -586,7 +598,11 @@ async def paper_customer_profile_provision(authorization: str | None = Header(de
 @app.get("/api/customer/me")
 async def paper_customer_me(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
-        profile, claims = await get_existing_customer(authorization, db)
+        # Summary is read-only: show the authenticated user's own Auth PII and
+        # an explicit review flag without granting paper-ledger access.
+        profile, claims = await get_existing_customer(
+            authorization, db, allow_identity_review_summary=True
+        )
     # The paper-staging runtime has a read-only identity role and deliberately
     # no application encryption keyring. Do not select EncryptedText columns
     # from customer_profiles; resolve display PII from the verified Auth user.
@@ -602,6 +618,7 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
         "email": str(user.get("email") or ""),
         "display_name": str(metadata.get("full_name") or metadata.get("name") or "")[:160],
         "status": profile.status,
+        "identity_review_required": bool(profile.identity_review_required),
     }
 
 
