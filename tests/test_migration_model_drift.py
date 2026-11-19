@@ -47,16 +47,14 @@ def _flatten(diff):
             yield entry
 
 
-# Keep the optional test defined so a direct migration_drift run collects it.
-# The mandatory application suite explicitly excludes this marker, so the per-test
-# skip cannot add skipped cases to its no-skips JUnit report.
+# The mandatory application suite excludes this marker, so an explicit skip
+# is reported honestly by standalone opt-in runs without affecting no-skips CI.
 @pytest.mark.migration_drift
+@pytest.mark.skipif(
+    not URL,
+    reason="ATLAS_MIGRATION_DRIFT_URL not set; drift check not run",
+)
 def test_models_have_matching_migrations():
-    # The mandatory suite rejects skipped tests. Keep this opt-in check collectable
-    # without a configured database, and execute the real drift query when supplied.
-    if not URL:
-        # No optional database was configured. This is a deliberate no-op, not a skipped test.
-        return
     missing = []
     for entry in _flatten(_collect_diff()):
         kind = entry[0]
