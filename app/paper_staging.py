@@ -14,7 +14,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field
 from sqlalchemy import select, text
