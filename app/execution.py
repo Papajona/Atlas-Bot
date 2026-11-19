@@ -1088,7 +1088,7 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             attribution_trade_id = int(entry_trade_id or trade.id)
             existing_count = await db.execute(select(func.count(StrategyOutcome.id)).where(StrategyOutcome.trade_id == attribution_trade_id))
             sequence = int(existing_count.scalar_one() or 0) + 1
-            notional_decimal = abs(Decimal(str(delta)) * Decimal(str(fill_price)))
+            notional_decimal = abs(closing_decimal * Decimal(str(fill_price)))
             return_bps = float(
                 realized_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
