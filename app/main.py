@@ -1430,6 +1430,8 @@ from .schemas import (
 
 docs_url = "/docs" if settings.docs_enabled else None
 redoc_url = "/redoc" if settings.docs_enabled else None
+# The schema lists every route and model; it must be as private as /docs and /redoc.
+openapi_url = "/openapi.json" if settings.docs_enabled else None
 @contextlib.asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Use FastAPI's lifespan protocol for deterministic worker startup/shutdown."""
@@ -1440,7 +1442,7 @@ async def app_lifespan(app: FastAPI):
         await shutdown()
 
 
-app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, lifespan=app_lifespan)
+app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url, lifespan=app_lifespan)
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
@@ -3158,7 +3160,10 @@ async def _reconciliation_loop():
     """Reconcile providers independently; repeated failures raise durable incidents."""
     while True:
         await asyncio.sleep(max(15, settings.reconciliation_interval_seconds))
-        should_crypto = settings.live_trading_enabled and bool(settings.exchange_api_key and settings.exchange_api_secret)
+        # sync_live_account() overwrites AppState equity/positions from the exchange, so every live
+        # gate must also require not paper_trading (as execution.py and live_execution.py do).
+        should_crypto = (settings.live_trading_enabled and not settings.paper_trading
+                         and bool(settings.exchange_api_key and settings.exchange_api_secret))
         should_oanda = bool(settings.oanda_account_id and settings.oanda_api_token and
                            settings.oanda_practice and settings.forex_demo_enabled)
         if not (should_crypto or should_oanda):
