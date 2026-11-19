@@ -10,10 +10,13 @@ migration, using a live database upgrade as the authoritative migration operatio
 """
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 from alembic import context, op
 import sqlalchemy as sa
+
+from app.crypto import decrypt_text
 
 
 revision = "0061_strategy_outcome_fill_aggregation"
@@ -67,6 +70,39 @@ def _reconstruct_notional(row) -> Decimal:
     return Decimal("0")
 
 
+
+
+def _reconstruct_fill_price(row) -> Decimal | None:
+    """Read the exact price captured for this fill, never the order's final average."""
+    raw = row.get("metadata_json")
+    if not raw:
+        return None
+    try:
+        decoded = decrypt_text(str(raw))
+        metadata = json.loads(decoded)
+        if not isinstance(metadata, dict):
+            return None
+        price = Decimal(str(metadata.get("fill_price") or 0))
+    except Exception:
+        # Missing encryption keys or corrupt legacy metadata make the fill
+        # unverifiable; they must not be replaced with the order's final VWAP.
+        return None
+    return price if price.is_finite() and price > 0 else None
+
+
+def _completed_episode_quantity_is_reconciled(
+    episode_status: str | None,
+    expected_entry_quantity: Decimal,
+    actual_closing_quantity: Decimal,
+) -> bool:
+    """A completed lifecycle must account for every unit, including zero-PnL closes."""
+    return (
+        str(episode_status or "").upper() == "COMPLETED"
+        and expected_entry_quantity.is_finite()
+        and actual_closing_quantity.is_finite()
+        and expected_entry_quantity > 0
+        and _close_enough(actual_closing_quantity, expected_entry_quantity)
+    )
 
 
 def _reconstruct_trade_fee_total(
@@ -135,17 +171,16 @@ def upgrade() -> None:
     outcome_columns = {
         column["name"] for column in inspector.get_columns("strategy_outcomes")
     }
-    position_columns = {
-        column["name"] for column in inspector.get_columns("positions")
-    }
     trade_columns = {
         column["name"] for column in inspector.get_columns("trades")
     }
 
-    # Historical 0035 schema declared net-result fields NOT NULL. Revision
-    # 0061 writes NULL when their fee basis cannot be verified, so relax the
-    # existing columns before the outcome backfill runs. Keep server defaults
-    # for mixed-version writers during rolling deployment.
+
+    # Revision 0061 writes NULL when the historical fee basis cannot be
+    # established. These three result fields were introduced as NOT NULL in 0035,
+    # so relax the existing columns before any historical row is updated.
+    # Keep the server defaults for mixed-version writers; only nullability
+    # changes here.
     if bind.dialect.name == "sqlite":
         with op.batch_alter_table("strategy_outcomes") as batch_op:
             if "net_pnl" in outcome_columns:
@@ -158,6 +193,13 @@ def upgrade() -> None:
             if "net_return_bps" in outcome_columns:
                 batch_op.alter_column(
                     "net_return_bps",
+                    existing_type=sa.Float(),
+                    existing_nullable=False,
+                    nullable=True,
+                )
+            if "return_bps" in outcome_columns:
+                batch_op.alter_column(
+                    "return_bps",
                     existing_type=sa.Float(),
                     existing_nullable=False,
                     nullable=True,
@@ -179,6 +221,18 @@ def upgrade() -> None:
                 existing_nullable=False,
                 nullable=True,
             )
+        if "return_bps" in outcome_columns:
+            op.alter_column(
+                "strategy_outcomes",
+                "return_bps",
+                existing_type=sa.Float(),
+                existing_nullable=False,
+                nullable=True,
+            )
+
+    position_columns = {
+        column["name"] for column in inspector.get_columns("positions")
+    }
 
     financial_type = sa.Numeric(38, 18, asdecimal=False)
     if "fee_reconciliation_pending" not in trade_columns:
@@ -242,6 +296,15 @@ def upgrade() -> None:
             ),
         )
 
+    def _driver_safe_values(values: dict):
+        """SQLite's DBAPI cannot bind Decimal directly to untyped text() SQL."""
+        if bind.dialect.name != "sqlite":
+            return values
+        return {
+            key: float(value) if isinstance(value, Decimal) else value
+            for key, value in values.items()
+        }
+
     update_outcome = sa.text("""
         UPDATE strategy_outcomes
         SET closing_quantity = :closing_quantity,
@@ -270,17 +333,45 @@ def upgrade() -> None:
     outcome_query = sa.text("""
         SELECT id, trade_id, closing_trade_id, sequence,
                realized_pnl, fee, net_pnl, return_bps, net_return_bps,
-               closing_quantity, closing_notional, lifecycle_status
+               closing_quantity, closing_notional, lifecycle_status, metadata_json
         FROM strategy_outcomes
         WHERE trade_id = :trade_id
           AND lifecycle_status IN ('OPEN', 'CLOSED')
         ORDER BY sequence, id
     """)
     trade_lookup = sa.text("""
-        SELECT id, filled_quantity, average_fill_price, notional, fee, mode
+        SELECT id, filled_quantity, average_fill_price, notional, fee, mode,
+               customer_id, side, exchange, symbol, created_at, updated_at
         FROM trades
         WHERE id IN :trade_ids
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
+    episode_query = sa.text("""
+        SELECT entry_quantity, status, closing_trade_id, entry_at, exit_at
+        FROM trade_learning_episodes
+        WHERE entry_trade_id = :entry_trade_id
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+    closing_order_query = sa.text("""
+        SELECT id
+        FROM trades
+        WHERE id <> :entry_trade_id
+          AND customer_id IS NOT DISTINCT FROM :customer_id
+          AND exchange = :exchange
+          AND symbol = :symbol
+          AND mode = :mode
+          AND lower(side) = :closing_side
+          AND created_at >= :entry_at
+          AND created_at <= :exit_at
+          -- created_at is order submission time, not fill time. Only infer
+          -- an unlinked closing order when its latest update (the persisted
+          -- fill/snapshot evidence) was observed by the lifecycle exit.
+          -- Orders updated after exit may have filled into a later position.
+          AND updated_at IS NOT NULL
+          AND updated_at <= :exit_at
+          AND filled_quantity > 0
+        ORDER BY created_at, id
+    """)
 
     while True:
         trade_ids = [
@@ -304,11 +395,53 @@ def upgrade() -> None:
             if not rows:
                 continue
 
-            closing_ids = sorted({
+            # Reconcile against the completed position episode, not only the
+            # StrategyOutcome rows. The old writer did not create outcome rows for
+            # zero-PnL partial closes, so those missing order IDs must be discovered
+            # independently from all opposite-side trades during the episode.
+            episode_raw = bind.execute(
+                episode_query, {"entry_trade_id": entry_trade_id}
+            ).mappings().first()
+            episode = dict(episode_raw) if episode_raw is not None else None
+
+            entry_raw = bind.execute(
+                trade_lookup, {"trade_ids": [entry_trade_id]}
+            ).mappings().first()
+            entry_trade = dict(entry_raw) if entry_raw is not None else None
+            candidate_closing_ids = []
+            if (
+                episode is not None
+                and str(episode.get("status") or "").upper() == "COMPLETED"
+                and episode.get("entry_at") is not None
+                and episode.get("exit_at") is not None
+                and entry_trade is not None
+            ):
+                entry_side = str(entry_trade.get("side") or "").lower()
+                closing_side = "sell" if entry_side == "buy" else "buy"
+                candidate_closing_ids = [
+                    int(value)
+                    for value in bind.execute(closing_order_query, {
+                        "entry_trade_id": entry_trade_id,
+                        "customer_id": entry_trade.get("customer_id"),
+                        "exchange": entry_trade.get("exchange"),
+                        "symbol": entry_trade.get("symbol"),
+                        "mode": entry_trade.get("mode"),
+                        "closing_side": closing_side,
+                        "entry_at": episode.get("entry_at"),
+                        "exit_at": episode.get("exit_at"),
+                    }).scalars().all()
+                ]
+
+            outcome_closing_ids = {
                 int(row["closing_trade_id"])
                 for row in rows
                 if row["closing_trade_id"] is not None
-            })
+            }
+            closing_ids = sorted(
+                outcome_closing_ids
+                | set(candidate_closing_ids)
+                | ({int(episode["closing_trade_id"])} if episode and episode.get("closing_trade_id") is not None else set())
+            )
             source_trade_ids = sorted({entry_trade_id, *closing_ids})
             source_trades = {
                 int(row["id"]): dict(row)
@@ -325,53 +458,100 @@ def upgrade() -> None:
                 entry_trade_id, closing_ids, source_trades
             )
 
-            # Reconstruct fill notionals, then verify every closing order's full
-            # filled notional/quantity is represented. This catches historical
-            # zero-PnL fills that the old producer never inserted.
-            row_notionals = {}
-            row_quantities = {}
-            complete = bool(closing_ids) and len(closing_ids) == len({
-                int(row["closing_trade_id"])
-                for row in rows
-                if row["closing_trade_id"] is not None
-            })
-            notionals_by_closing_trade = {}
-            quantities_by_closing_trade = {}
+            row_notionals: dict[int, Decimal] = {}
+            row_quantities: dict[int, Decimal] = {}
+            notionals_by_closing_trade: dict[int, Decimal] = {}
+            quantities_by_closing_trade: dict[int, Decimal] = {}
+            row_counts_by_closing_trade: dict[int, int] = {}
+            for row in rows:
+                if row["closing_trade_id"] is not None:
+                    close_id = int(row["closing_trade_id"])
+                    row_counts_by_closing_trade[close_id] = row_counts_by_closing_trade.get(close_id, 0) + 1
+
+            expected_entry_quantity = (
+                Decimal(str(episode.get("entry_quantity") or 0))
+                if episode is not None else Decimal("0")
+            )
+            complete = bool(
+                episode is not None
+                and str(episode.get("status") or "").upper() == "COMPLETED"
+                and episode.get("exit_at") is not None
+                and expected_entry_quantity.is_finite()
+                and expected_entry_quantity > 0
+                and closing_ids
+            )
 
             for row in rows:
                 closing_id = row["closing_trade_id"]
                 if closing_id is None or int(closing_id) not in closing_trades:
                     complete = False
                     continue
-                closing_trade = closing_trades[int(closing_id)]
+                close_id = int(closing_id)
                 notional = _reconstruct_notional(row)
                 quantity = Decimal(str(row["closing_quantity"] or 0))
-                avg_price = Decimal(str(closing_trade["average_fill_price"] or 0))
-                if quantity <= 0 and notional > 0 and avg_price > 0:
-                    quantity = notional / avg_price
+                if quantity <= 0 and notional > 0:
+                    # Each row records its own fill_price. The order's
+                    # average_fill_price is cumulative and is not a valid divisor
+                    # when that order filled at multiple prices.
+                    fill_price = _reconstruct_fill_price(row)
+                    if fill_price is not None:
+                        quantity = notional / fill_price
                 if notional <= 0 or quantity <= 0:
                     complete = False
                 row_notionals[int(row["id"])] = notional
                 row_quantities[int(row["id"])] = quantity
-                notionals_by_closing_trade[int(closing_id)] = (
-                    notionals_by_closing_trade.get(int(closing_id), Decimal("0")) + notional
+                notionals_by_closing_trade[close_id] = (
+                    notionals_by_closing_trade.get(close_id, Decimal("0")) + notional
                 )
-                quantities_by_closing_trade[int(closing_id)] = (
-                    quantities_by_closing_trade.get(int(closing_id), Decimal("0")) + quantity
+                quantities_by_closing_trade[close_id] = (
+                    quantities_by_closing_trade.get(close_id, Decimal("0")) + quantity
                 )
 
-            for closing_id in closing_ids:
+            # A reversal order may close the old lifecycle and open the new one.
+            # Allocate only the remaining old-position quantity to its closing side.
+            remaining_expected_quantity = expected_entry_quantity
+            ordered_closing_ids = sorted(
+                closing_ids,
+                key=lambda close_id: (
+                    closing_trades.get(close_id, {}).get("created_at") is None,
+                    closing_trades.get(close_id, {}).get("created_at"),
+                    close_id,
+                ),
+            )
+            for closing_id in ordered_closing_ids:
                 order = closing_trades.get(closing_id)
                 if order is None:
                     complete = False
                     continue
-                expected_quantity = Decimal(str(order["filled_quantity"] or 0))
+                order_filled_quantity = Decimal(str(order.get("filled_quantity") or 0))
+                if not order_filled_quantity.is_finite() or order_filled_quantity <= 0:
+                    complete = False
+                    continue
+                expected_order_quantity = min(
+                    order_filled_quantity, remaining_expected_quantity
+                )
+                if expected_order_quantity <= 0:
+                    complete = False
+                    continue
                 actual_notional = notionals_by_closing_trade.get(closing_id, Decimal("0"))
                 actual_quantity = quantities_by_closing_trade.get(closing_id, Decimal("0"))
                 if not _reconcile_closing_order_fill_evidence(
-                    expected_quantity, actual_quantity, actual_notional
+                    expected_order_quantity, actual_quantity, actual_notional
                 ):
                     complete = False
+                remaining_expected_quantity = max(
+                    Decimal("0"), remaining_expected_quantity - expected_order_quantity
+                )
+
+            if remaining_expected_quantity > _AMOUNT_TOLERANCE:
+                complete = False
+            actual_lifecycle_quantity = sum(row_quantities.values(), Decimal("0"))
+            if not _completed_episode_quantity_is_reconciled(
+                episode.get("status") if episode else None,
+                expected_entry_quantity,
+                actual_lifecycle_quantity,
+            ):
+                complete = False
 
             has_closed_fill = any(
                 str(row["lifecycle_status"] or "").upper() == "CLOSED"
@@ -387,7 +567,7 @@ def upgrade() -> None:
             total_fee = fee_total if fee_basis_complete else Decimal("0")
             total_net = (
                 total_realized - total_fee
-                if fee_basis_complete else Decimal("0")
+                if fee_basis_complete else None
             )
             total_notional = sum(row_notionals.values(), Decimal("0"))
             total_quantity = sum(row_quantities.values(), Decimal("0"))
@@ -397,18 +577,18 @@ def upgrade() -> None:
             if not has_closed_fill:
                 for row in rows:
                     row_id = int(row["id"])
-                    bind.execute(update_outcome, {
+                    bind.execute(update_outcome, _driver_safe_values({
                         "id": row_id,
                         "closing_quantity": row_quantities.get(row_id, Decimal("0")) if complete else Decimal("0"),
                         "closing_notional": row_notionals.get(row_id, Decimal("0")) if complete else Decimal("0"),
                         "realized_pnl": row["realized_pnl"],
                         "fee": row["fee"],
-                        "net_pnl": row["net_pnl"],
+                        "net_pnl": row["net_pnl"] if fee_basis_complete else None,
                         "return_bps": row["return_bps"],
-                        "net_return_bps": row["net_return_bps"],
+                        "net_return_bps": row["net_return_bps"] if fee_basis_complete else None,
                         "lifecycle_status": row["lifecycle_status"],
                         "fee_basis_complete": fee_basis_complete,
-                    })
+                    }))
                 continue
 
             # A completed trade must have every closing order and every filled
@@ -423,41 +603,37 @@ def upgrade() -> None:
             )
             net_return_bps = (
                 float(total_net / total_notional * Decimal("10000"))
-                if valid_notional > 0 and fee_basis_complete else 0.0
+                if valid_notional > 0 and fee_basis_complete and total_net is not None else None
             )
             for row in rows[:-1]:
-                bind.execute(update_outcome, {
+                bind.execute(update_outcome, _driver_safe_values({
                     "id": int(row["id"]),
                     "closing_quantity": row_quantities.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                     "closing_notional": row_notionals.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                     "realized_pnl": row["realized_pnl"],
                     "fee": row["fee"],
-                    "net_pnl": row["net_pnl"],
+                    "net_pnl": row["net_pnl"] if fee_basis_complete else None,
                     "return_bps": row["return_bps"],
-                    "net_return_bps": row["net_return_bps"],
+                    "net_return_bps": row["net_return_bps"] if fee_basis_complete else None,
                     "lifecycle_status": "PARTIAL_CLOSED",
                     "fee_basis_complete": fee_basis_complete,
-                })
-            bind.execute(update_outcome, {
+                }))
+            bind.execute(update_outcome, _driver_safe_values({
                 "id": int(final["id"]),
                 "closing_quantity": valid_quantity,
                 "closing_notional": valid_notional,
                 "realized_pnl": total_realized,
                 "fee": total_fee,
                 "net_pnl": total_net,
-                "return_bps": gross_return_bps,
+                "return_bps": gross_return_bps if valid_notional > 0 else None,
                 "net_return_bps": net_return_bps,
                 "lifecycle_status": "CLOSED",
                 "fee_basis_complete": fee_basis_complete,
-            })
+            }))
 
-    # Server defaults are used only to make existing rows valid while adding
-    # NOT NULL fields; the ORM owns defaults after the migration completes.
-    op.alter_column("strategy_outcomes", "closing_quantity", server_default=None)
-    op.alter_column("strategy_outcomes", "closing_notional", server_default=None)
-    op.alter_column("positions", "entry_fee", server_default=None)
-    op.alter_column("positions", "entry_fee_basis_known", server_default=None)
-    op.alter_column("strategy_outcomes", "fee_basis_complete", server_default=None)
+    # Preserve database defaults for mixed-version deployments. New application
+    # code maps these columns, while an older Cloud Run revision can still write
+    # rows safely during a rolling upgrade.
 
     # Backfill remaining entry fees only where the original entry order and all
     # recorded close quantities exactly reconcile to the still-open position.
@@ -519,11 +695,11 @@ def upgrade() -> None:
                 entry_trades.get(entry_id), remaining_quantity, closed_quantity
             )
             known = remaining_fee is not None
-            bind.execute(update_position, {
+            bind.execute(update_position, _driver_safe_values({
                 "id": int(position["id"]),
                 "entry_fee": remaining_fee if known else Decimal("0"),
                 "known": known,
-            })
+            }))
 
     index_names = {
         item["name"] for item in inspector.get_indexes("strategy_outcomes")
@@ -534,6 +710,8 @@ def upgrade() -> None:
             "strategy_outcomes",
             ["customer_id", "lifecycle_status", "created_at"],
         )
+
+
     trade_index_names = {
         item["name"] for item in inspector.get_indexes("trades")
     }

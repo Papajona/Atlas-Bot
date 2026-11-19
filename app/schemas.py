@@ -134,6 +134,8 @@ class StrategyLabRequest(BaseModel):
     # None means infer timeframe from the prompt; a selected value is an explicit override.
     timeframe: str | None = Field(default=None, pattern="^(5m|15m|30m|1h|4h|1d)$")
     days: int = Field(default=365, ge=60, le=1500)
+    # Explicit per-submission consent. Missing/false is always no capture.
+    benchmark_opt_in: bool = False
 
 
 class ExecutorCreateRequest(BaseModel):
@@ -163,6 +165,8 @@ class StrategyBuilderRequest(BaseModel):
     # Keep prompt inference as the default for the compatibility endpoint too.
     # An explicit value remains a caller-selected override.
     timeframe: str | None = Field(default=None, pattern="^(5m|15m|30m|1h|4h|1d)$")
+    # Explicit per-submission consent. Missing/false is always no capture.
+    benchmark_opt_in: bool = False
 
 
 class GridBotRequest(BaseModel):

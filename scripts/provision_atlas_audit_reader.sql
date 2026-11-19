@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated read-only identity for restore and provider-ledger audits.
--- Apply only after alembic is at 0061_strategy_outcome_fill_aggregation and after a
+-- Apply only after alembic is at 0062_customer_benchmark_capture and after a
 -- recoverable backup has been independently verified. Never reuse an existing role.
 BEGIN;
 
@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the dedicated audit login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0061_strategy_outcome_fill_aggregation') THEN
-        RAISE EXCEPTION 'database must be at 0061_strategy_outcome_fill_aggregation before audit role provisioning';
+                   WHERE version_num = '0062_customer_benchmark_capture') THEN
+        RAISE EXCEPTION 'database must be at 0062_customer_benchmark_capture before audit role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)

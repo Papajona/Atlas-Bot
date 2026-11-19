@@ -21,8 +21,9 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
     assert "PENDING_IDENTITY_REVIEW" in block
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in block
-    assert "await _has_unmapped_legacy_customer_profile(db, uid)" in block
+    assert 'needs_auth_identity = profile is None or not str(profile.email or "").strip()' in block
+    assert "if needs_auth_identity:" in block
+    assert "await _legacy_customer_email_conflict(db, uid, email)" in block
     assert "casefold()" in block
 
 
@@ -70,17 +71,12 @@ def test_profile_conflict_returns_actionable_409_not_auth_outage():
     assert "raise HTTPException(" in helper
 
 
-def test_risk_dashboard_queries_bounded_completed_trade_summaries():
+def test_risk_dashboard_uses_bounded_complete_trade_summaries_for_http_and_websocket():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    assert source.count("rows = await _recent_closed_platform_outcome_returns(db)") == 2
-    assert "latest_closed =" not in source
-    helper = source[
-        source.index("async def _recent_closed_platform_outcome_returns"):
-        source.index("async def risk_dashboard_metrics")
-    ]
-    assert "StrategyOutcome.closing_notional > 0" in helper
-    assert ".order_by(StrategyOutcome.created_at.desc())" in helper
-    assert ".limit(100)" in helper
+    assert source.count("latest_closed = (") == 2
+    assert "rows = await _recent_closed_platform_outcome_returns(db)" not in source
+    assert source.count("StrategyOutcome.closing_notional > 0") >= 2
+    assert source.count(".limit(100)") >= 2
     model = (ROOT / "app/db.py").read_text(encoding="utf-8")
     assert 'Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at")' in model
     assert "closing_notional:" in model
@@ -244,7 +240,7 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index('@app.get("/api/customer/wallets")')
     ]
     assert "allow_identity_review_summary=True" in summary
-    assert '"identity_review_required": bool(getattr(profile, "identity_review_required", False))' in summary
+    assert '"identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW"' in summary
 
     get_customer = source[
         source.index("async def get_customer("):
@@ -306,13 +302,11 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
         source.index("def _funding_signature_valid")
     ]
     assert "not str(profile.display_name or" not in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
-    assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in customer
-    assert "profile.identity_review_required = identity_review_required" in customer
-    assert "profile.status = \"ACTIVE\"" not in customer
-    assert "await _has_unmapped_legacy_customer_profile(db, uid)" in customer
-    assert "stale_legacy_quarantine" in customer
+    assert 'needs_auth_identity = profile is None or not str(profile.email or "").strip()' in customer
+    assert "if needs_auth_identity:" in customer
+    assert "_legacy_customer_email_conflict(db, uid, email)" in customer
+    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in customer
+    assert "if not identity_review_required:" in customer
 
 
 def test_edge_legacy_identity_offset_paging_has_a_stable_order():

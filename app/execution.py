@@ -1563,6 +1563,7 @@ async def _apply_fill_to_position(
                 ) if notional > 0 else 0.0
             if abs(float(position.quantity or 0.0)) < 1e-12:
                 episode.status = "COMPLETED"
+                episode.closing_trade_id = trade.id
                 episode.exit_price = float(fill_price)
                 episode.exit_at = utcnow()
             elif episode.entry_quantity > 0:
