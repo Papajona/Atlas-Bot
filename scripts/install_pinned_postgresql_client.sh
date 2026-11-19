@@ -23,7 +23,7 @@ apt_with_retries() {
       rc=$?
     fi
 
-    printf '%s\\n' "$output"
+    printf '%s\n' "$output"
     # apt-get update can exit 0 while silently retaining stale indexes after
     # an unavailable mirror. Treat those warnings as a failed attempt so the
     # pinned client install never appears green on partial package metadata.
@@ -56,7 +56,7 @@ curl --fail --silent --show-error --location \
 
 source /etc/os-release
 : "$VERSION_CODENAME"
-printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\\n' \
+printf 'deb [signed-by=%s] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' \
   "$KEYRING" "$VERSION_CODENAME" \
   | sudo tee "$SOURCE_LIST" >/dev/null
 
@@ -67,17 +67,17 @@ test -x "$POSTGRES_BIN_DIR/pg_restore"
 test -x "$POSTGRES_BIN_DIR/pg_dump"
 restore_version="$("$POSTGRES_BIN_DIR/pg_restore" --version)"
 dump_version="$("$POSTGRES_BIN_DIR/pg_dump" --version)"
-if ! grep -Eq '\\(PostgreSQL\\) 17(\\.|$)' <<<"$restore_version"; then
+if ! grep -Eq '\(PostgreSQL\) 17(\.|$)' <<<"$restore_version"; then
   echo "BLOCKED: expected PostgreSQL 17 pg_restore, got: $restore_version" >&2
   exit 1
 fi
-if ! grep -Eq '\\(PostgreSQL\\) 17(\\.|$)' <<<"$dump_version"; then
+if ! grep -Eq '\(PostgreSQL\) 17(\.|$)' <<<"$dump_version"; then
   echo "BLOCKED: expected PostgreSQL 17 pg_dump, got: $dump_version" >&2
   exit 1
 fi
 
 if [[ -v GITHUB_PATH ]] && [[ -n "$GITHUB_PATH" ]]; then
-  printf '%s\\n' "$POSTGRES_BIN_DIR" >> "$GITHUB_PATH"
+  printf '%s\n' "$POSTGRES_BIN_DIR" >> "$GITHUB_PATH"
 fi
 export PATH="$POSTGRES_BIN_DIR:$PATH"
 
