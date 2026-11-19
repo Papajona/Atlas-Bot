@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 
 from .db import CustomerProfile
 
@@ -31,13 +31,13 @@ async def has_unmapped_legacy_customer_identity(db) -> bool:
     statement = select(column)
 
     if dialect == "postgresql":
-        statement = statement.where(column.op("!~*")(_UUID_RE)).limit(1)
+        statement = statement.where(column.op("!~*")(literal_column("'" + _UUID_RE + "'"))).limit(1)
         result = await db.execute(statement)
         return result.first() is not None
 
     if dialect == "sqlite":
         statement = statement.where(
-            func.lower(column).op("NOT GLOB")(_UUID_GLOB)
+            func.lower(column).op("NOT GLOB")(literal_column("'" + _UUID_GLOB + "'"))
         ).limit(1)
         result = await db.execute(statement)
         return result.first() is not None
