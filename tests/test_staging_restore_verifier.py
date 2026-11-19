@@ -81,7 +81,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     provider_verifier = Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
-    expected = "0061_strategy_outcome_fill_aggregation"
+    expected = "0062_customer_benchmark_capture"
 
     assert f"--expected-revision {expected}" in workflow
     assert f"--expected-revision {expected}" in reconciliation_workflow

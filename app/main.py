@@ -26,13 +26,13 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .paper_execution_model import configured_paper_execution_settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, BenchmarkPromptCapture, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -1604,6 +1604,44 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
+async def _benchmark_capture_retention_loop() -> None:
+    """Delete expired consent captures hourly, even when pg_cron is unavailable."""
+    from .benchmark_capture import (
+        benchmark_capture_permissions,
+        purge_expired_benchmark_captures,
+    )
+
+    while True:
+        try:
+            async with SessionLocal() as db:
+                permissions = await benchmark_capture_permissions(db)
+                if permissions["can_delete"]:
+                    deleted = await purge_expired_benchmark_captures(db)
+                    await db.commit()
+                    _mark_worker_loop_success("benchmark-capture-retention")
+                else:
+                    # Staging's paper-reader role intentionally has no access to
+                    # opt-in benchmark captures. Do not widen it or emit repeated
+                    # permission errors; the API-capable worker owns retention.
+                    state = _worker_loop_health.setdefault(
+                        "benchmark-capture-retention", {"restart_count": 0}
+                    )
+                    state["status"] = "DISABLED"
+                    state["reason"] = "database_role_has_no_benchmark_capture_delete"
+                    deleted = 0
+            if deleted:
+                logger.info(
+                    "benchmark_capture_retention_deleted count=%s",
+                    deleted,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _mark_worker_loop_failure("benchmark-capture-retention", exc)
+            logger.exception("benchmark_capture_retention_cleanup_failed")
+        await asyncio.sleep(60 * 60)
+
+
 async def startup():
     global _background_task, _usdt_task
     assert_multidict_safe_backend()
@@ -1692,6 +1730,15 @@ async def startup():
             _track_worker_task(_supervise_worker_loop(_executor_controller_loop, "executor-controller"))
     elif process_role == "job":
         _track_worker_task(_heartbeat_loop())
+
+    # pg_cron is used when the database offers it; this monitored app-side loop
+    # guarantees a cleanup path on deployments without the extension.
+    _track_worker_task(
+        _supervise_worker_loop(
+            _benchmark_capture_retention_loop,
+            "benchmark-capture-retention",
+        )
+    )
 
 
 async def shutdown():
@@ -3848,60 +3895,6 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     return False
 
 
-async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
-    """Return whether any non-UUID legacy Auth reference remains unmapped."""
-    bind_getter = getattr(db, "get_bind", None)
-    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
-    dialect = getattr(getattr(bind, "dialect", None), "name", "")
-    if dialect == "postgresql":
-        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
-        statement = select(CustomerProfile.id).where(
-            CustomerProfile.auth_user_id != auth_user_id,
-            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
-        ).limit(1)
-        return (await db.execute(statement)).scalar_one_or_none() is not None
-    if dialect == "sqlite":
-        uuid_glob = (
-            "[0-9a-fA-F]" * 8 + "-"
-            + "[0-9a-fA-F]" * 4 + "-"
-            + "[0-9a-fA-F]" * 4 + "-"
-            + "[0-9a-fA-F]" * 4 + "-"
-            + "[0-9a-fA-F]" * 12
-        )
-        statement = select(CustomerProfile.id).where(
-            CustomerProfile.auth_user_id != auth_user_id,
-            ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
-        ).limit(1)
-        return (await db.execute(statement)).scalar_one_or_none() is not None
-    # Conservative fallback for a non-production/test dialect.
-    references = (await db.execute(
-        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
-    )).scalars().all()
-    for reference in references:
-        try:
-            uuid.UUID(str(reference))
-        except (ValueError, TypeError, AttributeError):
-            return True
-    return False
-
-
-async def _customer_profile_effectively_active(db, profile) -> bool:
-    """Resolve only this pending profile's legacy identity; preserve other inactive states."""
-    status = str(getattr(profile, "status", "") or "").upper()
-    if status == "ACTIVE":
-        return True
-    if status != "PENDING_IDENTITY_REVIEW":
-        return False
-    auth_user_id = str(getattr(profile, "auth_user_id", "") or "")
-    email = str(getattr(profile, "email", "") or "").strip()
-    conflict = (
-        await _legacy_customer_email_conflict(db, auth_user_id, email)
-        if email
-        else await _has_unmapped_legacy_customer_profile(db, auth_user_id)
-    )
-    return not conflict
-
-
 async def get_customer(
     authorization: str | None,
     db,
@@ -3920,62 +3913,49 @@ async def get_customer(
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
-    # Prefer already-persisted encrypted PII when the verified JWT omits a
-    # field. A missing display name is not a reason to call Supabase Auth:
-    # users without name metadata would otherwise trigger an Auth request on
-    # every customer endpoint.
-    if profile is not None:
-        email = email or str(profile.email or "").strip().lower()[:320]
-        name = name or str(profile.display_name or "").strip()[:160]
-
-    # Keyless Edge provisioning leaves encrypted PII empty. Verify Auth and
-    # backfill the email when the existing profile has no encrypted email; do
-    # not let a missing display name trigger a network call. Existing ACTIVE
-    # users are not newly required to reconfirm an email; new profiles are.
-    needs_auth_identity = profile is None or not str(profile.email or "").strip()
-    if needs_auth_identity:
+    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
+    # verified Auth identity here, then let the ORM encrypt values on write.
+    if (profile is not None and (
+        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
+    )) or not email:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
-        auth_email = str(user.get("email") or "").strip().lower()[:320]
-        if profile is None and (not auth_email or not user.get("email_confirmed_at")):
+        if not user.get("email_confirmed_at"):
             raise HTTPException(403, "A confirmed email address is required")
-        email = auth_email or email
+        email = str(user.get("email") or email).strip().lower()[:320]
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
         name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    # New provisioning is paused while legacy non-UUID identities remain.
-    # Existing customers are evaluated per identity, not against a global legacy
-    # count that would incorrectly lock every unrelated customer account.
-    if profile is None:
-        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
-        if identity_review_required:
-            raise HTTPException(
-                409,
-                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-            )
-    else:
-        identity_review_required = False
-        pending_review = str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-        # Only a pending identity or an Auth-backed email backfill needs a
-        # legacy comparison. Active profiles with an existing email must not be
-        # blocked by other customers' unmapped legacy references.
-        if pending_review or needs_auth_identity:
-            identity_review_required = (
-                await _legacy_customer_email_conflict(db, uid, email)
-                if email
-                else await _has_unmapped_legacy_customer_profile(db, uid)
-            )
-        profile.identity_review_required = identity_review_required
-        profile.auth_identity_email = email if identity_review_required else ""
+    identity_review_required = (
+        profile is not None
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    )
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "This customer identity is pending manual review. Contact support before using the account.",
+        )
 
-        if identity_review_required and not allow_identity_review_summary:
-            raise HTTPException(
-                409,
-                "This customer identity conflicts with an unmapped legacy profile. Manual identity review is required before using this account.",
-            )
+    # Check legacy non-UUID identities before inserting or activating a new
+    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
+    if profile is None or not str(profile.email or "").strip():
+        if await _legacy_customer_email_conflict(db, uid, email):
+            if profile is None:
+                raise HTTPException(
+                    409,
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                )
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            identity_review_required = True
+            if not allow_identity_review_summary:
+                await db.commit()
+                raise HTTPException(
+                    409,
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                )
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -4003,23 +3983,16 @@ async def get_customer(
                 profile.display_name = name
             await db.flush()
     else:
-        # Never persist an email that matched an unmapped legacy identity; keeping
-        # it transient ensures the next request cannot bypass the manual review.
-        if not identity_review_required:
-            if not profile.email:
-                profile.email = email
-            if not profile.display_name:
-                profile.display_name = name
-            await db.flush()
+        if not profile.email:
+            profile.email = email
+        if not profile.display_name:
+            profile.display_name = name
+        await db.flush()
 
-    stale_legacy_quarantine = (
-        str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-        and not identity_review_required
-    )
-    if str(profile.status or "").upper() != "ACTIVE" and not (
-        (allow_identity_review_summary and identity_review_required
-         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW")
-        or stale_legacy_quarantine
+    if profile.status != "ACTIVE" and not (
+        allow_identity_review_summary
+        and identity_review_required
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     ):
         raise HTTPException(403, "Customer account is not active")
     if not identity_review_required:
@@ -5512,14 +5485,9 @@ async def customer_me(authorization: str | None = Header(default=None)):
         )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
-        return {"id": profile.id, "auth_user_id": profile.auth_user_id,
-                "email": getattr(profile, "auth_identity_email", "") or profile.email,
-                "display_name": profile.display_name, "status": (
-                    "PENDING_IDENTITY_REVIEW"
-                    if bool(getattr(profile, "identity_review_required", False))
-                    else ("ACTIVE" if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW" else profile.status)
-                ),
-                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
+        return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
+                "display_name": profile.display_name, "status": profile.status,
+                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
@@ -6403,7 +6371,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 current_state = await guard_db.get(AppState, 1)
                 latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                 if (
-                    not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
+                    not current_profile or current_profile.status != "ACTIVE"
                     or not current_account or current_account.status != "ACTIVE"
                     or not current_state or current_state.kill_switch
                     or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -6494,7 +6462,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 outcomes = []
                 if profile.id:
                     outcomes = list((await state_db.execute(
-                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED", StrategyOutcome.closing_notional > 0, StrategyOutcome.fee_basis_complete.is_(True))
+                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED")
                         .order_by(desc(StrategyOutcome.created_at)).limit(200)
                     )).scalars().all())
                 current_strategy = bot_row.active_strategy if bot_row else None
@@ -6726,7 +6694,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     current_state = await guard_db.get(AppState, 1)
                     latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                     if (
-                        not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
+                        not current_profile or current_profile.status != "ACTIVE"
                         or not current_account or current_account.status != "ACTIVE"
                         or not current_state or current_state.kill_switch
                         or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -7394,6 +7362,62 @@ async def list_alerts(authorization: str | None = Header(default=None)):
         return [{"id":r.id,"type":r.alert_type,"symbol":r.symbol,"threshold":r.threshold,"condition":r.condition,"channel":r.channel,"status":r.status,"message":r.message,"triggered_at":r.triggered_at.isoformat() if r.triggered_at else None} for r in rows]
 
 
+_BENCHMARK_CAPTURE_RETENTION_DAYS = 90
+
+
+@app.get("/api/customer/benchmark-captures")
+async def customer_benchmark_capture_status(authorization: str | None = Header(default=None)):
+    """Return only the signed-in customer's count of unexpired opted-in captures."""
+    async with SessionLocal() as db:
+        profile, _claims = await get_customer(authorization, db, require_aal2=False)
+        from .benchmark_capture import (
+            benchmark_capture_permissions,
+            purge_expired_benchmark_captures,
+        )
+        permissions = await benchmark_capture_permissions(db)
+        if not permissions["can_select"] or not permissions["can_delete"]:
+            return {
+                "status": "UNAVAILABLE",
+                "count": None,
+                "retention_days": _BENCHMARK_CAPTURE_RETENTION_DAYS,
+                "consent_version": "atlas-strategy-benchmark-v1",
+                "reason": "benchmark capture storage is unavailable to this read-only runtime",
+            }
+        # Expiry deletion is a platform-wide maintenance operation; never
+        # expose its aggregate row count in a customer-scoped response.
+        await purge_expired_benchmark_captures(db)
+        now = datetime.now(timezone.utc)
+        count = int((await db.execute(
+            select(func.count(BenchmarkPromptCapture.id)).where(
+                BenchmarkPromptCapture.customer_id == profile.id,
+                BenchmarkPromptCapture.expires_at > now,
+            )
+        )).scalar_one() or 0)
+        await db.commit()
+        return {"status": "AVAILABLE", "count": count,
+                "retention_days": _BENCHMARK_CAPTURE_RETENTION_DAYS,
+                "consent_version": "atlas-strategy-benchmark-v1"}
+
+
+@app.delete("/api/customer/benchmark-captures")
+async def customer_delete_benchmark_captures(authorization: str | None = Header(default=None)):
+    """Delete all benchmark submissions owned by the authenticated customer."""
+    async with SessionLocal() as db:
+        profile, _claims = await get_customer(authorization, db, require_aal2=True)
+        from .benchmark_capture import benchmark_capture_permissions
+        permissions = await benchmark_capture_permissions(db)
+        if not permissions["can_delete"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Benchmark submissions are unavailable in this read-only runtime",
+            )
+        result = await db.execute(delete(BenchmarkPromptCapture).where(
+            BenchmarkPromptCapture.customer_id == profile.id
+        ))
+        await db.commit()
+        return {"deleted": int(result.rowcount or 0), "remaining": 0}
+
+
 @app.post("/api/customer/strategy-lab/candidates")
 async def create_strategy_candidate(req: StrategyLabRequest, authorization: str | None = Header(default=None)):
     _assert_established_noncrypto(MarketRequest(asset=req.asset, symbol=req.symbol, exchange=req.exchange, timeframe=req.timeframe or "1h", days=req.days))
@@ -7435,9 +7459,23 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
         }
         spec["live_authority"] = False
         spec["ai_provider"] = generated["ai"]
+        benchmark_capture = {"status": "NOT_REQUESTED"}
+        if req.benchmark_opt_in:
+            from .benchmark_capture import capture_strategy_prompt
+            benchmark_capture = await capture_strategy_prompt(
+                db,
+                customer_id=int(profile.id),
+                prompt=req.prompt,
+                native_output={"strategy": spec, "ai": generated["ai"]},
+                asset=req.asset,
+                symbol=req.symbol,
+                exchange=req.exchange,
+                timeframe=candidate_timeframe,
+            )
         row=StrategyCandidate(customer_id=profile.id,name=req.name,asset=req.asset,symbol=req.symbol,exchange=req.exchange,timeframe=candidate_timeframe,spec_json=json.dumps(spec,separators=(",",":")))
         db.add(row); await db.commit(); await db.refresh(row)
-        return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST"}
+        return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST",
+                "benchmark_capture": benchmark_capture}
 
 def _candidate_backtest_config(spec: dict[str, Any]) -> StrategyConfig:
     """Build the backtest config from the candidate's actual supported stop/target parameters."""
@@ -7642,7 +7680,8 @@ async def strategy_builder(req: StrategyBuilderRequest, authorization: str | Non
     # relying on create_strategy_candidate() as an implicit security side effect.
     await customer_claims(authorization, require_aal2=True)
     lab_req = StrategyLabRequest(name=req.name, prompt=req.prompt, asset=req.asset, symbol=req.symbol,
-                                 exchange=req.exchange, timeframe=req.timeframe)
+                                 exchange=req.exchange, timeframe=req.timeframe,
+                                 benchmark_opt_in=req.benchmark_opt_in)
     created = await create_strategy_candidate(lab_req, authorization)
     spec = created["spec"]
     return {
@@ -7652,6 +7691,7 @@ async def strategy_builder(req: StrategyBuilderRequest, authorization: str | Non
         "strategy": spec,
         "ai": spec.get("ai_provider"),
         "status": created["status"],
+        "benchmark_capture": created.get("benchmark_capture", {"status": "NOT_REQUESTED"}),
         "next_step": "POST /api/customer/strategy-lab/candidates/{id}/validate to backtest and walk-forward validate this strategy.".replace("{id}", str(created["id"])),
     }
 
@@ -8025,21 +8065,6 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
         }
 
 
-async def _recent_closed_platform_outcome_returns(db):
-    """Read a bounded sample of one-row-per-trade completion summaries."""
-    return (await db.execute(
-        select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-        .where(
-            StrategyOutcome.customer_id.is_(None),
-            StrategyOutcome.lifecycle_status == "CLOSED",
-            StrategyOutcome.closing_notional > 0,
-            StrategyOutcome.fee_basis_complete.is_(True),
-        )
-        .order_by(StrategyOutcome.created_at.desc())
-        .limit(100)
-    )).all()
-
-
 @app.get("/api/risk-dashboard/metrics")
 async def risk_dashboard_metrics(
     x_admin_token: str | None = Header(default=None),
@@ -8065,7 +8090,32 @@ async def risk_dashboard_metrics(
         worker_health = await _worker_health_snapshot(db)
 
         # Annualise only from the observed cadence of closed strategy outcomes.
-        rows = await _recent_closed_platform_outcome_returns(db)
+        latest_closed = (
+            select(
+                StrategyOutcome.trade_id.label("trade_id"),
+                func.max(StrategyOutcome.sequence).label("latest_sequence"),
+            )
+            .where(
+                StrategyOutcome.customer_id.is_(None),
+                StrategyOutcome.lifecycle_status == "CLOSED",
+            )
+            .group_by(StrategyOutcome.trade_id)
+            .subquery()
+        )
+        rows = (await db.execute(
+            select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+            .join(
+                latest_closed,
+                (StrategyOutcome.trade_id == latest_closed.c.trade_id)
+                & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
+            )
+            .where(
+                StrategyOutcome.customer_id.is_(None),
+                StrategyOutcome.lifecycle_status == "CLOSED",
+            )
+            .order_by(StrategyOutcome.created_at.desc())
+            .limit(100)
+        )).all()
         usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
         ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
         sharpe = ratios["sharpe"]
@@ -8180,7 +8230,32 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                rows = await _recent_closed_platform_outcome_returns(db)
+                latest_closed = (
+                    select(
+                        StrategyOutcome.trade_id.label("trade_id"),
+                        func.max(StrategyOutcome.sequence).label("latest_sequence"),
+                    )
+                    .where(
+                        StrategyOutcome.customer_id.is_(None),
+                        StrategyOutcome.lifecycle_status == "CLOSED",
+                    )
+                    .group_by(StrategyOutcome.trade_id)
+                    .subquery()
+                )
+                rows = (await db.execute(
+                    select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+                    .join(
+                        latest_closed,
+                        (StrategyOutcome.trade_id == latest_closed.c.trade_id)
+                        & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
+                    )
+                    .where(
+                        StrategyOutcome.customer_id.is_(None),
+                        StrategyOutcome.lifecycle_status == "CLOSED",
+                    )
+                    .order_by(StrategyOutcome.created_at.desc())
+                    .limit(100)
+                )).all()
                 usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
                 ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
                 sharpe = ratios["sharpe"]

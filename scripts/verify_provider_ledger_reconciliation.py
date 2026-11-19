@@ -328,7 +328,7 @@ def main() -> int:
     parser.add_argument("--staging-ref", default="")
     parser.add_argument("--production-ref", default="")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
-    parser.add_argument("--expected-revision", default="0061_strategy_outcome_fill_aggregation")
+    parser.add_argument("--expected-revision", default="0062_customer_benchmark_capture")
     parser.add_argument("--output", default="provider-ledger-reconciliation.json")
     args = parser.parse_args()
     import os

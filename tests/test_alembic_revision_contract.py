@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0061_strategy_outcome_fill_aggregation"
+        "0062_customer_benchmark_capture"
     }
 
 
@@ -53,12 +53,12 @@ def test_alembic_revision_contract_rejects_cycles(tmp_path):
 
 
 
-def test_strategy_outcome_aggregation_revision_is_direct_successor_and_single_repository_head():
+def test_benchmark_capture_revision_follows_strategy_outcomes_and_is_single_head():
     migration = (
-        ROOT / "alembic" / "versions" / "0061_strategy_outcome_fill_aggregation.py"
+        ROOT / "alembic" / "versions" / "0062_customer_benchmark_capture.py"
     ).read_text(encoding="utf-8")
-    assert 'revision = "0061_strategy_outcome_fill_aggregation"' in migration
-    assert 'down_revision = "0060_customer_identity_unmapped_index"' in migration
+    assert 'revision = "0062_customer_benchmark_capture"' in migration
+    assert 'down_revision = "0061_strategy_outcome_fill_aggregation"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0061_strategy_outcome_fill_aggregation"
+        "0062_customer_benchmark_capture"
     }
