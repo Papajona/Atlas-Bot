@@ -45,6 +45,8 @@ def test_customer_profile_provision_function_requires_verified_user_totp_aal2_an
     assert ".insert({" in source
     assert '"ALREADY_PROVISIONED"' in source
     assert "23505" in source
+    assert '.ilike("email", email)' in source
+    assert "manual identity review is required" in source
     assert ".update(" not in source
     assert ".upsert(" not in source
     assert "req.json()" not in source
