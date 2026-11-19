@@ -64,9 +64,12 @@ def test_customer_profile_provision_uses_only_authenticated_identity_and_never_r
     assert 'const jwtSubject = String(jwtClaims.sub ?? "").trim()' in source
     assert 'user.id !== userId' in source
     assert 'auth_user_id: userId' in source
-    assert 'email: email.slice(0, 320)' in source
+    assert 'auth_user_id: userId' in source
     assert 'status: "ACTIVE"' in source
-    assert "display_name: displayName" in source
+    assert "created_at: now" in source
+    assert "updated_at: now" in source
+    assert "email: email.slice" not in source
+    assert "display_name: displayName" not in source
     assert "legacy customer record" in source
     assert "ctx.supabaseAdmin" in source
 
