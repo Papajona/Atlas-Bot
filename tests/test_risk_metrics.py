@@ -43,5 +43,10 @@ def test_missing_or_identical_timestamps_are_reported_unannualised():
 
 
 def test_none_nan_and_naive_datetimes_are_handled():
-    out = performance_ratios(RETURNS + [None, float("nan")], [d.replace(tzinfo=None) for d in _days(10)] + [None, None], 2.0)
+    timestamps = [BASE + timedelta(days=10 * i) for i in range(10)]
+    out = performance_ratios(
+        RETURNS + [None, float("nan")],
+        [d.replace(tzinfo=None) for d in timestamps] + [None, None],
+        2.0,
+    )
     assert out["sample_size"] == 10 and out["annualized"] is True
