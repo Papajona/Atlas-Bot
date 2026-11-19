@@ -315,7 +315,8 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 status="FILLED",
             )
             closing = _trade(
-                customer_id=None, side="sell", quantity=0.2,
+                customer_id=None, signal_id="aggregate-close",
+                client_order_id="aggregate-close", side="sell", quantity=0.2,
                 requested_quantity=0.2, filled_quantity=0.2, fee=0,
                 status="FILLED", fee_reconciliation_pending=False,
             )
@@ -390,17 +391,20 @@ def test_reversal_order_fee_true_up_accounts_for_closed_opposite_leg():
     async def check(sessions):
         async with sessions() as db:
             old_entry = _trade(
-                customer_id=None, side="buy", quantity=1,
+                customer_id=None, signal_id="reversal-old-entry",
+                client_order_id="reversal-old-entry", side="buy", quantity=1,
                 requested_quantity=1, filled_quantity=1, fee=0,
                 status="FILLED",
             )
             reversal = _trade(
-                customer_id=None, side="sell", quantity=1.5,
+                customer_id=None, signal_id="reversal-order",
+                client_order_id="reversal-order", side="sell", quantity=1.5,
                 requested_quantity=1.5, filled_quantity=1.5, fee=0,
                 status="FILLED", fee_reconciliation_pending=False,
             )
             short_close = _trade(
-                customer_id=None, side="buy", quantity=0.5,
+                customer_id=None, signal_id="reversal-short-close",
+                client_order_id="reversal-short-close", side="buy", quantity=0.5,
                 requested_quantity=0.5, filled_quantity=0.5, fee=0,
                 status="FILLED",
             )
@@ -489,7 +493,8 @@ def test_open_add_on_fee_true_up_updates_aggregate_position_and_learning_episode
                 status="FILLED",
             )
             add_on = _trade(
-                customer_id=None, side="buy", quantity=0.5,
+                customer_id=None, signal_id="open-position-add-on",
+                client_order_id="open-position-add-on", side="buy", quantity=0.5,
                 requested_quantity=0.5, filled_quantity=0.5, fee=0,
                 status="FILLED", fee_reconciliation_pending=False,
             )
