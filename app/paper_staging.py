@@ -545,19 +545,21 @@ async def paper_customer_profile_provision(authorization: str | None = Header(de
 @app.get("/api/customer/me")
 async def paper_customer_me(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
-        profile, _claims = await get_existing_customer(authorization, db)
-        row = (
-            await db.execute(
-                select(
-                    CustomerProfile.email,
-                    CustomerProfile.display_name,
-                ).where(CustomerProfile.id == profile.id)
-            )
-        ).one()
+        profile, claims = await get_existing_customer(authorization, db)
+    # The paper-staging runtime has a read-only identity role and deliberately
+    # no application encryption keyring. Do not select EncryptedText columns
+    # from customer_profiles; resolve display PII from the verified Auth user.
+    user = await _supabase_user(_bearer_token(authorization))
+    uid = str(claims.get("sub") or "").strip()
+    if not uid or user.get("id") != uid:
+        raise HTTPException(401, "Customer Auth identity could not be verified")
+    if not user.get("email_confirmed_at"):
+        raise HTTPException(403, "A confirmed email address is required")
+    metadata = user.get("user_metadata") or {}
     return {
         "id": profile.id,
-        "email": row.email,
-        "display_name": row.display_name,
+        "email": str(user.get("email") or ""),
+        "display_name": str(metadata.get("full_name") or metadata.get("name") or "")[:160],
         "status": profile.status,
     }
 
