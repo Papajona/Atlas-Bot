@@ -24,7 +24,7 @@ from .paper_execution_model import (
     configured_paper_execution_settings,
     estimate_paper_fill,
 )
-from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
+from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand, Incident,
                   PaperOrderState, PaperBarState, PaperFillEvent, LiveExecutionLease, utcnow)
 from .trading_core import PROFILES
 from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
@@ -768,10 +768,21 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
         order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
     )
     if not fee_quality_is_verified(quality):
-        # Preserve the previously verified fee total. Estimated or denomination-
-        # ambiguous values are not authoritative cumulative fees and must not be
-        # persisted in Trade.fee or charged before the broker reconciles them.
+        # Persist an unresolved denomination across broker snapshots. If a later
+        # snapshot omits fee data, its taker-rate estimate must not replace the
+        # previously reported-but-unverifiable fee or lose the reconciliation need.
+        if quality == UNVERIFIED:
+            trade.fee_reconciliation_pending = True
+        elif bool(getattr(trade, "fee_reconciliation_pending", False)):
+            quality = UNVERIFIED
+            note = (
+                "previously reported fee still has an unresolved denomination; "
+                "estimated fallback withheld pending authoritative reconciliation"
+            )
         return Decimal("0"), prev, quality, note
+    # Only an authoritative denomination clears the pending state. The flag is
+    # changed in the same transaction as the eventual ledger settlement.
+    trade.fee_reconciliation_pending = False
     # Match ledger Numeric(38,6) booking semantics on the cumulative amount, not
     # by rounding each raw delta independently. This avoids repeated sub-micro fees
     # accumulating a different total in the trade row than in the ledger.
@@ -810,15 +821,27 @@ async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, 
             customer_id=trade.customer_id,
         )
         return
-    if delta <= 0:
-        return
-    await settle_trading_fee(
-        db,
-        customer_id=trade.customer_id,
-        fee=delta,
-        reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}",
-        strict=False,
-    )
+    if delta > 0:
+        await settle_trading_fee(
+            db,
+            customer_id=trade.customer_id,
+            fee=delta,
+            reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}",
+            strict=False,
+        )
+    # The broker's authoritative denomination is now known and the fee delta
+    # has been settled successfully (or was already settled by idempotency).
+    # Resolve the matching incident in this same database transaction.
+    incident = (await db.execute(
+        select(Incident).where(
+            Incident.incident_key == f"LIVE_FEE_UNVERIFIED:{trade.id}"
+        ).with_for_update()
+    )).scalar_one_or_none()
+    if incident and str(incident.status or "").upper() not in {"RESOLVED", "CLOSED"}:
+        incident.status = "RESOLVED"
+        incident.resolved_at = utcnow()
+        incident.resolved_by = "system:broker-fee-reconciliation"
+        incident.updated_at = utcnow()
 
 
 async def _refresh_live_customer_equity(db, customer_id: int) -> None:
@@ -2968,7 +2991,10 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
     async with SessionLocal() as db:
         query = select(Trade).where(
             Trade.customer_id.is_not(None),
-            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+            or_(
+                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                Trade.fee_reconciliation_pending.is_(True),
+            ),
             Trade.exchange.in_(list(requested)),
         )
         trades = (await db.execute(query.order_by(Trade.updated_at).limit(200))).scalars().all()
