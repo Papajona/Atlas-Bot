@@ -296,7 +296,9 @@ async def _paper_runtime_preflight() -> dict[str, Any]:
 
 async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     """Check for one non-UUID legacy identity without materializing the profile table."""
-    dialect = db.get_bind().dialect.name
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
     if dialect == "postgresql":
         uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
         statement = select(CustomerProfile.id).where(
@@ -320,7 +322,7 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     # Unknown dialects retain a conservative compatibility path.
     legacy_refs = (await db.execute(
         select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
-    )).scalars()
+    )).scalars().all()
     for reference in legacy_refs:
         try:
             uuid.UUID(str(reference))
