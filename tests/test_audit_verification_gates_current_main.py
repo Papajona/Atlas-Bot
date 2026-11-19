@@ -65,7 +65,7 @@ def test_normal_position_exit_and_reversal_close_strategy_lifecycle():
         execution.index("async def _release_unneeded_order_reserve")
     ]
     assert 'lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN"' in function
-    assert "if position_flat or position_flipped:" in function
+    assert "if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12:" in function
     assert "_aggregate_completed_strategy_outcomes(completed_outcomes)" in function
     assert 'row.lifecycle_status = "PARTIAL_CLOSED"' in execution
     assert 'final.lifecycle_status = "CLOSED"' in execution

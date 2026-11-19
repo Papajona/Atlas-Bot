@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app import execution
 from app.config import settings
 from app.db import Base, CustomerLedgerAccount, Incident, LedgerJournal, StrategyOutcome, Trade
-from app.live_fees import fee_quality_is_verified
+from app.live_fees import fee_quality_is_verified, UNVERIFIED
 
 
 @pytest.fixture(autouse=True)
@@ -134,9 +134,10 @@ def test_fee_without_currency_cannot_create_fee_complete_outcome():
                 0.2,
                 110.0,
             )
-            assert close_quality == "estimated"
+            assert close_quality == UNVERIFIED
+            assert close_delta == Decimal("0")
             assert not fee_quality_is_verified(close_quality)
-            assert "currency missing" in close_note
+            assert "customer charge withheld" in close_note
             await execution._apply_fill_to_position(
                 db,
                 closing,
@@ -154,5 +155,49 @@ def test_fee_without_currency_cannot_create_fee_complete_outcome():
             )).scalar_one()
             assert outcome.lifecycle_status == "CLOSED"
             assert outcome.fee_basis_complete is False
+
+    asyncio.run(with_database(check))
+
+
+
+def test_unknown_fee_currency_is_withheld_then_authoritative_snapshot_settles_exact_delta():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("1000")))
+            trade = _trade()
+            db.add(trade)
+            await db.flush()
+
+            withheld, cumulative, quality, note = execution._prepare_live_fee(
+                trade, {"fee": {"cost": "0.25"}}, 0.1, 60000
+            )
+            assert withheld == Decimal("0")
+            assert cumulative == Decimal("0")
+            assert quality == UNVERIFIED
+            await execution._post_live_fee(db, trade, withheld, cumulative, quality, note)
+            await db.commit()
+
+            balance = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert balance.available == Decimal("1000")
+            incident = (await db.execute(
+                select(Incident).where(
+                    Incident.incident_key == f"LIVE_FEE_UNVERIFIED:{trade.id}"
+                )
+            )).scalar_one()
+            assert incident.severity == "HIGH"
+
+            corrected, final_total, final_quality, final_note = execution._prepare_live_fee(
+                trade, {"fee": {"currency": "USDT", "cost": "0.25"}}, 0.1, 60000
+            )
+            assert corrected == Decimal("0.25")
+            assert final_total == Decimal("0.25")
+            assert final_quality == "exact"
+            await execution._post_live_fee(
+                db, trade, corrected, final_total, final_quality, final_note
+            )
+            await db.commit()
+
+            balance = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert balance.available == Decimal("999.75")
 
     asyncio.run(with_database(check))
