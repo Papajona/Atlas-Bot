@@ -170,3 +170,33 @@ def test_unmapped_legacy_profile_with_blank_email_blocks_new_identity():
     )
     assert legacy is True
     assert unrelated_uuid is False
+
+
+
+def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unlocking_customer_access():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    summary = source[
+        source.index('@app.get("/api/customer/me")'):
+        source.index('@app.get("/api/customer/wallets")')
+    ]
+    assert "allow_identity_review_summary=True" in summary
+    assert '"identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW"' in summary
+
+    get_customer = source[
+        source.index("async def get_customer("):
+        source.index("def _funding_signature_valid")
+    ]
+    assert "if identity_review_required and not allow_identity_review_summary" in get_customer
+    assert "allow_identity_review_summary" in get_customer
+    assert "PENDING_IDENTITY_REVIEW" in get_customer
+
+
+def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain():
+    source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
+    gate = source[
+        source.index("async def get_existing_customer"):
+        source.index("async def _paper_state_guard")
+    ]
+    assert "legacy_auth_refs" in gate
+    assert "uuid.UUID" in gate
+    assert "Paper access is paused until legacy customer identities are manually reviewed" in gate

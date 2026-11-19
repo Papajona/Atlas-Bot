@@ -318,6 +318,24 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
+    # The legacy rows have non-UUID Auth references and blank encrypted PII.
+    # Until those identities are mapped, no UUID-linked paper account can be
+    # proven distinct from them. Do not allow trading against a potentially
+    # duplicate customer profile.
+    legacy_auth_refs = (
+        await db.execute(
+            select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
+        )
+    ).scalars().all()
+    for legacy_auth_ref in legacy_auth_refs:
+        try:
+            uuid.UUID(str(legacy_auth_ref))
+        except (ValueError, TypeError, AttributeError):
+            raise HTTPException(
+                409,
+                "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
+            )
+
     # Keep PII/encrypted columns out of the query: this service has no encryption
     # keyring and only needs the numeric tenant ID and active status.
     profile = SimpleNamespace(

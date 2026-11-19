@@ -3848,7 +3848,12 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     return False
 
 
-async def get_customer(authorization: str | None, db, require_aal2: bool = True):
+async def get_customer(
+    authorization: str | None,
+    db,
+    require_aal2: bool = True,
+    allow_identity_review_summary: bool = False,
+):
     claims = await customer_claims(authorization, require_aal2=require_aal2)
     uid = str(claims.get("sub") or "").strip()
     if not uid:
@@ -3877,7 +3882,11 @@ async def get_customer(authorization: str | None, db, require_aal2: bool = True)
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    if profile is not None and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW":
+    identity_review_required = (
+        profile is not None
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    )
+    if identity_review_required and not allow_identity_review_summary:
         raise HTTPException(
             409,
             "This customer identity is pending manual review. Contact support before using the account.",
@@ -3887,13 +3896,19 @@ async def get_customer(authorization: str | None, db, require_aal2: bool = True)
     # Supabase profile. A match is quarantined, never auto-linked or rewritten.
     if profile is None or not str(profile.email or "").strip():
         if await _legacy_customer_email_conflict(db, uid, email):
-            if profile is not None:
-                profile.status = "PENDING_IDENTITY_REVIEW"
+            if profile is None:
+                raise HTTPException(
+                    409,
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                )
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            identity_review_required = True
+            if not allow_identity_review_summary:
                 await db.commit()
-            raise HTTPException(
-                409,
-                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-            )
+                raise HTTPException(
+                    409,
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                )
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -3927,7 +3942,11 @@ async def get_customer(authorization: str | None, db, require_aal2: bool = True)
             profile.display_name = name
         await db.flush()
 
-    if profile.status != "ACTIVE":
+    if profile.status != "ACTIVE" and not (
+        allow_identity_review_summary
+        and identity_review_required
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    ):
         raise HTTPException(403, "Customer account is not active")
     await _ensure_customer_subscription(db, profile)
     return profile, claims
@@ -5410,11 +5429,18 @@ async def admin_billing_margin(months: int = 1, authorization: str | None = Head
 @app.get("/api/customer/me")
 async def customer_me(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
-        profile, claims = await get_customer(authorization, db)
+        # This endpoint is a read-only identity summary. It may show the verified
+        # user's own Auth PII while the account is quarantined for manual legacy
+        # identity review; all trading/ledger endpoints retain the default denial.
+        profile, claims = await get_customer(
+            authorization, db, allow_identity_review_summary=True
+        )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
         return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status, "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
+                "display_name": profile.display_name, "status": profile.status,
+                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+                "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
 @app.get("/api/customer/wallets")
