@@ -1,16 +1,18 @@
-"""Opt-in drift check: ORM tables/columns must be represented in Alembic migrations.
+"""Opt-in ORM migration drift check against a separately provisioned database.
 
-Run against a database already upgraded to head:
+Run after upgrading an isolated database to Alembic head:
 
     alembic upgrade head
-    ATLAS_MIGRATION_DRIFT_URL=postgresql+asyncpg://user:pass@host/db pytest tests/test_migration_model_drift.py
+    ATLAS_MIGRATION_DRIFT_URL=postgresql+asyncpg://user:pass@host/db pytest -m migration_drift
 
-The test is collected only when ATLAS_MIGRATION_DRIFT_URL is configured. It fails only for
-tables or columns present in ORM metadata but absent from the migrated database; it
-intentionally ignores index, constraint and type differences.
+This marker is excluded from the mandatory no-skip application suite. The opt-in
+job may skip when its isolated database URL is not configured.
 """
 import asyncio
 import os
+
+import pytest
+
 
 URL = os.environ.get("ATLAS_MIGRATION_DRIFT_URL")
 
@@ -45,13 +47,14 @@ def _flatten(diff):
             yield entry
 
 
-if URL:
-    def test_models_have_matching_migrations():
-        missing = []
-        for entry in _flatten(_collect_diff()):
-            kind = entry[0]
-            if kind == "add_table":
-                missing.append(f"table {entry[1].name}")
-            elif kind == "add_column":
-                missing.append(f"column {entry[2]}.{entry[3].name}")
-        assert not missing, "models without migrations: " + ", ".join(sorted(missing))
+@pytest.mark.migration_drift
+@pytest.mark.skipif(not URL, reason="ATLAS_MIGRATION_DRIFT_URL is not configured")
+def test_models_have_matching_migrations():
+    missing = []
+    for entry in _flatten(_collect_diff()):
+        kind = entry[0]
+        if kind == "add_table":
+            missing.append(f"table {entry[1].name}")
+        elif kind == "add_column":
+            missing.append(f"column {entry[2]}.{entry[3].name}")
+    assert not missing, "models without migrations: " + ", ".join(sorted(missing))
