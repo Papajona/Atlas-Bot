@@ -503,7 +503,7 @@ def test_late_fee_true_up_from_earlier_partial_close_updates_final_aggregate_onc
     assert final.fee == Decimal("1.20")
     assert final.net_return_bps == 435.0
     metadata = json.loads(final.metadata_json)
-    assert metadata["aggregate_net_pnl"] == "8.70"
+    assert Decimal(metadata["aggregate_net_pnl"]) == Decimal("8.70")
     assert metadata["aggregate_net_return_bps"] == "435.0"
     assert metadata["late_fee_true_up_total"] == "1.00"
 
@@ -514,6 +514,7 @@ def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
     partial = SimpleNamespace(
         id=1, trade_id=91, metadata_json=json.dumps({"closing_notional": "1000"}),
         realized_pnl="10", return_bps=100, net_pnl="10",
+        fee_basis_complete=True,
         created_at=close_time - timedelta(minutes=5),
     )
     final = SimpleNamespace(
@@ -526,6 +527,7 @@ def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
             "aggregate_net_return_bps": "78",
         }),
         realized_pnl="40", return_bps=80, net_pnl="39",
+        fee_basis_complete=True,
         created_at=close_time,
     )
     assert main._aggregate_closed_outcome_fills([partial, final]) == [(0.0078, close_time)]
@@ -536,6 +538,7 @@ def test_incomplete_aggregate_partial_close_is_excluded_from_dashboard_ratios():
     partial = SimpleNamespace(
         id=1, trade_id=92, metadata_json=json.dumps({"closing_notional": "1000"}),
         realized_pnl="10", return_bps=100, net_pnl="10",
+        fee_basis_complete=True,
         created_at=close_time - timedelta(minutes=5),
     )
     final = SimpleNamespace(

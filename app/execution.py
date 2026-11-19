@@ -1232,25 +1232,25 @@ async def _apply_fill_to_position(
             # Keep the exact Decimal result through the custodial-ledger boundary;
             # do not round-trip the realized amount through a binary float first.
             await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized_decimal, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-        if closing > 0:
+        if closing_decimal > 0:
             # Store every closing fill against the strategy that opened the position,
             # including zero-PnL fills needed for a correct weighted denominator.
             # This avoids attributing a close to the strategy of the closing order.
             attribution_trade_id = int(entry_trade_id or trade.id)
             existing_count = await db.execute(select(func.count(StrategyOutcome.id)).where(StrategyOutcome.trade_id == attribution_trade_id))
             sequence = int(existing_count.scalar_one() or 0) + 1
-            notional_decimal = abs(Decimal(str(closing)) * Decimal(str(fill_price)))
+            notional_decimal = abs(closing_decimal * Decimal(str(fill_price)))
             return_bps = float(
                 realized_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
             closing_fee_decimal = _closing_fill_fee_share(
-                fill_fee_delta, closing_quantity=closing, fill_quantity=delta
+                fill_fee_delta, closing_quantity=closing_decimal, fill_quantity=delta
             )
             entry_row = await db.get(Trade, attribution_trade_id)
             entry_fee_decimal = Decimal(str(entry_row.fee or 0)) if entry_row else Decimal("0")
             episode_entry_qty = Decimal(str(episode.entry_quantity or 0)) if 'episode' in locals() and episode is not None else Decimal("0")
             allocated_entry_fee_decimal = (
-                entry_fee_decimal * Decimal(str(closing)) / episode_entry_qty
+                entry_fee_decimal * closing_decimal / episode_entry_qty
                 if episode_entry_qty > 0 else Decimal("0")
             )
             net_pnl_decimal = realized_decimal - closing_fee_decimal - allocated_entry_fee_decimal
