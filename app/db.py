@@ -237,6 +237,7 @@ class Trade(Base):
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_trade_account_customer"),
         Index("ix_trade_status_symbol", "status", "symbol"),
         Index("ix_trade_account_customer_fk", "trading_account_id", "customer_id"),
+        Index("ix_trade_fee_reconciliation_pending", "fee_reconciliation_pending", "updated_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id"), nullable=True, index=True)
@@ -256,6 +257,9 @@ class Trade(Base):
     reserved_cash: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     average_fill_price: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     fee: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    # Keep terminal orders in the bounded broker reconciliation queue until a
+    # previously withheld fee denomination is resolved.
+    fee_reconciliation_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notional: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     mode: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30))
