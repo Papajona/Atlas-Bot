@@ -89,7 +89,7 @@ def upgrade() -> None:
     """))
 
     # Retention is handled by the monitored application worker. Do not
-    # make schema upgrades depend on managed pg_cron flags or privileges.
+    # make schema upgrades depend on managed database scheduler extensions or privileges.
 
 def downgrade() -> None:
     # No database scheduler is created by this revision; the application worker
