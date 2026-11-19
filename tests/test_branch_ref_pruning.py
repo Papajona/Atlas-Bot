@@ -1397,10 +1397,12 @@ def test_one_time_prune_workflow_uses_safe_literal_path_comparison_and_allowlist
     restore_preflight_workflow = (
         repo_root / ".github" / "workflows" / "cloud-sql-recovery-restore-preflight.yml"
     ).read_text(encoding="utf-8")
-    assert "from scripts.cloud_sql_recovery_inventory import (" in restore_preflight_workflow
+    assert "from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major" in restore_preflight_workflow
+    # The prune guard's pinned main revision must retain the current inventory import
+    # contract used by this restore preflight.
     assert (
         'git show "$main_sha:.github/workflows/cloud-sql-recovery-restore-preflight.yml" '
-        '| grep -F \'from scripts.cloud_sql_recovery_inventory import (\' >/dev/null'
+        '| grep -F \'from scripts.cloud_sql_recovery_inventory import require_supported_postgresql_major\' >/dev/null'
         in cloud_inventory_case
     )
     assert (

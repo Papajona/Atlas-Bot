@@ -3,7 +3,16 @@ import os
 
 import pytest
 
-from scripts.verify_staging_restore import read_database_uri, required_table_failures, truthy, validate_cloud_sql_target_pair
+from scripts.verify_staging_restore import (
+    customer_paper_backend_policy_failures,
+    customer_paper_schema_failures,
+    customer_paper_tenant_policy_failures,
+    read_database_uri,
+    required_table_failures,
+    truthy,
+    validate_cloud_sql_target_for_supabase_source,
+    validate_cloud_sql_target_pair,
+)
 
 
 STAGING = "abcdefghijklmnopqrst"
@@ -14,10 +23,31 @@ def url(project):
     return f"postgresql://atlas_runtime:unit-test-password@db.{project}.supabase.co:5432/postgres"
 
 
+def test_cloud_sql_target_isolated_from_supabase_pg_dump_source():
+    validate_cloud_sql_target_for_supabase_source(
+        "atlas-staging-510915:europe-west1:atlas-recovery",
+        "wauaelzyugjuepmrewaw",
+    )
+
+
+@pytest.mark.parametrize(
+    "target,source_ref",
+    [
+        ("atlas-production:europe-west1:atlas-primary", "wauaelzyugjuepmrewaw"),
+        ("atlas-staging-510915:us-east1:atlas-recovery", "wauaelzyugjuepmrewaw"),
+        ("atlas-staging-510915:europe-west1:atlas-recovery", "wrong-project-ref"),
+        ("", "wauaelzyugjuepmrewaw"),
+    ],
+)
+def test_cloud_sql_target_supabase_source_pair_fails_closed(target, source_ref):
+    with pytest.raises(ValueError):
+        validate_cloud_sql_target_for_supabase_source(target, source_ref)
+
+
 def test_restore_audit_accepts_explicit_staging_host():
     env, host = read_database_uri(url(STAGING), STAGING, PRODUCTION)
     assert host == f"db.{STAGING}.supabase.co"
-    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000 -c atlas.restore_target_kind=supabase"
     assert env["PGSSLMODE"] == "require"
 
 
@@ -69,7 +99,9 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "restore audit target" in runbook
     assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
-    assert "PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" in workflow
+    assert "SOURCE_SUPABASE_PROJECT_REF: ${{ inputs.source_supabase_project_ref }}" in workflow
+    assert "verify_cloud_sql_supabase_source_provenance.py" in workflow
+    assert "PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" not in workflow
     assert "backup reference must pin an exact GCS generation" in workflow
     assert 'gcloud sql operations describe "$RESTORE_OPERATION_ID"' in workflow
     assert "verify_cloud_sql_backup_binding.py" in workflow
@@ -242,6 +274,284 @@ def test_restore_integrity_query_skips_absent_0059_tables_without_sql_reference(
     assert result["research_trial_ledger_head_valid"] is False
     assert result["research_holdout_registry_invalid_rows"] is None
 
+
+def _valid_customer_paper_backend_policies():
+    return [
+        {
+            "table": table,
+            "cmd": "ALL",
+            "permissive": "PERMISSIVE",
+            "roles": ["atlas_customer_paper"],
+            "qual": "true",
+            "with_check": "true",
+        }
+        for table in ("market_bar_budgets", "market_bar_allocations")
+    ]
+
+
+def _valid_customer_paper_tenant_policies():
+    predicate = (
+        "(customer_id = (NULLIF(( SELECT current_setting('app.customer_id'::text, true) "
+        "AS current_setting), ''::text))::bigint)"
+    )
+    return [
+        {
+            "table": table,
+            "cmd": "ALL",
+            "permissive": "PERMISSIVE",
+            "roles": ["atlas_customer_paper"],
+            "qual": predicate,
+            "with_check": predicate,
+        }
+        for table in (
+            "accounts", "journals", "journal_lines", "orders", "fills",
+            "order_events", "position_events",
+        )
+    ]
+
+
+def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "'customer_paper_schema_present'" in QUERY
+    assert "'customer_paper_tables_missing'" in QUERY
+    assert "'customer_paper_tables_without_forced_rls'" in QUERY
+    assert "'customer_paper_policy_count'" in QUERY
+    assert "'customer_paper_tenant_policy_count'" in QUERY
+    assert "'customer_paper_backend_policy_count'" in QUERY
+    assert "member_role.rolname = 'postgres'" in QUERY
+    assert "grantor_role.rolname = 'supabase_admin'" in QUERY
+    assert "m.admin_option" in QUERY
+    assert "inherit_option" in QUERY
+    assert "set_option" in QUERY
+
+    valid = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        "customer_paper_runtime_public_financial_privileges": 0,
+    }
+    assert customer_paper_schema_failures(valid) == []
+
+    missing_schema = {
+        **valid,
+        "customer_paper_schema_present": False,
+        "customer_paper_tables_missing": [
+            "accounts", "journals", "journal_lines", "orders", "fills",
+            "order_events", "position_events", "market_bar_budgets", "market_bar_allocations",
+        ],
+        "customer_paper_tables_without_forced_rls": 9,
+        "customer_paper_policy_count": 0,
+        "customer_paper_tenant_policy_count": 0,
+        "customer_paper_backend_policy_count": 0,
+    }
+    failures = customer_paper_schema_failures(missing_schema)
+    assert "customer_paper schema is missing" in failures
+    assert "required customer-paper table missing: accounts" in failures
+    assert "customer_paper_tables_without_forced_rls expected 0, observed 9" in failures
+    assert "customer_paper_policy_count expected 9, observed 0" in failures
+    assert "customer_paper_tenant_policy_count expected 7, observed 0" in failures
+    assert "customer_paper_backend_policy_count expected 2, observed 0" in failures
+
+
+def test_restore_audit_rejects_malformed_customer_paper_catalog_observations():
+    assert customer_paper_schema_failures(None) == [
+        "customer-paper schema observations are missing or malformed"
+    ]
+    failures = customer_paper_schema_failures({
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": "accounts",
+        "customer_paper_tables_without_forced_rls": "invalid",
+        "customer_paper_policy_count": None,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+    })
+    assert "customer_paper_tables_missing was not reported as a JSON array" in failures
+    assert any("customer_paper_tables_without_forced_rls must be a JSON integer" in item for item in failures)
+    assert any("customer_paper_policy_count must be a JSON integer" in item for item in failures)
+
+
+
+
+
+def test_customer_paper_restore_audit_rejects_unsafe_runtime_role_and_acl():
+    good = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        "customer_paper_runtime_public_financial_privileges": 0,
+    }
+    assert customer_paper_schema_failures(good) == []
+    unsafe = {
+        **good,
+        "customer_paper_wrong_policy_role_count": 1,
+        "customer_paper_runtime_role_valid": False,
+        "customer_paper_runtime_schema_create": True,
+        "customer_paper_runtime_public_schema_usage": True,
+        "customer_paper_runtime_invalid_table_privileges": 2,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 1,
+        "customer_paper_runtime_public_financial_privileges": 1,
+    }
+    failures = customer_paper_schema_failures(unsafe)
+    assert "customer_paper_wrong_policy_role_count expected 0, observed 1" in failures
+    assert "customer_paper_runtime_role_valid expected True, observed False" in failures
+    assert "customer_paper_runtime_schema_create expected False, observed True" in failures
+    assert "customer_paper_runtime_public_schema_usage expected False, observed True" in failures
+    assert "customer_paper_runtime_invalid_table_privileges expected 0, observed 2" in failures
+    assert "customer_paper_runtime_sequences_with_forbidden_privileges expected 0, observed 1" in failures
+    assert "customer_paper_runtime_public_financial_privileges expected 0, observed 1" in failures
+
+
+def test_customer_paper_restore_audit_rejects_malformed_missing_table_names():
+    failures = customer_paper_schema_failures({
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [None],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+    })
+    assert "customer_paper_tables_missing contains malformed table names" in failures
+
+
+def test_customer_paper_restore_audit_rejects_unsafe_tenant_policy_attributes():
+    valid = _valid_customer_paper_tenant_policies()
+    cases = (
+        ("qual", "true", "USING expression"),
+        (
+            "qual",
+            "(customer_id = ( SELECT NULLIF(current_setting('app.customer_idselect'::text, true), ''::text)::bigint AS \"nullif\"))",
+            "USING expression",
+        ),
+        ("with_check", "true", "WITH CHECK expression"),
+        ("roles", ["atlas_customer_paper", "public"], "roles are not exactly"),
+        ("cmd", "SELECT", "command is not ALL"),
+        ("permissive", "RESTRICTIVE", "policy is not PERMISSIVE"),
+    )
+    for field, value, expected in cases:
+        policies = [dict(policy) for policy in valid]
+        policies[0][field] = value
+        failures = customer_paper_tenant_policy_failures(policies)
+        assert any(expected in failure for failure in failures)
+
+
+def test_customer_paper_restore_audit_rejects_wrong_tenant_policy_coverage():
+    policies = _valid_customer_paper_tenant_policies()
+    policies.pop()
+    failures = customer_paper_tenant_policy_failures(policies)
+    assert "customer_paper_tenant policies do not cover exactly the expected tables" in failures
+
+
+def test_customer_paper_restore_audit_handles_null_missing_table_observation():
+    observed = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": None,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+    }
+    failures = customer_paper_schema_failures(observed)
+    assert "customer_paper_tables_missing was not reported as a JSON array" in failures
+
+
+@pytest.mark.parametrize(
+    "count_key",
+    [
+        "customer_paper_tables_without_forced_rls",
+        "customer_paper_policy_count",
+        "customer_paper_tenant_policy_count",
+        "customer_paper_backend_policy_count",
+        "customer_paper_wrong_policy_role_count",
+        "customer_paper_runtime_invalid_table_privileges",
+        "customer_paper_runtime_sequences",
+        "customer_paper_runtime_sequences_with_usage",
+        "customer_paper_runtime_sequences_with_forbidden_privileges",
+        "customer_paper_runtime_public_financial_privileges",
+    ],
+)
+@pytest.mark.parametrize("invalid_count", [False, True, 9.0, 9.9, "9", None])
+def test_customer_paper_restore_audit_rejects_non_integer_counts(count_key, invalid_count):
+    observed = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        "customer_paper_runtime_public_financial_privileges": 0,
+    }
+    observed[count_key] = invalid_count
+    failures = customer_paper_schema_failures(observed)
+    assert any(f"{count_key} must be a JSON integer" in failure for failure in failures)
+
+
+
+def test_customer_paper_restore_audit_rejects_unsafe_backend_policy_attributes():
+    valid = _valid_customer_paper_backend_policies()
+    cases = (
+        ("qual", "false", "predicate"),
+        ("with_check", "false", "predicate"),
+        ("roles", ["atlas_customer_paper", "public"], "role"),
+        ("cmd", "SELECT", "command"),
+        ("permissive", "RESTRICTIVE", "permissiveness"),
+    )
+    for field, value, _ in cases:
+        policies = [dict(policy) for policy in valid]
+        policies[0][field] = value
+        failures = customer_paper_backend_policy_failures(policies)
+        assert any("customer_paper.market_bar_budgets backend policy" in failure for failure in failures)
+
+
+def test_customer_paper_restore_audit_rejects_wrong_backend_policy_coverage():
+    failures = customer_paper_backend_policy_failures(
+        [_valid_customer_paper_backend_policies()[0]]
+    )
+    assert "customer_paper backend policies do not cover exactly the expected tables" in failures
+
+
+
 def _configured_postgres_dsn() -> str | None:
     """Return only an explicitly PostgreSQL DSN, never an application SQLite fallback."""
     for name in (
@@ -285,6 +595,151 @@ def test_research_integrity_query_executes_against_postgres():
     assert result["research_holdout_registry_invalid_rows"] == 0
 
 
+
+
+
+def test_restore_audit_sql_covers_cloud_sql_and_supabase_managed_membership_shapes():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "current_setting('atlas.restore_target_kind', true)" in QUERY
+    assert "grantor_role.rolname = 'supabase_admin'" in QUERY
+    assert "grantor_role.rolname = 'cloudsqladmin'" in QUERY
+    assert "member_role.rolname = 'postgres'" in QUERY
+    assert "m.admin_option" in QUERY
+    assert "inherit_option" in QUERY
+    assert "set_option" in QUERY
+
+
+def test_restore_audit_handles_missing_customer_paper_schema_with_existing_role():
+    from scripts.verify_staging_restore import QUERY
+
+    usage_guard = (
+        "'customer_paper_runtime_schema_usage', CASE "
+        "WHEN to_regrole('atlas_customer_paper') IS NULL "
+        "OR to_regnamespace('customer_paper') IS NULL THEN false "
+        "ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'USAGE') END"
+    )
+    create_guard = (
+        "'customer_paper_runtime_schema_create', CASE "
+        "WHEN to_regrole('atlas_customer_paper') IS NULL "
+        "OR to_regnamespace('customer_paper') IS NULL THEN true "
+        "ELSE has_schema_privilege('atlas_customer_paper', 'customer_paper', 'CREATE') END"
+    )
+    assert "to_regnamespace('customer_paper') IS NULL THEN false" in QUERY
+    assert "to_regnamespace('customer_paper') IS NULL THEN true" in QUERY
+    normalized_query = "".join(QUERY.split())
+    assert "".join(usage_guard.split()) in normalized_query
+    assert "".join(create_guard.split()) in normalized_query
+
+
+def test_restore_audit_rejects_a_maintain_only_public_financial_grant():
+    from scripts.verify_staging_restore import QUERY
+
+    assert "current_setting('server_version_num')::integer >= 170000" in QUERY
+    assert "THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')" in QUERY
+    observed = {
+        "customer_paper_schema_present": True,
+        "customer_paper_tables_missing": [],
+        "customer_paper_tables_without_forced_rls": 0,
+        "customer_paper_policy_count": 9,
+        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_backend_policy_count": 2,
+        "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
+        "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
+        "customer_paper_wrong_policy_role_count": 0,
+        "customer_paper_runtime_role_valid": True,
+        "customer_paper_runtime_schema_usage": True,
+        "customer_paper_runtime_schema_create": False,
+        "customer_paper_runtime_public_schema_usage": False,
+        "customer_paper_runtime_invalid_table_privileges": 0,
+        "customer_paper_runtime_sequences": 4,
+        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
+        # A MAINTAIN-only grant is included in this forbidden effective-privilege count.
+        "customer_paper_runtime_public_financial_privileges": 1,
+    }
+    failures = customer_paper_schema_failures(observed)
+    assert "customer_paper_runtime_public_financial_privileges expected 0, observed 1" in failures
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    _configured_postgres_dsn() is None,
+    reason="requires the disposable PostgreSQL service provisioned by CI",
+)
+def test_postgres17_maintain_only_grant_is_detectable():
+    import asyncio
+    import uuid
+    import asyncpg
+    from scripts.verify_staging_restore import QUERY
+
+    dsn = _configured_postgres_dsn()
+
+    async def verify_grant():
+        connection = await asyncpg.connect(dsn)
+        role = "atlas_qodo_maintain_" + uuid.uuid4().hex[:12]
+        table = "atlas_qodo_maintain_probe_" + uuid.uuid4().hex[:12]
+        transaction = connection.transaction()
+        await transaction.start()
+        try:
+            version = await connection.fetchval("SELECT current_setting('server_version_num')::int")
+            if version < 170000:
+                pytest.skip("MAINTAIN table privilege exists only on PostgreSQL 17+")
+            await connection.execute(f'CREATE ROLE "{role}" NOLOGIN')
+            await connection.execute(f'CREATE TEMP TABLE "{table}" (id integer)')
+            await connection.execute(f'GRANT MAINTAIN ON TABLE pg_temp."{table}" TO "{role}"')
+            result = await connection.fetchrow(
+                "SELECT has_table_privilege($1, to_regclass($2), 'MAINTAIN') AS maintain, "
+                "has_table_privilege($1, to_regclass($2), 'SELECT') AS can_select",
+                role, f"pg_temp.{table}",
+            )
+            assert result["maintain"] is True
+            assert result["can_select"] is False
+            assert "THEN has_table_privilege('atlas_customer_paper', c.oid, 'MAINTAIN')" in QUERY
+        finally:
+            await transaction.rollback()
+            await connection.close()
+
+    asyncio.run(verify_grant())
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    _configured_postgres_dsn() is None,
+    reason="requires the disposable PostgreSQL service provisioned by CI",
+)
+def test_full_restore_audit_query_reports_missing_customer_paper_schema_instead_of_error():
+    import asyncio
+    import json
+    import asyncpg
+    from scripts.verify_staging_restore import QUERY
+
+    dsn = _configured_postgres_dsn()
+
+    async def execute_without_paper_schema():
+        connection = await asyncpg.connect(dsn)
+        transaction = connection.transaction()
+        await transaction.start()
+        try:
+            await connection.execute(
+                "DO $block$ BEGIN "
+                "IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='atlas_customer_paper') THEN "
+                "CREATE ROLE atlas_customer_paper NOLOGIN; "
+                "END IF; END $block$"
+            )
+            await connection.execute("DROP SCHEMA IF EXISTS customer_paper CASCADE")
+            payload = await connection.fetchval(QUERY)
+            return json.loads(payload)
+        finally:
+            await transaction.rollback()
+            await connection.close()
+
+    observed = asyncio.run(execute_without_paper_schema())
+    assert observed["customer_paper_schema_present"] is False
+    assert observed["customer_paper_runtime_schema_usage"] is False
+    assert observed["customer_paper_runtime_schema_create"] is True
+
+
 def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     env, host = read_database_uri(
         "postgresql://atlas_audit_reader:unit-test-password@127.0.0.1:5432/atlas_recovery",
@@ -294,7 +749,7 @@ def test_restore_audit_accepts_cloud_sql_auth_proxy_target():
     )
     assert host == "127.0.0.1"
     assert env["PGDATABASE"] == "atlas_recovery"
-    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000"
+    assert env["PGOPTIONS"] == "-c default_transaction_read_only=on -c statement_timeout=15000 -c atlas.restore_target_kind=cloud_sql"
     assert env["PGSSLMODE"] == "disable"  # TLS terminates in the Cloud SQL Auth Proxy
 
 

@@ -16,6 +16,7 @@ from scripts.execute_cloud_sql_restore import (
     _wait_for_operation,
     validate_backup_metadata,
     validate_restore_inputs,
+    validate_sanitized_backup_reference,
 )
 from scripts.cloud_sql_recovery_inventory import is_source_backup_candidate
 
@@ -286,7 +287,7 @@ def test_pinned_generation_must_be_the_live_object_before_import():
         )
 
 
-def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_audit():
+def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_manual():
     workflow = Path(".github/workflows/staging-cloud-sql-restore.yml").read_text(encoding="utf-8")
     audit_workflow = Path(".github/workflows/staging-restore-audit.yml").read_text(encoding="utf-8")
     executor = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
@@ -294,55 +295,204 @@ def test_cloud_sql_restore_workflow_executes_import_and_automatically_chains_aud
     discovery_preflight = Path(".github/workflows/cloud-sql-recovery-preflight.yml").read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
-    assert 'confirm_restore_target' in workflow
+    assert "confirm_restore_target" in workflow
     assert '== "RESTORE"' in workflow
     assert "GCP_STAGING_RESTORE_EXECUTOR_SERVICE_ACCOUNT" in workflow
     assert "scripts/execute_cloud_sql_restore.py" in workflow
     assert 'RESTORE_TARGET_KIND" == "cloud_sql"' in workflow
-    assert "atlas_audit_reader" in workflow
-    assert "inputs[source_backup_reference]" in workflow
-    assert "import_object_reference" in workflow
-    assert "[.]sql([.]gz)?" in workflow
-    assert "[.]sql([.]gz)?" in audit_workflow
-    assert "gh api --method POST" in workflow
-    assert "staging-restore-audit.yml/dispatches" in workflow
-    assert "gh run watch" in workflow
-    assert "run-name: Cloud SQL restore audit (" in audit_workflow
+    assert "source_supabase_project_ref" in workflow
+    assert "sanitized_backup_reference" in workflow
+    assert "--sanitized-backup-reference" in workflow
+    assert "verify_sanitized_artifacts(" in executor
+    assert '"status": "IMPORT_COMPLETE"' in executor
+    assert "IMPORT_COMPLETE_NOT_CERTIFIED" in workflow
+    assert "migration_and_schema_certification_pending" in workflow
+    assert "read_only_restore_audit_pending" in workflow
+    assert "gh api --method POST" not in workflow
+    assert "staging-restore-audit.yml/dispatches" not in workflow
+    assert "gh run watch" not in workflow
+
+    # Certification remains a separately dispatched read-only workflow.
+    assert "workflow_dispatch:" in audit_workflow
+    assert "source_supabase_project_ref" in audit_workflow
+    assert "verify_cloud_sql_supabase_source_provenance.py" in audit_workflow
+    assert "verify_cloud_sql_sanitized_artifacts.py" in audit_workflow
     assert "SOURCE_BACKUP_REFERENCE" in audit_workflow
-    assert "compare_cloud_sql_import_dumps.py" in audit_workflow
-    assert "canonicalized conversion" in Path("scripts/compare_cloud_sql_import_dumps.py").read_text(encoding="utf-8")
     assert "prepare_cloud_sql_import_dump.py" in audit_workflow
-    assert "Install pinned PostgreSQL 17 client for custom archive verification" in audit_workflow
-    assert "Install pinned PostgreSQL 17 client for custom archive conversion" in workflow
+    assert "atlas_audit_reader" in audit_workflow
+    assert "[.]sql([.]gz)?" in audit_workflow
+    assert "RESTORE_TARGET_KIND" in audit_workflow
+
+    assert "from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source" in preflight
+    assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in preflight
+    assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" not in preflight
+    assert "require_supported_postgresql_major(" in preflight
+    assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
+
     installer = Path("scripts/install_pinned_postgresql_client.sh").read_text(encoding="utf-8")
     assert "POSTGRES_CLIENT_MAJOR=17" in installer
     assert '"postgresql-client-$POSTGRES_CLIENT_MAJOR"' in installer
-    assert "Verify a real PostgreSQL 17 custom archive conversion" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "pg_dump --format=custom" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "bash -n scripts/install_pinned_postgresql_client.sh" in Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert "RESTORE_TARGET_KIND" in audit_workflow
-    assert '"gcloud", "sql", "import", "sql"' in executor
-    assert '"--async"' in executor
-    assert "verify_cloud_sql_import_dump.py" in executor
-    assert "_live_backup_generation" in executor
-    assert "verify_backup_binding(" in executor
-    assert "verify_restore_operation(" in executor
-    assert "def _pick(" in executor
-    assert "--if-generation-match=0" in executor
-    assert "import_object_reference" in executor
-    assert "source_backup_sha256" in executor
-    assert "import_sha256 != prepared_import_sha256" in executor
-    assert "prepare_cloud_sql_import_dump.py" in executor
-    assert "prepared_import_sha256" in executor
-    assert "restore-imports/" in executor
-    assert ".sql.gz" in executor
-    assert "classify_backup_objects(" in preflight
-    assert "ATLAS_PRODUCTION_CLOUD_SQL_DATABASE" in preflight
-    assert "expected_source_database=source_database" in preflight
-    assert "require_supported_postgresql_major(" in preflight
-    assert "scripts.cloud_sql_recovery_inventory" in preflight
-    assert "scripts/cloud_sql_recovery_discovery.py" in discovery_preflight
-    assert '.lower().endswith((".sql", ".sql.gz", ".dump", ".backup", ".gz"))' not in preflight
+    ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "Verify a real PostgreSQL 17 custom archive conversion" in ci
+    assert "pg_dump --format=custom" in ci
+    assert "bash -n scripts/install_pinned_postgresql_client.sh" in ci
+
+
+def test_execute_restore_signature_keeps_required_output_before_optional_source_settings():
+    import inspect
+    from scripts.execute_cloud_sql_restore import execute_restore
+
+    parameters = list(inspect.signature(execute_restore).parameters)
+    assert parameters.index("output_path") < parameters.index("source_supabase_project_ref")
+    assert parameters.index("output_path") < parameters.index("production_instance")
+
+
+def test_execute_restore_retains_import_safety_generation_and_operation_evidence_gates():
+    source = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
+    body = source.split("def execute_restore(", 1)[1].split("\ndef main(", 1)[0]
+
+    # Protect the executor orchestration, not just the helpers in isolation.
+    required_calls = (
+        "verify_supabase_pg_dump_source(",
+        "verify_sanitized_artifacts(",
+        '\"scripts/verify_cloud_sql_import_dump.py\"',
+        '\"--if-generation-match=0\"',
+        "_live_backup_generation(",
+        "_wait_for_operation(",
+        "verify_backup_binding(",
+        "verify_restore_operation(",
+    )
+    for call in required_calls:
+        assert call in body, f"execute_restore no longer enforces {call}"
+
+    # Do not import until SQL scanning, immutable upload/read-back, generation
+    # verification, and completed-operation evidence checks have all run.
+    scanner = body.index('\"scripts/verify_cloud_sql_import_dump.py\"')
+    create_only_upload = body.index('\"--if-generation-match=0\"')
+    read_back = body.index("[\"gcloud\", \"storage\", \"cp\", import_reference, verified_import_path]")
+    live_generation = body.index("_live_backup_generation(")
+    import_request = body.index('\"gcloud\", \"sql\", \"import\"')
+    wait_for_completion = body.index("_wait_for_operation(")
+    backup_binding = body.index("backup_binding = verify_backup_binding(")
+    operation_evidence = body.index("restore_evidence = verify_restore_operation(")
+
+    assert scanner < create_only_upload < read_back < live_generation < import_request
+    assert import_request < wait_for_completion < backup_binding < operation_evidence
+
+
+
+
+def test_restore_inputs_accept_verified_supabase_pg_dump_source_without_production_cloud_sql_instance():
+    assert validate_restore_inputs(
+        project_id="atlas-staging-510915",
+        region="europe-west1",
+        target_instance=TARGET,
+        target_database="atlas-recovery-db",
+        backup_reference=(
+            "gs://atlas-staging-510915-db-backups/"
+            "atlas-supabase-pre-customer-paper-20261022T153023Z.dump#1792683068959304"
+        ),
+        source_supabase_project_ref="wauaelzyugjuepmrewaw",
+    ) == (
+        "atlas-recovery",
+        "atlas-supabase-pre-customer-paper-20261022T153023Z.dump",
+        "1792683068959304",
+    )
+
+
+def test_restore_inputs_reject_wrong_supabase_source_project_ref():
+    with pytest.raises(ValueError, match="source Supabase project ref"):
+        validate_restore_inputs(
+            project_id="atlas-staging-510915",
+            region="europe-west1",
+            target_instance=TARGET,
+            target_database="atlas-recovery-db",
+            backup_reference=(
+                "gs://atlas-staging-510915-db-backups/"
+                "atlas-supabase-pre-customer-paper-20261022T153023Z.dump#1792683068959304"
+            ),
+            source_supabase_project_ref="wrong-project-ref",
+        )
+
+
+def test_sanitized_backup_reference_accepts_only_generation_pinned_sql_under_sanitized_prefix():
+    assert validate_sanitized_backup_reference(
+        "gs://atlas-staging-510915-db-backups/sanitized-imports/public-staging-scrubbed.sql#1792683068959305"
+    ) == ("sanitized-imports/public-staging-scrubbed.sql", "1792683068959305")
+
+
+@pytest.mark.parametrize("reference", [
+    "gs://atlas-staging-510915-db-backups/public-staging-scrubbed.sql#1792683068959305",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/public-staging-scrubbed.sql",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/../raw.dump#1792683068959305",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/../raw.sql#1792683068959305",
+    "gs://wrong-bucket/sanitized-imports/public-staging-scrubbed.sql#1792683068959305",
+    "gs://atlas-staging-510915-db-backups/sanitized-imports/raw.dump#1792683068959305",
+])
+def test_sanitized_backup_reference_rejects_unpinned_or_unapproved_objects(reference):
+    with pytest.raises(ValueError):
+        validate_sanitized_backup_reference(reference)
+
+
+def test_sanitized_import_verifier_binds_candidate_to_source_and_imported_bytes(tmp_path, monkeypatch):
+    from scripts import verify_cloud_sql_sanitized_artifacts as verifier
+
+    source = tmp_path / "source-prepared.sql"
+    candidate = tmp_path / "candidate.sql"
+    imported = tmp_path / "imported.sql"
+    source.write_bytes(b"reviewed source prepared SQL")
+    candidate.write_bytes(b"scrubbed candidate SQL")
+    imported.write_bytes(b"scrubbed candidate SQL")
+
+    import hashlib
+    source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
+    monkeypatch.setattr(
+        verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
+        "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+    )
+
+    result = verifier.verify_sanitized_artifacts(
+        source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+        source_prepared_sql_path=source,
+        sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
+        sanitized_sql_path=candidate,
+        imported_sql_path=imported,
+    )
+    assert result["status"] == "PASS"
+    assert result["source_prepared_sql_sha256"] == source_sha
+    assert result["source_prepared_sql_canonical_sha256"]
+    assert result["sanitized_import_sha256"] == candidate_sha
+    assert result["imported_sql_sha256"] == candidate_sha
+
+
+def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_path, monkeypatch):
+    from scripts import verify_cloud_sql_sanitized_artifacts as verifier
+    import hashlib
+
+    source = tmp_path / "source-prepared.sql"
+    candidate = tmp_path / "candidate.sql"
+    imported = tmp_path / "imported.sql"
+    source.write_bytes(b"reviewed source prepared SQL")
+    candidate.write_bytes(b"scrubbed candidate SQL")
+    imported.write_bytes(b"original unsanitized source SQL")
+
+    monkeypatch.setattr(verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
+        "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304")
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256",
+        hashlib.sha256(candidate.read_bytes()).hexdigest())
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
+
+    with pytest.raises(ValueError, match="immutable import object bytes differ"):
+        verifier.verify_sanitized_artifacts(
+            source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+            source_prepared_sql_path=source,
+            sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
+            sanitized_sql_path=candidate,
+            imported_sql_path=imported,
+        )
 
 
 def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
@@ -364,6 +514,9 @@ def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
     assert "gcloud sql instances create" not in bootstrap
     assert "gcloud sql databases create" not in bootstrap
     assert "gcloud sql import" not in bootstrap
+    assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in bootstrap
+    assert "wauaelzyugjuepmrewaw" in bootstrap
+    assert "ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" not in bootstrap
 
 def test_recovery_preflight_accepts_retained_noncurrent_source_backup_generation():
     # GCS reports timeDeleted for an archived object generation. Its presence in

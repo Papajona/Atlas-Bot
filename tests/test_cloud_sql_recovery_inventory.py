@@ -172,7 +172,7 @@ def test_source_identity_is_required():
         )
 
 
-def test_restore_preflight_uses_production_source_database_separately_from_recovery_target():
+def test_restore_preflight_uses_logged_supabase_pg_dump_source_and_distinct_cloud_sql_target():
     workflow = (
         __import__("pathlib").Path(__file__).resolve().parents[1]
         / ".github"
@@ -180,7 +180,14 @@ def test_restore_preflight_uses_production_source_database_separately_from_recov
         / "cloud-sql-recovery-restore-preflight.yml"
     ).read_text(encoding="utf-8")
 
-    assert "PRODUCTION_CLOUD_SQL_DATABASE: ${{ vars.ATLAS_PRODUCTION_CLOUD_SQL_DATABASE }}" in workflow
-    assert 'source_instance, source_database = sys.argv[2:]' in workflow
-    assert "expected_source_database=source_database" in workflow
+    assert "SOURCE_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_PRODUCTION_SUPABASE_PROJECT_REF }}" in workflow
+    assert "SOURCE_SUPABASE_DATABASE: postgres" in workflow
+    assert "from scripts.verify_cloud_sql_supabase_source_provenance import verify_supabase_pg_dump_source" in workflow
+    verify_call = workflow.split(
+        "source_evidence = verify_supabase_pg_dump_source(", 1
+    )[1].split(")", 1)[0]
+    assert "source_backup_reference=source_reference" in verify_call
+    assert "source_reference=source_reference" not in verify_call
+    assert "source_project_ref=source_project_ref" in verify_call
     assert "database.get(\"name\") != expected_database" in workflow
+    assert "PRODUCTION_CLOUD_SQL_DATABASE" not in workflow

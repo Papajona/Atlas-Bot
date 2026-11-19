@@ -51,7 +51,7 @@ from .research_execution_costs import (
 )
 from .research_validation import oos_promotion_gate, monte_carlo_bootstrap
 from .daily_research import run_daily_research, latest_macro_context
-from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, sync_live_account, enforce_platform_loss_limits
+from .execution import execute_signal, advance_platform_paper_orders, reconcile, emergency_stop, RiskBlocked, mark_paper_equity, reconcile_customer_live_orders, enforce_platform_loss_limits
 from .customer_paper_api import build_customer_paper_router
 from .customer_paper_flow import CustomerPaperFlowBlocked, ensure_customer_paper_account, recover_customer_paper_spot_flow, execute_customer_paper_spot_signal, conservative_customer_paper_buy_price
 from .live_execution import assert_live_system_enabled, LiveExecutionBlocked
@@ -1430,6 +1430,8 @@ from .schemas import (
 
 docs_url = "/docs" if settings.docs_enabled else None
 redoc_url = "/redoc" if settings.docs_enabled else None
+# The schema lists every route and model; it must be as private as /docs and /redoc.
+openapi_url = "/openapi.json" if settings.docs_enabled else None
 @contextlib.asynccontextmanager
 async def app_lifespan(app: FastAPI):
     """Use FastAPI's lifespan protocol for deterministic worker startup/shutdown."""
@@ -1440,7 +1442,7 @@ async def app_lifespan(app: FastAPI):
         await shutdown()
 
 
-app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, lifespan=app_lifespan)
+app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url, lifespan=app_lifespan)
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
@@ -3158,18 +3160,20 @@ async def _reconciliation_loop():
     """Reconcile providers independently; repeated failures raise durable incidents."""
     while True:
         await asyncio.sleep(max(15, settings.reconciliation_interval_seconds))
-        should_crypto = settings.live_trading_enabled and bool(settings.exchange_api_key and settings.exchange_api_secret)
+        # Existing platform orders still need broker reconciliation after switching to paper.
+        # The missing-credentials probe runs inside the crypto scope below so database
+        # failures are recorded and cannot prevent independent provider/customer scopes.
+        crypto_credentials_available = bool(
+            settings.exchange_api_key and settings.exchange_api_secret
+        )
         should_oanda = bool(settings.oanda_account_id and settings.oanda_api_token and
                            settings.oanda_practice and settings.forex_demo_enabled)
-        if not (should_crypto or should_oanda):
-            _mark_worker_loop_success("reconciliation")
-            continue
 
         cycle_failures: list[tuple[str, Exception]] = []
 
-        async def run_scope(scope: str, operation) -> None:
+        async def run_scope(scope: str, operation):
             try:
-                await operation()
+                result = await operation()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -3180,14 +3184,77 @@ async def _reconciliation_loop():
                     "reconciliation_loop_scope_failed scope=%s consecutive_failures=%s",
                     scope, count,
                 )
+                return False, None
             else:
                 await _record_reconciliation_success(scope)
+                return True, result
 
-        async def reconcile_crypto_and_equity() -> None:
-            await reconcile(settings.default_exchange, settings.default_symbol)
-            await sync_live_account(settings.default_exchange)
+        async def reconcile_crypto_orders():
+            # If credentials are absent, first check whether unresolved platform LIVE
+            # orders actually need a broker lookup. Keep this DB probe inside run_scope:
+            # a query error is a crypto reconciliation failure, not evidence of no orders.
+            if not crypto_credentials_available:
+                async with SessionLocal() as db:
+                    unresolved_platform_live_order = (await db.execute(
+                        select(Trade.id).where(
+                            Trade.customer_id.is_(None),
+                            Trade.mode == "LIVE",
+                            Trade.exchange == settings.default_exchange,
+                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                        ).limit(1)
+                    )).scalar_one_or_none()
+                if unresolved_platform_live_order is None:
+                    return {
+                        "status": "SKIPPED",
+                        "reason": "NO_UNRESOLVED_PLATFORM_LIVE_ORDERS",
+                    }
+                raise RuntimeError(
+                    "Outstanding platform LIVE orders cannot be reconciled because "
+                    "exchange API credentials are unavailable"
+                )
+            result = await reconcile(settings.default_exchange)
+            if settings.live_trading_enabled and not settings.paper_trading:
+                account = result.get("account") if isinstance(result, Mapping) else None
+                if isinstance(account, Mapping) and account.get("error"):
+                    raise RuntimeError(
+                        "Platform broker account synchronization failed: "
+                        + str(account.get("error"))
+                    )
+            return result
 
-        async def enforce_loss_limits() -> None:
+        async def skip_platform_loss_limits_when_live_unavailable():
+            # AppState equity is not a live-equity snapshot in paper mode or whenever
+            # the platform live-trading feature is disabled.
+            reason = (
+                "PAPER_MODE_HAS_NO_VALID_LIVE_EQUITY_SNAPSHOT"
+                if settings.paper_trading
+                else "LIVE_TRADING_DISABLED"
+            )
+            logger.info("platform_loss_limits_skipped reason=%s", reason)
+            return {"status": "SKIPPED", "reason": reason}
+
+        async def enforce_loss_limits_from_fresh_equity(reconciliation_result) -> None:
+            account = (
+                reconciliation_result.get("account")
+                if isinstance(reconciliation_result, Mapping)
+                else None
+            )
+            raw_equity = account.get("equity") if isinstance(account, Mapping) else None
+            if raw_equity is None or isinstance(raw_equity, bool):
+                raise RuntimeError(
+                    "Platform loss limits require a fresh live-equity snapshot; "
+                    "broker reconciliation did not return one"
+                )
+            try:
+                live_equity = float(raw_equity)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise RuntimeError(
+                    "Platform loss limits require a numeric live-equity snapshot"
+                ) from exc
+            if not math.isfinite(live_equity) or live_equity < 0:
+                raise RuntimeError(
+                    "Platform loss limits require a finite, non-negative live-equity snapshot"
+                )
             await enforce_platform_loss_limits()
 
         async def reconcile_customers() -> None:
@@ -3205,11 +3272,33 @@ async def _reconciliation_loop():
             if selected:
                 await reconcile_customer_live_orders(selected)
 
-        if should_crypto:
-            await run_scope("crypto", reconcile_crypto_and_equity)
-            await run_scope("platform-loss-limits", enforce_loss_limits)
+        # Always run the crypto scope: with missing credentials it performs a scoped
+        # unresolved-order probe, and a probe failure must not suppress other providers.
+        crypto_ok, crypto_result = await run_scope("crypto", reconcile_crypto_orders)
+        crypto_skipped = (
+            isinstance(crypto_result, Mapping)
+            and str(crypto_result.get("status") or "").upper() == "SKIPPED"
+        )
+        if not crypto_skipped:
+            if settings.paper_trading or not settings.live_trading_enabled:
+                await run_scope(
+                    "platform-loss-limits",
+                    skip_platform_loss_limits_when_live_unavailable,
+                )
+            elif crypto_ok:
+                await run_scope(
+                    "platform-loss-limits",
+                    lambda: enforce_loss_limits_from_fresh_equity(crypto_result),
+                )
+            else:
+                # Do not evaluate limits against stale AppState equity after a failed
+                # broker reconciliation; the crypto scope already records the failure.
+                logger.warning(
+                    "platform_loss_limits_skipped reason=live_equity_reconciliation_failed"
+                )
         if should_oanda:
             await run_scope("oanda", lambda: reconcile("oanda"))
+        # Customer reconciliation is independent of platform credentials/provider health.
         await run_scope("customer-live", reconcile_customers)
 
         if cycle_failures:
