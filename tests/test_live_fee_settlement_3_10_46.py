@@ -65,21 +65,33 @@ def test_partial_then_full_fill_charges_fee_delta_once_and_replay_is_noop():
     asyncio.run(with_database(check))
 
 
-def test_missing_fee_data_is_estimated_charged_and_flagged():
+def test_missing_fee_data_is_estimated_but_withheld_and_flagged():
     async def check(sessions):
         async with sessions() as db:
             db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("1000")))
             t = _trade()
             db.add(t)
+            await db.flush()
+            delta, cumulative, quality, note = execution._prepare_live_fee(
+                t, {}, 0.1, 60000
+            )
+            assert delta == Decimal("0")
+            assert quality == "estimated"
+            assert t.fee_reconciliation_pending is True
+            await execution._post_live_fee(
+                db, t, delta, cumulative, quality, note
+            )
             await db.commit()
-            d, c, q, n = execution._prepare_live_fee(t, {}, 0.1, 60000)
-            await execution._post_live_fee(db, t, d, c, q, n)
-            await db.commit()
-            assert d == Decimal("3.300000")
-            flagged = (await db.execute(select(Incident).where(Incident.incident_key == f"LIVE_FEE_ESTIMATED:{t.id}"))).scalar_one()
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.available == Decimal("1000")
+            assert not (await db.execute(select(LedgerJournal))).scalars().all()
+            flagged = (await db.execute(
+                select(Incident).where(
+                    Incident.incident_key == f"LIVE_FEE_ESTIMATED:{t.id}"
+                )
+            )).scalar_one()
             assert flagged.severity == "HIGH"
     asyncio.run(with_database(check))
-
 
 def test_fee_never_decreases_automatically():
     async def check(sessions):
