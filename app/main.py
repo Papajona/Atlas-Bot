@@ -3214,7 +3214,15 @@ async def _reconciliation_loop():
                     "Outstanding platform LIVE orders cannot be reconciled because "
                     "exchange API credentials are unavailable"
                 )
-            return await reconcile(settings.default_exchange, settings.default_symbol)
+            result = await reconcile(settings.default_exchange, settings.default_symbol)
+            if settings.live_trading_enabled and not settings.paper_trading:
+                account = result.get("account") if isinstance(result, Mapping) else None
+                if isinstance(account, Mapping) and account.get("error"):
+                    raise RuntimeError(
+                        "Platform broker account synchronization failed: "
+                        + str(account.get("error"))
+                    )
+            return result
 
         async def skip_platform_loss_limits_in_paper_mode():
             # AppState equity belongs to the paper ledger in paper mode. Never evaluate
