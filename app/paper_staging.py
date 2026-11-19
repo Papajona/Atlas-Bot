@@ -2,7 +2,8 @@
 
 This app deliberately does not run app.main's lifespan: that startup initializes the
 general application schema and writes billing state in the primary public schema.
-Only health/readiness and /api/customer/paper are exposed by this ASGI app.
+Only explicit health/readiness, Supabase customer Auth, customer summary, and
+customer-paper ledger routes are exposed by this ASGI app.
 """
 from __future__ import annotations
 
