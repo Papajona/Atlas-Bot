@@ -347,6 +347,46 @@ def test_execute_restore_signature_keeps_required_output_before_optional_source_
     assert parameters.index("output_path") < parameters.index("production_instance")
 
 
+def test_execute_restore_retains_import_safety_generation_and_operation_evidence_gates():
+    source = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
+    body = source.split("def execute_restore(", 1)[1].split("\\ndef main(", 1)[0]
+
+    # Protect the executor orchestration, not just the helpers in isolation.
+    required_calls = (
+        "verify_supabase_pg_dump_source(",
+        "verify_sanitized_artifacts(",
+        '\"scripts/verify_cloud_sql_import_dump.py\"',
+        '\"--if-generation-match=0\"',
+        "_live_backup_generation(",
+        "_wait_for_operation(",
+        "verify_backup_binding(",
+        "verify_restore_operation(",
+    )
+    for call in required_calls:
+        assert call in body, f"execute_restore no longer enforces {call}"
+
+    # Do not import until SQL scanning, immutable upload/read-back, generation
+    # verification, and completed-operation evidence checks have all run.
+    scanner = body.index('\"scripts/verify_cloud_sql_import_dump.py\"')
+    create_only_upload = body.index('\"--if-generation-match=0\"')
+    read_back = body.index("[\"gcloud\", \"storage\", \"cp\", import_reference, verified_import_path]")
+    live_generation = body.index("_live_backup_generation(")
+    import_request = body.index('\"gcloud\", \"sql\", \"import\"')
+    wait_for_completion = body.index("_wait_for_operation(")
+    backup_binding = body.index("backup_binding = verify_backup_binding(")
+    operation_evidence = body.index("restore_evidence = verify_restore_operation(")
+
+    assert scanner < create_only_upload < read_back < live_generation < import_request
+    assert import_request < wait_for_completion < backup_binding < operation_evidence
+
+    import inspect
+    from scripts.execute_cloud_sql_restore import execute_restore
+
+    parameters = list(inspect.signature(execute_restore).parameters)
+    assert parameters.index("output_path") < parameters.index("source_supabase_project_ref")
+    assert parameters.index("output_path") < parameters.index("production_instance")
+
+
 def test_restore_inputs_accept_verified_supabase_pg_dump_source_without_production_cloud_sql_instance():
     assert validate_restore_inputs(
         project_id="atlas-staging-510915",
