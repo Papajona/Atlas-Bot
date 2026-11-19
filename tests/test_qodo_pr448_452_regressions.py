@@ -1,7 +1,9 @@
 import asyncio
+from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
-from app import main
+from app import execution, main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +48,8 @@ def test_edge_provisioning_keeps_pii_encrypted_and_paper_portfolio_is_guarded():
         paper.index("app.include_router")
     ]
     assert "await _paper_state_guard()" in portfolio
+    assert portfolio.index("get_existing_customer(authorization, db)") < portfolio.index("await _paper_state_guard()")
+    assert portfolio.index("await _paper_state_guard()") < portfolio.index("get_customer_paper_balances")
     summary = paper[
         paper.index("async def paper_customer_me"):
         paper.index('@app.get("/api/customer/portfolio")')
@@ -64,14 +68,51 @@ def test_profile_conflict_returns_actionable_409_not_auth_outage():
     assert "raise HTTPException(" in helper
 
 
-def test_risk_dashboard_uses_only_latest_closed_platform_outcome_per_trade():
+def test_risk_dashboard_queries_bounded_completed_trade_summaries():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    assert source.count("latest_closed = (") == 2
-    assert source.count("StrategyOutcome.customer_id.is_(None)") >= 4
-    assert source.count('StrategyOutcome.lifecycle_status == "CLOSED"') >= 4
+    assert source.count("rows = await _recent_closed_platform_outcome_returns(db)") == 2
+    assert "latest_closed =" not in source
+    helper = source[
+        source.index("async def _recent_closed_platform_outcome_returns"):
+        source.index("async def risk_dashboard_metrics")
+    ]
+    assert "StrategyOutcome.closing_notional > 0" in helper
+    assert ".order_by(StrategyOutcome.created_at.desc())" in helper
+    assert ".limit(100)" in helper
+    model = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    assert 'Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at")' in model
+    assert "closing_notional:" in model
     ratios = (ROOT / "app/risk_metrics.py").read_text(encoding="utf-8")
     assert "MIN_ANNUALIZATION_SPAN_SECONDS = 30 * 86400" in ratios
     assert "interval_count = len(times) - 1" in ratios
+
+
+def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
+    first = SimpleNamespace(
+        id=1, sequence=1, closing_notional=Decimal("100"),
+        net_pnl=Decimal("1.90"), realized_pnl=Decimal("2.00"),
+        fee=Decimal("0.10"), return_bps=200.0, net_return_bps=190.0,
+        lifecycle_status="OPEN", metadata_json="{}",
+    )
+    final = SimpleNamespace(
+        id=2, sequence=2, closing_notional=Decimal("300"),
+        net_pnl=Decimal("5.70"), realized_pnl=Decimal("6.00"),
+        fee=Decimal("0.30"), return_bps=200.0, net_return_bps=190.0,
+        lifecycle_status="CLOSED", metadata_json="{}",
+    )
+
+    result = execution._aggregate_completed_strategy_outcomes([first, final])
+
+    assert result is final
+    assert first.lifecycle_status == "PARTIAL_CLOSED"
+    assert final.lifecycle_status == "CLOSED"
+    assert final.closing_notional == Decimal("400")
+    assert final.net_pnl == Decimal("7.60")
+    assert final.realized_pnl == Decimal("8.00")
+    assert final.fee == Decimal("0.40")
+    assert final.return_bps == 200.0
+    assert final.net_return_bps == 190.0
+    assert '"aggregate_fill_count": 2' in final.metadata_json
 
 
 def test_risk_websocket_publishes_annualization_and_sample_metadata():
@@ -124,8 +165,7 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
         source.index("async def _legacy_customer_email_conflict"):
         source.index("async def get_customer")
     ]
-    assert 'if not str(stored_email or "").strip():' in helper
-    assert "return True" in helper
+    assert 'if not str(stored_email or "").strip():\n            return True' in helper
 
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
     provisioning = edge[
@@ -180,7 +220,7 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index('@app.get("/api/customer/wallets")')
     ]
     assert "allow_identity_review_summary=True" in summary
-    assert '"identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW"' in summary
+    assert '"identity_review_required": bool(getattr(profile, "identity_review_required", False))' in summary
 
     get_customer = source[
         source.index("async def get_customer("):
@@ -195,11 +235,13 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
 def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain():
     source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
     gate = source[
-        source.index("async def get_existing_customer"):
+        source.index("async def _has_unmapped_legacy_customer_profile"):
         source.index("async def _paper_state_guard")
     ]
-    assert "legacy_auth_refs" in gate
-    assert "uuid.UUID" in gate
+    assert 'op("!~*")' in gate
+    assert 'op("GLOB")' in gate
+    assert ".limit(1)" in gate
+    assert "_has_unmapped_legacy_customer_profile(db, uid)" in gate
     assert "Paper access is paused until legacy customer identities are manually reviewed" in gate
 
 
@@ -219,3 +261,26 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
     ]
     assert "if not allow_identity_review_summary:" in access
     assert "identity_review_required=identity_review_required" in access
+
+
+def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_or_persist_review():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    customer = source[
+        source.index("async def get_customer("):
+        source.index("def _funding_signature_valid")
+    ]
+    assert "not str(profile.display_name or" not in customer
+    assert "if not email and (profile is None or not str(profile.email or \"\").strip()):" in customer
+    assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in customer
+    assert "profile.identity_review_required = identity_review_required" in customer
+    assert "profile.status = \"ACTIVE\"" in customer
+
+
+def test_edge_legacy_identity_offset_paging_has_a_stable_order():
+    edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
+    paging = edge[
+        edge.index("const pageSize = 500"):
+        edge.index("// Atlas stores customer_profiles.email")
+    ]
+    assert '.order("id", { ascending: true })' in paging
+    assert paging.index('.order("id", { ascending: true })') < paging.index(".range(offset, offset + pageSize - 1)")
