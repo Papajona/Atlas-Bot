@@ -5482,7 +5482,11 @@ async def customer_me(authorization: str | None = Header(default=None)):
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
         return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status,
+                "display_name": profile.display_name, "status": (
+                    "PENDING_IDENTITY_REVIEW"
+                    if bool(getattr(profile, "identity_review_required", False))
+                    else ("ACTIVE" if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW" else profile.status)
+                ),
                 "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
