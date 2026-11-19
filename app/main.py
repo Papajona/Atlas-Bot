@@ -3161,30 +3161,13 @@ async def _reconciliation_loop():
     while True:
         await asyncio.sleep(max(15, settings.reconciliation_interval_seconds))
         # Existing platform orders still need broker reconciliation after switching to paper.
-        # reconcile() performs that read/update path but only calls sync_live_account() when
-        # live trading is enabled AND paper mode is off.
+        # The missing-credentials probe runs inside the crypto scope below so database
+        # failures are recorded and cannot prevent independent provider/customer scopes.
         crypto_credentials_available = bool(
             settings.exchange_api_key and settings.exchange_api_secret
         )
-        should_crypto = crypto_credentials_available
-        if not crypto_credentials_available:
-            # Do not silently mark reconciliation healthy when legacy platform LIVE
-            # orders remain but the broker credentials needed to resolve them are gone.
-            async with SessionLocal() as db:
-                unresolved_platform_live_order = (await db.execute(
-                    select(Trade.id).where(
-                        Trade.customer_id.is_(None),
-                        Trade.mode == "LIVE",
-                        Trade.exchange == settings.default_exchange,
-                        Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
-                    ).limit(1)
-                )).scalar_one_or_none()
-            should_crypto = unresolved_platform_live_order is not None
         should_oanda = bool(settings.oanda_account_id and settings.oanda_api_token and
                            settings.oanda_practice and settings.forex_demo_enabled)
-        if not (should_crypto or should_oanda):
-            _mark_worker_loop_success("reconciliation")
-            continue
 
         cycle_failures: list[tuple[str, Exception]] = []
 
@@ -3207,9 +3190,24 @@ async def _reconciliation_loop():
                 return True, result
 
         async def reconcile_crypto_orders():
-            # Reconcile only existing platform LIVE orders. reconcile() performs its own
-            # account/position sync only when live trading is enabled and paper mode is off.
+            # If credentials are absent, first check whether unresolved platform LIVE
+            # orders actually need a broker lookup. Keep this DB probe inside run_scope:
+            # a query error is a crypto reconciliation failure, not evidence of no orders.
             if not crypto_credentials_available:
+                async with SessionLocal() as db:
+                    unresolved_platform_live_order = (await db.execute(
+                        select(Trade.id).where(
+                            Trade.customer_id.is_(None),
+                            Trade.mode == "LIVE",
+                            Trade.exchange == settings.default_exchange,
+                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                        ).limit(1)
+                    )).scalar_one_or_none()
+                if unresolved_platform_live_order is None:
+                    return {
+                        "status": "SKIPPED",
+                        "reason": "NO_UNRESOLVED_PLATFORM_LIVE_ORDERS",
+                    }
                 raise RuntimeError(
                     "Outstanding platform LIVE orders cannot be reconciled because "
                     "exchange API credentials are unavailable"
@@ -3224,10 +3222,14 @@ async def _reconciliation_loop():
                     )
             return result
 
-        async def skip_platform_loss_limits_in_paper_mode():
-            # AppState equity belongs to the paper ledger in paper mode. Never evaluate
-            # live loss limits using that value; record the deliberate skip as a scope.
-            reason = "PAPER_MODE_HAS_NO_VALID_LIVE_EQUITY_SNAPSHOT"
+        async def skip_platform_loss_limits_when_live_unavailable():
+            # AppState equity is not a live-equity snapshot in paper mode or whenever
+            # the platform live-trading feature is disabled.
+            reason = (
+                "PAPER_MODE_HAS_NO_VALID_LIVE_EQUITY_SNAPSHOT"
+                if settings.paper_trading
+                else "LIVE_TRADING_DISABLED"
+            )
             logger.info("platform_loss_limits_skipped reason=%s", reason)
             return {"status": "SKIPPED", "reason": reason}
 
@@ -3270,10 +3272,19 @@ async def _reconciliation_loop():
             if selected:
                 await reconcile_customer_live_orders(selected)
 
-        if should_crypto:
-            crypto_ok, crypto_result = await run_scope("crypto", reconcile_crypto_orders)
-            if settings.paper_trading:
-                await run_scope("platform-loss-limits", skip_platform_loss_limits_in_paper_mode)
+        # Always run the crypto scope: with missing credentials it performs a scoped
+        # unresolved-order probe, and a probe failure must not suppress other providers.
+        crypto_ok, crypto_result = await run_scope("crypto", reconcile_crypto_orders)
+        crypto_skipped = (
+            isinstance(crypto_result, Mapping)
+            and str(crypto_result.get("status") or "").upper() == "SKIPPED"
+        )
+        if not crypto_skipped:
+            if settings.paper_trading or not settings.live_trading_enabled:
+                await run_scope(
+                    "platform-loss-limits",
+                    skip_platform_loss_limits_when_live_unavailable,
+                )
             elif crypto_ok:
                 await run_scope(
                     "platform-loss-limits",
@@ -3287,6 +3298,7 @@ async def _reconciliation_loop():
                 )
         if should_oanda:
             await run_scope("oanda", lambda: reconcile("oanda"))
+        # Customer reconciliation is independent of platform credentials/provider health.
         await run_scope("customer-live", reconcile_customers)
 
         if cycle_failures:
