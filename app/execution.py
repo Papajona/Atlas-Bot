@@ -767,6 +767,11 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
     observed_cumulative, quality, note = extract_order_fee_quote_decimal(
         order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
     )
+    if not fee_quality_is_verified(quality):
+        # Preserve the previously verified fee total. Estimated or denomination-
+        # ambiguous values are not authoritative cumulative fees and must not be
+        # persisted in Trade.fee or charged before the broker reconciles them.
+        return Decimal("0"), prev, quality, note
     # Match ledger Numeric(38,6) booking semantics on the cumulative amount, not
     # by rounding each raw delta independently. This avoids repeated sub-micro fees
     # accumulating a different total in the trade row than in the ledger.
@@ -779,24 +784,16 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
 
 
 async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, quality: str, note: str) -> None:
-    """Charge the fee delta to the customer ledger (idempotent) and flag estimated fees for review."""
+    """Settle only exchange-reported or deterministically converted fee amounts."""
     if trade.customer_id is None:
         return
-    if delta > 0:
-        await settle_trading_fee(
-            db,
-            customer_id=trade.customer_id,
-            fee=delta,
-            reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}",
-            strict=False,
-        )
-    if quality in {ESTIMATED, UNVERIFIED}:
+    if not fee_quality_is_verified(quality):
         withheld = quality == UNVERIFIED
         incident_key = "LIVE_FEE_UNVERIFIED" if withheld else "LIVE_FEE_ESTIMATED"
         summary = (
             "Live fee denomination is unknown; customer settlement is withheld pending broker reconciliation"
             if withheld
-            else "Live fill fee was estimated, not reported by the exchange; true-up against fetch_my_trades"
+            else "Live fill fee was estimated, not reported by the exchange; no estimated amount was debited"
         )
         await record_ledger_incident(
             db,
@@ -812,6 +809,16 @@ async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, 
             },
             customer_id=trade.customer_id,
         )
+        return
+    if delta <= 0:
+        return
+    await settle_trading_fee(
+        db,
+        customer_id=trade.customer_id,
+        fee=delta,
+        reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}",
+        strict=False,
+    )
 
 
 async def _refresh_live_customer_equity(db, customer_id: int) -> None:

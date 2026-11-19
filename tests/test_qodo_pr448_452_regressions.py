@@ -499,3 +499,62 @@ def test_metadata_declares_the_partial_indexes_created_by_revision_0060():
     )
     assert "customer_id IS NULL" in predicate
     assert "lifecycle_status = 'CLOSED'" in predicate
+
+
+
+def test_missing_currency_fee_is_not_debited_or_saved_as_authoritative(monkeypatch):
+    from app.live_fees import UNVERIFIED
+
+    trade = SimpleNamespace(
+        id=7701, customer_id=91, symbol="BTC/USDT", fee=Decimal("0")
+    )
+    delta, cumulative, quality, note = execution._prepare_live_fee(
+        trade,
+        {"fee": {"cost": "0.25"}},
+        filled=0.1,
+        fill_price=60000,
+        taker_bps=5.5,
+    )
+
+    assert delta == Decimal("0")
+    assert cumulative == Decimal("0.000000")
+    assert quality == UNVERIFIED
+    assert trade.fee == Decimal("0")
+    calls = {"settle": [], "incident": []}
+
+    async def fake_settle(*args, **kwargs):
+        calls["settle"].append((args, kwargs))
+
+    async def fake_incident(*args, **kwargs):
+        calls["incident"].append((args, kwargs))
+
+    monkeypatch.setattr(execution, "settle_trading_fee", fake_settle)
+    monkeypatch.setattr(execution, "record_ledger_incident", fake_incident)
+
+    asyncio.run(
+        execution._post_live_fee(
+            None, trade, delta, cumulative, quality, note
+        )
+    )
+
+    assert calls["settle"] == []
+    assert len(calls["incident"]) == 1
+    assert calls["incident"][0][1]["detail"]["fee_quality"] == UNVERIFIED
+
+
+def test_later_verified_fee_snapshot_charges_only_unsettled_authoritative_delta():
+    trade = SimpleNamespace(id=7702, customer_id=92, symbol="BTC/USDT", fee=Decimal("0"))
+    missing_delta, _cumulative, missing_quality, _note = execution._prepare_live_fee(
+        trade, {"fee": {"cost": "0.25"}}, 0.1, 60000, taker_bps=5.5
+    )
+    assert missing_delta == Decimal("0")
+    assert trade.fee == Decimal("0")
+
+    delta, cumulative, quality, _note = execution._prepare_live_fee(
+        trade, {"fee": {"currency": "USDT", "cost": "0.25"}},
+        0.1, 60000, taker_bps=5.5
+    )
+    assert quality == "exact"
+    assert delta == Decimal("0.250000")
+    assert cumulative == Decimal("0.250000")
+    assert trade.fee == Decimal("0.250000")
