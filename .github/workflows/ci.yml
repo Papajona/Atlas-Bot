@@ -540,6 +540,14 @@ jobs:
           SQL
           # Check drift only after reaching the actual migration head, not at an older revision.
           python -m alembic check
+      - name: Run opt-in ORM drift check against the migrated PostgreSQL database
+        env:
+          ATLAS_MIGRATION_DRIFT_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+        run: |
+          python -m pytest -q \
+            tests/test_migration_model_drift.py::test_models_have_matching_migrations \
+            --junitxml=migration-drift.xml
+          python scripts/assert_no_skips.py migration-drift.xml
       - name: Controlled withdrawal recovery regressions
         run: |
           python -m pytest -q \
