@@ -1,6 +1,9 @@
 """Pure unit tests for app.live_fees (no database needed)."""
 import pytest
-from app.live_fees import extract_order_fee_quote, extract_order_fee_quote_decimal, split_symbol, EXACT, CONVERTED, ESTIMATED
+from app.live_fees import (
+    extract_order_fee_quote, extract_order_fee_quote_decimal, split_symbol,
+    fee_quality_is_verified, EXACT, CONVERTED, ESTIMATED,
+)
 
 BPS = 5.5
 
@@ -59,3 +62,18 @@ def test_fee_conversion_keeps_sub_micro_quote_amount_as_decimal():
     assert fee == __import__("decimal").Decimal("0.0000006")
     assert quality == EXACT
     assert note == ""
+
+
+
+def test_fee_cost_without_currency_is_estimated_and_never_verified():
+    fee, quality, note = extract_order_fee_quote_decimal(
+        {"fee": {"cost": "0.25"}},
+        "BTC/USDT",
+        "60000",
+        "0.1",
+        fallback_taker_bps="5.5",
+    )
+    assert fee == __import__("decimal").Decimal("3.300000")
+    assert quality == ESTIMATED
+    assert not fee_quality_is_verified(quality)
+    assert "currency missing" in note

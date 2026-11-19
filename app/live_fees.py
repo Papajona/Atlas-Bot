@@ -85,7 +85,13 @@ def extract_order_fee_quote_decimal(
             continue
         with localcontext() as context:
             context.prec = 50
-            if cur == quote or (not cur and quote):
+            if not cur:
+                # A numeric fee without its asset denomination is not a quote-currency
+                # amount. Estimate conservatively and exclude it from verified risk
+                # samples until fetch_my_trades supplies an authoritative currency.
+                note = "exchange fee currency missing; quote denomination cannot be verified"
+                quality = ESTIMATED
+            elif cur == quote:
                 total = total + cost
             elif cur == base:
                 total = total + cost * fill_price_d

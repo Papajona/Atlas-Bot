@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app import execution
 from app.config import settings
-from app.db import Base, CustomerLedgerAccount, Incident, LedgerJournal, Trade
+from app.db import Base, CustomerLedgerAccount, Incident, LedgerJournal, StrategyOutcome, Trade
+from app.live_fees import fee_quality_is_verified
 
 
 @pytest.fixture(autouse=True)
@@ -86,4 +87,70 @@ def test_fee_never_decreases_automatically():
             t = _trade(fee=5.0)
             d, c, _, _ = execution._prepare_live_fee(t, {"fee": {"currency": "USDT", "cost": 4.0}}, 0.1, 60000)
             assert d == 0.0 and c == 5.0 and t.fee == 5.0
+    asyncio.run(with_database(check))
+
+
+
+def test_fee_without_currency_cannot_create_fee_complete_outcome():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                signal_id="fee-denomination-entry",
+                client_order_id="fee-denomination-entry",
+                side="buy",
+                fee=0.0,
+            )
+            db.add(entry)
+            await db.flush()
+            entry_delta, _entry_cumulative, entry_quality, _entry_note = execution._prepare_live_fee(
+                entry,
+                {"fee": {"currency": "USDT", "cost": "0.10"}},
+                0.2,
+                100.0,
+            )
+            await execution._apply_fill_to_position(
+                db,
+                entry,
+                0.2,
+                100.0,
+                current_fill_fee=entry_delta,
+                current_fill_fee_verified=fee_quality_is_verified(entry_quality),
+            )
+            await db.flush()
+
+            closing = _trade(
+                signal_id="fee-denomination-close",
+                client_order_id="fee-denomination-close",
+                side="sell",
+                fee=0.0,
+            )
+            db.add(closing)
+            await db.flush()
+            close_delta, _close_cumulative, close_quality, close_note = execution._prepare_live_fee(
+                closing,
+                {"fee": {"cost": "0.25"}},
+                0.2,
+                110.0,
+            )
+            assert close_quality == "estimated"
+            assert not fee_quality_is_verified(close_quality)
+            assert "currency missing" in close_note
+            await execution._apply_fill_to_position(
+                db,
+                closing,
+                0.2,
+                110.0,
+                current_fill_fee=close_delta,
+                current_fill_fee_verified=fee_quality_is_verified(close_quality),
+            )
+            await db.commit()
+
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.closing_trade_id == closing.id
+                )
+            )).scalar_one()
+            assert outcome.lifecycle_status == "CLOSED"
+            assert outcome.fee_basis_complete is False
+
     asyncio.run(with_database(check))
