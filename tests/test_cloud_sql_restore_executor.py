@@ -349,7 +349,7 @@ def test_execute_restore_signature_keeps_required_output_before_optional_source_
 
 def test_execute_restore_retains_import_safety_generation_and_operation_evidence_gates():
     source = Path("scripts/execute_cloud_sql_restore.py").read_text(encoding="utf-8")
-    body = source.split("def execute_restore(", 1)[1].split("\\ndef main(", 1)[0]
+    body = source.split("def execute_restore(", 1)[1].split("\ndef main(", 1)[0]
 
     # Protect the executor orchestration, not just the helpers in isolation.
     required_calls = (
