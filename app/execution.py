@@ -115,6 +115,15 @@ def _aggregate_completed_strategy_outcomes(outcomes):
         metadata = {}
     if isinstance(metadata, dict):
         metadata["aggregate_fill_count"] = len(rows)
+        # Preserve the final fill's own slice before closing_quantity/notional
+        # are replaced with the lifecycle aggregate. Fee true-ups need source
+        # quantities, not the already-aggregated total, for correct allocation.
+        metadata["final_fill_closing_quantity"] = str(
+            getattr(rows[-1], "closing_quantity", 0) or 0
+        )
+        metadata["final_fill_closing_notional"] = str(
+            getattr(rows[-1], "closing_notional", 0) or 0
+        )
         metadata["total_closing_notional"] = str(final.closing_notional)
         metadata["net_pnl"] = str(total_net_pnl)
         metadata["aggregate_fee_basis_complete"] = bool(final.fee_basis_complete)
