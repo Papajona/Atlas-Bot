@@ -12,10 +12,14 @@ export default {
       return response({ error: "Method not allowed" }, 405);
     }
 
-    // The signed JWT must represent a completed second-factor authentication.
-    const claims = ctx.userClaims ?? {};
-    const userId = String(claims.sub ?? "").trim();
-    if (!userId || claims.aal !== "aal2") {
+    // @supabase/server exposes the resolved identity separately from the
+    // full JWT. Use userClaims.id for identity and jwtClaims for sub/aal.
+    // The full signed JWT must represent a completed second-factor session.
+    const userClaims = ctx.userClaims ?? {};
+    const jwtClaims = ctx.jwtClaims ?? {};
+    const userId = String(userClaims.id ?? "").trim();
+    const jwtSubject = String(jwtClaims.sub ?? "").trim();
+    if (!userId || userId !== jwtSubject || jwtClaims.aal !== "aal2") {
       return response({ error: "A verified AAL2 session is required" }, 403);
     }
 
