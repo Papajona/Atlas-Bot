@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import hmac
 import time
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,12 +24,18 @@ from .body_limit import BodySizeLimitMiddleware
 from .monitoring import TelemetryMiddleware
 from .db import AppState, CustomerProfile, SessionLocal, engine
 from .customer_paper_api import _paper_feature_flags, build_customer_paper_router
-from .customer_paper_ledger import preflight_isolated_customer_paper_ledger
-# Import the existing JWT/MFA verifier and market-data adapter. The main ASGI app is
-# not mounted or served; its startup/lifespan is never executed in this process.
+from .customer_paper_ledger import (
+    get_customer_paper_balances,
+    preflight_isolated_customer_paper_ledger,
+)
+from .customer_paper_lifecycle import get_customer_paper_positions
+from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
+# Import only the existing Auth/JWT helpers and market-data adapter. The main ASGI
+# app is not mounted or served; its startup/lifespan is never executed in this process.
 from .main import (
-    MarketRequest, _customer_paper_group_mark_prices, _trusted_client_ip,
-    api_rate_limit, customer_claims, market_data,
+    MarketRequest, _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
+    _customer_paper_group_mark_prices, _supabase_request, _supabase_user,
+    _trusted_client_ip, api_rate_limit, customer_claims, market_data,
 )
 
 
@@ -437,6 +444,148 @@ async def readyz(request: Request):
     if state.kill_switch:
         return JSONResponse({"status": "BLOCKED", "reason": "PAPER_TRADING_HALTED"}, status_code=503)
     return result
+
+
+@app.post("/api/auth/signup")
+async def paper_customer_signup(req: CustomerCredentials):
+    """Create a Supabase Auth identity; email confirmation remains controlled by Auth."""
+    return await _supabase_request(
+        "/auth/v1/signup",
+        payload={"email": req.email.strip().lower(), "password": req.password},
+    )
+
+
+@app.post("/api/auth/login")
+async def paper_customer_login(req: CustomerCredentials):
+    """Authenticate the first factor before the TOTP enrollment/challenge step."""
+    return await _supabase_request(
+        "/auth/v1/token?grant_type=password",
+        payload={"email": req.email.strip().lower(), "password": req.password},
+    )
+
+
+@app.get("/api/auth/mfa/status")
+async def paper_customer_mfa_status(authorization: str | None = Header(default=None)):
+    state = await _customer_mfa_state(authorization)
+    return {
+        "enabled": state["enabled"],
+        "aal": state["aal"],
+        "factor_count": state["factor_count"],
+        "factor_ids": state["factor_ids"],
+    }
+
+
+@app.post("/api/auth/mfa/enroll")
+async def paper_customer_mfa_enroll(authorization: str | None = Header(default=None)):
+    await customer_claims(authorization, require_aal2=False)
+    state = await _customer_mfa_state(authorization)
+    if state["enabled"]:
+        return {
+            "enabled": True,
+            "factor_ids": state["factor_ids"],
+            "message": "A verified authenticator is already enrolled.",
+        }
+    token = _bearer_token(authorization)
+    return await _supabase_request(
+        "/auth/v1/factors",
+        payload={
+            "factor_type": "totp",
+            "friendly_name": "Atlas Paper Trading / Google Authenticator",
+        },
+        access_token=token,
+    )
+
+
+@app.post("/api/auth/mfa/challenge")
+async def paper_customer_mfa_challenge(
+    req: MfaChallengeRequest, authorization: str | None = Header(default=None)
+):
+    await customer_claims(authorization, require_aal2=False)
+    factor_ids = await _customer_mfa_factor_ids(authorization)
+    if req.factor_id not in factor_ids:
+        raise HTTPException(403, "Invalid authenticator factor")
+    return await _supabase_request(
+        f"/auth/v1/factors/{req.factor_id}/challenge",
+        payload={},
+        access_token=_bearer_token(authorization),
+    )
+
+
+@app.post("/api/auth/mfa/verify")
+async def paper_customer_mfa_verify(
+    req: MfaVerifyRequest, authorization: str | None = Header(default=None)
+):
+    await customer_claims(authorization, require_aal2=False)
+    factor_ids = await _customer_mfa_factor_ids(authorization)
+    if req.factor_id not in factor_ids:
+        raise HTTPException(403, "Invalid authenticator factor")
+    return await _supabase_request(
+        f"/auth/v1/factors/{req.factor_id}/verify",
+        payload={"challenge_id": req.challenge_id, "code": req.code},
+        access_token=_bearer_token(authorization),
+    )
+
+
+@app.post("/api/auth/profile/provision")
+async def paper_customer_profile_provision(authorization: str | None = Header(default=None)):
+    """Provision only the caller's profile after email confirmation and TOTP AAL2."""
+    await customer_claims(authorization, require_aal2=True)
+    token = _bearer_token(authorization)
+    user = await _supabase_user(token)
+    if not user.get("email_confirmed_at"):
+        raise HTTPException(403, "A confirmed email address is required")
+    return await _supabase_request(
+        "/functions/v1/customer-profile-provision",
+        payload={},
+        access_token=token,
+    )
+
+
+@app.get("/api/customer/me")
+async def paper_customer_me(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+        row = (
+            await db.execute(
+                select(
+                    CustomerProfile.email,
+                    CustomerProfile.display_name,
+                ).where(CustomerProfile.id == profile.id)
+            )
+        ).one()
+    return {
+        "id": profile.id,
+        "email": row.email,
+        "display_name": row.display_name,
+        "status": profile.status,
+    }
+
+
+@app.get("/api/customer/portfolio")
+async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    balances = await get_customer_paper_balances(customer_id=int(profile.id))
+    positions = await get_customer_paper_positions(customer_id=int(profile.id))
+    by_code = {
+        str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))
+        for row in balances
+    }
+    cash = by_code.get("PAPER_CASH")
+    # Open positions require a current, verified mark to calculate total equity.
+    # Never substitute cost basis or a stale value and label it as market equity.
+    equity = (
+        float(cash)
+        if cash is not None and not positions
+        else None
+    )
+    return {
+        "equity": equity,
+        "cash_equity": float(cash) if cash is not None else None,
+        "positions": positions,
+        "virtual_only": True,
+        "valuation_status": "CASH_ONLY" if not positions else "CURRENT_MARK_REQUIRED",
+    }
 
 
 app.include_router(
