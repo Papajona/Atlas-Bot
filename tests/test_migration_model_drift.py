@@ -12,10 +12,7 @@ intentionally ignores index, constraint and type differences.
 import asyncio
 import os
 
-import pytest
-
 URL = os.environ.get("ATLAS_MIGRATION_DRIFT_URL")
-pytestmark = pytest.mark.skipif(not URL, reason="set ATLAS_MIGRATION_DRIFT_URL to run")
 
 
 def _collect_diff():
@@ -48,12 +45,13 @@ def _flatten(diff):
             yield entry
 
 
-def test_models_have_matching_migrations():
-    missing = []
-    for entry in _flatten(_collect_diff()):
-        kind = entry[0]
-        if kind == "add_table":
-            missing.append(f"table {entry[1].name}")
-        elif kind == "add_column":
-            missing.append(f"column {entry[2]}.{entry[3].name}")
-    assert not missing, "models without migrations: " + ", ".join(sorted(missing))
+if URL:
+    def test_models_have_matching_migrations():
+        missing = []
+        for entry in _flatten(_collect_diff()):
+            kind = entry[0]
+            if kind == "add_table":
+                missing.append(f"table {entry[1].name}")
+            elif kind == "add_column":
+                missing.append(f"column {entry[2]}.{entry[3].name}")
+        assert not missing, "models without migrations: " + ", ".join(sorted(missing))
