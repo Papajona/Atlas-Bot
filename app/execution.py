@@ -764,6 +764,9 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized_decimal = Decimal("0")
     realized = 0.0
+    # Only the opposite-direction (closing) branch assigns this; same-direction
+    # additions and new positions must not reference an unbound variable.
+    closing = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
