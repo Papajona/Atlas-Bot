@@ -3863,6 +3863,65 @@ def approver_auth(admin_id: str, approver_token: str | None, admin_token: str | 
     return True
 
 
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Find another non-UUID Auth ID without selecting encrypted customer PII."""
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    try:
+        if dialect == "postgresql":
+            uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+            statement = select(CustomerProfile.id).where(
+                CustomerProfile.auth_user_id != auth_user_id,
+                CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+            ).limit(1)
+            return (await db.execute(statement)).scalar_one_or_none() is not None
+        if dialect == "sqlite":
+            uuid_glob = (
+                "[0-9a-fA-F]" * 8 + "-"
+                + "[0-9a-fA-F]" * 4 + "-"
+                + "[0-9a-fA-F]" * 4 + "-"
+                + "[0-9a-fA-F]" * 4 + "-"
+                + "[0-9a-fA-F]" * 12
+            )
+            statement = select(CustomerProfile.id).where(
+                CustomerProfile.auth_user_id != auth_user_id,
+                ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+            ).limit(1)
+            return (await db.execute(statement)).scalar_one_or_none() is not None
+        legacy_ids = (await db.execute(
+            select(CustomerProfile.auth_user_id).where(
+                CustomerProfile.auth_user_id != auth_user_id
+            )
+        )).scalars().all()
+        for legacy_id in legacy_ids:
+            try:
+                uuid.UUID(str(legacy_id))
+            except (ValueError, TypeError, AttributeError):
+                return True
+        return False
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("unmapped_legacy_customer_identity_lookup_failed")
+        raise HTTPException(
+            503, "Customer identity verification is temporarily unavailable"
+        ) from exc
+
+
+async def _customer_profile_effectively_active(guard_db, current_profile) -> bool:
+    """An active row with a blank email is not usable while unmapped Auth IDs remain."""
+    if current_profile is None:
+        return False
+    if str(current_profile.status or "").upper() != "ACTIVE":
+        return False
+    if str(current_profile.email or "").strip():
+        return True
+    return not await _has_unmapped_legacy_customer_profile(
+        guard_db, str(current_profile.auth_user_id or "")
+    )
+
+
 async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> bool:
     """Compare a confirmed email against legacy identities after ORM decryption.
 
@@ -3921,9 +3980,8 @@ async def get_customer(
         or ""
     ).strip()[:160]
 
-    # Only an absent profile or empty encrypted email requires an Auth Admin/user
-    # lookup. A missing optional display name must not trigger a repeated network
-    # request on every customer API call.
+    # Only a missing profile or stored email requires a verified Auth lookup.
+    # An optional blank display name must not trigger repeated Auth network calls.
     needs_auth_identity = profile is None or not stored_email
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
@@ -3939,38 +3997,42 @@ async def get_customer(
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    identity_review_required = (
+    stale_legacy_quarantine = bool(
         profile is not None
         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     )
+    identity_review_required = stale_legacy_quarantine
+
+    if needs_auth_identity:
+        guard_db = db
+        current_profile = profile
+        profile_effectively_active = await _customer_profile_effectively_active(guard_db, current_profile)
+        if profile is None:
+            identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+        elif (
+            not identity_review_required
+            and str(profile.status or "").upper() == "ACTIVE"
+            and not profile_effectively_active
+        ):
+            identity_review_required = True
+        if not identity_review_required:
+            identity_review_required = await _legacy_customer_email_conflict(db, uid, email)
+
+    if profile is None and identity_review_required:
+        raise HTTPException(
+            409,
+            "An unmapped legacy customer identity prevents safe provisioning. "
+            "Manual identity review is required before creating this profile.",
+        )
     if identity_review_required and not allow_identity_review_summary:
         raise HTTPException(
             409,
             "This customer identity is pending manual review. Contact support before using the account.",
         )
 
-    # Check legacy non-UUID identities before inserting or activating a new
-    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
-    if profile is None or not str(profile.email or "").strip():
-        if await _legacy_customer_email_conflict(db, uid, email):
-            if profile is None:
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
-            profile.status = "PENDING_IDENTITY_REVIEW"
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                await db.commit()
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
-
     if profile is None:
-        # Concurrent first requests can both observe no profile. Use a savepoint so
-        # the unique auth_user_id constraint resolves the loser without poisoning
-        # the caller's transaction.
+        # A savepoint lets the unique auth_user_id constraint resolve concurrent
+        # first requests without poisoning the caller's surrounding transaction.
         try:
             async with db.begin_nested():
                 profile = CustomerProfile(
@@ -3985,20 +4047,24 @@ async def get_customer(
             profile = (await db.execute(
                 select(CustomerProfile).where(CustomerProfile.auth_user_id == uid)
             )).scalar_one_or_none()
-            if not profile:
+            if profile is None:
                 raise
-            if not profile.email:
-                profile.email = email
-            if not profile.display_name:
-                profile.display_name = name
-            await db.flush()
-    else:
+            if not identity_review_required:
+                if not profile.email:
+                    profile.email = email
+                if not profile.display_name and name:
+                    profile.display_name = name
+                await db.flush()
+    elif not identity_review_required:
         if not profile.email:
             profile.email = email
-        if not profile.display_name:
+        if not profile.display_name and name:
             profile.display_name = name
         await db.flush()
 
+    # Identity review is request-local until an operator completes manual review.
+    # Do not rewrite the customer's persisted ACTIVE/SUSPENDED status here.
+    profile.identity_review_required = bool(identity_review_required)
     if profile.status != "ACTIVE" and not (
         allow_identity_review_summary
         and identity_review_required
@@ -4008,6 +4074,7 @@ async def get_customer(
     if not identity_review_required:
         await _ensure_customer_subscription(db, profile)
     return profile, claims
+
 
 
 def _funding_signature_valid(raw_body: bytes, signature: str | None, timestamp: str | None) -> bool:
@@ -5495,9 +5562,12 @@ async def customer_me(authorization: str | None = Header(default=None)):
         )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
-        return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status,
-                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+        metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
+        return {"id": profile.id, "auth_user_id": profile.auth_user_id,
+                "email": profile.email or claims.get("email") or "",
+                "display_name": profile.display_name or metadata.get("full_name") or metadata.get("name") or "",
+                "status": profile.status,
+                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
@@ -8123,6 +8193,7 @@ async def risk_dashboard_metrics(
             .where(
                 StrategyOutcome.customer_id.is_(None),
                 StrategyOutcome.lifecycle_status == "CLOSED",
+                StrategyOutcome.closing_notional > 0,
             )
             .order_by(StrategyOutcome.created_at.desc())
             .limit(100)
@@ -8249,6 +8320,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                     .where(
                         StrategyOutcome.customer_id.is_(None),
                         StrategyOutcome.lifecycle_status == "CLOSED",
+                        StrategyOutcome.closing_notional > 0,
                     )
                     .group_by(StrategyOutcome.trade_id)
                     .subquery()
@@ -8263,6 +8335,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                     .where(
                         StrategyOutcome.customer_id.is_(None),
                         StrategyOutcome.lifecycle_status == "CLOSED",
+                        StrategyOutcome.closing_notional > 0,
                     )
                     .order_by(StrategyOutcome.created_at.desc())
                     .limit(100)
