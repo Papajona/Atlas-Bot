@@ -296,6 +296,15 @@ def upgrade() -> None:
             ),
         )
 
+    def _driver_safe_values(values: dict):
+        """SQLite's DBAPI cannot bind Decimal directly to untyped text() SQL."""
+        if bind.dialect.name != "sqlite":
+            return values
+        return {
+            key: float(value) if isinstance(value, Decimal) else value
+            for key, value in values.items()
+        }
+
     update_outcome = sa.text("""
         UPDATE strategy_outcomes
         SET closing_quantity = :closing_quantity,
@@ -568,7 +577,7 @@ def upgrade() -> None:
             if not has_closed_fill:
                 for row in rows:
                     row_id = int(row["id"])
-                    bind.execute(update_outcome, {
+                    bind.execute(update_outcome, _driver_safe_values({
                         "id": row_id,
                         "closing_quantity": row_quantities.get(row_id, Decimal("0")) if complete else Decimal("0"),
                         "closing_notional": row_notionals.get(row_id, Decimal("0")) if complete else Decimal("0"),
@@ -579,7 +588,7 @@ def upgrade() -> None:
                         "net_return_bps": row["net_return_bps"] if fee_basis_complete else None,
                         "lifecycle_status": row["lifecycle_status"],
                         "fee_basis_complete": fee_basis_complete,
-                    })
+                    }))
                 continue
 
             # A completed trade must have every closing order and every filled
@@ -597,7 +606,7 @@ def upgrade() -> None:
                 if valid_notional > 0 and fee_basis_complete and total_net is not None else None
             )
             for row in rows[:-1]:
-                bind.execute(update_outcome, {
+                bind.execute(update_outcome, _driver_safe_values({
                     "id": int(row["id"]),
                     "closing_quantity": row_quantities.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                     "closing_notional": row_notionals.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
@@ -608,8 +617,8 @@ def upgrade() -> None:
                     "net_return_bps": row["net_return_bps"] if fee_basis_complete else None,
                     "lifecycle_status": "PARTIAL_CLOSED",
                     "fee_basis_complete": fee_basis_complete,
-                })
-            bind.execute(update_outcome, {
+                }))
+            bind.execute(update_outcome, _driver_safe_values({
                 "id": int(final["id"]),
                 "closing_quantity": valid_quantity,
                 "closing_notional": valid_notional,
@@ -620,7 +629,7 @@ def upgrade() -> None:
                 "net_return_bps": net_return_bps,
                 "lifecycle_status": "CLOSED",
                 "fee_basis_complete": fee_basis_complete,
-            })
+            }))
 
     # Preserve database defaults for mixed-version deployments. New application
     # code maps these columns, while an older Cloud Run revision can still write
@@ -686,11 +695,11 @@ def upgrade() -> None:
                 entry_trades.get(entry_id), remaining_quantity, closed_quantity
             )
             known = remaining_fee is not None
-            bind.execute(update_position, {
+            bind.execute(update_position, _driver_safe_values({
                 "id": int(position["id"]),
                 "entry_fee": remaining_fee if known else Decimal("0"),
                 "known": known,
-            })
+            }))
 
     index_names = {
         item["name"] for item in inspector.get_indexes("strategy_outcomes")
