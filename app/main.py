@@ -8449,6 +8449,7 @@ async def list_withdrawals(status: str = "PENDING", x_admin_token: str | None = 
     }
     auth_email_results: dict[str, tuple[str, str]] = {}
     legacy_ids: set[str] = set()
+    canonical_auth_ids: dict[str, str] = {}
     lookup_candidates: list[str] = []
 
     for auth_id in sorted(missing_auth_ids):
@@ -8458,6 +8459,7 @@ async def list_withdrawals(status: str = "PENDING", x_admin_token: str | None = 
             legacy_ids.add(auth_id)
             auth_email_results[auth_id] = ("", "LEGACY_IDENTITY_UNMAPPED")
             continue
+        canonical_auth_ids[auth_id] = normalized_id
         cached = _cached_withdrawal_auth_email(normalized_id)
         if cached is not None:
             auth_email_results[auth_id] = cached
@@ -8489,6 +8491,16 @@ async def list_withdrawals(status: str = "PENDING", x_admin_token: str | None = 
             )
         except asyncio.TimeoutError:
             failed_ids.update(pending_ids)
+
+    # Supabase UUIDs are canonicalized before lookup/cache. Preserve the original
+    # stored reference as a result key so upper-case UUID rows still resolve.
+    for original_id, normalized_id in canonical_auth_ids.items():
+        if normalized_id in auth_email_results:
+            auth_email_results[original_id] = auth_email_results[normalized_id]
+        if normalized_id in deferred_ids:
+            deferred_ids.add(original_id)
+        if normalized_id in failed_ids:
+            failed_ids.add(original_id)
 
     result = []
     for row in snapshot:
