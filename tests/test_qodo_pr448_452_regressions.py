@@ -37,7 +37,7 @@ def test_edge_provisioning_keeps_pii_encrypted_and_pages_legacy_rows_stably():
     assert "auth_user_id: userId" in insert
     assert "email:" not in insert
     assert "display_name:" not in insert
-    page = edge[edge.index(".select(\"auth_user_id\")"):edge.index("if (legacyLookupError")]
+    page = edge[edge.index('.select("auth_user_id")'):edge.index("if (legacyLookupError")]
     assert '.order("id", { ascending: true })' in page
     assert page.index('.order("id", { ascending: true })') < page.index(".range(")
 
@@ -75,7 +75,7 @@ def test_withdrawal_review_resolves_empty_encrypted_email_from_auth_admin():
     assert "settings.supabase_auth_admin_key" in admin_user
     assert '"/auth/v1/admin/users/' in admin_user
     assert "response.status_code == 404" in admin_user
-    assert "str(user.get(\"id\") or \"\") != user_id" in admin_user
+    assert 'str(user.get("id") or "") != user_id' in admin_user
     assert "_supabase_admin_user(auth_id)" in route
     assert '"customer_email_status": email_status' in route
     assert "AUTH_LOOKUP_NOT_CONFIGURED" in route
@@ -97,15 +97,14 @@ def test_partial_close_fills_are_weighted_and_use_final_close_time():
     rows = [
         SimpleNamespace(
             trade_id=41, metadata_json=json.dumps({"closing_notional": "1000"}),
-            realized_pnl="10", return_bps=100, net_pnl="10",
-            created_at=start,
+            realized_pnl="10", return_bps=100, net_pnl="10", created_at=start,
         ),
         SimpleNamespace(
             trade_id=41, metadata_json=json.dumps({"closing_notional": "3000"}),
             realized_pnl="30", return_bps=100, net_pnl="30",
             created_at=start + timedelta(minutes=5),
         ),
-        # A zero-realized-PnL exit still contributes its fill notional and fee.
+        # A zero-PnL closing fill still contributes its notional and fees.
         SimpleNamespace(
             trade_id=41, metadata_json=json.dumps({"closing_notional": "1000"}),
             realized_pnl="0", return_bps=0, net_pnl="-1",
