@@ -51,25 +51,3 @@ def _fresh_default_test_db():
 
 
 
-def pytest_collection_modifyitems(config, items):
-    """Keep the opt-in migration-drift test out of ordinary no-skips CI runs.
-
-    An explicit pytest -m migration_drift invocation still collects and runs
-    the test (or reports an honest skip when its isolated URL is absent).
-    """
-    explicit_file_or_node = any(
-        "test_migration_model_drift.py" in str(argument)
-        or "test_models_have_matching_migrations" in str(argument)
-        for argument in (config.args or [])
-    )
-    if "migration_drift" in str(config.option.markexpr or "") or explicit_file_or_node:
-        return
-    deselected = [
-        item for item in items
-        if item.get_closest_marker("migration_drift") is not None
-    ]
-    if not deselected:
-        return
-    selected = [item for item in items if item not in deselected]
-    config.hook.pytest_deselected(items=deselected)
-    items[:] = selected
