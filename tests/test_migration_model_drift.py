@@ -5,7 +5,7 @@ Run against a database already upgraded to head:
     alembic upgrade head
     ATLAS_MIGRATION_DRIFT_URL=postgresql+asyncpg://user:pass@host/db pytest tests/test_migration_model_drift.py
 
-The test is skipped unless ATLAS_MIGRATION_DRIFT_URL is configured. It fails only for
+The test is collected only when ATLAS_MIGRATION_DRIFT_URL is configured. It fails only for
 tables or columns present in ORM metadata but absent from the migrated database; it
 intentionally ignores index, constraint and type differences.
 """
