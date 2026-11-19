@@ -83,7 +83,7 @@ export default {
       });
       if (hasUnmappedLegacyIdentity) {
         return response({
-          error: "New customer provisioning is paused while legacy customer identities are manually reviewed. Contact support.",
+          error: "New customer provisioning is paused until legacy customer identities complete manual identity review. Contact support.",
         }, 409);
       }
       if (profilePage.length < pageSize) break;

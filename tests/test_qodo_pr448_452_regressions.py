@@ -187,6 +187,7 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index("def _funding_signature_valid")
     ]
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
+    assert "if not identity_review_required:" in get_customer
     assert "allow_identity_review_summary" in get_customer
     assert "PENDING_IDENTITY_REVIEW" in get_customer
 

@@ -3599,7 +3599,7 @@ async def _supabase_request(path: str, payload: dict | None = None, method: str 
             if "manual identity review" in upstream_error or "existing customer" in upstream_error:
                 raise HTTPException(
                     409,
-                    "This email may match an existing customer account. Manual identity review is required before provisioning; contact support.",
+                    "Customer profile provisioning is paused because legacy customer identities remain unmapped. Manual identity review is required; contact support.",
                 )
             raise HTTPException(
                 409,
@@ -3948,7 +3948,8 @@ async def get_customer(
         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     ):
         raise HTTPException(403, "Customer account is not active")
-    await _ensure_customer_subscription(db, profile)
+    if not identity_review_required:
+        await _ensure_customer_subscription(db, profile)
     return profile, claims
 
 
