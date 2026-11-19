@@ -116,6 +116,15 @@ def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
     assert '"aggregate_fill_count": 2' in final.metadata_json
 
 
+def test_execution_safety_windows_use_only_completed_trade_outcomes():
+    source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    assert source.count('StrategyOutcome.lifecycle_status == "CLOSED"') >= 2
+    assert "PARTIAL_CLOSED" not in source[
+        source.index("def _execution_health_block_reason"):
+        source.index("async def ")
+    ] if "def _execution_health_block_reason" in source else True
+
+
 def test_risk_websocket_publishes_annualization_and_sample_metadata():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     websocket = source[
