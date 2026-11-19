@@ -31,7 +31,8 @@ class _FakeSession:
 def _run_one_cycle(monkeypatch, *, paper: bool, reconciliation_account: dict):
     calls = []
     failures = []
-    monkeypatch.setattr(main_module.settings, "live_trading_enabled", True)
+    successes = []
+    monkeypatch.setattr(main_module.settings, "live_trading_enabled", not paper)
     monkeypatch.setattr(main_module.settings, "paper_trading", paper)
     monkeypatch.setattr(main_module.settings, "exchange_api_key", "k")
     monkeypatch.setattr(main_module.settings, "exchange_api_secret", "s")
@@ -62,16 +63,18 @@ def _run_one_cycle(monkeypatch, *, paper: bool, reconciliation_account: dict):
     async def noop(*_args, **_kwargs):
         return 0
 
+    async def record_success(scope):
+        successes.append(scope)
+
     async def record_failure(scope, exc):
         failures.append((scope, str(exc)))
         return 1
 
     monkeypatch.setattr(main_module.asyncio, "sleep", fake_sleep)
     monkeypatch.setattr(main_module, "reconcile", reconcile)
-    monkeypatch.setattr(main_module, "sync_live_account", sync_live_account)
     monkeypatch.setattr(main_module, "enforce_platform_loss_limits", enforce_loss_limits)
     monkeypatch.setattr(main_module, "reconcile_customer_live_orders", noop)
-    monkeypatch.setattr(main_module, "_record_reconciliation_success", noop)
+    monkeypatch.setattr(main_module, "_record_reconciliation_success", record_success)
     monkeypatch.setattr(main_module, "_record_reconciliation_failure", record_failure)
     monkeypatch.setattr(main_module, "_mark_worker_loop_success", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(main_module, "_mark_worker_loop_failure", lambda *_args, **_kwargs: None)
@@ -79,11 +82,11 @@ def _run_one_cycle(monkeypatch, *, paper: bool, reconciliation_account: dict):
 
     with pytest.raises(_StopLoop):
         asyncio.run(main_module._reconciliation_loop())
-    return calls, failures
+    return calls, failures, successes
 
 
 def test_paper_switch_still_reconciles_an_outstanding_platform_order_without_syncing_live_equity(monkeypatch):
-    calls, failures = _run_one_cycle(
+    calls, failures, successes = _run_one_cycle(
         monkeypatch,
         paper=True,
         reconciliation_account={"paper": True},
@@ -92,6 +95,7 @@ def test_paper_switch_still_reconciles_an_outstanding_platform_order_without_syn
     assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
     assert ("sync_live_account",) not in calls
     assert ("loss_limits",) not in calls
+    assert "platform-loss-limits" in successes
     assert not failures
 
 
