@@ -5,7 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
-from app import main
+from app import execution, main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -102,7 +102,7 @@ def test_withdrawal_review_resolves_empty_encrypted_email_from_auth_admin():
 
 def test_risk_dashboard_uses_bounded_recent_trade_candidates_in_both_transports():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    assert source.count("_recent_closed_platform_trade_returns(db)") == 2
+    assert source.count("_recent_closed_platform_trade_returns(db)") == 3
     assert "latest_closed = (" not in source
     assert "_RISK_OUTCOME_SAMPLE_SIZE = 100" in source
     assert ".limit(_RISK_OUTCOME_SAMPLE_SIZE)" in source
@@ -440,3 +440,47 @@ def test_fee_only_live_snapshot_true_up_updates_last_closing_outcome():
     assert outcome.net_return_bps == 390.0
     metadata = json.loads(outcome.metadata_json)
     assert metadata["late_fee_true_up_total"] == "1.00"
+
+
+
+def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
+    close_time = datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc)
+    partial = SimpleNamespace(
+        id=1, trade_id=91, metadata_json=json.dumps({"closing_notional": "1000"}),
+        realized_pnl="10", return_bps=100, net_pnl="10",
+        created_at=close_time - timedelta(minutes=5),
+    )
+    final = SimpleNamespace(
+        id=2, trade_id=91,
+        metadata_json=json.dumps({
+            "closing_notional": "4000",
+            "aggregate_closing_notional": "5000",
+            "aggregate_notional_complete": True,
+            "aggregate_net_pnl": "39",
+            "aggregate_net_return_bps": "78",
+        }),
+        realized_pnl="40", return_bps=80, net_pnl="39",
+        created_at=close_time,
+    )
+    assert main._aggregate_closed_outcome_fills([partial, final]) == [(0.0078, close_time)]
+
+
+def test_incomplete_aggregate_partial_close_is_excluded_from_dashboard_ratios():
+    close_time = datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc)
+    partial = SimpleNamespace(
+        id=1, trade_id=92, metadata_json=json.dumps({"closing_notional": "1000"}),
+        realized_pnl="10", return_bps=100, net_pnl="10",
+        created_at=close_time - timedelta(minutes=5),
+    )
+    final = SimpleNamespace(
+        id=2, trade_id=92,
+        metadata_json=json.dumps({
+            "closing_notional": "0",
+            "aggregate_closing_notional": "0",
+            "aggregate_notional_complete": False,
+            "aggregate_net_pnl": "10",
+        }),
+        realized_pnl="10", return_bps=0, net_pnl="10",
+        created_at=close_time,
+    )
+    assert main._aggregate_closed_outcome_fills([partial, final]) == []

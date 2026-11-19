@@ -8076,57 +8076,86 @@ _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250
 
 
 def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
-    """Aggregate closing fills into one fee-adjusted return per completed trade."""
-    incomplete = set(incomplete_trade_ids or ())
+    """Aggregate one complete return per closed trade without double-counting summaries."""
+    incomplete = {int(value) for value in (incomplete_trade_ids or ())}
     grouped = {}
     for outcome in outcomes:
-        trade_id = int(outcome.trade_id)
+        try:
+            trade_id = int(outcome.trade_id)
+        except (TypeError, ValueError, AttributeError):
+            continue
         if trade_id in incomplete:
             continue
-        state = grouped.setdefault(trade_id, {
-            "net_pnl": Decimal("0"), "notional": Decimal("0"),
-            "closed_at": None, "valid": True,
-        })
         try:
             metadata = json.loads(str(outcome.metadata_json or "{}"))
             if not isinstance(metadata, dict):
                 metadata = {}
         except (TypeError, ValueError):
             metadata = {}
-        try:
-            notional = Decimal(str(metadata.get("closing_notional") or "0"))
-        except Exception:
-            notional = Decimal("0")
-        if notional <= 0:
-            # Older rows predate persisted closing_notional. Their raw return_bps
-            # reconstructs each non-zero fill's notional from realized_pnl.
-            try:
-                realized = Decimal(str(outcome.realized_pnl or "0"))
-                raw_return_bps = Decimal(str(outcome.return_bps or "0"))
-                if realized != 0 and raw_return_bps != 0:
-                    notional = abs(realized * Decimal("10000") / raw_return_bps)
-            except Exception:
-                notional = Decimal("0")
-        if notional <= 0 or not notional.is_finite():
-            state["valid"] = False
-            continue
-        try:
-            state["net_pnl"] += Decimal(str(outcome.net_pnl or "0"))
-        except Exception:
-            state["valid"] = False
-            continue
-        state["notional"] += notional
-        created_at = outcome.created_at
-        if created_at is None:
-            state["valid"] = False
-        elif state["closed_at"] is None or created_at > state["closed_at"]:
-            state["closed_at"] = created_at
+        grouped.setdefault(trade_id, []).append((outcome, metadata))
 
     completed = []
-    for state in grouped.values():
-        if not state["valid"] or state["notional"] <= 0 or state["closed_at"] is None:
+    for trade_id, entries in grouped.items():
+        entries.sort(
+            key=lambda item: (
+                item[0].created_at is not None,
+                item[0].created_at,
+                int(getattr(item[0], "id", 0) or 0),
+            )
+        )
+        # The final CLOSED row carries the entire trade P&L. Its metadata carries
+        # the whole-position denominator; do not add partial rows a second time.
+        aggregate_entries = [
+            (outcome, metadata)
+            for outcome, metadata in entries
+            if "aggregate_notional_complete" in metadata
+        ]
+        if aggregate_entries:
+            outcome, metadata = aggregate_entries[-1]
+            if metadata.get("aggregate_notional_complete") is not True:
+                continue
+            try:
+                notional = Decimal(str(metadata.get("aggregate_closing_notional") or "0"))
+                net_pnl = Decimal(str(outcome.net_pnl))
+            except (TypeError, ValueError, ArithmeticError):
+                continue
+            closed_at = outcome.created_at
+            if notional <= 0 or notional.is_finite() or not net_pnl.is_finite() or closed_at is None:
+                continue
+            completed.append((float(net_pnl / notional), closed_at))
             continue
-        completed.append((float(state["net_pnl"] / state["notional"]), state["closed_at"]))
+
+        # Historical rows have no aggregate metadata; preserve per-fill reconstruction.
+        state = {"net_pnl": Decimal("0"), "notional": Decimal("0"), "closed_at": None, "valid": True}
+        for outcome, metadata in entries:
+            try:
+                notional = Decimal(str(metadata.get("closing_notional") or "0"))
+            except (TypeError, ValueError, ArithmeticError):
+                notional = Decimal("0")
+            if notional <= 0:
+                try:
+                    realized = Decimal(str(outcome.realized_pnl or "0"))
+                    raw_return_bps = Decimal(str(outcome.return_bps or "0"))
+                    if realized != 0 and raw_return_bps != 0:
+                        notional = abs(realized * Decimal("10000") / raw_return_bps)
+                except (TypeError, ValueError, ArithmeticError):
+                    notional = Decimal("0")
+            if notional <= 0 or not notional.is_finite():
+                state["valid"] = False
+                continue
+            try:
+                state["net_pnl"] += Decimal(str(outcome.net_pnl or "0"))
+            except (TypeError, ValueError, ArithmeticError):
+                state["valid"] = False
+                continue
+            state["notional"] += notional
+            created_at = outcome.created_at
+            if created_at is None:
+                state["valid"] = False
+            elif state["closed_at"] is None or created_at > state["closed_at"]:
+                state["closed_at"] = created_at
+        if state["valid"] and state["notional"] > 0 and state["closed_at"] is not None:
+            completed.append((float(state["net_pnl"] / state["notional"]), state["closed_at"]))
     return sorted(completed, key=lambda item: item[1], reverse=True)
 
 
@@ -8161,7 +8190,7 @@ async def _recent_closed_platform_trade_returns(db):
         .where(
             StrategyOutcome.trade_id.in_(selected),
             StrategyOutcome.customer_id.is_(None),
-            StrategyOutcome.lifecycle_status == "CLOSED",
+            StrategyOutcome.lifecycle_status.in_(("CLOSED", "PARTIAL_CLOSED")),
         )
         .subquery()
     )
