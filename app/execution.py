@@ -737,7 +737,33 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
         account.daily_start_equity = account.equity
 
 
-async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_price: float):
+def _closing_fill_fee_share(
+    fill_fee_delta: Decimal | float,
+    *,
+    closing_quantity: Decimal | float,
+    fill_quantity: Decimal | float,
+) -> Decimal:
+    """Allocate only the incremental fee for the part of a fill that closes exposure."""
+    fee = Decimal(str(fill_fee_delta or 0))
+    closing = Decimal(str(closing_quantity or 0))
+    filled = Decimal(str(fill_quantity or 0))
+    if not fee.is_finite() or not closing.is_finite() or not filled.is_finite():
+        raise ValueError("closing-fill fee inputs must be finite")
+    if fee < 0 or closing <= 0 or filled <= 0:
+        return Decimal("0")
+    if closing > filled:
+        raise ValueError("closing quantity cannot exceed the current fill quantity")
+    return fee * closing / filled
+
+
+async def _apply_fill_to_position(
+    db,
+    trade: Trade,
+    new_filled: float,
+    fill_price: float,
+    *,
+    fill_fee_delta: Decimal | float = Decimal("0"),
+):
     delta = max(0.0, new_filled - trade.filled_quantity)
     if delta <= 0 or fill_price <= 0:
         trade.filled_quantity = new_filled
@@ -764,6 +790,9 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     position = (await db.execute(position_query)).scalar_one_or_none()
     realized_decimal = Decimal("0")
     realized = 0.0
+    # Same-direction position additions do not close quantity. Initialize this
+    # unconditionally because all fills reach the outcome-recording condition.
+    closing = 0.0
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
@@ -1031,7 +1060,9 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             return_bps = float(
                 realized_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
-            closing_fee_decimal = Decimal(str(trade.fee or 0))
+            closing_fee_decimal = _closing_fill_fee_share(
+                fill_fee_delta, closing_quantity=closing, fill_quantity=delta
+            )
             entry_row = await db.get(Trade, attribution_trade_id)
             entry_fee_decimal = Decimal(str(entry_row.fee or 0)) if entry_row else Decimal("0")
             episode_entry_qty = Decimal(str(episode.entry_quantity or 0)) if 'episode' in locals() and episode is not None else Decimal("0")
@@ -1717,7 +1748,14 @@ async def advance_platform_paper_orders(
                                 fill_quantity * fill_price * Decimal(str(profile.taker_bps))
                                 / Decimal("10000")
                             )
-                            await _apply_fill_to_position(db, trade, float(new_filled), float(fill_price))
+                            # Set the cumulative paper fee before outcome/episode
+                            # recording; pass the delta separately to avoid recharging
+                            # earlier fills in the weighted trade return.
+                            trade.fee = float(Decimal(str(trade.fee or 0.0)) + fee_decimal)
+                            await _apply_fill_to_position(
+                                db, trade, float(new_filled), float(fill_price),
+                                fill_fee_delta=fee_decimal,
+                            )
                             weighted_average = (
                                 (old_filled * old_average + fill_quantity * fill_price) / new_filled
                                 if new_filled > 0 else fill_price
@@ -1728,7 +1766,6 @@ async def advance_platform_paper_orders(
                             )
                             trade.average_fill_price = float(weighted_average)
                             trade.notional = float(new_filled * weighted_average)
-                            trade.fee = float(Decimal(str(trade.fee or 0.0)) + fee_decimal)
                             state = await _get_state_locked(db)
                             state.cash_equity = max(0.0, float(state.cash_equity or 0.0) - float(fee_decimal))
                             bar_state.consumed = float(Decimal(str(bar_state.consumed or 0.0)) + fill_quantity)
@@ -2575,7 +2612,9 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             t = await db.get(Trade, trade_id)
             t.broker_order_id = broker_id
             fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(t, order, filled, fill_price, PROFILES.get(asset, PROFILES["crypto"]).taker_bps)
-            await _apply_fill_to_position(db, t, filled, fill_price)
+            await _apply_fill_to_position(
+                db, t, filled, fill_price, fill_fee_delta=fee_delta
+            )
             await _post_live_fee(db, t, fee_delta, fee_cum, fee_quality, fee_note)
             if customer_id is not None and str(t.mode or "").upper() == "LIVE":
                 await _refresh_live_customer_equity(db, customer_id)
@@ -2701,7 +2740,9 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
         )
 
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
-    realized_delta = await _apply_fill_to_position(db, trade, filled, avg)
+    realized_delta = await _apply_fill_to_position(
+        db, trade, filled, avg, fill_fee_delta=fee_delta
+    )
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
 
     if status in {"closed", "filled"} and remaining <= 0:
