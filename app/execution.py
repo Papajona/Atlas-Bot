@@ -56,6 +56,58 @@ async def audit(event: str, detail: dict, actor_id: str = "system") -> None:
         logging.getLogger(__name__).warning("audit_write_failed event=%s", event, exc_info=True)
 
 
+def _aggregate_completed_strategy_outcomes(outcomes):
+    """Collapse partial closing fills into one complete, weighted trade outcome."""
+    rows = sorted(list(outcomes), key=lambda item: (int(item.sequence or 0), int(item.id or 0)))
+    if not rows:
+        return None
+
+    final = rows[-1]
+    total_notional = sum(
+        (Decimal(str(row.closing_notional or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_net_pnl = sum(
+        (Decimal(str(row.net_pnl or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_realized_pnl = sum(
+        (Decimal(str(row.realized_pnl or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_fee = sum(
+        (Decimal(str(row.fee or 0)) for row in rows),
+        Decimal("0"),
+    )
+    # A missing fill notional makes the total return unknowable. Keep the
+    # completed trade for audit, but exclude it from return-ratio samples.
+    notional_complete = all(Decimal(str(row.closing_notional or 0)) > 0 for row in rows)
+    if notional_complete and total_notional > 0:
+        final.closing_notional = total_notional
+        final.net_return_bps = float(total_net_pnl / total_notional * Decimal("10000"))
+        final.return_bps = float(total_realized_pnl / total_notional * Decimal("10000"))
+    else:
+        final.closing_notional = Decimal("0")
+        final.net_return_bps = 0.0
+        final.return_bps = 0.0
+    final.net_pnl = total_net_pnl
+    final.realized_pnl = total_realized_pnl
+    final.fee = total_fee
+    for row in rows[:-1]:
+        row.lifecycle_status = "PARTIAL_CLOSED"
+    final.lifecycle_status = "CLOSED"
+    try:
+        metadata = json.loads(final.metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    if isinstance(metadata, dict):
+        metadata["aggregate_fill_count"] = len(rows)
+        metadata["total_closing_notional"] = str(final.closing_notional)
+        metadata["net_pnl"] = str(total_net_pnl)
+        final.metadata_json = json.dumps(metadata, default=str)
+    return final
+
+
 class RiskBlocked(RuntimeError):
     pass
 
@@ -1043,13 +1095,14 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             net_return_bps = float(
                 net_pnl_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
-            db.add(StrategyOutcome(
+            outcome_row = StrategyOutcome(
                 trade_id=attribution_trade_id, closing_trade_id=trade.id, customer_id=trade.customer_id,
                 bot_id=int(trade_context.get("bot_id")) if str(trade_context.get("bot_id", "")).isdigit() else None,
                 strategy=realized_strategy, regime=realized_regime, asset=str(trade_context.get("asset") or "crypto"),
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
                 realized_pnl=realized_decimal, fee=closing_fee_decimal, return_bps=return_bps,
                 net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
+                closing_notional=notional_decimal,
                 lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({
@@ -1057,13 +1110,16 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                     "fill_price": str(fill_price), "entry_fee": str(entry_fee_decimal),
                     "allocated_entry_fee": str(allocated_entry_fee_decimal), "net_pnl": str(net_pnl_decimal),
                 }, default=str),
-            ))
+            )
+            db.add(outcome_row)
             if abs(float(position.quantity or 0.0)) < 1e-12:
+                await db.flush()
                 completed_outcomes = (await db.execute(
-                    select(StrategyOutcome).where(StrategyOutcome.trade_id == attribution_trade_id).with_for_update()
+                    select(StrategyOutcome).where(
+                        StrategyOutcome.trade_id == attribution_trade_id
+                    ).with_for_update()
                 )).scalars().all()
-                for outcome in completed_outcomes:
-                    outcome.lifecycle_status = "CLOSED"
+                _aggregate_completed_strategy_outcomes(completed_outcomes)
         if position.quantity:
             position.unrealized_pnl = (
                 Decimal(str(position.quantity))
