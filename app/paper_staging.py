@@ -294,6 +294,41 @@ async def _paper_runtime_preflight() -> dict[str, Any]:
     }
 
 
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Check for one non-UUID legacy identity without materializing the profile table."""
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    if dialect == "sqlite":
+        uuid_glob = (
+            "[0-9a-fA-F]" * 8 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 12
+        )
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    # Unknown dialects retain a conservative compatibility path.
+    legacy_refs = (await db.execute(
+        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
+    )).scalars()
+    for reference in legacy_refs:
+        try:
+            uuid.UUID(str(reference))
+        except (ValueError, TypeError, AttributeError):
+            return True
+    return False
+
+
 async def get_existing_customer(
     authorization: str | None,
     db,
@@ -321,27 +356,17 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
-    # The legacy rows have non-UUID Auth references and blank encrypted PII.
-    # Until those identities are mapped, no UUID-linked paper account can be
-    # proven distinct from them. Do not allow trading against a potentially
-    # duplicate customer profile.
-    legacy_auth_refs = (
-        await db.execute(
-            select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
+    # A bounded indexed existence query detects any unmapped non-UUID
+    # reference; do not transfer every customer identity to Python per request.
+    identity_review_required = (
+        str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        or await _has_unmapped_legacy_customer_profile(db, uid)
+    )
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
         )
-    ).scalars().all()
-    identity_review_required = str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    for legacy_auth_ref in legacy_auth_refs:
-        try:
-            uuid.UUID(str(legacy_auth_ref))
-        except (ValueError, TypeError, AttributeError):
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                raise HTTPException(
-                    409,
-                    "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
-                )
-            break
 
     # Keep PII/encrypted columns out of the query: this service has no encryption
     # keyring and only needs the numeric tenant ID and active status.
@@ -624,9 +649,11 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
 
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
-    await _paper_state_guard()
+    # Authenticate first so unauthenticated callers cannot probe preflight or
+    # kill-switch state. Keep the paper gate before any balance/portfolio read.
     async with SessionLocal() as db:
         profile, _claims = await get_existing_customer(authorization, db)
+    await _paper_state_guard()
     balances = await get_customer_paper_balances(customer_id=int(profile.id))
     positions = await get_customer_paper_positions(customer_id=int(profile.id))
     by_code = {
