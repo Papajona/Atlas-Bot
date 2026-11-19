@@ -14,6 +14,31 @@ class CustomerAuthClient(
     private val http: OkHttpClient = OkHttpClient()
 ) {
     data class Session(val accessToken: String, val refreshToken: String?)
+    data class MfaEnrollment(val factorId: String, val secret: String, val qrCode: String?)
+
+    suspend fun signUp(email: String, password: String) = withContext(Dispatchers.IO) {
+        require(email.isNotBlank() && email.contains("@")) { "Enter a valid email address" }
+        require(password.length >= 8) { "Password must contain at least 8 characters" }
+        require(baseUrl.isNotBlank()) { "Customer authentication service is unavailable" }
+
+        val body = JSONObject().put("email", email.trim()).put("password", password)
+        val request = Request.Builder()
+            .url(baseUrl.trimEnd('/') + "/api/auth/signup")
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .build()
+        http.newCall(request).execute().use { response ->
+            val raw = response.body?.string().orEmpty()
+            val json = runCatching { JSONObject(raw) }.getOrElse { JSONObject() }
+            if (!response.isSuccessful) {
+                throw IllegalStateException(
+                    json.optString("detail").takeIf { it.isNotBlank() }
+                        ?: "Customer registration failed (HTTP ${response.code})"
+                )
+            }
+        }
+    }
 
     suspend fun login(email: String, password: String): Session = withContext(Dispatchers.IO) {
         require(email.isNotBlank() && email.contains("@")) { "Enter a valid email address" }
@@ -46,6 +71,17 @@ class CustomerAuthClient(
     }
     data class MfaStatus(val enabled: Boolean, val factorIds: List<String>, val aal: String)
     data class MfaChallenge(val factorId: String, val challengeId: String)
+
+    suspend fun enroll(accessToken: String): MfaEnrollment {
+        val json = requestJson("/api/auth/mfa/enroll", accessToken, JSONObject())
+        val totp = json.optJSONObject("totp") ?: JSONObject()
+        val factorId = json.optString("id").takeIf { it.isNotBlank() && it != "null" }
+            ?: throw IllegalStateException("Authenticator enrollment did not return a factor ID")
+        val secret = totp.optString("secret").takeIf { it.isNotBlank() && it != "null" }
+            ?: throw IllegalStateException("Authenticator enrollment did not return a setup secret")
+        val qrCode = totp.optString("qr_code").takeIf { it.isNotBlank() && it != "null" }
+        return MfaEnrollment(factorId, secret, qrCode)
+    }
 
     suspend fun mfaStatus(accessToken: String): MfaStatus = requestJson(
         "/api/auth/mfa/status", accessToken, null
@@ -80,6 +116,26 @@ class CustomerAuthClient(
         val token = json.optString("access_token").takeIf { it.isNotBlank() && it != "null" }
             ?: throw IllegalStateException("Authenticator verification did not return a refreshed session")
         return Session(token, json.optString("refresh_token").takeIf { it.isNotBlank() && it != "null" })
+    }
+
+    suspend fun provisionProfile(accessToken: String): String {
+        val json = requestJson("/api/auth/profile/provision", accessToken, JSONObject())
+        val status = json.optString("status").takeIf { it.isNotBlank() && it != "null" }
+            ?: throw IllegalStateException("Customer profile provisioning returned no status")
+        if (status !in setOf("PROVISIONED", "ALREADY_PROVISIONED")) {
+            throw IllegalStateException("Customer profile provisioning was not confirmed")
+        }
+        return status
+    }
+
+    suspend fun initializePaperAccount(accessToken: String): String {
+        val json = requestJson("/api/customer/paper/account/initialize", accessToken, JSONObject())
+        val status = json.optString("status").takeIf { it.isNotBlank() && it != "null" }
+            ?: throw IllegalStateException("Paper account initialization returned no status")
+        if (status !in setOf("INITIALIZED", "ALREADY_INITIALIZED")) {
+            throw IllegalStateException("Paper account initialization was not confirmed")
+        }
+        return status
     }
 
     private suspend fun requestJson(path: String, token: String, body: JSONObject?): JSONObject =

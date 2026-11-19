@@ -48,11 +48,18 @@ def _concrete_dispatch_routes(app):
     return concrete
 
 
-def test_paper_staging_asgi_exposes_only_health_and_paper_routes():
+def test_paper_staging_asgi_exposes_only_explicit_health_auth_customer_and_paper_routes():
     routes = _concrete_dispatch_routes(paper_staging.app)
     assert len(routes) >= 3
     allowed = lambda path: (
-        path in {"/healthz", "/livez", "/readyz"}
+        path in {
+            "/healthz", "/livez", "/readyz",
+            "/api/auth/signup", "/api/auth/login",
+            "/api/auth/mfa/status", "/api/auth/mfa/enroll",
+            "/api/auth/mfa/challenge", "/api/auth/mfa/verify",
+            "/api/auth/profile/provision",
+            "/api/customer/me", "/api/customer/portfolio",
+        }
         or path.startswith("/api/customer/paper/")
     )
     assert all(allowed(route.path) for route in routes)

@@ -3702,6 +3702,25 @@ async def _customer_mfa_state(authorization: str | None) -> dict:
     }
 
 
+async def _customer_mfa_factor_ids(authorization: str | None) -> set[str]:
+    """Return TOTP factor IDs owned by this user, including pending enrollment factors.
+
+    Only verified factors count as enrolled in _customer_mfa_state and customer_claims.
+    Challenge/verify must also accept the user's own unverified factor so first-time
+    enrollment can complete. Phone factors and factors belonging to another user are
+    never accepted.
+    """
+    token = _bearer_token(authorization)
+    user = await _supabase_user(token)
+    return {
+        str(factor.get("id"))
+        for factor in (user.get("factors") or [])
+        if str(factor.get("id") or "").strip()
+        and str(factor.get("factor_type") or "").lower() == "totp"
+        and str(factor.get("status") or "").lower() in {"unverified", "verified"}
+    }
+
+
 async def customer_claims(authorization: str | None, require_aal2: bool = True) -> dict:
     token = _bearer_token(authorization)
     claims = await _supabase_claims(token, require_aal2=False)
@@ -4987,9 +5006,9 @@ async def customer_mfa_enroll(authorization: str | None = Header(default=None)):
 @app.post("/api/auth/mfa/challenge")
 async def customer_mfa_challenge(req: MfaChallengeRequest, authorization: str | None = Header(default=None)):
     await customer_claims(authorization, require_aal2=False)
-    token = authorization.split(" ", 1)[1].strip() if authorization else ""
-    state = await _customer_mfa_state(authorization)
-    if req.factor_id not in state["factor_ids"]:
+    token = _bearer_token(authorization)
+    factor_ids = await _customer_mfa_factor_ids(authorization)
+    if req.factor_id not in factor_ids:
         raise HTTPException(403, "Invalid authenticator factor")
     return await _supabase_request(f"/auth/v1/factors/{req.factor_id}/challenge", payload={}, access_token=token)
 
@@ -4997,9 +5016,9 @@ async def customer_mfa_challenge(req: MfaChallengeRequest, authorization: str | 
 @app.post("/api/auth/mfa/verify")
 async def customer_mfa_verify(req: MfaVerifyRequest, authorization: str | None = Header(default=None)):
     await customer_claims(authorization, require_aal2=False)
-    token = authorization.split(" ", 1)[1].strip() if authorization else ""
-    state = await _customer_mfa_state(authorization)
-    if req.factor_id not in state["factor_ids"]:
+    token = _bearer_token(authorization)
+    factor_ids = await _customer_mfa_factor_ids(authorization)
+    if req.factor_id not in factor_ids:
         raise HTTPException(403, "Invalid authenticator factor")
     return await _supabase_request(f"/auth/v1/factors/{req.factor_id}/verify", payload={"challenge_id": req.challenge_id, "code": req.code}, access_token=token)
 

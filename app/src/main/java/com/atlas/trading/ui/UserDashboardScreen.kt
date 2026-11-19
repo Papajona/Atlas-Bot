@@ -76,6 +76,8 @@ fun UserDashboardScreen(
     var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
     var customerSignInError by remember { mutableStateOf<String?>(null) }
     var customerSignInBusy by remember { mutableStateOf(false) }
+    var customerInfoMessage by remember { mutableStateOf<String?>(null) }
+    var customerMfaSetupSecret by remember { mutableStateOf<String?>(null) }
     var customerMfaChallenge by remember { mutableStateOf<CustomerAuthClient.MfaChallenge?>(null) }
     var pendingCustomerSession by remember { mutableStateOf<CustomerAuthClient.Session?>(null) }
     val customerAuthScope = rememberCoroutineScope()
@@ -158,25 +160,48 @@ fun UserDashboardScreen(
                                 CustomerSignInCard(
                                     busy = customerSignInBusy,
                                     error = customerSignInError,
+                                    infoMessage = customerInfoMessage,
                                     requiresAuthenticator = customerMfaChallenge != null,
+                                    authenticatorSetupSecret = customerMfaSetupSecret,
                                     onSignIn = { email, password ->
                                         customerAuthScope.launch {
                                             customerSignInBusy = true
                                             customerSignInError = null
+                                            customerInfoMessage = null
                                             try {
                                                 val auth = CustomerAuthClient(backendUrl)
                                                 val session = auth.login(email, password)
                                                 val status = auth.mfaStatus(session.accessToken)
-                                                if (!status.enabled || status.factorIds.isEmpty()) {
-                                                    throw IllegalStateException("Google Authenticator setup is required before customer sign-in can complete")
+                                                val challenge = if (status.enabled && status.factorIds.isNotEmpty()) {
+                                                    customerMfaSetupSecret = null
+                                                    auth.challenge(session.accessToken, status.factorIds.first())
+                                                } else {
+                                                    val enrollment = auth.enroll(session.accessToken)
+                                                    customerMfaSetupSecret = enrollment.secret
+                                                    auth.challenge(session.accessToken, enrollment.factorId)
                                                 }
-                                                val challenge = auth.challenge(session.accessToken, status.factorIds.first())
                                                 pendingCustomerSession = session
                                                 customerMfaChallenge = challenge
                                             } catch (error: Exception) {
                                                 pendingCustomerSession = null
                                                 customerMfaChallenge = null
+                                                customerMfaSetupSecret = null
                                                 customerSignInError = error.message ?: "Customer sign-in failed"
+                                            } finally {
+                                                customerSignInBusy = false
+                                            }
+                                        }
+                                    },
+                                    onCreateAccount = { email, password ->
+                                        customerAuthScope.launch {
+                                            customerSignInBusy = true
+                                            customerSignInError = null
+                                            customerInfoMessage = null
+                                            try {
+                                                CustomerAuthClient(backendUrl).signUp(email, password)
+                                                customerInfoMessage = "Registration submitted. Check your email and confirm the address before signing in."
+                                            } catch (error: Exception) {
+                                                customerSignInError = error.message ?: "Customer registration failed"
                                             } finally {
                                                 customerSignInBusy = false
                                             }
@@ -191,10 +216,15 @@ fun UserDashboardScreen(
                                                     ?: throw IllegalStateException("Sign in again to request an authenticator challenge")
                                                 val challenge = customerMfaChallenge
                                                     ?: throw IllegalStateException("Authenticator challenge expired; sign in again")
-                                                val verified = CustomerAuthClient(backendUrl).verify(session.accessToken, challenge, code)
+                                                val auth = CustomerAuthClient(backendUrl)
+                                                val verified = auth.verify(session.accessToken, challenge, code)
+                                                auth.provisionProfile(verified.accessToken)
+                                                auth.initializePaperAccount(verified.accessToken)
                                                 activeCustomerToken = verified.accessToken
                                                 pendingCustomerSession = null
                                                 customerMfaChallenge = null
+                                                customerMfaSetupSecret = null
+                                                customerInfoMessage = null
                                             } catch (error: Exception) {
                                                 customerSignInError = error.message ?: "Authenticator verification failed"
                                             } finally {
@@ -208,6 +238,10 @@ fun UserDashboardScreen(
                                     activeCustomerToken = null
                                     customerSnapshot = null
                                     customerSignInError = null
+                                    customerInfoMessage = null
+                                    customerMfaChallenge = null
+                                    customerMfaSetupSecret = null
+                                    pendingCustomerSession = null
                                 }) {
                                     Text("Sign out customer")
                                 }
@@ -476,13 +510,17 @@ fun UserDashboardScreen(
 private fun CustomerSignInCard(
     busy: Boolean,
     error: String?,
+    infoMessage: String?,
     requiresAuthenticator: Boolean,
+    authenticatorSetupSecret: String?,
     onSignIn: (String, String) -> Unit,
+    onCreateAccount: (String, String) -> Unit,
     onVerifyAuthenticator: (String) -> Unit
 ) {
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var authenticatorCode by remember { mutableStateOf("") }
+    var creatingAccount by remember { mutableStateOf(false) }
     val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
 
     Card(
@@ -495,9 +533,16 @@ private fun CustomerSignInCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("Sign in to your customer account", fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
             Text(
-                "Account balances and market-scanner data are hidden until the backend authenticates your customer session.",
+                if (requiresAuthenticator) "Secure your customer account"
+                else if (creatingAccount) "Create a customer account"
+                else "Sign in to your customer account",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = theme.textPrimary
+            )
+            Text(
+                "Paper trading uses a virtual ledger. Live trading and payouts are disabled in this staging app.",
                 fontSize = 12.sp,
                 color = theme.textMuted
             )
@@ -507,7 +552,7 @@ private fun CustomerSignInCard(
                 modifier = Modifier.fillMaxWidth(),
                 label = { Text("Email") },
                 singleLine = true,
-                enabled = !busy
+                enabled = !busy && !requiresAuthenticator
             )
             if (!requiresAuthenticator) {
                 OutlinedTextField(
@@ -519,8 +564,32 @@ private fun CustomerSignInCard(
                     singleLine = true,
                     enabled = !busy
                 )
+                Text(
+                    if (creatingAccount) "We'll send an email confirmation before the account can be used."
+                    else "After password sign-in, set up Google Authenticator if this account has no verified factor.",
+                    fontSize = 12.sp,
+                    color = theme.textMuted
+                )
             } else {
-                Text("Enter the 6-digit code from your authenticator app.", fontSize = 12.sp, color = theme.textMuted)
+                if (!authenticatorSetupSecret.isNullOrBlank()) {
+                    Text(
+                        "Add this setup key to Google Authenticator (or another TOTP app), then enter its current 6-digit code:",
+                        fontSize = 12.sp,
+                        color = theme.textMuted
+                    )
+                    Text(
+                        authenticatorSetupSecret,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = theme.textPrimary
+                    )
+                } else {
+                    Text(
+                        "Enter the 6-digit code from your registered authenticator app.",
+                        fontSize = 12.sp,
+                        color = theme.textMuted
+                    )
+                }
                 OutlinedTextField(
                     value = authenticatorCode,
                     onValueChange = { authenticatorCode = it.filter(Char::isDigit).take(6) },
@@ -530,22 +599,47 @@ private fun CustomerSignInCard(
                     enabled = !busy
                 )
             }
+            if (!infoMessage.isNullOrBlank()) {
+                Text(infoMessage, color = theme.brandTeal, fontSize = 12.sp)
+            }
             if (!error.isNullOrBlank()) {
                 Text(error, color = theme.redDanger, fontSize = 12.sp)
             }
             Button(
                 onClick = {
-                    if (requiresAuthenticator) onVerifyAuthenticator(authenticatorCode)
-                    else onSignIn(email, password)
+                    when {
+                        requiresAuthenticator -> onVerifyAuthenticator(authenticatorCode)
+                        creatingAccount -> onCreateAccount(email, password)
+                        else -> onSignIn(email, password)
+                    }
                 },
-                enabled = !busy && if (requiresAuthenticator) authenticatorCode.length == 6 else email.isNotBlank() && password.isNotBlank(),
+                enabled = !busy && if (requiresAuthenticator) {
+                    authenticatorCode.length == 6
+                } else {
+                    email.isNotBlank() && password.length >= 8
+                },
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (busy) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(modifier = Modifier.width(8.dp))
                 }
-                Text(when { busy -> "Verifying…"; requiresAuthenticator -> "Verify authenticator"; else -> "Sign in securely" })
+                Text(
+                    when {
+                        busy -> "Please wait…"
+                        requiresAuthenticator -> "Verify authenticator"
+                        creatingAccount -> "Create account"
+                        else -> "Sign in securely"
+                    }
+                )
+            }
+            if (!requiresAuthenticator) {
+                TextButton(
+                    enabled = !busy,
+                    onClick = { creatingAccount = !creatingAccount }
+                ) {
+                    Text(if (creatingAccount) "Already registered? Sign in" else "New customer? Create an account")
+                }
             }
         }
     }
