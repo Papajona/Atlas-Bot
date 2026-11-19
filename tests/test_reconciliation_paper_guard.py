@@ -46,7 +46,7 @@ def _run_one_cycle(monkeypatch, *, paper: bool, reconciliation_account: dict):
         if sleeps["n"] > 1:
             raise _StopLoop()
 
-    async def reconcile(exchange, symbol):
+    async def reconcile(exchange, symbol=None):
         calls.append(("reconcile", exchange, symbol))
         return {
             "results": [{"trade_id": 42, "status": "FILLED", "resolved": True}],
