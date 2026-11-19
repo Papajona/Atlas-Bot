@@ -63,6 +63,15 @@ def _aggregate_completed_strategy_outcomes(outcomes):
         return None
 
     final = rows[-1]
+    # Keep the final source fill values before this row is replaced by the
+    # lifecycle aggregate below. Fee reconciliation later relies on this
+    # exact per-fill quantity/notional for conservation and proration.
+    final_fill_closing_quantity = Decimal(
+        str(getattr(final, "closing_quantity", 0) or 0)
+    )
+    final_fill_closing_notional = Decimal(
+        str(getattr(final, "closing_notional", 0) or 0)
+    )
     total_notional = sum(
         (Decimal(str(row.closing_notional or 0)) for row in rows),
         Decimal("0"),
@@ -119,10 +128,10 @@ def _aggregate_completed_strategy_outcomes(outcomes):
         # are replaced with the lifecycle aggregate. Fee true-ups need source
         # quantities, not the already-aggregated total, for correct allocation.
         metadata["final_fill_closing_quantity"] = str(
-            getattr(rows[-1], "closing_quantity", 0) or 0
+            final_fill_closing_quantity
         )
         metadata["final_fill_closing_notional"] = str(
-            getattr(rows[-1], "closing_notional", 0) or 0
+            final_fill_closing_notional
         )
         metadata["total_closing_notional"] = str(final.closing_notional)
         metadata["net_pnl"] = str(total_net_pnl)
@@ -1085,9 +1094,12 @@ async def _apply_reconciled_live_fee_basis(
                 delta_fee * reversal_quantity / trade_quantity
             )
 
+    add_on_fee_only = False
     if not entry_rows and not closing_rows:
-        # A fee on an add-on entry can be attached to an open aggregate position
-        # only while no closing outcome has made its lot attribution ambiguous.
+        # An add-on order has no outcome rows of its own: its exact fee belongs
+        # to the still-open aggregate position anchored to an earlier entry trade.
+        # It is safe only before any close outcomes exist; once lots have closed,
+        # the old schema cannot attribute that add-on fee across the realized legs.
         if (
             position is None
             or abs(float(position.quantity or 0.0)) <= 1e-12
@@ -1107,16 +1119,51 @@ async def _apply_reconciled_live_fee_basis(
                 "position already has closed outcome rows"
             )
         position_entry_fee_delta = delta_fee
+        add_on_fee_only = True
 
     if position_entry_fee_delta:
-        if position is None or int(position.entry_trade_id or 0) != int(trade.id):
+        if position is None:
+            raise ValueError(
+                f"cannot attach recovered fee for trade {trade.id} to its position"
+            )
+        is_position_entry = int(position.entry_trade_id or 0) == int(trade.id)
+        if not is_position_entry and not add_on_fee_only:
             raise ValueError(
                 f"cannot attach recovered fee for trade {trade.id} to its position"
             )
         position.entry_fee = (
             Decimal(str(position.entry_fee or 0)) + position_entry_fee_delta
         )
-        position.entry_fee_basis_known = True
+        # An add-on true-up must not certify the earlier entry's fee basis. Keep
+        # the existing flag unchanged; it remains true only when the original
+        # entry fee was already authoritative.
+        if is_position_entry:
+            position.entry_fee_basis_known = True
+
+        if add_on_fee_only and bool(position.entry_fee_basis_known):
+            entry_episode = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id == position.entry_trade_id
+                ).with_for_update()
+            )).scalar_one_or_none()
+            if entry_episode is not None:
+                entry_episode.total_fees = (
+                    Decimal(str(entry_episode.total_fees or 0))
+                    + position_entry_fee_delta
+                )
+                entry_episode.net_pnl = (
+                    Decimal(str(entry_episode.gross_pnl or 0))
+                    - Decimal(str(entry_episode.total_fees))
+                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+                entry_notional = abs(
+                    Decimal(str(entry_episode.entry_quantity or 0))
+                    * Decimal(str(entry_episode.entry_price or 0))
+                )
+                entry_episode.return_bps = (
+                    float(Decimal(str(entry_episode.net_pnl)) / entry_notional * Decimal("10000"))
+                    if entry_notional > 0 else 0.0
+                )
+                entry_episode.updated_at = utcnow()
 
     changed_row_ids = set(entry_fee_by_row) | set(closing_fee_by_row)
     affected_entry_ids: set[int] = set()
