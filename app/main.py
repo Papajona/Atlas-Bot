@@ -3214,7 +3214,7 @@ async def _reconciliation_loop():
                     "Outstanding platform LIVE orders cannot be reconciled because "
                     "exchange API credentials are unavailable"
                 )
-            result = await reconcile(settings.default_exchange, settings.default_symbol)
+            result = await reconcile(settings.default_exchange)
             if settings.live_trading_enabled and not settings.paper_trading:
                 account = result.get("account") if isinstance(result, Mapping) else None
                 if isinstance(account, Mapping) and account.get("error"):
