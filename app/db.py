@@ -1201,6 +1201,7 @@ class StrategyOutcome(Base):
         Index("ix_strategy_outcome_customer_strategy_created", "customer_id", "strategy", "created_at"),
         Index("ix_strategy_outcome_symbol_regime_created", "symbol", "regime", "created_at"),
         Index("ix_strategy_outcome_lifecycle_created", "lifecycle_status", "created_at"),
+        Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
@@ -1218,6 +1219,8 @@ class StrategyOutcome(Base):
     return_bps: Mapped[float] = mapped_column(Float, default=0.0)
     net_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     net_return_bps: Mapped[float] = mapped_column(Float, default=0.0)
+    # Exact closing-fill notional supports complete, weighted trade returns.
+    closing_notional: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
     lifecycle_status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN")
     mode: Mapped[str] = mapped_column(String(20), default="")
     sequence: Mapped[int] = mapped_column(Integer, default=1)
