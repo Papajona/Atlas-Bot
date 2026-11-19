@@ -116,6 +116,8 @@ def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
     assert final.return_bps == 200.0
     assert final.net_return_bps == 190.0
     assert '"aggregate_fill_count": 2' in final.metadata_json
+    assert '"final_fill_closing_quantity": "3"' in final.metadata_json
+    assert '"final_fill_closing_notional": "300"' in final.metadata_json
 
 
 def test_execution_safety_windows_use_only_completed_trade_outcomes():
