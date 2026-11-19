@@ -48,3 +48,6 @@ def _fresh_default_test_db():
         for suffix in ("", "-wal", "-shm", "-journal"):
             pathlib.Path("test_trading.db" + suffix).unlink(missing_ok=True)
     yield
+
+
+
