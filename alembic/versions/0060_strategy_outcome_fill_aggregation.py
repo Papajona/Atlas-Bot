@@ -29,7 +29,7 @@ def upgrade() -> None:
             "strategy_outcomes",
             sa.Column(
                 "closing_notional",
-                sa.Numeric(24, 8),
+                sa.Numeric(38, 18, asdecimal=False),
                 nullable=False,
                 server_default=sa.text("0"),
             ),
