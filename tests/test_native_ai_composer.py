@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app.native_ai import NativeAIInputError, compose_strategy_spec
+from app.strategy_ai import AIStrategySpec
 
 ROOT = Path(__file__).resolve().parents[1]
 _EVAL_SPEC = importlib.util.spec_from_file_location("eval_native_ai", ROOT / "scripts" / "eval_native_ai.py")
@@ -262,7 +263,9 @@ def test_condition_text_is_normalized_before_application_contract_scoring():
     failures = _EVAL._contract_failures(spec)
 
     assert failures == []
-    assert spec["entry_conditions"][0]["type"] == "  RSI  "
+    normalized = AIStrategySpec.model_validate(spec)
+    assert normalized.entry_conditions[0].type == "RSI"
+    assert normalized.entry_conditions[0].rule == "close above 20"
 
 
 def test_condition_text_that_is_only_whitespace_or_too_short_is_rejected():
