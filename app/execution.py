@@ -33,7 +33,7 @@ from .incidents import open_incident
 from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
-from .live_fees import extract_order_fee_quote_decimal, fee_quality_is_verified, ESTIMATED, UNVERIFIED
+from .live_fees import extract_order_fee_quote_decimal, fee_quality_is_verified, UNVERIFIED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
