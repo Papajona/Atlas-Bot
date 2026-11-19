@@ -184,7 +184,6 @@ async def _apply_late_closing_fee_true_up(db, trade: Trade, fee_delta: Decimal |
         metadata["aggregate_net_pnl"] = str(target.net_pnl)
         metadata["aggregate_net_return_bps"] = str(target.net_return_bps)
     target.metadata_json = json.dumps(metadata, default=str)
-    target.updated_at = utcnow()
     return allocated_fee
 
 
