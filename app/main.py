@@ -3874,11 +3874,12 @@ async def get_customer(
         email = email or str(profile.email or "").strip().lower()[:320]
         name = name or str(profile.display_name or "").strip()[:160]
 
-    # The keyless Edge provisioner leaves encrypted PII empty. Fetch Auth only
-    # when an email is actually needed and neither the JWT nor the encrypted
-    # profile can supply one. Existing ACTIVE profiles remain usable even when
-    # their Auth email is unconfirmed; new profiles still require confirmation.
-    if not email and (profile is None or not str(profile.email or "").strip()):
+    # Keyless Edge provisioning leaves encrypted PII empty. Verify Auth and
+    # backfill the email when the existing profile has no encrypted email; do
+    # not let a missing display name trigger a network call. Existing ACTIVE
+    # users are not newly required to reconfirm an email; new profiles are.
+    needs_auth_identity = profile is None or not str(profile.email or "").strip()
+    if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
