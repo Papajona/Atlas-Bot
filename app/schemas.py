@@ -300,7 +300,8 @@ class WithdrawalCreate(BaseModel):
 
 
 class CustomerWithdrawalCreate(BaseModel):
-    amount: float = Field(gt=0)
+    # Sanity ceiling; the operative per-withdrawal limit remains settings.withdrawal_max_amount.
+    amount: float = Field(gt=0, le=1_000_000_000)
     destination: str = Field(min_length=30, max_length=50)
     destination_tag: str | None = Field(default=None, max_length=120)
     network: str = Field(default="TRON", min_length=3, max_length=40)
