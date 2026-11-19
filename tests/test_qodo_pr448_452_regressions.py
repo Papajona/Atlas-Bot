@@ -1,6 +1,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -25,8 +26,9 @@ def test_customer_profile_backfill_uses_auth_claims_without_name_only_network_ca
 
 def test_legacy_identity_detection_is_bounded_and_dialect_aware():
     source = (ROOT / "app/customer_identity.py").read_text(encoding="utf-8")
-    assert 'column.op("!~*")(_UUID_RE)' in source
-    assert 'func.lower(column).op("NOT GLOB")(_UUID_GLOB)' in source
+    assert 'column.op("!~*")' in source
+    assert 'func.lower(column).op("NOT GLOB")' in source
+    assert "literal_column(" in source
     migration = (ROOT / "alembic/versions/0060_customer_identity_unmapped_index.py").read_text(encoding="utf-8")
     assert "ix_customer_profiles_unmapped_auth_user_id" in migration
     assert "auth_user_id !~*" in migration
