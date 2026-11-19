@@ -344,3 +344,105 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
             assert reopened.closing_trade_id is None
 
     asyncio.run(run())
+
+
+def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
+    from decimal import Decimal
+    from app import execution
+    from app.db import (
+        init_db, SessionLocal, Trade, Position, StrategyOutcome,
+    )
+
+    suffix = uuid.uuid4().hex
+    symbol = f"FEE-BASIS-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"fee-entry-{suffix}", client_order_id=f"fee-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=2.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=2.0, notional=200.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"fee-regression","asset":"crypto"}',
+            )
+            first_close = Trade(
+                signal_id=f"fee-close-1-{suffix}", client_order_id=f"fee-close-1-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=110.0,
+                average_fill_price=0.0, fee=1.5, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"fee-regression","asset":"crypto"}',
+            )
+            second_close = Trade(
+                signal_id=f"fee-close-2-{suffix}", client_order_id=f"fee-close-2-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=110.0,
+                average_fill_price=0.0, fee=0.25, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"fee-regression","asset":"crypto"}',
+            )
+            db.add_all([entry, first_close, second_close])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=2.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, entry_fee=Decimal("2.00"),
+                strategy="fee-regression", entry_regime="UNKNOWN",
+                entry_trade_id=entry.id,
+            ))
+            await db.commit()
+            first_id, second_id = first_close.id, second_close.id
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == first_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.50")
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            position = (await db.execute(
+                select(Position).where(Position.symbol == symbol)
+            )).scalar_one()
+            assert position.quantity == pytest.approx(1.0)
+            assert Decimal(str(position.entry_fee)) == Decimal("1.00")
+            first_outcome = (await db.execute(
+                select(StrategyOutcome).where(StrategyOutcome.closing_trade_id == first_id)
+            )).scalar_one()
+            assert Decimal(str(first_outcome.fee)) == Decimal("1.50")
+            assert Decimal(str(first_outcome.net_pnl)) == Decimal("8.50")
+            assert first_outcome.lifecycle_status == "OPEN"
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == second_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.25")
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            outcomes = (await db.execute(
+                select(StrategyOutcome)
+                .where(StrategyOutcome.trade_id == entry.id)
+                .order_by(StrategyOutcome.sequence)
+            )).scalars().all()
+            assert len(outcomes) == 2
+            assert outcomes[0].lifecycle_status == "PARTIAL_CLOSED"
+            assert outcomes[1].lifecycle_status == "CLOSED"
+            assert Decimal(str(outcomes[1].closing_quantity)) == Decimal("2")
+            assert Decimal(str(outcomes[1].closing_notional)) == Decimal("220")
+            assert Decimal(str(outcomes[1].fee)) == Decimal("2.75")
+            assert Decimal(str(outcomes[1].net_pnl)) == Decimal("17.25")
+            assert outcomes[1].net_return_bps == pytest.approx(17.25 / 220 * 10000)
+
+    asyncio.run(run())
