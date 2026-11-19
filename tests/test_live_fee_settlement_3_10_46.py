@@ -97,6 +97,7 @@ def test_fee_without_currency_cannot_create_fee_complete_outcome():
             entry = _trade(
                 signal_id="fee-denomination-entry",
                 client_order_id="fee-denomination-entry",
+                customer_id=None,
                 side="buy",
                 fee=0.0,
             )
@@ -121,6 +122,7 @@ def test_fee_without_currency_cannot_create_fee_complete_outcome():
             closing = _trade(
                 signal_id="fee-denomination-close",
                 client_order_id="fee-denomination-close",
+                customer_id=None,
                 side="sell",
                 fee=0.0,
             )
