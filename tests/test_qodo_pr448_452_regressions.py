@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pytest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -282,7 +283,7 @@ def test_same_direction_position_additions_have_a_defined_zero_close_quantity():
         source.index("async def _release_unneeded_order_reserve")
     ]
     assert block.index("closing = 0.0") < block.index("if not position:")
-    assert "if closing > 0:" in block
+    assert "if closing_decimal > 0:" in block
 
 
 def test_live_and_paper_partial_close_fees_use_only_the_incremental_fill_fee():
@@ -439,7 +440,7 @@ def test_fee_only_live_snapshot_true_up_updates_last_closing_outcome():
     assert outcome.net_pnl == Decimal("3.90")
     assert outcome.net_return_bps == 390.0
     metadata = json.loads(outcome.metadata_json)
-    assert metadata["late_fee_true_up_total"] == "1.00"
+    assert Decimal(metadata["late_fee_true_up_total"]) == Decimal("1.00")
 
 
 
@@ -505,7 +506,7 @@ def test_late_fee_true_up_from_earlier_partial_close_updates_final_aggregate_onc
     metadata = json.loads(final.metadata_json)
     assert Decimal(metadata["aggregate_net_pnl"]) == Decimal("8.70")
     assert metadata["aggregate_net_return_bps"] == "435.0"
-    assert metadata["late_fee_true_up_total"] == "1.00"
+    assert Decimal(metadata["late_fee_true_up_total"]) == Decimal("1.00")
 
 
 
@@ -530,7 +531,10 @@ def test_aggregated_partial_close_summary_uses_aggregate_notional_once():
         fee_basis_complete=True,
         created_at=close_time,
     )
-    assert main._aggregate_closed_outcome_fills([partial, final]) == [(0.0078, close_time)]
+    result = main._aggregate_closed_outcome_fills([partial, final])
+    assert len(result) == 1
+    assert result[0][0] == pytest.approx(0.0078)
+    assert result[0][1] == close_time
 
 
 def test_incomplete_aggregate_partial_close_is_excluded_from_dashboard_ratios():
