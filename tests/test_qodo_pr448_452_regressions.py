@@ -331,3 +331,112 @@ def test_legacy_withdrawal_rows_are_not_misreported_as_auth_outages():
     assert "AUTH_EMAIL_UNCONFIRMED" in source
 
 
+
+
+def test_customer_identity_migration_always_checks_the_strategy_outcome_index():
+    migration = (ROOT / "alembic/versions/0060_customer_identity_unmapped_index.py").read_text(encoding="utf-8")
+    assert "if name in indexes:\n        return" not in migration
+    assert "if name not in indexes:" in migration
+    assert migration.index("if name not in indexes:") < migration.index("outcome_indexes =")
+    assert "ix_strategy_outcome_platform_closed_trade_time" in migration
+
+
+def test_partial_closes_are_aggregated_into_one_risk_observation():
+    import json
+
+    first = SimpleNamespace(
+        id=1, sequence=1, lifecycle_status="OPEN",
+        realized_pnl=Decimal("1.00"), net_pnl=Decimal("0.80"), fee=Decimal("0.20"),
+        net_return_bps=80.0,
+        metadata_json=json.dumps({"closing_notional": "100"}),
+    )
+    final = SimpleNamespace(
+        id=2, sequence=2, lifecycle_status="OPEN",
+        realized_pnl=Decimal("-1.00"), net_pnl=Decimal("-1.20"), fee=Decimal("0.20"),
+        net_return_bps=-120.0,
+        metadata_json=json.dumps({"closing_notional": "100"}),
+    )
+
+    summary = execution._aggregate_completed_strategy_outcomes([first, final])
+
+    assert first.lifecycle_status == "PARTIAL_CLOSED"
+    assert final.lifecycle_status == "CLOSED"
+    assert summary is final
+    assert final.realized_pnl == Decimal("0.00")
+    assert final.net_pnl == Decimal("-0.40")
+    assert final.fee == Decimal("0.40")
+    assert final.net_return_bps == -20.0
+    metadata = json.loads(final.metadata_json)
+    assert metadata["aggregate_fill_count"] == 2
+    assert metadata["aggregate_notional_complete"] is True
+
+
+def test_completed_trade_risk_window_uses_aggregate_rows_not_partial_fills():
+    import json
+
+    summary = SimpleNamespace(
+        id=2, trade_id=10, lifecycle_status="CLOSED",
+        created_at=None, net_return_bps=-20.0,
+        metadata_json=json.dumps({
+            "aggregate_notional_complete": True,
+            "aggregate_net_return_bps": "-20.0",
+        }),
+    )
+    partial = SimpleNamespace(
+        id=1, trade_id=10, lifecycle_status="PARTIAL_CLOSED",
+        created_at=None, net_return_bps=-1000.0,
+        metadata_json=json.dumps({"closing_notional": "100"}),
+    )
+
+    class Scalars:
+        def all(self):
+            return [summary, partial]
+
+    class Result:
+        def scalars(self):
+            return Scalars()
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+    returns = asyncio.run(execution._recent_completed_trade_returns(Database(), None, 5))
+    assert returns == [-20.0]
+
+
+def test_fee_only_live_snapshot_true_up_updates_last_closing_outcome():
+    import json
+
+    outcome = SimpleNamespace(
+        id=5, sequence=2, closing_trade_id=77,
+        fee=Decimal("0.10"), net_pnl=Decimal("4.90"),
+        net_return_bps=490.0, updated_at=None,
+        metadata_json=json.dumps({"closing_notional": "100", "net_pnl": "4.90"}),
+    )
+
+    class Scalars:
+        def all(self):
+            return [outcome]
+
+    class Result:
+        def scalars(self):
+            return Scalars()
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+    trade = SimpleNamespace(
+        id=77, filled_quantity=2.0, average_fill_price=100.0,
+        requested_quantity=2.0, remaining_quantity=0.0,
+    )
+    applied = asyncio.run(execution._apply_fill_to_position(
+        Database(), trade, 2.0, 100.0, fill_fee_delta=Decimal("2.00")
+    ))
+
+    assert applied == 0.0
+    assert outcome.fee == Decimal("1.10")
+    assert outcome.net_pnl == Decimal("3.90")
+    assert outcome.net_return_bps == 390.0
+    metadata = json.loads(outcome.metadata_json)
+    assert metadata["late_fee_true_up_total"] == "1.00"

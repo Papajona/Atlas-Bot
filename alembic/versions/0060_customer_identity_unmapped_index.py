@@ -30,26 +30,24 @@ def upgrade() -> None:
         )
     }
     name = "ix_customer_profiles_unmapped_auth_user_id"
-    if name in indexes:
-        return
-
-    if bind.dialect.name == "postgresql":
-        op.create_index(
-            name,
-            "customer_profiles",
-            ["auth_user_id"],
-            unique=False,
-            schema="public",
-            postgresql_where=sa.text(f"auth_user_id !~* '{_UUID_PATTERN}'"),
-        )
-    elif bind.dialect.name == "sqlite":
-        op.create_index(
-            name,
-            "customer_profiles",
-            ["auth_user_id"],
-            unique=False,
-            sqlite_where=sa.text(f"lower(auth_user_id) NOT GLOB '{_UUID_GLOB}'"),
-        )
+    if name not in indexes:
+        if bind.dialect.name == "postgresql":
+            op.create_index(
+                name,
+                "customer_profiles",
+                ["auth_user_id"],
+                unique=False,
+                schema="public",
+                postgresql_where=sa.text(f"auth_user_id !~* '{_UUID_PATTERN}'"),
+            )
+        elif bind.dialect.name == "sqlite":
+            op.create_index(
+                name,
+                "customer_profiles",
+                ["auth_user_id"],
+                unique=False,
+                sqlite_where=sa.text(f"lower(auth_user_id) NOT GLOB '{_UUID_GLOB}'"),
+            )
 
     outcome_indexes = {
         item["name"]
