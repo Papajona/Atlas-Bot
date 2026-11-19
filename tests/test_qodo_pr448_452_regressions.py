@@ -124,7 +124,7 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
         source.index("async def _legacy_customer_email_conflict"):
         source.index("async def get_customer")
     ]
-    assert "if not str(stored_email or "").strip():" in helper
+    assert 'if not str(stored_email or "").strip():' in helper
     assert "return True" in helper
 
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
