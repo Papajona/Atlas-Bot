@@ -55,6 +55,7 @@ def test_models_have_matching_migrations():
     # The mandatory suite rejects skipped tests. Keep this opt-in check collectable
     # without a configured database, and execute the real drift query when supplied.
     if not URL:
+        # No optional database was configured. This is a deliberate no-op, not a skipped test.
         return
     missing = []
     for entry in _flatten(_collect_diff()):
