@@ -48,3 +48,23 @@ def _fresh_default_test_db():
         for suffix in ("", "-wal", "-shm", "-journal"):
             pathlib.Path("test_trading.db" + suffix).unlink(missing_ok=True)
     yield
+
+
+
+def pytest_collection_modifyitems(config, items):
+    """Keep the opt-in migration-drift test out of ordinary no-skips CI runs.
+
+    An explicit pytest -m migration_drift invocation still collects and runs
+    the test (or reports an honest skip when its isolated URL is absent).
+    """
+    if "migration_drift" in str(config.option.markexpr or ""):
+        return
+    deselected = [
+        item for item in items
+        if item.get_closest_marker("migration_drift") is not None
+    ]
+    if not deselected:
+        return
+    selected = [item for item in items if item not in deselected]
+    config.hook.pytest_deselected(items=deselected)
+    items[:] = selected
