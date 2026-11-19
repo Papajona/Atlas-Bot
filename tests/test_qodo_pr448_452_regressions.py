@@ -417,13 +417,19 @@ def _load_strategy_outcome_migration():
 def test_historical_fee_reconstruction_counts_each_source_order_once():
     migration = _load_strategy_outcome_migration()
     source_trades = {
-        10: {"id": 10, "fee": "2.25"},
-        20: {"id": 20, "fee": "1.50"},
-        30: {"id": 30, "fee": "0.75"},
+        10: {"id": 10, "fee": "2.25", "mode": "PAPER"},
+        20: {"id": 20, "fee": "1.50", "mode": "PAPER"},
+        30: {"id": 30, "fee": "0.75", "mode": "PAPER"},
     }
     assert migration._reconstruct_trade_fee_total(
         10, [20, 20, 30], source_trades
     ) == Decimal("4.50")
+    live_sources = {
+        key: {**value, "mode": "LIVE"} for key, value in source_trades.items()
+    }
+    assert migration._reconstruct_trade_fee_total(
+        10, [20, 30], live_sources
+    ) is None
     assert migration._reconstruct_trade_fee_total(
         10, [20, 99], source_trades
     ) is None
@@ -442,3 +448,54 @@ def test_open_position_entry_fee_backfill_requires_full_quantity_reconciliation(
     assert migration._reconstruct_remaining_entry_fee(
         None, Decimal("1"), Decimal("3")
     ) is None
+
+
+
+def test_exchange_fee_quality_distinguishes_reported_from_estimated_values():
+    from app.live_fees import EXACT, CONVERTED, ESTIMATED, fee_quality_is_verified
+
+    assert fee_quality_is_verified(EXACT) is True
+    assert fee_quality_is_verified(CONVERTED) is True
+    assert fee_quality_is_verified(ESTIMATED) is False
+    assert fee_quality_is_verified(None) is False
+    assert fee_quality_is_verified("unexpected") is False
+
+
+def test_historical_variable_price_fill_notional_reconciles_by_quantity():
+    migration = _load_strategy_outcome_migration()
+    # Two fills for one order: 1 @ 100 and 2 @ 120. The recorded order's
+    # cumulative notional may be 3 @ 120 = 360; actual fill notional is 340.
+    # Quantity and per-fill evidence are complete despite different notionals.
+    assert migration._reconcile_closing_order_fill_evidence(
+        Decimal("3"), Decimal("3"), Decimal("340")
+    ) is True
+    assert migration._reconcile_closing_order_fill_evidence(
+        Decimal("3"), Decimal("2"), Decimal("340")
+    ) is False
+    assert migration._reconcile_closing_order_fill_evidence(
+        Decimal("3"), Decimal("3"), Decimal("0")
+    ) is False
+
+
+def test_metadata_declares_the_partial_indexes_created_by_revision_0060():
+    from app.db import CustomerProfile, StrategyOutcome
+
+    customer = {
+        item.name: item for item in CustomerProfile.__table__.indexes
+    }
+    outcomes = {
+        item.name: item for item in StrategyOutcome.__table__.indexes
+    }
+    assert "ix_customer_profiles_unmapped_auth_user_id" in customer
+    assert "auth_user_id !~*" in str(
+        customer["ix_customer_profiles_unmapped_auth_user_id"].dialect_options["postgresql"]["where"]
+    )
+    assert "NOT GLOB" in str(
+        customer["ix_customer_profiles_unmapped_auth_user_id"].dialect_options["sqlite"]["where"]
+    )
+    assert "ix_strategy_outcome_platform_closed_trade_time" in outcomes
+    predicate = str(
+        outcomes["ix_strategy_outcome_platform_closed_trade_time"].dialect_options["postgresql"]["where"]
+    )
+    assert "customer_id IS NULL" in predicate
+    assert "lifecycle_status = 'CLOSED'" in predicate

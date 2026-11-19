@@ -405,7 +405,8 @@ def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
                 select(Trade).where(Trade.id == first_id)
             )).scalar_one()
             await execution._apply_fill_to_position(
-                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.50")
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.50"),
+                current_fill_fee_verified=True
             )
             await db.commit()
 
@@ -427,7 +428,8 @@ def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
                 select(Trade).where(Trade.id == second_id)
             )).scalar_one()
             await execution._apply_fill_to_position(
-                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.25")
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.25"),
+                current_fill_fee_verified=True
             )
             await db.commit()
 

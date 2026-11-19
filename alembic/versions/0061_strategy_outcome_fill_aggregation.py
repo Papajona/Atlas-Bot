@@ -31,6 +31,22 @@ def _close_enough(actual: Decimal, expected: Decimal) -> bool:
     return abs(actual - expected) <= tolerance
 
 
+def _reconcile_closing_order_fill_evidence(
+    expected_quantity: Decimal,
+    actual_quantity: Decimal,
+    actual_notional: Decimal,
+) -> bool:
+    """Reconcile all executed units and positive per-fill notional, not last-price notional."""
+    return (
+        expected_quantity.is_finite()
+        and actual_quantity.is_finite()
+        and actual_notional.is_finite()
+        and expected_quantity > 0
+        and actual_notional > 0
+        and _close_enough(actual_quantity, expected_quantity)
+    )
+
+
 def _reconstruct_notional(row) -> Decimal:
     """Use exact stored notional, then net and gross ratio evidence in that order."""
     current = Decimal(str(row["closing_notional"] or 0))
@@ -63,7 +79,14 @@ def _reconstruct_trade_fee_total(
     total = Decimal("0")
     for order_id in ids:
         order = source_trades.get(order_id)
-        if order is None or order.get("fee") is None:
+        # Older live trades did not persist the source quality of their fee.
+        # A non-null amount may be an estimate, so it cannot establish a
+        # verified net-return basis. Deterministic paper-model fees are known.
+        if (
+            order is None
+            or order.get("fee") is None
+            or str(order.get("mode") or "").upper() not in {"PAPER", "PAPER_SHADOW"}
+        ):
             return None
         try:
             fee = Decimal(str(order["fee"]))
@@ -102,7 +125,7 @@ def _reconstruct_remaining_entry_fee(
 def upgrade() -> None:
     if context.is_offline_mode():
         raise RuntimeError(
-            "Revision 0060 requires an online database connection to verify historical "
+            "Revision 0061 requires an online database connection to verify historical "
             "strategy outcome fills against trades. Apply it with 'alembic upgrade head' "
             "against the target database; offline --sql generation is not supported."
         )
@@ -203,7 +226,7 @@ def upgrade() -> None:
         ORDER BY sequence, id
     """)
     trade_lookup = sa.text("""
-        SELECT id, filled_quantity, average_fill_price, notional, fee
+        SELECT id, filled_quantity, average_fill_price, notional, fee, mode
         FROM trades
         WHERE id IN :trade_ids
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
@@ -291,15 +314,11 @@ def upgrade() -> None:
                 if order is None:
                     complete = False
                     continue
-                expected_notional = Decimal(str(order["notional"] or 0))
                 expected_quantity = Decimal(str(order["filled_quantity"] or 0))
                 actual_notional = notionals_by_closing_trade.get(closing_id, Decimal("0"))
                 actual_quantity = quantities_by_closing_trade.get(closing_id, Decimal("0"))
-                if (
-                    expected_notional <= 0
-                    or expected_quantity <= 0
-                    or not _close_enough(actual_notional, expected_notional)
-                    or not _close_enough(actual_quantity, expected_quantity)
+                if not _reconcile_closing_order_fill_evidence(
+                    expected_quantity, actual_quantity, actual_notional
                 ):
                     complete = False
 

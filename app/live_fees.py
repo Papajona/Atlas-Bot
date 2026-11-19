@@ -13,6 +13,11 @@ from decimal import Decimal, localcontext
 EXACT, CONVERTED, ESTIMATED = "exact", "converted", "estimated"
 
 
+def fee_quality_is_verified(quality: str | None) -> bool:
+    """Only exchange-reported fees (or their deterministic quote conversion) are verified."""
+    return quality in {EXACT, CONVERTED}
+
+
 def split_symbol(symbol: str) -> tuple[str, str]:
     """'BTC/USDT' or 'BTC/USDT:USDT' -> ('BTC', 'USDT')."""
     pair = str(symbol or "").split(":", 1)[0]

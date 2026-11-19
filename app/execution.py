@@ -33,7 +33,7 @@ from .incidents import open_incident
 from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
-from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
+from .live_fees import extract_order_fee_quote_decimal, fee_quality_is_verified, ESTIMATED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
@@ -821,7 +821,9 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
 
 async def _apply_fill_to_position(
     db, trade: Trade, new_filled: float, fill_price: float,
-    *, current_fill_fee: Decimal | float | None = None,
+    *,
+    current_fill_fee: Decimal | float | None = None,
+    current_fill_fee_verified: bool = False,
 ):
     delta = max(0.0, new_filled - trade.filled_quantity)
     if delta <= 0 or fill_price <= 0:
@@ -870,7 +872,7 @@ async def _apply_fill_to_position(
                                 else Decimal("0")
                             ),
                             entry_fee=current_fee_decimal,
-                            entry_fee_basis_known=current_fill_fee is not None,
+                            entry_fee_basis_known=current_fill_fee_verified,
                         )
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
@@ -908,11 +910,11 @@ async def _apply_fill_to_position(
                 position.strategy = str(trade_context.get("strategy") or "unknown")
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
                 position.entry_fee = current_fee_decimal
-                position.entry_fee_basis_known = current_fill_fee is not None
+                position.entry_fee_basis_known = current_fill_fee_verified
             else:
                 position.entry_fee = Decimal(str(position.entry_fee or 0)) + current_fee_decimal
                 position.entry_fee_basis_known = bool(
-                    position.entry_fee_basis_known and current_fill_fee is not None
+                    position.entry_fee_basis_known and current_fill_fee_verified
                 )
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))
@@ -957,7 +959,7 @@ async def _apply_fill_to_position(
             position_flipped = bool(position.quantity) and (old_qty * position.quantity < 0)
             if position_flipped:
                 position.entry_fee = current_fee_decimal - closing_order_fee_decimal
-                position.entry_fee_basis_known = current_fill_fee is not None
+                position.entry_fee_basis_known = current_fill_fee_verified
             elif abs(float(position.quantity or 0.0)) < 1e-12:
                 position.entry_fee = Decimal("0")
             else:
@@ -1163,7 +1165,7 @@ async def _apply_fill_to_position(
                 net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
                 closing_quantity=closing_decimal,
                 closing_notional=notional_decimal,
-                fee_basis_complete=bool(entry_fee_basis_known and current_fill_fee is not None),
+                fee_basis_complete=bool(entry_fee_basis_known and current_fill_fee_verified),
                 lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({
@@ -1171,7 +1173,7 @@ async def _apply_fill_to_position(
                     "fill_price": str(fill_price),
                     "allocated_entry_fee": str(allocated_entry_fee_decimal),
                     "closing_fee": str(closing_fee_decimal),
-                    "fee_basis_complete": bool(entry_fee_basis_known and current_fill_fee is not None),
+                    "fee_basis_complete": bool(entry_fee_basis_known and current_fill_fee_verified),
                     "net_pnl": str(net_pnl_decimal),
                 }, default=str),
             )
@@ -1842,6 +1844,7 @@ async def advance_platform_paper_orders(
                             await _apply_fill_to_position(
                                 db, trade, float(new_filled), float(fill_price),
                                 current_fill_fee=fee_decimal,
+                                current_fill_fee_verified=True,
                             )
                             weighted_average = (
                                 (old_filled * old_average + fill_quantity * fill_price) / new_filled
@@ -2700,7 +2703,11 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             t = await db.get(Trade, trade_id)
             t.broker_order_id = broker_id
             fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(t, order, filled, fill_price, PROFILES.get(asset, PROFILES["crypto"]).taker_bps)
-            await _apply_fill_to_position(db, t, filled, fill_price, current_fill_fee=fee_delta)
+            await _apply_fill_to_position(
+                db, t, filled, fill_price,
+                current_fill_fee=fee_delta,
+                current_fill_fee_verified=fee_quality_is_verified(fee_quality),
+            )
             await _post_live_fee(db, t, fee_delta, fee_cum, fee_quality, fee_note)
             if customer_id is not None and str(t.mode or "").upper() == "LIVE":
                 await _refresh_live_customer_equity(db, customer_id)
@@ -2827,7 +2834,9 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
 
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
     realized_delta = await _apply_fill_to_position(
-        db, trade, filled, avg, current_fill_fee=fee_delta
+        db, trade, filled, avg,
+        current_fill_fee=fee_delta,
+        current_fill_fee_verified=fee_quality_is_verified(fee_quality),
     )
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
 

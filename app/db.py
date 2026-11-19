@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from .config import settings
 from .crypto import encrypt_text, decrypt_text
 
+_UUID_AUTH_REFERENCE_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_UUID_AUTH_REFERENCE_GLOB = "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+
 
 def _utc_date():
     return datetime.now(timezone.utc).date()
@@ -626,7 +629,19 @@ async def init_db():
 
 class CustomerProfile(Base):
     __tablename__ = "customer_profiles"
-    __table_args__ = (UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),
+        Index(
+            "ix_customer_profiles_unmapped_auth_user_id",
+            "auth_user_id",
+            postgresql_where=sa.text(
+                f"auth_user_id !~* '{_UUID_AUTH_REFERENCE_PATTERN}'"
+            ),
+            sqlite_where=sa.text(
+                f"lower(auth_user_id) NOT GLOB '{_UUID_AUTH_REFERENCE_GLOB}'"
+            ),
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     auth_user_id: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[str] = mapped_column(EncryptedText, default="")
@@ -1205,6 +1220,17 @@ class StrategyOutcome(Base):
         Index("ix_strategy_outcome_symbol_regime_created", "symbol", "regime", "created_at"),
         Index("ix_strategy_outcome_lifecycle_created", "lifecycle_status", "created_at"),
         Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at"),
+        Index(
+            "ix_strategy_outcome_platform_closed_trade_time",
+            "trade_id",
+            "created_at",
+            postgresql_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+            sqlite_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
