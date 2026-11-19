@@ -48,14 +48,10 @@ def _run_one_cycle(monkeypatch, *, paper: bool, reconciliation_account: dict):
 
     async def reconcile(exchange, symbol):
         calls.append(("reconcile", exchange, symbol))
-        # Model an existing platform order being resolved from its broker snapshot.
         return {
             "results": [{"trade_id": 42, "status": "FILLED", "resolved": True}],
             "account": reconciliation_account,
         }
-
-    async def sync_live_account(*_args, **_kwargs):
-        calls.append(("sync_live_account",))
 
     async def enforce_loss_limits():
         calls.append(("loss_limits",))
@@ -93,14 +89,13 @@ def test_paper_switch_still_reconciles_an_outstanding_platform_order_without_syn
     )
 
     assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
-    assert ("sync_live_account",) not in calls
     assert ("loss_limits",) not in calls
     assert "platform-loss-limits" in successes
     assert not failures
 
 
 def test_live_mode_enforces_loss_limits_only_after_reconciliation_returns_fresh_live_equity(monkeypatch):
-    calls, failures = _run_one_cycle(
+    calls, failures, successes = _run_one_cycle(
         monkeypatch,
         paper=False,
         reconciliation_account={"equity": 12_500.0, "positions_synced": 0},
@@ -108,13 +103,13 @@ def test_live_mode_enforces_loss_limits_only_after_reconciliation_returns_fresh_
 
     assert calls[0][0] == "reconcile"
     assert ("loss_limits",) in calls
-    # The worker must not issue a second account sync: reconcile() owns the guarded sync.
-    assert ("sync_live_account",) not in calls
+    assert "crypto" in successes
+    assert "platform-loss-limits" in successes
     assert not failures
 
 
-def test_live_mode_skips_loss_limits_and_records_failure_when_live_equity_is_unavailable(monkeypatch):
-    calls, failures = _run_one_cycle(
+def test_live_mode_records_broker_account_sync_error_in_crypto_scope(monkeypatch):
+    calls, failures, successes = _run_one_cycle(
         monkeypatch,
         paper=False,
         reconciliation_account={"error": "broker balance unavailable"},
@@ -123,6 +118,25 @@ def test_live_mode_skips_loss_limits_and_records_failure_when_live_equity_is_una
     assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
     assert ("loss_limits",) not in calls
     assert any(
+        scope == "crypto" and "account synchronization failed" in message
+        for scope, message in failures
+    )
+    assert "crypto" not in successes
+    assert "platform-loss-limits" not in successes
+
+
+def test_live_mode_records_missing_live_equity_as_loss_limit_failure(monkeypatch):
+    calls, failures, successes = _run_one_cycle(
+        monkeypatch,
+        paper=False,
+        reconciliation_account={"balance": 12_500.0},
+    )
+
+    assert ("reconcile", main_module.settings.default_exchange, main_module.settings.default_symbol) in calls
+    assert ("loss_limits",) not in calls
+    assert any(
         scope == "platform-loss-limits" and "fresh live-equity snapshot" in message
         for scope, message in failures
     )
+    assert "crypto" in successes
+    assert "platform-loss-limits" not in successes
