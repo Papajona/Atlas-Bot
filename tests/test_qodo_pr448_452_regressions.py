@@ -1,5 +1,8 @@
 import asyncio
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from app import main
 
@@ -7,71 +10,122 @@ from app import main
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity():
+def test_customer_profile_backfill_uses_auth_claims_without_name_only_network_calls():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    block = source[
-        source.index("async def _legacy_customer_email_conflict"):
-        source.index("def _funding_signature_valid")
-    ]
+    block = source[source.index("async def get_customer("):source.index("def _funding_signature_valid")]
     assert "_supabase_user(_bearer_token(authorization))" in block
     assert 'user.get("email_confirmed_at")' in block
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
-    assert "PENDING_IDENTITY_REVIEW" in block
-    assert "_legacy_customer_email_conflict(db, uid, email)" in block
-    assert "casefold()" in block
+    assert "if not profile.display_name and name:" in block
+    assert "if not str(profile.display_name" not in block
+    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' not in block
+    assert "has_unmapped_legacy_customer_identity(db)" in block
 
 
-def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like():
-    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    block = source[
-        source.index("async def _legacy_customer_email_conflict"):
-        source.index("async def get_customer")
-    ]
-    assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in block
-    assert "uuid.UUID" in block
-    assert ".ilike(" not in block
+def test_legacy_identity_detection_is_bounded_and_dialect_aware():
+    source = (ROOT / "app/customer_identity.py").read_text(encoding="utf-8")
+    assert '.op("~*")(_UUID_RE)' in source
+    assert '.op("GLOB")(_UUID_GLOB)' in source
+    assert ".limit(1)" in source
+    assert "rows = (await db.execute(statement)).scalars().all()" in source
 
 
-def test_edge_provisioning_keeps_pii_encrypted_and_paper_portfolio_is_guarded():
+def test_edge_provisioning_keeps_pii_encrypted_and_pages_legacy_rows_stably():
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
     insert = edge[edge.index(".insert({"):edge.index("})", edge.index(".insert({")) + 2]
     assert "auth_user_id: userId" in insert
     assert "email:" not in insert
     assert "display_name:" not in insert
+    page = edge[edge.index(".select(\"auth_user_id\")"):edge.index("if (legacyLookupError")]
+    assert '.order("id", { ascending: true })' in page
+    assert page.index('.order("id", { ascending: true })') < page.index(".range(")
 
+
+def test_paper_portfolio_authenticates_before_state_guard_and_never_scans_all_profiles():
     paper = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
     portfolio = paper[
         paper.index("async def paper_customer_portfolio"):
         paper.index("app.include_router")
     ]
-    assert "await _paper_state_guard()" in portfolio
-    summary = paper[
-        paper.index("async def paper_customer_me"):
-        paper.index('@app.get("/api/customer/portfolio")')
+    assert portfolio.index("await get_existing_customer") < portfolio.index("await _paper_state_guard()")
+    assert portfolio.index("await _paper_state_guard()") < portfolio.index("get_customer_paper_balances")
+    gate = paper[
+        paper.index("async def get_existing_customer"):
+        paper.index("async def _paper_state_guard")
     ]
-    assert "_supabase_user(_bearer_token(authorization))" in summary
-    assert "CustomerProfile.email" not in summary
-    assert "CustomerProfile.display_name" not in summary
+    assert "has_unmapped_legacy_customer_identity(db)" in gate
+    assert "legacy_auth_refs" not in gate
+    assert ".scalars().all()" not in gate
 
 
 def test_profile_conflict_returns_actionable_409_not_auth_outage():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    helper = source[source.index("async def _supabase_request"):source.index("async def _supabase_user")]
+    helper = source[source.index("async def _supabase_request"):source.index("async def _supabase_admin_user")]
     assert "response.status_code == 409" in helper
     assert '"/functions/v1/customer-profile-provision"' in helper
     assert "Manual identity review is required" in helper
     assert "raise HTTPException(" in helper
 
 
-def test_risk_dashboard_uses_only_latest_closed_platform_outcome_per_trade():
+def test_withdrawal_review_resolves_empty_encrypted_email_from_auth_admin():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    assert source.count("latest_closed = (") == 2
-    assert source.count("StrategyOutcome.customer_id.is_(None)") >= 4
-    assert source.count('StrategyOutcome.lifecycle_status == "CLOSED"') >= 4
-    ratios = (ROOT / "app/risk_metrics.py").read_text(encoding="utf-8")
-    assert "MIN_ANNUALIZATION_SPAN_SECONDS = 30 * 86400" in ratios
-    assert "interval_count = len(times) - 1" in ratios
+    admin_user = source[source.index("async def _supabase_admin_user"):source.index("async def _supabase_user")]
+    route = source[source.index('@app.get("/api/admin/withdrawals")'):source.index('@app.post("/api/admin/withdrawals")')]
+    assert "settings.supabase_auth_admin_key" in admin_user
+    assert '"/auth/v1/admin/users/' in admin_user
+    assert "response.status_code == 404" in admin_user
+    assert "str(user.get(\"id\") or \"\") != user_id" in admin_user
+    assert "_supabase_admin_user(auth_id)" in route
+    assert '"customer_email_status": email_status' in route
+    assert "AUTH_LOOKUP_NOT_CONFIGURED" in route
+    assert "AUTH_LOOKUP_UNAVAILABLE" in route
+
+
+def test_risk_dashboard_uses_bounded_recent_trade_candidates_in_both_transports():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert source.count("_recent_closed_platform_trade_returns(db)") == 2
+    assert "latest_closed = (" not in source
+    assert "_RISK_OUTCOME_CANDIDATE_ROW_LIMIT = 20000" in source
+    assert ".limit(_RISK_OUTCOME_CANDIDATE_ROW_LIMIT)" in source
+    assert "StrategyOutcome.trade_id.in_(selected)" in source
+    assert "group_by(StrategyOutcome.trade_id)" not in source
+
+
+def test_partial_close_fills_are_weighted_and_use_final_close_time():
+    start = datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc)
+    rows = [
+        SimpleNamespace(
+            trade_id=41, metadata_json=json.dumps({"closing_notional": "1000"}),
+            realized_pnl="10", return_bps=100, net_pnl="10",
+            created_at=start,
+        ),
+        SimpleNamespace(
+            trade_id=41, metadata_json=json.dumps({"closing_notional": "3000"}),
+            realized_pnl="30", return_bps=100, net_pnl="30",
+            created_at=start + timedelta(minutes=5),
+        ),
+        # A zero-realized-PnL exit still contributes its fill notional and fee.
+        SimpleNamespace(
+            trade_id=41, metadata_json=json.dumps({"closing_notional": "1000"}),
+            realized_pnl="0", return_bps=0, net_pnl="-1",
+            created_at=start + timedelta(minutes=10),
+        ),
+    ]
+    result = main._aggregate_closed_outcome_fills(rows)
+    assert len(result) == 1
+    assert result[0][0] == 0.0078
+    assert result[0][1] == start + timedelta(minutes=10)
+
+
+def test_legacy_outcome_notional_can_be_reconstructed_without_new_metadata():
+    start = datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc)
+    row = SimpleNamespace(
+        trade_id=42, metadata_json="{}", realized_pnl="5",
+        return_bps=50, net_pnl="4", created_at=start,
+    )
+    result = main._aggregate_closed_outcome_fills([row])
+    assert result == [(0.004, start)]
 
 
 def test_risk_websocket_publishes_annualization_and_sample_metadata():
@@ -117,15 +171,15 @@ def test_stale_pending_totp_factor_is_deleted_before_reenrollment():
     assert enroll.index('method="DELETE"') < enroll.index('payload={"factor_type": "totp"')
 
 
-
-def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
+def test_new_customer_profiles_fail_closed_while_legacy_identities_remain():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    helper = source[
-        source.index("async def _legacy_customer_email_conflict"):
-        source.index("async def get_customer")
+    get_customer = source[
+        source.index("async def get_customer("):
+        source.index("def _funding_signature_valid")
     ]
-    assert 'if not str(stored_email or "").strip():' in helper
-    assert "return True" in helper
+    assert "has_unmapped_legacy_customer_identity(db)" in get_customer
+    assert "if profile is None and identity_review_required:" in get_customer
+    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' not in get_customer
 
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
     provisioning = edge[
@@ -138,70 +192,22 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
     assert "}, 409)" in provisioning
 
 
-
-def test_unmapped_legacy_profile_with_blank_email_blocks_new_identity():
-    class Result:
-        def __init__(self, rows):
-            self.rows = rows
-
-        def all(self):
-            return self.rows
-
-    class Database:
-        def __init__(self, rows):
-            self.rows = rows
-
-        async def execute(self, _statement):
-            return Result(self.rows)
-
-    legacy = asyncio.run(
-        main._legacy_customer_email_conflict(
-            Database([("legacy-tron-reference", "")]),
-            "new-supabase-uuid",
-            "new@example.invalid",
-        )
-    )
-    unrelated_uuid = asyncio.run(
-        main._legacy_customer_email_conflict(
-            Database([("8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7", "")]),
-            "new-supabase-uuid",
-            "new@example.invalid",
-        )
-    )
-    assert legacy is True
-    assert unrelated_uuid is False
-
-
-
-def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unlocking_customer_access():
+def test_core_customer_summary_reports_review_without_permanently_quarantining():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     summary = source[
         source.index('@app.get("/api/customer/me")'):
         source.index('@app.get("/api/customer/wallets")')
     ]
     assert "allow_identity_review_summary=True" in summary
-    assert '"identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW"' in summary
+    assert '"identity_review_required": bool(getattr(profile, "identity_review_required", False))' in summary
 
     get_customer = source[
         source.index("async def get_customer("):
         source.index("def _funding_signature_valid")
     ]
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
-    assert "if not identity_review_required:" in get_customer
-    assert "allow_identity_review_summary" in get_customer
+    assert 'profile.status = "ACTIVE"' in get_customer
     assert "PENDING_IDENTITY_REVIEW" in get_customer
-
-
-def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain():
-    source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
-    gate = source[
-        source.index("async def get_existing_customer"):
-        source.index("async def _paper_state_guard")
-    ]
-    assert "legacy_auth_refs" in gate
-    assert "uuid.UUID" in gate
-    assert "Paper access is paused until legacy customer identities are manually reviewed" in gate
-
 
 
 def test_paper_customer_summary_is_read_only_and_marks_identity_review():
@@ -217,5 +223,5 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
         source.index("async def get_existing_customer"):
         source.index("async def _paper_state_guard")
     ]
-    assert "if not allow_identity_review_summary:" in access
+    assert "if identity_review_required and not allow_identity_review_summary:" in access
     assert "identity_review_required=identity_review_required" in access
