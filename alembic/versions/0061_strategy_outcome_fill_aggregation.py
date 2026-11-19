@@ -142,6 +142,44 @@ def upgrade() -> None:
         column["name"] for column in inspector.get_columns("trades")
     }
 
+    # Historical 0035 schema declared net-result fields NOT NULL. Revision
+    # 0061 writes NULL when their fee basis cannot be verified, so relax the
+    # existing columns before the outcome backfill runs. Keep server defaults
+    # for mixed-version writers during rolling deployment.
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("strategy_outcomes") as batch_op:
+            if "net_pnl" in outcome_columns:
+                batch_op.alter_column(
+                    "net_pnl",
+                    existing_type=sa.Numeric(38, 18),
+                    existing_nullable=False,
+                    nullable=True,
+                )
+            if "net_return_bps" in outcome_columns:
+                batch_op.alter_column(
+                    "net_return_bps",
+                    existing_type=sa.Float(),
+                    existing_nullable=False,
+                    nullable=True,
+                )
+    else:
+        if "net_pnl" in outcome_columns:
+            op.alter_column(
+                "strategy_outcomes",
+                "net_pnl",
+                existing_type=sa.Numeric(38, 18),
+                existing_nullable=False,
+                nullable=True,
+            )
+        if "net_return_bps" in outcome_columns:
+            op.alter_column(
+                "strategy_outcomes",
+                "net_return_bps",
+                existing_type=sa.Float(),
+                existing_nullable=False,
+                nullable=True,
+            )
+
     financial_type = sa.Numeric(38, 18, asdecimal=False)
     if "fee_reconciliation_pending" not in trade_columns:
         op.add_column(
