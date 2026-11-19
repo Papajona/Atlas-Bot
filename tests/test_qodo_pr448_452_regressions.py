@@ -264,6 +264,9 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
     ]
     assert "if not allow_identity_review_summary:" in access
     assert "identity_review_required=identity_review_required" in access
+    assert "effective_status = (" in access
+    assert "and not identity_review_required" in access
+    assert "status=effective_status" in access
 
 
 def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_or_persist_review():
