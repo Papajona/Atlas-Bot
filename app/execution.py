@@ -317,8 +317,11 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
     inferred and no threshold is silently substituted.
     """
     window = max(1, int(settings.execution_health_window_orders))
-    outcomes_q = select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(
-        int(settings.max_consecutive_losses)
+    outcomes_q = (
+        select(StrategyOutcome.net_return_bps)
+        .where(StrategyOutcome.lifecycle_status == "CLOSED")
+        .order_by(StrategyOutcome.created_at.desc())
+        .limit(int(settings.max_consecutive_losses))
     )
     if customer_id is not None:
         outcomes_q = outcomes_q.where(StrategyOutcome.customer_id == customer_id)
@@ -555,7 +558,12 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         if settings.edge_decay_halt_enabled and not reducing:
             # Stop NEW entries when realized net returns are statistically negative (z <= -edge_decay_z_halt vs a zero-edge null).
             # Reducing/closing orders always pass. Resumes automatically once the rolling window recovers; a human decides about live.
-            qout = select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(int(settings.edge_decay_window_trades))
+            qout = (
+                select(StrategyOutcome.net_return_bps)
+                .where(StrategyOutcome.lifecycle_status == "CLOSED")
+                .order_by(StrategyOutcome.created_at.desc())
+                .limit(int(settings.edge_decay_window_trades))
+            )
             qout = qout.where(StrategyOutcome.customer_id == customer_id) if customer_id is not None else qout.where(StrategyOutcome.customer_id.is_(None))
             realized = [float(v) / 10_000.0 for v in (await db.execute(qout)).scalars().all() if v is not None]
             decay = edge_decay_check(realized, expected_mean=0.0, min_obs=int(settings.edge_decay_min_trades), z_halt=float(settings.edge_decay_z_halt))
