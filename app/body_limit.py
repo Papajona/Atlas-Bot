@@ -1,12 +1,15 @@
 """Pure-ASGI request body size limit.
 
-Reject oversized request bodies before application middleware, route handlers, or
-framework parsers can start a response. Both Content-Length and streamed (chunked)
-request bodies are bounded. At most max_bytes of body data is retained.
+Reject oversized webhook, funding and API request bodies before handlers buffer them.
+Both Content-Length and streamed (chunked) request bodies are bounded.
 
 This middleware is dependency-free and can be tested with a stub ASGI app.
 """
 from __future__ import annotations
+
+
+class _BodyTooLarge(Exception):
+    """Raised when the running request-body byte count exceeds the configured cap."""
 
 
 class BodySizeLimitMiddleware:
@@ -19,69 +22,58 @@ class BodySizeLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        http_version = str(scope.get("http_version") or "1.1")
-        close_connection = http_version not in {"2", "3"}
-
-        # Check every Content-Length instance. Streaming byte accounting below
-        # remains authoritative for absent, invalid, or understated lengths.
         for name, value in scope.get("headers") or []:
-            if name.lower() != b"content-length":
-                continue
-            try:
-                declared = int(value)
-            except (TypeError, ValueError):
-                continue
-            if declared > self.max_bytes:
-                await self._reject(send, close_connection=close_connection)
-                return
+            if name.lower() == b"content-length":
+                try:
+                    declared = int(value)
+                except (TypeError, ValueError):
+                    declared = None
+                if declared is not None and declared > self.max_bytes:
+                    await self._reject(
+                        send,
+                        close_connection=str(scope.get("http_version") or "1.1") not in {"2", "3"},
+                    )
+                    return
+                break
 
-        # Fully check the body before invoking the app. Raising from receive()
-        # after framework parsing begins can leak a 400/500 instead of HTTP 413.
-        # A single concatenated ASGI request message also bounds memory when an
-        # attacker sends an unbounded number of empty chunks.
-        buffered = bytearray()
-        disconnected = False
-        other_message = None
-        request_complete = False
-        while True:
+        received = 0
+        response_started = False
+        response_complete = False
+
+        async def limited_receive():
+            nonlocal received
             message = await receive()
+            if message.get("type") == "http.request":
+                received += len(message.get("body") or b"")
+                if received > self.max_bytes:
+                    raise _BodyTooLarge()
+            return message
+
+        async def tracking_send(message):
+            nonlocal response_started, response_complete
             message_type = message.get("type")
-            if message_type == "http.disconnect":
-                disconnected = True
-                break
-            if message_type != "http.request":
-                other_message = message
-                break
+            if message_type == "http.response.start":
+                response_started = True
+            elif message_type == "http.response.body" and not message.get("more_body", False):
+                response_complete = True
+            await send(message)
 
-            chunk = message.get("body") or b""
-            if len(buffered) + len(chunk) > self.max_bytes:
-                await self._reject(send, close_connection=close_connection)
-                return
-            buffered.extend(chunk)
-            if not message.get("more_body", False):
-                request_complete = True
-                break
-
-        first_message_sent = False
-        other_message_sent = False
-
-        async def replay_receive():
-            nonlocal first_message_sent, other_message_sent
-            if not first_message_sent:
-                first_message_sent = True
-                return {
-                    "type": "http.request",
-                    "body": bytes(buffered),
-                    "more_body": not request_complete,
-                }
-            if disconnected:
-                return {"type": "http.disconnect"}
-            if other_message is not None and not other_message_sent:
-                other_message_sent = True
-                return other_message
-            return await receive()
-
-        await self.app(scope, replay_receive, send)
+        try:
+            await self.app(scope, limited_receive, tracking_send)
+        except _BodyTooLarge:
+            if not response_started:
+                await self._reject(
+                    send,
+                    close_connection=str(scope.get("http_version") or "1.1") not in {"2", "3"},
+                )
+            elif not response_complete:
+                # ASGI headers cannot be changed after response.start. Complete the
+                # started response rather than leaving the server waiting indefinitely.
+                await send({
+                    "type": "http.response.body",
+                    "body": b"",
+                    "more_body": False,
+                })
 
     @staticmethod
     async def _reject(send, *, close_connection: bool) -> None:
