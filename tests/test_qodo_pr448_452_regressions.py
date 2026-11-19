@@ -253,7 +253,7 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
     assert "if profile is None:" in get_customer
     assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
     assert "await _legacy_customer_email_conflict(db, uid, email)" in get_customer
-    assert "await _customer_profile_effectively_active(db, current_profile)" in source
+    assert "await _customer_profile_effectively_active(guard_db, current_profile)" in source
     assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in get_customer
     assert "if not identity_review_required:" in get_customer
     assert "allow_identity_review_summary" in get_customer
@@ -270,7 +270,7 @@ def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain(
     assert 'op("GLOB")' in gate
     assert ".limit(1)" in gate
     assert "_legacy_customer_email_conflict(db, uid, str(stored_email))" in gate
-    assert "str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"" in gate
+    assert 'str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"' in gate
     assert "Paper access is paused until legacy customer identities are manually reviewed" in gate
 
 
@@ -349,8 +349,8 @@ def test_revision_0060_is_batched_online_only_and_refuses_a_false_downgrade():
     assert "filled_quantity" in migration and "average_fill_price" in migration
     assert ".mappings().all()" in migration
     assert "raise RuntimeError(" in migration
-    assert 'sa.Column("closing_quantity"' in migration
-    assert 'sa.Column("entry_fee"' in migration
+    assert '"closing_quantity",' in migration
+    assert '"entry_fee",' in migration
 
 
 def test_fill_outcomes_use_per_fill_fees_and_reversal_close_only_quantity():
