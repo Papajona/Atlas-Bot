@@ -3850,7 +3850,9 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
 
 async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     """Return whether any non-UUID legacy Auth reference remains unmapped."""
-    dialect = db.get_bind().dialect.name
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
     if dialect == "postgresql":
         uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
         statement = select(CustomerProfile.id).where(
@@ -3874,7 +3876,7 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     # Conservative fallback for a non-production/test dialect.
     references = (await db.execute(
         select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
-    )).scalars()
+    )).scalars().all()
     for reference in references:
         try:
             uuid.UUID(str(reference))
