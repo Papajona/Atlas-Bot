@@ -3885,6 +3885,23 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     return False
 
 
+async def _customer_profile_effectively_active(db, profile) -> bool:
+    """Resolve only this pending profile's legacy identity; preserve other inactive states."""
+    status = str(getattr(profile, "status", "") or "").upper()
+    if status == "ACTIVE":
+        return True
+    if status != "PENDING_IDENTITY_REVIEW":
+        return False
+    auth_user_id = str(getattr(profile, "auth_user_id", "") or "")
+    email = str(getattr(profile, "email", "") or "").strip()
+    conflict = (
+        await _legacy_customer_email_conflict(db, auth_user_id, email)
+        if email
+        else await _has_unmapped_legacy_customer_profile(db, auth_user_id)
+    )
+    return not conflict
+
+
 async def get_customer(
     authorization: str | None,
     db,
@@ -3929,27 +3946,36 @@ async def get_customer(
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    # Re-evaluate unmapped legacy Auth references for every customer request.
-    # This is deliberately independent of blank encrypted profile PII: a prior
-    # Auth-backed email backfill must not let the next request bypass review.
-    identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
-
-    if profile is None and identity_review_required:
-        raise HTTPException(
-            409,
-            "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-        )
-
-    if profile is not None:
-        # Transient request-local state only; never persist a quarantine because
-        # the customer opened their profile page.
+    # New provisioning is paused while legacy non-UUID identities remain.
+    # Existing customers are evaluated per identity, not against a global legacy
+    # count that would incorrectly lock every unrelated customer account.
+    if profile is None:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+        if identity_review_required:
+            raise HTTPException(
+                409,
+                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+            )
+    else:
+        identity_review_required = False
+        pending_review = str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        # Only a pending identity or an Auth-backed email backfill needs a
+        # legacy comparison. Active profiles with an existing email must not be
+        # blocked by other customers' unmapped legacy references.
+        if pending_review or needs_auth_identity:
+            identity_review_required = (
+                await _legacy_customer_email_conflict(db, uid, email)
+                if email
+                else await _has_unmapped_legacy_customer_profile(db, uid)
+            )
         profile.identity_review_required = identity_review_required
+        profile.auth_identity_email = email if identity_review_required else ""
 
-    if identity_review_required and not allow_identity_review_summary:
-        raise HTTPException(
-            409,
-            "An unmapped legacy customer identity prevents safe access. Manual identity review is required before using this account.",
-        )
+        if identity_review_required and not allow_identity_review_summary:
+            raise HTTPException(
+                409,
+                "This customer identity conflicts with an unmapped legacy profile. Manual identity review is required before using this account.",
+            )
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -3977,17 +4003,20 @@ async def get_customer(
                 profile.display_name = name
             await db.flush()
     else:
-        if not profile.email:
-            profile.email = email
-        if not profile.display_name:
-            profile.display_name = name
-        await db.flush()
+        # Never persist an email that matched an unmapped legacy identity; keeping
+        # it transient ensures the next request cannot bypass the manual review.
+        if not identity_review_required:
+            if not profile.email:
+                profile.email = email
+            if not profile.display_name:
+                profile.display_name = name
+            await db.flush()
 
     stale_legacy_quarantine = (
         str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
         and not identity_review_required
     )
-    if profile.status != "ACTIVE" and not (
+    if str(profile.status or "").upper() != "ACTIVE" and not (
         (allow_identity_review_summary and identity_review_required
          and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW")
         or stale_legacy_quarantine
@@ -6373,7 +6402,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 current_state = await guard_db.get(AppState, 1)
                 latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                 if (
-                    not current_profile or current_profile.status != "ACTIVE"
+                    not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
                     or not current_account or current_account.status != "ACTIVE"
                     or not current_state or current_state.kill_switch
                     or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -6464,7 +6493,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 outcomes = []
                 if profile.id:
                     outcomes = list((await state_db.execute(
-                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED")
+                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED", StrategyOutcome.closing_notional > 0)
                         .order_by(desc(StrategyOutcome.created_at)).limit(200)
                     )).scalars().all())
                 current_strategy = bot_row.active_strategy if bot_row else None
@@ -6696,7 +6725,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     current_state = await guard_db.get(AppState, 1)
                     latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                     if (
-                        not current_profile or current_profile.status != "ACTIVE"
+                        not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
                         or not current_account or current_account.status != "ACTIVE"
                         or not current_state or current_state.kill_switch
                         or "automated_entry_exit" not in latest_plan.get("features", [])
