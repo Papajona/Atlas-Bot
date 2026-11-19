@@ -57,7 +57,12 @@ def pytest_collection_modifyitems(config, items):
     An explicit pytest -m migration_drift invocation still collects and runs
     the test (or reports an honest skip when its isolated URL is absent).
     """
-    if "migration_drift" in str(config.option.markexpr or ""):
+    explicit_file_or_node = any(
+        "test_migration_model_drift.py" in str(argument)
+        or "test_models_have_matching_migrations" in str(argument)
+        for argument in (config.args or [])
+    )
+    if "migration_drift" in str(config.option.markexpr or "") or explicit_file_or_node:
         return
     deselected = [
         item for item in items
