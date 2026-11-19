@@ -1,7 +1,7 @@
 """Persist complete, verified per-trade summaries after partial closing fills.
 
-Revision ID: 0060_strategy_outcome_fill_aggregation
-Revises: 0059_research_integrity_controls
+Revision ID: 0061_strategy_outcome_fill_aggregation
+Revises: 0060_customer_identity_unmapped_index
 
 This migration is intentionally online-only: historical reconstruction cross-checks
 strategy outcome fills against their source trade orders before admitting them to
@@ -16,8 +16,8 @@ from alembic import context, op
 import sqlalchemy as sa
 
 
-revision = "0060_strategy_outcome_fill_aggregation"
-down_revision = "0059_research_integrity_controls"
+revision = "0061_strategy_outcome_fill_aggregation"
+down_revision = "0060_customer_identity_unmapped_index"
 branch_labels = None
 depends_on = None
 
@@ -50,6 +50,54 @@ def _reconstruct_notional(row) -> Decimal:
             return recovered
     return Decimal("0")
 
+
+
+
+def _reconstruct_trade_fee_total(
+    entry_trade_id: int,
+    closing_trade_ids: list[int],
+    source_trades: dict[int, dict],
+) -> Decimal | None:
+    """Sum an entry order and distinct closing orders once, never repeated snapshots."""
+    ids = {int(entry_trade_id), *(int(value) for value in closing_trade_ids)}
+    total = Decimal("0")
+    for order_id in ids:
+        order = source_trades.get(order_id)
+        if order is None or order.get("fee") is None:
+            return None
+        try:
+            fee = Decimal(str(order["fee"]))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not fee.is_finite() or fee < 0:
+            return None
+        total += fee
+    return total
+
+
+def _reconstruct_remaining_entry_fee(
+    entry_trade: dict | None,
+    remaining_quantity: Decimal,
+    closed_quantity: Decimal,
+) -> Decimal | None:
+    """Backfill only when the entry order and all recorded closes reconcile."""
+    if entry_trade is None or entry_trade.get("fee") is None:
+        return None
+    try:
+        entered = Decimal(str(entry_trade.get("filled_quantity") or 0))
+        fee = Decimal(str(entry_trade["fee"]))
+        remaining = abs(Decimal(str(remaining_quantity)))
+        closed = abs(Decimal(str(closed_quantity)))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if (
+        not entered.is_finite() or not fee.is_finite()
+        or not remaining.is_finite() or not closed.is_finite()
+        or entered <= 0 or fee < 0 or remaining <= 0
+        or not _close_enough(remaining + closed, entered)
+    ):
+        return None
+    return fee * remaining / entered
 
 def upgrade() -> None:
     if context.is_offline_mode():
@@ -99,6 +147,26 @@ def upgrade() -> None:
                 server_default=sa.text("0"),
             ),
         )
+    if "entry_fee_basis_known" not in position_columns:
+        op.add_column(
+            "positions",
+            sa.Column(
+                "entry_fee_basis_known",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("false"),
+            ),
+        )
+    if "fee_basis_complete" not in outcome_columns:
+        op.add_column(
+            "strategy_outcomes",
+            sa.Column(
+                "fee_basis_complete",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.text("false"),
+            ),
+        )
 
     update_outcome = sa.text("""
         UPDATE strategy_outcomes
@@ -109,7 +177,8 @@ def upgrade() -> None:
             net_pnl = :net_pnl,
             return_bps = :return_bps,
             net_return_bps = :net_return_bps,
-            lifecycle_status = :lifecycle_status
+            lifecycle_status = :lifecycle_status,
+            fee_basis_complete = :fee_basis_complete
         WHERE id = :id
     """)
 
@@ -166,14 +235,21 @@ def upgrade() -> None:
                 for row in rows
                 if row["closing_trade_id"] is not None
             })
-            closing_trades = {}
-            if closing_ids:
-                closing_trades = {
-                    int(row["id"]): dict(row)
-                    for row in bind.execute(
-                        trade_lookup, {"trade_ids": closing_ids}
-                    ).mappings().all()
-                }
+            source_trade_ids = sorted({entry_trade_id, *closing_ids})
+            source_trades = {
+                int(row["id"]): dict(row)
+                for row in bind.execute(
+                    trade_lookup, {"trade_ids": source_trade_ids}
+                ).mappings().all()
+            }
+            closing_trades = {
+                closing_id: source_trades[closing_id]
+                for closing_id in closing_ids
+                if closing_id in source_trades
+            }
+            fee_total = _reconstruct_trade_fee_total(
+                entry_trade_id, closing_ids, source_trades
+            )
 
             # Reconstruct fill notionals, then verify every closing order's full
             # filled notional/quantity is represented. This catches historical
@@ -235,13 +311,13 @@ def upgrade() -> None:
                 (Decimal(str(row["realized_pnl"] or 0)) for row in rows),
                 Decimal("0"),
             )
-            total_fee = sum(
-                (Decimal(str(row["fee"] or 0)) for row in rows),
-                Decimal("0"),
-            )
-            total_net = sum(
-                (Decimal(str(row["net_pnl"] or 0)) for row in rows),
-                Decimal("0"),
+            # Historical outcome rows can repeat a closing order's cumulative
+            # fee. Reconstruct from each source order once rather than summing rows.
+            fee_basis_complete = bool(complete and fee_total is not None)
+            total_fee = fee_total if fee_basis_complete else Decimal("0")
+            total_net = (
+                total_realized - total_fee
+                if fee_basis_complete else Decimal("0")
             )
             total_notional = sum(row_notionals.values(), Decimal("0"))
             total_quantity = sum(row_quantities.values(), Decimal("0"))
@@ -261,6 +337,7 @@ def upgrade() -> None:
                         "return_bps": row["return_bps"],
                         "net_return_bps": row["net_return_bps"],
                         "lifecycle_status": row["lifecycle_status"],
+                        "fee_basis_complete": fee_basis_complete,
                     })
                 continue
 
@@ -276,7 +353,7 @@ def upgrade() -> None:
             )
             net_return_bps = (
                 float(total_net / total_notional * Decimal("10000"))
-                if valid_notional > 0 else 0.0
+                if valid_notional > 0 and fee_basis_complete else 0.0
             )
             for row in rows[:-1]:
                 bind.execute(update_outcome, {
@@ -289,6 +366,7 @@ def upgrade() -> None:
                     "return_bps": row["return_bps"],
                     "net_return_bps": row["net_return_bps"],
                     "lifecycle_status": "PARTIAL_CLOSED",
+                    "fee_basis_complete": fee_basis_complete,
                 })
             bind.execute(update_outcome, {
                 "id": int(final["id"]),
@@ -300,6 +378,7 @@ def upgrade() -> None:
                 "return_bps": gross_return_bps,
                 "net_return_bps": net_return_bps,
                 "lifecycle_status": "CLOSED",
+                "fee_basis_complete": fee_basis_complete,
             })
 
     # Server defaults are used only to make existing rows valid while adding
@@ -307,6 +386,74 @@ def upgrade() -> None:
     op.alter_column("strategy_outcomes", "closing_quantity", server_default=None)
     op.alter_column("strategy_outcomes", "closing_notional", server_default=None)
     op.alter_column("positions", "entry_fee", server_default=None)
+    op.alter_column("positions", "entry_fee_basis_known", server_default=None)
+    op.alter_column("strategy_outcomes", "fee_basis_complete", server_default=None)
+
+    # Backfill remaining entry fees only where the original entry order and all
+    # recorded close quantities exactly reconcile to the still-open position.
+    position_query = sa.text("""
+        SELECT id, entry_trade_id, quantity
+        FROM positions
+        WHERE id > :last_id
+          AND entry_trade_id IS NOT NULL
+          AND quantity <> 0
+        ORDER BY id
+        LIMIT :batch_size
+    """)
+    entry_trade_query = sa.text("""
+        SELECT id, filled_quantity, fee
+        FROM trades
+        WHERE id IN :trade_ids
+    """).bindparams(sa.bindparam("trade_ids", expanding=True))
+    closed_quantity_query = sa.text("""
+        SELECT COALESCE(SUM(closing_quantity), 0)
+        FROM strategy_outcomes
+        WHERE trade_id = :entry_trade_id
+          AND closing_trade_id IS NOT NULL
+    """)
+    update_position = sa.text("""
+        UPDATE positions
+        SET entry_fee = :entry_fee,
+            entry_fee_basis_known = :known
+        WHERE id = :id
+    """)
+    last_position_id = 0
+    while True:
+        position_rows = [
+            dict(row)
+            for row in bind.execute(
+                position_query,
+                {"last_id": last_position_id, "batch_size": _BATCH_SIZE},
+            ).mappings().all()
+        ]
+        if not position_rows:
+            break
+        last_position_id = max(int(row["id"]) for row in position_rows)
+        entry_ids = sorted({
+            int(row["entry_trade_id"])
+            for row in position_rows if row["entry_trade_id"] is not None
+        })
+        entry_trades = {
+            int(row["id"]): dict(row)
+            for row in bind.execute(
+                entry_trade_query, {"trade_ids": entry_ids}
+            ).mappings().all()
+        }
+        for position in position_rows:
+            entry_id = int(position["entry_trade_id"])
+            closed_quantity = Decimal(str(bind.execute(
+                closed_quantity_query, {"entry_trade_id": entry_id}
+            ).scalar_one() or 0))
+            remaining_quantity = abs(Decimal(str(position["quantity"] or 0)))
+            remaining_fee = _reconstruct_remaining_entry_fee(
+                entry_trades.get(entry_id), remaining_quantity, closed_quantity
+            )
+            known = remaining_fee is not None
+            bind.execute(update_position, {
+                "id": int(position["id"]),
+                "entry_fee": remaining_fee if known else Decimal("0"),
+                "known": known,
+            })
 
     index_names = {
         item["name"] for item in inspector.get_indexes("strategy_outcomes")
@@ -321,7 +468,7 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     raise RuntimeError(
-        "Revision 0060 cannot be downgraded safely: it consolidates historical fill "
+        "Revision 0061 cannot be downgraded safely: it consolidates historical fill "
         "rows and adds fee/notional basis required for accurate risk evidence. Restore "
-        "a pre-0060 database backup or deploy a forward corrective migration."
+        "a pre-0061 database backup or deploy a forward corrective migration."
     )
