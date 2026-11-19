@@ -275,7 +275,7 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
         source.index("async def get_existing_customer"):
         source.index("async def _paper_state_guard")
     ]
-    assert "if not allow_identity_review_summary:" in access
+    assert "if identity_review_required and not allow_identity_review_summary:" in access
     assert "identity_review_required=identity_review_required" in access
     assert "effective_status = (" in access
     assert "and not identity_review_required" in access
