@@ -67,6 +67,10 @@ def _aggregate_completed_strategy_outcomes(outcomes):
         (Decimal(str(row.closing_notional or 0)) for row in rows),
         Decimal("0"),
     )
+    total_quantity = sum(
+        (Decimal(str(getattr(row, "closing_quantity", 0) or 0)) for row in rows),
+        Decimal("0"),
+    )
     total_net_pnl = sum(
         (Decimal(str(row.net_pnl or 0)) for row in rows),
         Decimal("0"),
@@ -81,12 +85,18 @@ def _aggregate_completed_strategy_outcomes(outcomes):
     )
     # A missing fill notional makes the total return unknowable. Keep the
     # completed trade for audit, but exclude it from return-ratio samples.
-    notional_complete = all(Decimal(str(row.closing_notional or 0)) > 0 for row in rows)
-    if notional_complete and total_notional > 0:
+    notional_complete = all(
+        Decimal(str(row.closing_notional or 0)) > 0
+        and Decimal(str(getattr(row, "closing_quantity", 0) or 0)) > 0
+        for row in rows
+    )
+    if notional_complete and total_notional > 0 and total_quantity > 0:
+        final.closing_quantity = total_quantity
         final.closing_notional = total_notional
         final.net_return_bps = float(total_net_pnl / total_notional * Decimal("10000"))
         final.return_bps = float(total_realized_pnl / total_notional * Decimal("10000"))
     else:
+        final.closing_quantity = Decimal("0")
         final.closing_notional = Decimal("0")
         final.net_return_bps = 0.0
         final.return_bps = 0.0
