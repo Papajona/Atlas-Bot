@@ -997,6 +997,24 @@ async def _apply_reconciled_live_fee_basis(
     entry_fee_by_row: dict[int, Decimal] = {}
     closing_fee_by_row: dict[int, Decimal] = {}
     position_entry_fee_delta = Decimal("0")
+    reversal_episode = (await db.execute(
+        select(TradeLearningEpisode).where(
+            TradeLearningEpisode.entry_trade_id == trade.id
+        ).with_for_update()
+    )).scalar_one_or_none()
+    reversal_lifecycle_quantity = Decimal("0")
+    if (
+        reversal_episode is not None
+        and str(reversal_episode.status or "").upper() in {"OPEN", "COMPLETED"}
+    ):
+        reversal_lifecycle_quantity = Decimal(
+            str(reversal_episode.entry_quantity or 0)
+        )
+        if not reversal_lifecycle_quantity.is_finite() or reversal_lifecycle_quantity < 0:
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "reversal lifecycle quantity is invalid"
+            )
 
     trade_quantity = Decimal(str(trade.filled_quantity or 0))
     if not trade_quantity.is_finite() or trade_quantity <= 0:
@@ -1009,11 +1027,7 @@ async def _apply_reconciled_live_fee_basis(
         # A reversal order can open a smaller opposite-side lifecycle than the
         # order's total fill quantity. Reconcile the new-leg quantity separately;
         # its fee share still uses the entire broker order as denominator.
-        episode = (await db.execute(
-            select(TradeLearningEpisode).where(
-                TradeLearningEpisode.entry_trade_id == trade.id
-            ).with_for_update()
-        )).scalar_one_or_none()
+        episode = reversal_episode
         lifecycle_quantity = Decimal(str(
             episode.entry_quantity if episode is not None else trade_quantity
         ))
@@ -1043,12 +1057,13 @@ async def _apply_reconciled_live_fee_basis(
 
     if closing_rows:
         closed_quantity = sum(closing_fill_quantities.values(), Decimal("0"))
-        reversal_position_quantity = Decimal("0")
-        if position is not None and int(position.entry_trade_id or 0) == int(trade.id):
-            reversal_position_quantity = abs(Decimal(str(position.quantity or 0)))
+        # The order may have opened a smaller opposite-side episode which has
+        # since closed. Use that lifecycle's full entry quantity for conservation,
+        # not only a currently-open Position row (which may no longer exist).
+        reversal_quantity = reversal_lifecycle_quantity
         if (
-            not reversal_position_quantity.is_finite()
-            or abs((closed_quantity + reversal_position_quantity) - trade_quantity)
+            not reversal_quantity.is_finite()
+            or abs((closed_quantity + reversal_quantity) - trade_quantity)
                 > Decimal("0.000001")
         ):
             raise ValueError(
@@ -1057,9 +1072,17 @@ async def _apply_reconciled_live_fee_basis(
             )
         for row_id, quantity in closing_fill_quantities.items():
             closing_fee_by_row[row_id] = delta_fee * quantity / trade_quantity
-        if reversal_position_quantity > 0:
+        # If the new reversal leg is still wholly open, no entry outcome exists
+        # yet; attach its portion to the current position. When entry_rows exist,
+        # their fee allocations (plus any remaining position slice) handled it.
+        if (
+            not entry_rows
+            and reversal_quantity > 0
+            and position is not None
+            and int(position.entry_trade_id or 0) == int(trade.id)
+        ):
             position_entry_fee_delta += (
-                delta_fee * reversal_position_quantity / trade_quantity
+                delta_fee * reversal_quantity / trade_quantity
             )
 
     if not entry_rows and not closing_rows:
