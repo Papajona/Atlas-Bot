@@ -25,8 +25,12 @@ def test_customer_profile_backfill_uses_auth_claims_without_name_only_network_ca
 
 def test_legacy_identity_detection_is_bounded_and_dialect_aware():
     source = (ROOT / "app/customer_identity.py").read_text(encoding="utf-8")
-    assert '.op("~*")(_UUID_RE)' in source
-    assert '.op("GLOB")(_UUID_GLOB)' in source
+    assert 'column.op("!~*")(_UUID_RE)' in source
+    assert 'func.lower(column).op("NOT GLOB")(_UUID_GLOB)' in source
+    migration = (ROOT / "alembic/versions/0060_customer_identity_unmapped_index.py").read_text(encoding="utf-8")
+    assert "ix_customer_profiles_unmapped_auth_user_id" in migration
+    assert "auth_user_id !~*" in migration
+    assert "ix_strategy_outcome_platform_closed_trade_time" in migration
     assert ".limit(1)" in source
     assert "rows = (await db.execute(statement)).scalars().all()" in source
 
@@ -76,20 +80,32 @@ def test_withdrawal_review_resolves_empty_encrypted_email_from_auth_admin():
     assert '"/auth/v1/admin/users/' in admin_user
     assert "response.status_code == 404" in admin_user
     assert 'str(user.get("id") or "") != user_id' in admin_user
-    assert "_supabase_admin_user(auth_id)" in route
+    assert "_resolve_withdrawal_auth_email(auth_id)" in route
     assert '"customer_email_status": email_status' in route
     assert "AUTH_LOOKUP_NOT_CONFIGURED" in route
     assert "AUTH_LOOKUP_UNAVAILABLE" in route
+    assert "AUTH_LOOKUP_DEFERRED" in route
+    assert "LEGACY_IDENTITY_UNMAPPED" in route
+    assert "asyncio.wait_for(" in route
+    assert "missing_auth_ids = {" in route
+    assert route.index("snapshot.append({") < route.index("missing_auth_ids = {")
+    assert "_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST = 50" in source
+    assert "_WITHDRAWAL_AUTH_EMAIL_CACHE_TTL_SECONDS = 300.0" in source
+    assert "_cached_withdrawal_auth_email" in source
 
 
 def test_risk_dashboard_uses_bounded_recent_trade_candidates_in_both_transports():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     assert source.count("_recent_closed_platform_trade_returns(db)") == 2
     assert "latest_closed = (" not in source
-    assert "_RISK_OUTCOME_CANDIDATE_ROW_LIMIT = 20000" in source
-    assert ".limit(_RISK_OUTCOME_CANDIDATE_ROW_LIMIT)" in source
-    assert "StrategyOutcome.trade_id.in_(selected)" in source
-    assert "group_by(StrategyOutcome.trade_id)" not in source
+    assert "_RISK_OUTCOME_SAMPLE_SIZE = 100" in source
+    assert ".limit(_RISK_OUTCOME_SAMPLE_SIZE)" in source
+    assert ".group_by(StrategyOutcome.trade_id)" in source
+    assert "func.row_number().over(" in source
+    assert "_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250" in source
+    assert "ranked_fills.c.fill_rank <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1" in source
+    assert "incomplete_trade_ids" in source
+    assert "ratio_sample_incomplete_trades" in source
 
 
 def test_partial_close_fills_are_weighted_and_use_final_close_time():
@@ -224,3 +240,87 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
     ]
     assert "if identity_review_required and not allow_identity_review_summary:" in access
     assert "identity_review_required=identity_review_required" in access
+
+
+def test_existing_active_customer_is_not_blocked_by_an_unrelated_legacy_identity():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("async def get_customer("):
+        source.index("def _funding_signature_valid")
+    ]
+    assert "profile_needs_identity_review = (" in block
+    assert 'str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"' in block
+    assert 'or not str(profile.email or "").strip()' in block
+    assert "if profile_needs_identity_review else False" in block
+    assert "if profile is None and identity_review_required:" in block
+
+
+def test_existing_profile_auth_backfill_never_persists_unconfirmed_email():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("async def get_customer("):
+        source.index("def _funding_signature_valid")
+    ]
+    assert 'if user.get("email_confirmed_at"):' in block
+    assert 'logger.info("customer_auth_pii_backfill_unconfirmed' in block
+    assert "email = str(user.get(\"email\") or \"\").strip().lower()[:320]" in block
+
+
+def test_same_direction_position_additions_have_a_defined_zero_close_quantity():
+    from app import execution
+
+    source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    block = source[
+        source.index("async def _apply_fill_to_position"):
+        source.index("async def _release_unneeded_order_reserve")
+    ]
+    assert block.index("closing = 0.0") < block.index("if not position:")
+    assert "if closing > 0:" in block
+
+
+def test_live_and_paper_partial_close_fees_use_only_the_incremental_fill_fee():
+    from app.execution import _closing_fill_fee_share
+
+    assert _closing_fill_fee_share(Decimal("3"), closing_quantity=1, fill_quantity=3) == Decimal("1")
+    assert _closing_fill_fee_share(Decimal("2"), closing_quantity=2, fill_quantity=2) == Decimal("2")
+    # Two broker snapshots report cumulative fee totals 3 then 5. The outcome
+    # ledger must charge the deltas 3 then 2, not the cumulative 3 then 5.
+    assert (
+        _closing_fill_fee_share(Decimal("3"), closing_quantity=3, fill_quantity=3)
+        + _closing_fill_fee_share(Decimal("2"), closing_quantity=2, fill_quantity=2)
+    ) == Decimal("5")
+
+    source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    assert "fill_fee_delta: Decimal | float = Decimal(\"0\")" in source
+    assert "closing_fee_decimal = _closing_fill_fee_share(" in source
+    assert "fill_fee_delta=fee_delta" in source
+    paper_start = source.index("trade.fee = float(Decimal(str(trade.fee or 0.0)) + fee_decimal)")
+    paper_apply = source.index("fill_fee_delta=fee_decimal")
+    assert paper_start < paper_apply
+
+
+def test_risk_sample_excludes_a_trade_when_its_fill_history_exceeds_the_cap():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    helper = source[
+        source.index("async def _recent_closed_platform_trade_returns"):
+        source.index('@app.get("/api/risk-dashboard/metrics")')
+    ]
+    assert "row_number().over(" in helper
+    assert "_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1" in helper
+    assert "incomplete_trade_ids = {" in helper
+    assert "int(outcome.trade_id) not in incomplete_trade_ids" in helper
+    assert "len(incomplete_trade_ids)" in helper
+
+
+def test_legacy_withdrawal_rows_are_not_misreported_as_auth_outages():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    route = source[
+        source.index('@app.get("/api/admin/withdrawals")'):
+        source.index('@app.post("/api/admin/withdrawals")')
+    ]
+    assert "legacy_ids: set[str]" in route
+    assert 'auth_email_results[auth_id] = ("", "LEGACY_IDENTITY_UNMAPPED")' in route
+    assert 'email_status = "LEGACY_IDENTITY_UNMAPPED"' in route
+    assert "AUTH_EMAIL_UNCONFIRMED" in source
+
+
