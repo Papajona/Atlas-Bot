@@ -2875,9 +2875,12 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                            market_type=settings.default_market_type, timeout_ms=settings.exchange_timeout_ms)
         broker = Broker.get(cfg)
     async with SessionLocal() as db:
+        # Atlas OANDA executions are practice-only and persist with FOREX_DEMO mode.
+        # Keep PAPER simulator rows out of every external broker lookup.
+        reconciliation_mode = "FOREX_DEMO" if is_oanda else "LIVE"
         query = select(Trade).where(
             Trade.exchange == exchange,
-            Trade.mode == "LIVE",
+            Trade.mode == reconciliation_mode,
             Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
         )
         if symbol:
