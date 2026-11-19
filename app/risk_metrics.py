@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from typing import Iterable, Sequence
 
 _SECONDS_PER_YEAR = 365.25 * 86400.0
+MIN_ANNUALIZATION_SPAN_SECONDS = 30 * 86400
 MIN_SAMPLE = 10
 
 
@@ -26,16 +27,32 @@ def performance_ratios(
     current_drawdown_pct: float = 0.0,
 ) -> dict:
     """Return Sharpe/Calmar/Sortino/edge-decay metrics without inventing inputs."""
+    timestamp_values = list(timestamps) if timestamps is not None else None
     clean = []
-    for value in returns:
+    paired_times = []
+    timestamps_complete = timestamp_values is not None
+    for index, value in enumerate(returns):
         if value is None:
             continue
         try:
             number = float(value)
         except (TypeError, ValueError, OverflowError):
             continue
-        if math.isfinite(number):
-            clean.append(number)
+        if not math.isfinite(number):
+            continue
+        clean.append(number)
+        stamp = (
+            _as_utc(timestamp_values[index])
+            if timestamp_values is not None and index < len(timestamp_values)
+            else None
+        )
+        if stamp is None:
+            timestamps_complete = False
+        else:
+            paired_times.append(stamp)
+
+    if timestamp_values is not None and len(timestamp_values) != len(returns):
+        timestamps_complete = False
 
     zero = {
         "sharpe": 0.0,
@@ -55,20 +72,19 @@ def performance_ratios(
     downside = [value for value in clean if value < 0]
     downside_vol = math.sqrt(sum(value * value for value in downside) / max(1, len(downside)))
 
-    times = sorted(
-        timestamp
-        for timestamp in (_as_utc(value) for value in (timestamps or []))
-        if timestamp is not None
-    )
     periods = 1.0
     annualized = False
     trades_per_year = None
-    if len(times) >= 2:
+    if timestamps_complete and len(paired_times) == n and len(paired_times) >= 2:
+        times = sorted(paired_times)
         span = (times[-1] - times[0]).total_seconds()
-        if span > 0:
-            trades_per_year = n / (span / _SECONDS_PER_YEAR)
-            periods = trades_per_year
-            annualized = True
+        # Short bursts and partial-fill clusters do not establish a stable cadence.
+        if span >= MIN_ANNUALIZATION_SPAN_SECONDS:
+            interval_count = len(times) - 1
+            trades_per_year = interval_count / (span / _SECONDS_PER_YEAR)
+            if math.isfinite(trades_per_year) and trades_per_year > 0:
+                periods = trades_per_year
+                annualized = True
 
     root = math.sqrt(periods)
     try:

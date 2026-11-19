@@ -218,12 +218,15 @@ fun UserDashboardScreen(
                                                     ?: throw IllegalStateException("Authenticator challenge expired; sign in again")
                                                 val auth = CustomerAuthClient(backendUrl)
                                                 val verified = auth.verify(session.accessToken, challenge, code)
-                                                auth.provisionProfile(verified.accessToken)
-                                                auth.initializePaperAccount(verified.accessToken)
-                                                activeCustomerToken = verified.accessToken
+                                                // TOTP has succeeded; clear the one-time challenge before
+                                                // downstream operations can fail. A retry must return to
+                                                // ordinary sign-in controls, not a consumed code-entry state.
                                                 pendingCustomerSession = null
                                                 customerMfaChallenge = null
                                                 customerMfaSetupSecret = null
+                                                auth.provisionProfile(verified.accessToken)
+                                                auth.initializePaperAccount(verified.accessToken)
+                                                activeCustomerToken = verified.accessToken
                                                 customerInfoMessage = null
                                             } catch (error: Exception) {
                                                 customerSignInError = error.message ?: "Authenticator verification failed"
@@ -616,7 +619,7 @@ private fun CustomerSignInCard(
                 enabled = !busy && if (requiresAuthenticator) {
                     authenticatorCode.length == 6
                 } else {
-                    email.isNotBlank() && password.length >= 8
+                    email.isNotBlank() && (if (creatingAccount) password.length >= 8 else password.isNotBlank())
                 },
                 modifier = Modifier.fillMaxWidth()
             ) {

@@ -1,0 +1,218 @@
+[
+  {
+    "id": "silver-word",
+    "prompt": "silver trend strategy on 1h",
+    "expect": {
+      "asset": "commodity",
+      "symbol": "XAG_USD",
+      "timeframes": [
+        "1h"
+      ]
+    }
+  },
+  {
+    "id": "silver-pair",
+    "prompt": "XAG/USD breakout on 4h",
+    "expect": {
+      "asset": "commodity",
+      "symbol": "XAG_USD",
+      "timeframes": [
+        "4h"
+      ],
+      "strategy_family": "BREAKOUT"
+    }
+  },
+  {
+    "id": "silver-ticker",
+    "prompt": "XAGUSD momentum",
+    "expect": {
+      "asset": "commodity",
+      "symbol": "XAG_USD",
+      "strategy_family": "MOMENTUM"
+    }
+  },
+  {
+    "id": "gold-stays-gold",
+    "prompt": "gold breakout on 4h",
+    "expect": {
+      "asset": "commodity",
+      "symbol": "XAU_USD"
+    }
+  },
+  {
+    "id": "golden-cross-is-not-gold",
+    "prompt": "golden cross strategy on BTC 1h",
+    "expect": {
+      "asset": "crypto",
+      "symbol": "BTC/USDT"
+    }
+  },
+  {
+    "id": "forex-word-boundary",
+    "prompt": "forexample BTC trend 1h",
+    "expect": {
+      "asset": "crypto",
+      "symbol": "BTC/USDT"
+    }
+  },
+  {
+    "id": "eurusd",
+    "prompt": "mean reversion on EUR/USD 30 minute chart",
+    "expect": {
+      "asset": "forex",
+      "symbol": "EUR_USD",
+      "timeframes": [
+        "30m"
+      ]
+    }
+  },
+  {
+    "id": "hourly",
+    "prompt": "hourly breakout strategy on ETH",
+    "expect": {
+      "asset": "crypto",
+      "symbol": "ETH/USDT",
+      "timeframes": [
+        "1h"
+      ]
+    }
+  },
+  {
+    "id": "four-hour",
+    "prompt": "trend on the four hour chart for ETH",
+    "expect": {
+      "timeframes": [
+        "4h"
+      ]
+    }
+  },
+  {
+    "id": "daily",
+    "prompt": "trend following on the daily timeframe for BTC",
+    "expect": {
+      "timeframes": [
+        "1d"
+      ]
+    }
+  },
+  {
+    "id": "unsupported-one-minute",
+    "prompt": "scalp BTC on the 1m chart with momentum",
+    "expect": {
+      "timeframes": [
+        "1h"
+      ],
+      "warns": [
+        "Unsupported timeframe"
+      ]
+    }
+  },
+  {
+    "id": "unsupported-two-hour",
+    "prompt": "trade EURUSD on the 2h chart, trend",
+    "expect": {
+      "timeframes": [
+        "1h"
+      ],
+      "warns": [
+        "Unsupported timeframe"
+      ]
+    }
+  },
+  {
+    "id": "weekly-unsupported",
+    "prompt": "weekly trend on BTC",
+    "expect": {
+      "timeframes": [
+        "1h"
+      ],
+      "warns": [
+        "Unsupported timeframe"
+      ]
+    }
+  },
+  {
+    "id": "moving-average-200d",
+    "prompt": "200d moving average trend BTC 1h",
+    "expect": {
+      "timeframes": [
+        "1h"
+      ],
+      "no_warns": [
+        "Unsupported timeframe"
+      ]
+    }
+  },
+  {
+    "id": "volume-24h",
+    "prompt": "24h volume filter breakout BTC 4h",
+    "expect": {
+      "timeframes": [
+        "4h"
+      ],
+      "no_warns": [
+        "Unsupported timeframe"
+      ]
+    }
+  },
+  {
+    "id": "atr-stop-target",
+    "prompt": "stop 1 ATR and take profit 3 ATR, trend BTC 1h",
+    "expect": {
+      "stop_loss_atr": 1,
+      "take_profit_rr": 3
+    }
+  },
+  {
+    "id": "atr-target-stop-reversed",
+    "prompt": "take profit 3 ATR and stop 1 ATR, trend BTC 1h",
+    "expect": {
+      "stop_loss_atr": 1,
+      "take_profit_rr": 3
+    }
+  },
+  {
+    "id": "rr-risk-reward",
+    "prompt": "trend BTC 1h, risk reward 1:3",
+    "expect": {
+      "take_profit_rr": 3
+    }
+  },
+  {
+    "id": "rr-reward-risk",
+    "prompt": "trend BTC 1h, reward:risk 2.5:1",
+    "expect": {
+      "take_profit_rr": 2.5
+    }
+  },
+  {
+    "id": "rr-suffix",
+    "prompt": "trend BTC 1h, target 3R",
+    "expect": {
+      "take_profit_rr": 3
+    }
+  },
+  {
+    "id": "atr-period-is-not-stop",
+    "prompt": "trend BTC 1h, ATR 14 lookback",
+    "expect": {
+      "stop_loss_atr": 1.5
+    }
+  },
+  {
+    "id": "negated-direction",
+    "prompt": "Never go long BTC, short only on 1h",
+    "expect": {
+      "direction": "SHORT"
+    }
+  },
+  {
+    "id": "negated-only-auto",
+    "prompt": "Never go long silver",
+    "expect": {
+      "direction": "AUTO",
+      "asset": "commodity",
+      "symbol": "XAG_USD"
+    }
+  }
+]

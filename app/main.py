@@ -41,6 +41,7 @@ from .strategy_router import select_strategy, policy_walk_forward_backtest, stra
 from .trade_learning import process_trade_learning_episodes
 from .entry_exit_engine import EntryExitConfig, start_bot_decision, gated_entry_exit_backtest
 from .ai_providers import dual_ai_trade_safety_review, AIProviderError
+from .native_ai import NativeAIInputError
 from .groq_ai import groq_trade_context_review
 from .strategy_ai import generate_strategy_draft
 from .research_engine import backtest_all_strategies, ai_market_review, paper_candidates, live_strategy_signals
@@ -3590,6 +3591,20 @@ async def _supabase_request(path: str, payload: dict | None = None, method: str 
     except ValueError:
         data = {}
     if response.status_code >= 400:
+        if (
+            response.status_code == 409
+            and str(path).rstrip("/") == "/functions/v1/customer-profile-provision"
+        ):
+            upstream_error = str(data.get("error") or "").lower()
+            if "manual identity review" in upstream_error or "existing customer" in upstream_error:
+                raise HTTPException(
+                    409,
+                    "Customer profile provisioning is paused because legacy customer identities remain unmapped. Manual identity review is required; contact support.",
+                )
+            raise HTTPException(
+                409,
+                "Customer profile conflicts with an existing identity. Manual identity review is required before provisioning; contact support.",
+            )
         if response.status_code in {400, 401, 403}:
             detail = "Authentication request was rejected"
         elif response.status_code == 404:
@@ -3801,28 +3816,140 @@ def approver_auth(admin_id: str, approver_token: str | None, admin_token: str | 
     return True
 
 
-async def get_customer(authorization: str | None, db, require_aal2: bool = True):
+async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> bool:
+    """Compare a confirmed email against legacy identities after ORM decryption.
+
+    Legacy Auth IDs are not Supabase UUIDs. EncryptedText must be read through the
+    application ORM/keyring; SQL LIKE against ciphertext is never meaningful.
+    """
+    normalized = str(email or "").strip().casefold()
+    if not normalized:
+        return False
+    try:
+        rows = (await db.execute(
+            select(CustomerProfile.auth_user_id, CustomerProfile.email)
+            .where(CustomerProfile.auth_user_id != auth_user_id)
+        )).all()
+    except Exception as exc:
+        logger.exception("legacy_customer_identity_lookup_failed")
+        raise HTTPException(503, "Customer identity verification is temporarily unavailable") from exc
+    for legacy_auth_id, stored_email in rows:
+        try:
+            uuid.UUID(str(legacy_auth_id))
+            continue
+        except (ValueError, TypeError, AttributeError):
+            pass
+        # An unmapped legacy identity with no recoverable email must be treated
+        # as a conflict: absence of stored PII is not proof of a distinct person.
+        if not str(stored_email or "").strip():
+            return True
+        if str(stored_email).strip().casefold() == normalized:
+            return True
+    return False
+
+
+async def get_customer(
+    authorization: str | None,
+    db,
+    require_aal2: bool = True,
+    allow_identity_review_summary: bool = False,
+):
     claims = await customer_claims(authorization, require_aal2=require_aal2)
-    uid = claims["sub"]
-    profile = (await db.execute(select(CustomerProfile).where(CustomerProfile.auth_user_id == uid))).scalar_one_or_none()
-    email = str(claims.get("email") or "")[:320]
-    name = str((claims.get("user_metadata") or {}).get("full_name") or (claims.get("user_metadata") or {}).get("name") or "")[:160]
-    if not profile:
+    uid = str(claims.get("sub") or "").strip()
+    if not uid:
+        raise HTTPException(401, "Customer authentication is invalid")
+    profile = (await db.execute(
+        select(CustomerProfile).where(CustomerProfile.auth_user_id == uid)
+    )).scalar_one_or_none()
+
+    email = str(claims.get("email") or "").strip().lower()[:320]
+    metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
+    name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
+
+    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
+    # verified Auth identity here, then let the ORM encrypt values on write.
+    if (profile is not None and (
+        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
+    )) or not email:
+        user = await _supabase_user(_bearer_token(authorization))
+        if str(user.get("id") or "") != uid:
+            raise HTTPException(401, "Customer Auth identity could not be verified")
+        if not user.get("email_confirmed_at"):
+            raise HTTPException(403, "A confirmed email address is required")
+        email = str(user.get("email") or email).strip().lower()[:320]
+        user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
+        name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
+    if not email:
+        raise HTTPException(403, "A confirmed email address is required")
+
+    identity_review_required = (
+        profile is not None
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    )
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "This customer identity is pending manual review. Contact support before using the account.",
+        )
+
+    # Check legacy non-UUID identities before inserting or activating a new
+    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
+    if profile is None or not str(profile.email or "").strip():
+        if await _legacy_customer_email_conflict(db, uid, email):
+            if profile is None:
+                raise HTTPException(
+                    409,
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                )
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            identity_review_required = True
+            if not allow_identity_review_summary:
+                await db.commit()
+                raise HTTPException(
+                    409,
+                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+                )
+
+    if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
         # the unique auth_user_id constraint resolves the loser without poisoning
         # the caller's transaction.
         try:
             async with db.begin_nested():
-                profile = CustomerProfile(auth_user_id=uid, email=email, display_name=name, status="ACTIVE")
+                profile = CustomerProfile(
+                    auth_user_id=uid,
+                    email=email,
+                    display_name=name,
+                    status="ACTIVE",
+                )
                 db.add(profile)
                 await db.flush()
         except IntegrityError:
-            profile = (await db.execute(select(CustomerProfile).where(CustomerProfile.auth_user_id == uid))).scalar_one_or_none()
+            profile = (await db.execute(
+                select(CustomerProfile).where(CustomerProfile.auth_user_id == uid)
+            )).scalar_one_or_none()
             if not profile:
                 raise
-    if profile.status != "ACTIVE":
+            if not profile.email:
+                profile.email = email
+            if not profile.display_name:
+                profile.display_name = name
+            await db.flush()
+    else:
+        if not profile.email:
+            profile.email = email
+        if not profile.display_name:
+            profile.display_name = name
+        await db.flush()
+
+    if profile.status != "ACTIVE" and not (
+        allow_identity_review_summary
+        and identity_review_required
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    ):
         raise HTTPException(403, "Customer account is not active")
-    await _ensure_customer_subscription(db, profile)
+    if not identity_review_required:
+        await _ensure_customer_subscription(db, profile)
     return profile, claims
 
 
@@ -5303,11 +5430,18 @@ async def admin_billing_margin(months: int = 1, authorization: str | None = Head
 @app.get("/api/customer/me")
 async def customer_me(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
-        profile, claims = await get_customer(authorization, db)
+        # This endpoint is a read-only identity summary. It may show the verified
+        # user's own Auth PII while the account is quarantined for manual legacy
+        # identity review; all trading/ledger endpoints retain the default denial.
+        profile, claims = await get_customer(
+            authorization, db, allow_identity_review_summary=True
+        )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
         return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status, "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
+                "display_name": profile.display_name, "status": profile.status,
+                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+                "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
 @app.get("/api/customer/wallets")
@@ -7197,6 +7331,11 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
                 symbol=req.symbol,
                 timeframe=req.timeframe,
             )
+        except NativeAIInputError as exc:
+            raise HTTPException(
+                422,
+                "Invalid strategy market symbol. Use only letters, digits, /, _, :, ., or - (maximum 80 characters).",
+            ) from exc
         except AIProviderError as exc:
             raise _safe_http_error(503, exc, "Strategy generation is temporarily unavailable") from exc
         await _consume_ai_credit(db, profile.id, "strategy_builder_generation")
@@ -7832,9 +7971,31 @@ async def risk_dashboard_metrics(
         worker_health = await _worker_health_snapshot(db)
 
         # Annualise only from the observed cadence of closed strategy outcomes.
+        latest_closed = (
+            select(
+                StrategyOutcome.trade_id.label("trade_id"),
+                func.max(StrategyOutcome.sequence).label("latest_sequence"),
+            )
+            .where(
+                StrategyOutcome.customer_id.is_(None),
+                StrategyOutcome.lifecycle_status == "CLOSED",
+            )
+            .group_by(StrategyOutcome.trade_id)
+            .subquery()
+        )
         rows = (await db.execute(
             select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-            .order_by(StrategyOutcome.created_at.desc()).limit(100)
+            .join(
+                latest_closed,
+                (StrategyOutcome.trade_id == latest_closed.c.trade_id)
+                & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
+            )
+            .where(
+                StrategyOutcome.customer_id.is_(None),
+                StrategyOutcome.lifecycle_status == "CLOSED",
+            )
+            .order_by(StrategyOutcome.created_at.desc())
+            .limit(100)
         )).all()
         usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
         ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
@@ -7950,9 +8111,31 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
+                latest_closed = (
+                    select(
+                        StrategyOutcome.trade_id.label("trade_id"),
+                        func.max(StrategyOutcome.sequence).label("latest_sequence"),
+                    )
+                    .where(
+                        StrategyOutcome.customer_id.is_(None),
+                        StrategyOutcome.lifecycle_status == "CLOSED",
+                    )
+                    .group_by(StrategyOutcome.trade_id)
+                    .subquery()
+                )
                 rows = (await db.execute(
                     select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-                    .order_by(StrategyOutcome.created_at.desc()).limit(100)
+                    .join(
+                        latest_closed,
+                        (StrategyOutcome.trade_id == latest_closed.c.trade_id)
+                        & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
+                    )
+                    .where(
+                        StrategyOutcome.customer_id.is_(None),
+                        StrategyOutcome.lifecycle_status == "CLOSED",
+                    )
+                    .order_by(StrategyOutcome.created_at.desc())
+                    .limit(100)
                 )).all()
                 usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
                 ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
@@ -7973,6 +8156,8 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 "sharpe_ratio": round(sharpe, 2),
                 "calmar_ratio": round(calmar, 2),
                 "sortino_ratio": round(sortino, 2),
+                "ratios_annualized": ratios["annualized"],
+                "ratio_sample_size": ratios["sample_size"],
                 "deflated_sharpe_ratio": 0.0,
                 "edge_decay_z_score": round(edge_decay_z, 2),
                 "regime": "UNKNOWN",

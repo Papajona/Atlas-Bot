@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import time
+import uuid
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -294,7 +295,10 @@ async def _paper_runtime_preflight() -> dict[str, Any]:
 
 
 async def get_existing_customer(
-    authorization: str | None, db, require_aal2: bool = True
+    authorization: str | None,
+    db,
+    require_aal2: bool = True,
+    allow_identity_review_summary: bool = False,
 ):
     """Verify MFA and an already-provisioned customer using SELECTs only; never self-register."""
     claims = await customer_claims(authorization, require_aal2=require_aal2)
@@ -317,14 +321,41 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
+    # The legacy rows have non-UUID Auth references and blank encrypted PII.
+    # Until those identities are mapped, no UUID-linked paper account can be
+    # proven distinct from them. Do not allow trading against a potentially
+    # duplicate customer profile.
+    legacy_auth_refs = (
+        await db.execute(
+            select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
+        )
+    ).scalars().all()
+    identity_review_required = str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    for legacy_auth_ref in legacy_auth_refs:
+        try:
+            uuid.UUID(str(legacy_auth_ref))
+        except (ValueError, TypeError, AttributeError):
+            identity_review_required = True
+            if not allow_identity_review_summary:
+                raise HTTPException(
+                    409,
+                    "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
+                )
+            break
+
     # Keep PII/encrypted columns out of the query: this service has no encryption
     # keyring and only needs the numeric tenant ID and active status.
     profile = SimpleNamespace(
         id=row.id,
         auth_user_id=row.auth_user_id,
         status=row.status,
+        identity_review_required=identity_review_required,
     )
-    if str(getattr(profile, "status", "")).upper() != "ACTIVE":
+    if str(getattr(profile, "status", "")).upper() != "ACTIVE" and not (
+        allow_identity_review_summary
+        and identity_review_required
+        and str(getattr(profile, "status", "")).upper() == "PENDING_IDENTITY_REVIEW"
+    ):
         raise HTTPException(403, "Customer account is not active")
     return profile, claims
 
@@ -487,12 +518,34 @@ async def paper_customer_mfa_enroll(authorization: str | None = Header(default=N
             "message": "A verified authenticator is already enrolled.",
         }
     token = _bearer_token(authorization)
+    user = await _supabase_user(token)
+    friendly_name = "Atlas Paper Trading / Google Authenticator"
+    # Supabase rejects re-enrollment when an abandoned setup leaves an unverified
+    # factor with the same friendly name. Its original setup secret cannot be
+    # recovered, so remove only this user's matching stale pending TOTP factor.
+    for factor in user.get("factors") or []:
+        if (
+            str(factor.get("factor_type") or "").lower() != "totp"
+            or str(factor.get("status") or "").lower() != "unverified"
+            or str(factor.get("friendly_name") or "") != friendly_name
+        ):
+            continue
+        try:
+            factor_id = str(uuid.UUID(str(factor.get("id") or "")))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        try:
+            await _supabase_request(
+                f"/auth/v1/factors/{factor_id}",
+                method="DELETE",
+                access_token=token,
+            )
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
     return await _supabase_request(
         "/auth/v1/factors",
-        payload={
-            "factor_type": "totp",
-            "friendly_name": "Atlas Paper Trading / Google Authenticator",
-        },
+        payload={"factor_type": "totp", "friendly_name": friendly_name},
         access_token=token,
     )
 
@@ -545,7 +598,11 @@ async def paper_customer_profile_provision(authorization: str | None = Header(de
 @app.get("/api/customer/me")
 async def paper_customer_me(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
-        profile, claims = await get_existing_customer(authorization, db)
+        # Summary is read-only: show the authenticated user's own Auth PII and
+        # an explicit review flag without granting paper-ledger access.
+        profile, claims = await get_existing_customer(
+            authorization, db, allow_identity_review_summary=True
+        )
     # The paper-staging runtime has a read-only identity role and deliberately
     # no application encryption keyring. Do not select EncryptedText columns
     # from customer_profiles; resolve display PII from the verified Auth user.
@@ -561,11 +618,13 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
         "email": str(user.get("email") or ""),
         "display_name": str(metadata.get("full_name") or metadata.get("name") or "")[:160],
         "status": profile.status,
+        "identity_review_required": bool(profile.identity_review_required),
     }
 
 
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
+    await _paper_state_guard()
     async with SessionLocal() as db:
         profile, _claims = await get_existing_customer(authorization, db)
     balances = await get_customer_paper_balances(customer_id=int(profile.id))

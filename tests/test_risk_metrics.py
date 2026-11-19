@@ -20,10 +20,21 @@ def test_zero_volatility_and_zero_drawdown_are_not_fabricated():
     assert (out["sharpe"], out["calmar"], out["sortino"], out["edge_decay_z"]) == (0.0, 0.0, 0.0, 0.0)
 
 
-def test_annualisation_uses_observed_trade_frequency():
-    out = performance_ratios(RETURNS, _days(10), 5.0)
-    assert out["annualized"] is True and 400 < out["trades_per_year"] < 412
+def test_annualisation_uses_intervals_not_observation_count():
+    # Ten outcomes over nine 10-day intervals means one observation per 10 days.
+    timestamps = [BASE + timedelta(days=10 * i) for i in range(10)]
+    out = performance_ratios(RETURNS, timestamps, 5.0)
+    assert out["annualized"] is True
+    assert abs(out["trades_per_year"] - 36.525) < 0.01
     assert out["sharpe"] > 0 and out["calmar"] > 0
+
+
+def test_short_or_bursty_samples_are_not_annualized():
+    timestamps = [BASE + timedelta(seconds=i) for i in range(10)]
+    out = performance_ratios(RETURNS, timestamps, 5.0)
+    assert out["annualized"] is False
+    assert out["trades_per_year"] is None
+    assert out["sharpe"] < 100 and out["sortino"] < 100
 
 
 def test_missing_or_identical_timestamps_are_reported_unannualised():
@@ -32,5 +43,10 @@ def test_missing_or_identical_timestamps_are_reported_unannualised():
 
 
 def test_none_nan_and_naive_datetimes_are_handled():
-    out = performance_ratios(RETURNS + [None, float("nan")], [d.replace(tzinfo=None) for d in _days(10)] + [None, None], 2.0)
+    timestamps = [BASE + timedelta(days=10 * i) for i in range(10)]
+    out = performance_ratios(
+        RETURNS + [None, float("nan")],
+        [d.replace(tzinfo=None) for d in timestamps] + [None, None],
+        2.0,
+    )
     assert out["sample_size"] == 10 and out["annualized"] is True

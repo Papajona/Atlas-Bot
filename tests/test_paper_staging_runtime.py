@@ -366,21 +366,37 @@ def test_paper_customer_auth_requires_an_existing_profile_and_never_self_registe
 
 
 def test_paper_customer_auth_returns_only_an_active_existing_profile(monkeypatch):
-    profile = SimpleNamespace(id=42, auth_user_id="supabase-user-3", status="ACTIVE")
+    profile = SimpleNamespace(id=42, auth_user_id="8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7", status="ACTIVE")
 
     async def fake_customer_claims(_authorization, require_aal2=True):
-        return {"sub": "supabase-user-3", "aal": "aal2"}
+        return {"sub": profile.auth_user_id, "aal": "aal2"}
 
     class QueryResult:
+        def __init__(self, row=None, values=()):
+            self.row = row
+            self.values = values
+
         def one_or_none(self):
-            return SimpleNamespace(id=profile.id, auth_user_id=profile.auth_user_id, status=profile.status)
+            return self.row
+
+        def scalars(self):
+            return SimpleNamespace(all=lambda: list(self.values))
 
     class ReadOnlyDatabase:
-        statement = None
+        statements = []
 
         async def execute(self, query):
-            self.statement = query
-            return QueryResult()
+            self.statements.append(query)
+            selected = {column.name for column in query.selected_columns}
+            if selected == {"id", "auth_user_id", "status"}:
+                return QueryResult(
+                    row=SimpleNamespace(
+                        id=profile.id,
+                        auth_user_id=profile.auth_user_id,
+                        status=profile.status,
+                    )
+                )
+            return QueryResult(values=[])
 
     db = ReadOnlyDatabase()
     monkeypatch.setattr(paper_staging, "customer_claims", fake_customer_claims)
@@ -393,6 +409,46 @@ def test_paper_customer_auth_returns_only_an_active_existing_profile(monkeypatch
     assert result_profile.auth_user_id == profile.auth_user_id
     assert result_profile.status == profile.status
     assert claims["aal"] == "aal2"
-    selected = {column.name for column in db.statement.selected_columns}
+    selected = {column.name for column in db.statements[0].selected_columns}
     assert selected == {"id", "auth_user_id", "status"}
     assert "email" not in selected and "display_name" not in selected
+    assert len(db.statements) == 2
+
+
+def test_paper_customer_auth_rejects_uuid_profile_while_legacy_auth_references_exist(monkeypatch):
+    profile_id = "8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7"
+
+    async def fake_customer_claims(_authorization, require_aal2=True):
+        return {"sub": profile_id, "aal": "aal2"}
+
+    class QueryResult:
+        def __init__(self, row=None, values=()):
+            self.row = row
+            self.values = values
+
+        def one_or_none(self):
+            return self.row
+
+        def scalars(self):
+            return SimpleNamespace(all=lambda: list(self.values))
+
+    class ReadOnlyDatabase:
+        calls = 0
+
+        async def execute(self, _query):
+            self.calls += 1
+            if self.calls == 1:
+                return QueryResult(
+                    row=SimpleNamespace(id=42, auth_user_id=profile_id, status="ACTIVE")
+                )
+            return QueryResult(values=["legacy-tron-reference"])
+
+    db = ReadOnlyDatabase()
+    monkeypatch.setattr(paper_staging, "customer_claims", fake_customer_claims)
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(paper_staging.get_existing_customer("Bearer test", db))
+
+    assert exc.value.status_code == 409
+    assert "legacy customer identities are manually reviewed" in exc.value.detail
+    assert db.calls == 2

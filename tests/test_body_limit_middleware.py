@@ -86,22 +86,23 @@ def test_malformed_content_length_falls_back_to_streaming_count():
     assert sent[0]["status"] == 413
 
 
-def test_oversize_after_response_start_completes_the_started_response():
-    async def start_then_read(scope, receive, send):
-        await send({"type": "http.response.start", "status": 200, "headers": []})
-        await receive()
-        await receive()
+def test_chunked_oversize_is_rejected_before_route_can_start_a_400_response():
+    called = []
 
-    mw = BodySizeLimitMiddleware(start_then_read, max_bytes=10)
+    async def route_with_framework_parse_error(scope, receive, send):
+        called.append(True)
+        # Simulate a framework parser responding 400 to an interrupted body.
+        await receive()
+        await receive()
+        await send({"type": "http.response.start", "status": 400, "headers": []})
+        await send({"type": "http.response.body", "body": b"bad request"})
+
+    mw = BodySizeLimitMiddleware(route_with_framework_parse_error, max_bytes=10)
     sent = _run(_drive(mw, chunks=[b"x" * 6, b"x" * 6]))
 
-    assert sent[0]["type"] == "http.response.start"
-    assert sent[0]["status"] == 200
-    assert sent[-1] == {
-        "type": "http.response.body",
-        "body": b"",
-        "more_body": False,
-    }
+    assert sent[0]["status"] == 413
+    assert called == []
+    assert sent[-1]["body"] == b'{"detail":"Request body too large"}'
 
 
 def test_http2_oversize_rejection_omits_connection_header():
@@ -113,5 +114,24 @@ def test_http2_oversize_rejection_omits_connection_header():
         http_version="2",
     ))
 
+    assert sent[0]["status"] == 413
+    assert all(name != b"connection" for name, _value in sent[0]["headers"])
+
+
+
+def test_chunked_body_at_limit_reaches_route():
+    mw = BodySizeLimitMiddleware(_reader_app(), max_bytes=10)
+    sent = _run(_drive(mw, chunks=[b"x" * 4, b"x" * 6]))
+    assert sent[0]["status"] == 200
+    assert sent[1]["body"] == b"10"
+
+
+def test_http3_oversize_rejection_omits_connection_header():
+    mw = BodySizeLimitMiddleware(_reader_app(), max_bytes=10)
+    sent = _run(_drive(
+        mw,
+        chunks=[b"x" * 11],
+        http_version="3",
+    ))
     assert sent[0]["status"] == 413
     assert all(name != b"connection" for name, _value in sent[0]["headers"])
