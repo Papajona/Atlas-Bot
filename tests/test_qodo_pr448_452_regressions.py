@@ -395,3 +395,44 @@ def test_strategy_outcome_aggregates_only_current_lifecycle_and_carries_fee_comp
     metadata = json.loads(final.metadata_json)
     assert metadata["aggregate_fee_basis_complete"] is False
     assert old_lifecycle.lifecycle_status == "CLOSED"
+
+
+
+def _load_strategy_outcome_migration():
+    import importlib.util
+
+    path = ROOT / "alembic/versions/0061_strategy_outcome_fill_aggregation.py"
+    spec = importlib.util.spec_from_file_location("strategy_outcome_0061", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_historical_fee_reconstruction_counts_each_source_order_once():
+    migration = _load_strategy_outcome_migration()
+    source_trades = {
+        10: {"id": 10, "fee": "2.25"},
+        20: {"id": 20, "fee": "1.50"},
+        30: {"id": 30, "fee": "0.75"},
+    }
+    assert migration._reconstruct_trade_fee_total(
+        10, [20, 20, 30], source_trades
+    ) == Decimal("4.50")
+    assert migration._reconstruct_trade_fee_total(
+        10, [20, 99], source_trades
+    ) is None
+
+
+def test_open_position_entry_fee_backfill_requires_full_quantity_reconciliation():
+    migration = _load_strategy_outcome_migration()
+    entry_trade = {"filled_quantity": "4", "fee": "8"}
+    assert migration._reconstruct_remaining_entry_fee(
+        entry_trade, Decimal("1"), Decimal("3")
+    ) == Decimal("2")
+    # A top-up, missing close, or incomplete history cannot silently become zero fee.
+    assert migration._reconstruct_remaining_entry_fee(
+        entry_trade, Decimal("2"), Decimal("1")
+    ) is None
+    assert migration._reconstruct_remaining_entry_fee(
+        None, Decimal("1"), Decimal("3")
+    ) is None

@@ -336,6 +336,7 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
         .where(
             StrategyOutcome.lifecycle_status == "CLOSED",
             StrategyOutcome.closing_notional > 0,
+            StrategyOutcome.fee_basis_complete.is_(True),
         )
         .order_by(StrategyOutcome.created_at.desc())
         .limit(int(settings.max_consecutive_losses))
@@ -580,6 +581,7 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
                 .where(
                     StrategyOutcome.lifecycle_status == "CLOSED",
                     StrategyOutcome.closing_notional > 0,
+                    StrategyOutcome.fee_basis_complete.is_(True),
                 )
                 .order_by(StrategyOutcome.created_at.desc())
                 .limit(int(settings.edge_decay_window_trades))
