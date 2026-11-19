@@ -64,6 +64,31 @@ export default {
       });
     }
 
+    // Existing legacy profiles have non-UUID Auth references and blank encrypted
+    // email fields. No safe comparison can establish that a new Auth user is a
+    // different person. Fail closed for new identities until support completes
+    // the legacy identity mapping; existing UUID-linked users remain unaffected.
+    const pageSize = 500;
+    for (let offset = 0; ; offset += pageSize) {
+      const { data: profilePage, error: legacyLookupError } = await ctx.supabaseAdmin
+        .from("customer_profiles")
+        .select("auth_user_id")
+        .range(offset, offset + pageSize - 1);
+      if (legacyLookupError || !Array.isArray(profilePage)) {
+        return response({ error: "Legacy customer identity verification is unavailable; manual review is required" }, 503);
+      }
+      const hasUnmappedLegacyIdentity = profilePage.some((profile: { auth_user_id?: unknown }) => {
+        const reference = String(profile.auth_user_id ?? "").trim();
+        return !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(reference);
+      });
+      if (hasUnmappedLegacyIdentity) {
+        return response({
+          error: "New customer provisioning is paused while legacy customer identities are manually reviewed. Contact support.",
+        }, 409);
+      }
+      if (profilePage.length < pageSize) break;
+    }
+
     // Atlas stores customer_profiles.email and display_name with application-layer
     // Fernet encryption. This Edge Function intentionally has no encryption key,
     // so it must leave both default-empty fields untouched. The paper-staging API

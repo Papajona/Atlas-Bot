@@ -1,8 +1,9 @@
 """Native AI veto/composer hardening. Pure-Python: no network, no app settings."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.native_ai import (
     NativeAIError,
+    NativeAIInputError,
     compose_strategy_spec,
     evaluate_native_trade_packet,
     native_ai_health_check,
@@ -43,6 +44,16 @@ def test_bad_timestamps_are_vetoed():
     assert "market_timestamp_in_future" in _reasons(lambda p: p.update(market_timestamp="2999-01-01T00:00:00Z"))[1]
 
 
+def test_daily_candle_future_timestamp_within_one_timeframe_is_vetoed():
+    future = datetime.now(timezone.utc) + timedelta(hours=12)
+    packet = _good()
+    packet["timeframe"] = "1d"
+    packet["market_timestamp"] = future.isoformat()
+    result = evaluate_native_trade_packet(packet)
+    assert result["safe"] is False
+    assert "market_timestamp_in_future" in result["reasons"]
+
+
 def test_spread_limit_can_only_be_tightened():
     assert "spread_exceeds_limit" in _reasons(lambda p: p["price_context"].update(spread_bps=150))[1]
     assert "spread_exceeds_limit" in _reasons(lambda p: p["price_context"].update(spread_bps=5000))[1]
@@ -81,9 +92,11 @@ def test_short_trade_still_passes():
 def test_negated_direction_is_not_misread():
     assert compose_strategy_spec(prompt="do not short BTC, buy the dip on 1h", name="n")["direction"] == "LONG"
     assert compose_strategy_spec(prompt="Never go long BTC, short only on 1h", name="n")["direction"] == "SHORT"
+    assert compose_strategy_spec(prompt="Do not go long BTC on 1h", name="n")["direction"] == "AUTO"
+    assert compose_strategy_spec(prompt="Don’t short BTC, buy dips on 1h", name="n")["direction"] == "LONG"
     spec = compose_strategy_spec(prompt="never go long EUR/USD, avoid buying", name="n")
     assert any("Negated direction" in w for w in spec["validation_warnings"])
-    assert any("No trading direction" in w for w in spec["validation_warnings"])
+    assert any("AUTO" in w for w in spec["validation_warnings"])
 
 
 def test_indicator_period_wording_is_not_a_direction():
@@ -96,8 +109,10 @@ def test_symbol_must_be_clean():
     for bad in ("<script>alert(1)</script>", "BTC USDT", "a" * 81, "'; DROP TABLE x;--"):
         try:
             compose_strategy_spec(prompt="BTC trend long", name="n", symbol=bad)
-        except NativeAIError:
+        except NativeAIInputError:
             continue
+        except NativeAIError as exc:
+            raise AssertionError(f"invalid symbol raised an engine error instead of an input error: {exc}") from exc
         raise AssertionError(f"symbol accepted: {bad!r}")
 
 

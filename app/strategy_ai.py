@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .config import settings
-from .native_ai import NativeAIError, compose_strategy_spec
+from .native_ai import NativeAIError, NativeAIInputError, compose_strategy_spec
 from .strategy_evidence import evidence_for
 
 
@@ -125,6 +125,8 @@ async def generate_strategy_draft(*, prompt: str, name: str, asset: str | None =
                                     timeframe=timeframe, max_risk_per_trade=settings.risk_per_trade)
         spec = AIStrategySpec.model_validate(raw)
         spec = _apply_market_context(spec, asset=asset, symbol=symbol, timeframe=timeframe)
+    except NativeAIInputError:
+        raise
     except Exception as exc:
         raise NativeAIError(f"Atlas Native AI could not create a valid strategy draft: {exc}") from exc
     family = {"TREND":"trend", "MOMENTUM":"momentum", "BREAKOUT":"breakout",

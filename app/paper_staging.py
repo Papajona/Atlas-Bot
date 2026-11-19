@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import hmac
 import time
+import uuid
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -487,12 +488,34 @@ async def paper_customer_mfa_enroll(authorization: str | None = Header(default=N
             "message": "A verified authenticator is already enrolled.",
         }
     token = _bearer_token(authorization)
+    user = await _supabase_user(token)
+    friendly_name = "Atlas Paper Trading / Google Authenticator"
+    # Supabase rejects re-enrollment when an abandoned setup leaves an unverified
+    # factor with the same friendly name. Its original setup secret cannot be
+    # recovered, so remove only this user's matching stale pending TOTP factor.
+    for factor in user.get("factors") or []:
+        if (
+            str(factor.get("factor_type") or "").lower() != "totp"
+            or str(factor.get("status") or "").lower() != "unverified"
+            or str(factor.get("friendly_name") or "") != friendly_name
+        ):
+            continue
+        try:
+            factor_id = str(uuid.UUID(str(factor.get("id") or "")))
+        except (ValueError, TypeError, AttributeError):
+            continue
+        try:
+            await _supabase_request(
+                f"/auth/v1/factors/{factor_id}",
+                method="DELETE",
+                access_token=token,
+            )
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
     return await _supabase_request(
         "/auth/v1/factors",
-        payload={
-            "factor_type": "totp",
-            "friendly_name": "Atlas Paper Trading / Google Authenticator",
-        },
+        payload={"factor_type": "totp", "friendly_name": friendly_name},
         access_token=token,
     )
 
@@ -566,6 +589,7 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
 
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
+    await _paper_state_guard()
     async with SessionLocal() as db:
         profile, _claims = await get_existing_customer(authorization, db)
     balances = await get_customer_paper_balances(customer_id=int(profile.id))

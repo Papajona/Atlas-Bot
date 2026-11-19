@@ -16,6 +16,10 @@ class NativeAIError(RuntimeError):
     """Raised when the local Native AI engine cannot produce a valid draft."""
 
 
+class NativeAIInputError(NativeAIError):
+    """Raised when a caller supplies invalid strategy input rather than an engine failure."""
+
+
 AIProviderError = NativeAIError  # compatibility alias; no provider is called
 _ALLOWED_TIMEFRAMES = ("5m", "15m", "30m", "1h", "4h", "1d")
 _ALLOWED_ASSETS = ("crypto", "forex", "commodity")
@@ -174,7 +178,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     if symbol and symbol.strip():
         selected_symbol = symbol.strip()
         if not _SYMBOL_PATTERN.fullmatch(selected_symbol):
-            raise NativeAIError("Symbol may contain only letters, digits and / _ : . - (max 80 characters).")
+            raise NativeAIInputError("Symbol may contain only letters, digits and / _ : . - (max 80 characters).")
     else:
         upper = text.upper()
         match = next(((pattern, label) for pattern, label in (
@@ -202,8 +206,10 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     tf = requested_timeframes[0]
     family = _classify_family(text)
     lower = text.lower()
-    direction_text = _strip_negated_direction(lower)
-    negated_direction = direction_text != lower
+    # Curly apostrophes are common on mobile keyboards and must share ASCII negation semantics.
+    direction_source = lower.replace("\u2019", "'").replace("\u2018", "'")
+    direction_text = _strip_negated_direction(direction_source)
+    negated_direction = direction_text != direction_source
     asks_both = any(x in direction_text for x in ("both directions", "long and short", "long/short", "both sides"))
     # "short EMA" and "long EMA" describe indicator periods, while "sell when RSI"
     # describes an exit. Only explicit direction phrases or a known instrument imply side.
@@ -221,8 +227,14 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         re.search(r"\b(?:buy|bullish|uptrend)\b", direction_text)
         or re.search(r"\blong\b(?!\s+(?:ema|sma|ma|moving\s+average|window|period|lookback|average)\b)", direction_text)
     )
-    direction = "BOTH" if asks_both or (asks_short and asks_long) else ("SHORT" if asks_short else "LONG")
     direction_ambiguous = not (asks_both or asks_short or asks_long)
+    direction = (
+        "BOTH" if asks_both or (asks_short and asks_long)
+        else "SHORT" if asks_short
+        else "LONG" if asks_long
+        else "AUTO" if negated_direction
+        else "LONG"
+    )
     cap = _number(max_risk_per_trade)
     cap = min(cap if cap is not None and cap > 0 else 0.005, 0.05)
     risk = min(cap, 0.005)
@@ -230,9 +242,13 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         "Generated locally by Atlas Native AI from supported templates; not a general-purpose language-model response.",
         "This draft is not backtest evidence; cost-aware out-of-sample and walk-forward validation remain mandatory before paper promotion."]
     if direction_ambiguous:
-        warnings.append("No trading direction was explicit in the prompt; LONG is only a draft default and must be confirmed before use.")
+        warnings.append(
+            "No affirmative trading direction was supplied; AUTO is used when the prompt only excludes a direction."
+            if negated_direction
+            else "No trading direction was explicit in the prompt; LONG is only a draft default and must be confirmed before use."
+        )
     if negated_direction:
-        warnings.append("Negated direction wording (for example 'do not short') was detected and excluded from side detection; confirm the direction before use.")
+        warnings.append("Negated direction wording was detected and excluded from side detection; confirm the permitted direction before use.")
     if explicit_timeframe and len(prompt_timeframes) > 1 and any(
         prompt_timeframe != explicit_timeframe for prompt_timeframe in prompt_timeframes
     ):
@@ -332,7 +348,7 @@ def evaluate_native_trade_packet(packet: dict[str, Any]) -> dict[str, Any]:
         market_time = _parse_market_time(packet.get("market_timestamp"))
         if market_time is None:
             reasons.append("invalid_market_timestamp")
-        elif market_time > datetime.now(timezone.utc) + timedelta(seconds=_TIMEFRAME_SECONDS[packet["timeframe"]] + _FUTURE_SKEW_SECONDS):
+        elif market_time > datetime.now(timezone.utc) + timedelta(seconds=_FUTURE_SKEW_SECONDS):
             reasons.append("market_timestamp_in_future")
     plan = packet.get("trade_plan")
     if not isinstance(plan, dict): plan = {}; reasons.append("trade_plan_not_object")
