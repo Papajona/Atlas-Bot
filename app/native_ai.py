@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 
 class NativeAIError(RuntimeError):
@@ -79,11 +79,20 @@ def _classify_asset(text: str, requested: str | None) -> str:
     if requested in _ALLOWED_ASSETS:
         return requested
     value = text.lower()
-    if any(x in value for x in ("forex", "eurusd", "eur_usd", "gbpusd", "gbp_usd", "usdjpy", "usd_jpy", "currency")):
+    # Match complete instrument names/tickers: "golden cross" is not Gold, and "forexample" is not Forex.
+    if re.search(r"\b(?:forex|currency|currencies|eur\s*[/_-]?\s*usd|gbp\s*[/_-]?\s*usd|usd\s*[/_-]?\s*jpy)\b", value):
         return "forex"
-    if any(x in value for x in ("commodity", "gold", "xau", "wti", "brent", "crude oil", "natural gas", "silver", "xag")):
+    if re.search(r"\b(?:commodity|commodities|gold|xau(?:\s*[/_-]?\s*usd)?|wti|brent|crude\s+oil|natural\s+gas|silver|xag(?:\s*[/_-]?\s*usd)?)\b", value):
         return "commodity"
     return "crypto"
+
+
+_SYMBOL_ASSET = {
+    "EUR_USD": "forex", "GBP_USD": "forex", "USD_JPY": "forex",
+    "XAU_USD": "commodity", "XAG_USD": "commodity", "WTI": "commodity",
+    "WTICO_USD": "commodity", "BCO_USD": "commodity", "NATGAS_USD": "commodity",
+    "BTC/USDT": "crypto", "ETH/USDT": "crypto",
+}
 
 
 def _classify_family(text: str) -> str:
@@ -128,12 +137,140 @@ def _template_rules(family: str) -> tuple[list[dict[str, str]], list[dict[str, s
     return entries, [{"type": f"{family}_EXIT", "rule": exits[family]}]
 
 
+
+
+_SUPPORTED_BY_MINUTES = {5: "5m", 15: "15m", 30: "30m", 60: "1h", 240: "4h", 1440: "1d"}
+_COMPACT_SUPPORTED = frozenset(_ALLOWED_TIMEFRAMES)
+_COMPACT_UNSUPPORTED = frozenset({"1m", "2m", "3m", "10m", "20m", "45m", "2h", "3h", "6h", "8h", "12h", "3d", "1w", "2w"})
+_UNIT_MINUTES = {
+    "m": 1, "min": 1, "mins": 1, "minute": 1, "minutes": 1,
+    "h": 60, "hr": 60, "hrs": 60, "hour": 60, "hours": 60,
+    "d": 1440, "day": 1440, "days": 1440,
+    "w": 10080, "week": 10080, "weeks": 10080,
+}
+_WORD_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "fifteen": 15, "thirty": 30}
+_TF_COMPACT_RE = re.compile(r"(?<![a-z0-9$.])(\d{1,3}(?:m|h|d|w))(?![a-z0-9])")
+_TF_LONG_RE = re.compile(r"(?<![a-z0-9$.])(\d{1,3}|one|two|three|four|five|fifteen|thirty)[\s-]?(minutes?|mins?|hours?|hrs?|days?|weeks?)(?![a-z0-9])")
+_TF_NAMED_RE = re.compile(r"(?<![a-z0-9])(daily|hourly|weekly)(?![a-z0-9])(?!\s+(?:loss|limit|risk|drawdown|target|profit|max|cap|stop))")
+_TF_CONTEXT_AFTER = re.compile(r"\s*(?:time\s*frame|timeframe|chart|bars?|candles?|candlesticks?|interval)s?\b")
+_TF_CONTEXT_BEFORE = re.compile(r"(?:\bon(?:\s+the|\s+a)?|\busing(?:\s+the|\s+a)?|\bin\s+the|\bover\s+the)\s*$")
+
+
+class _TFMention(NamedTuple):
+    start: int
+    end: int
+    tf: str | None
+    raw: str
+
+
+def _timeframe_mentions(lower: str) -> list[_TFMention]:
+    """Find supported and known-unsupported timeframe requests without mistaking lookbacks for charts."""
+    found: list[_TFMention] = []
+    for match in _TF_COMPACT_RE.finditer(lower):
+        token = match.group(1)
+        if token in _COMPACT_SUPPORTED:
+            found.append(_TFMention(match.start(1), match.end(1), token, token))
+        elif token in _COMPACT_UNSUPPORTED:
+            found.append(_TFMention(match.start(1), match.end(1), None, token))
+    for match in _TF_LONG_RE.finditer(lower):
+        if not (_TF_CONTEXT_AFTER.match(lower, match.end()) or _TF_CONTEXT_BEFORE.search(lower[max(0, match.start() - 14):match.start()])):
+            continue
+        number = _WORD_NUMBERS.get(match.group(1)) or int(match.group(1))
+        minutes = number * _UNIT_MINUTES[match.group(2)]
+        found.append(_TFMention(match.start(), match.end(), _SUPPORTED_BY_MINUTES.get(minutes), match.group(0)))
+    for match in _TF_NAMED_RE.finditer(lower):
+        word = match.group(1)
+        found.append(_TFMention(match.start(), match.end(), {"daily": "1d", "hourly": "1h"}.get(word), word))
+    found.sort(key=lambda mention: mention.start)
+    # Prefer the longest overlapping mention (e.g. "daily timeframe" is one phrase).
+    deduplicated: list[_TFMention] = []
+    for mention in found:
+        if deduplicated and mention.start < deduplicated[-1].end:
+            if mention.end > deduplicated[-1].end:
+                deduplicated[-1] = mention
+            continue
+        deduplicated.append(mention)
+    return deduplicated
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return min(high, max(low, value))
+
+
+_ATR_RE = re.compile(r"(?<![\w.])(\d{1,6}(?:\.\d{1,6})?)\s{0,3}-?\s{0,3}atr\b(?!\s{0,3}(?:period|length|lookback|bars?|candles?))")
+_STOP_WORDS = re.compile(r"\b(?:stop|sl|stop-?loss|loss|risk)\b")
+_TARGET_WORDS = re.compile(r"\b(?:take[-\s]?profit|tp|target|profit)\b")
+_NUM = r"(\d{1,6}(?:\.\d{1,6})?)"
+_RR_AFTER_RE = re.compile(
+    r"(?:(?P<rw>reward)\s{0,3}(?:[:/]|-|to)?\s{0,3}risk|(?P<rk>risk)\s{0,3}(?:[:/]|-|to)?\s{0,3}reward|(?P<rr>\brr\b)|\br\s{0,3}[:/]\s{0,3}r\b)"
+    rf"\s{{0,3}}(?:ratio|target)?\s{{0,3}}(?:of|=|:|is|at)?\s{{0,3}}{_NUM}(?:\s{{0,3}}[:/]\s{{0,3}}{_NUM})?")
+_RR_BEFORE_RE = re.compile(
+    rf"(?<![\w.]){_NUM}\s{{0,3}}[:/]\s{{0,3}}{_NUM}\s{{0,3}}(?:(?P<rw>reward\s{{0,3}}[:/]?\s{{0,3}}risk)|risk\s{{0,3}}[:/]?\s{{0,3}}reward|\brr\b|\br\s{{0,3}}[:/]\s{{0,3}}r\b)")
+_RR_R_SUFFIX_RE = re.compile(r"(?:take.?profit|reward.?risk|risk.?reward|target)\s{0,3}(?:of|=|:)?\s{0,3}(\d{1,6}(?:\.\d{1,6})?)\s{0,3}r\b")
+_RR_R_LEAD_RE = re.compile(r"(?<![\w.])(\d{1,6}(?:\.\d{1,6})?)\s{0,3}r\s{1,3}(?:take[-\s]?profit|target|tp)\b")
+
+
+def _atr_levels(lower: str) -> tuple[list[float], list[float], list[float]]:
+    stops: list[float] = []
+    targets: list[float] = []
+    plain: list[float] = []
+    for match in _ATR_RE.finditer(lower):
+        value = float(match.group(1))
+        before = re.split(r"[.;,]| and | then | with ", lower[max(0, match.start() - 28):match.start()])[-1]
+        after = re.split(r"[.;,]| and | then | with ", lower[match.end():match.end() + 14])[0]
+        if _STOP_WORDS.search(before) or re.match(r"\s*(?:stop|sl)\b", after):
+            stops.append(value)
+        elif _TARGET_WORDS.search(before) or re.match(r"\s*(?:take[-\s]?profit|tp|target|profit)\b", after):
+            targets.append(value)
+        else:
+            plain.append(value)
+    return stops, targets, plain
+
+
+def _reward_risk(lower: str) -> float | None:
+    match = _RR_AFTER_RE.search(lower)
+    if match:
+        first, second = float(match.group(4)), match.group(5)
+        if second is None:
+            return first or None
+        second_value = float(second)
+        if not first or not second_value:
+            return None
+        return first / second_value if match.group("rw") else second_value / first
+    match = _RR_BEFORE_RE.search(lower)
+    if match:
+        first, second = float(match.group(1)), float(match.group(2))
+        if not first or not second:
+            return None
+        return first / second if match.group("rw") else second / first
+    match = _RR_R_SUFFIX_RE.search(lower) or _RR_R_LEAD_RE.search(lower)
+    return float(match.group(1)) if match else None
+
+
+def _parse_stop_and_target(lower: str) -> tuple[float, float, list[str]]:
+    notes: list[str] = []
+    stops, targets, plain = _atr_levels(lower)
+    stop = stops[0] if stops else (plain[0] if plain else None)
+    stop_atr = _clamp(stop, 0.1, 10.0) if stop is not None else 1.5
+    reward = _reward_risk(lower)
+    if reward is None and targets:
+        reward = targets[0] / stop_atr
+        if stop is None:
+            notes.append(f"Take-profit of {targets[0]:g} ATR was converted to {reward:.2f}R using the default {stop_atr:g} ATR stop.")
+    if reward is None:
+        if re.search(r"(?:reward|\brr\b)[^.;]{0,20}\d", lower):
+            notes.append("A reward:risk target was mentioned but not understood; the default 2.0R was used. Write it as '3R' or 'reward risk 3'.")
+        reward = 2.0
+    clamped = _clamp(reward, 0.1, 10.0)
+    if clamped != reward:
+        notes.append(f"Requested reward:risk {reward:g}R was limited to {clamped:g}R.")
+    return stop_atr, clamped, notes
+
+
 def _condition_timeframe(prompt: str, condition_type: str, default_timeframe: str) -> str:
     """Bind supported rules to the nearest explicitly requested timeframe when clear."""
     prompt_lower = prompt.lower()
-    timeframe_matches = list(re.finditer(
-        r"(?<![a-z0-9])(5m|15m|30m|1h|4h|1d)(?![a-z0-9])", prompt_lower
-    ))
+    timeframe_matches = [mention for mention in _timeframe_mentions(prompt_lower) if mention.tf][:20]
     if len(timeframe_matches) < 2:
         return default_timeframe
     keywords = {
@@ -157,10 +294,10 @@ def _condition_timeframe(prompt: str, condition_type: str, default_timeframe: st
     ranked = []
     for timeframe_match in timeframe_matches:
         distance = min(
-            max(0, max(start - timeframe_match.end(), timeframe_match.start() - end))
+            max(0, max(start - timeframe_match.end, timeframe_match.start - end))
             for start, end in keyword_spans
         )
-        ranked.append((distance, timeframe_match.group(1)))
+        ranked.append((distance, timeframe_match.tf))
     distance, selected = min(ranked, key=lambda item: item[0])
     # Do not bind a rule to a distant timeframe mention without local textual evidence.
     return selected if distance <= 48 else default_timeframe
@@ -179,23 +316,27 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         selected_symbol = symbol.strip()
         if not _SYMBOL_PATTERN.fullmatch(selected_symbol):
             raise NativeAIInputError("Symbol may contain only letters, digits and / _ : . - (max 80 characters).")
+        inferred_symbol_asset = _SYMBOL_ASSET.get(selected_symbol)
+        if inferred_symbol_asset and asset not in _ALLOWED_ASSETS:
+            asset_kind = inferred_symbol_asset
     else:
         upper = text.upper()
         match = next(((pattern, label) for pattern, label in (
             (r"\bEUR\s*[/_-]?\s*USD\b", "EUR_USD"),
             (r"\bGBP\s*[/_-]?\s*USD\b", "GBP_USD"),
             (r"\bXAU(?:\s*[/_-]?\s*USD)?\b|\bGOLD\b", "XAU_USD"),
+            (r"\bXAG(?:\s*[/_-]?\s*USD)?\b|\bSILVER\b", "XAG_USD"),
             (r"\bBTC(?:\s*[/_-]?\s*USDT?)?\b", "BTC/USDT"),
             (r"\bETH(?:\s*[/_-]?\s*USDT?)?\b", "ETH/USDT"),
             (r"\bWTI\b|\bCRUDE\s*OIL\b", "WTI"),
         ) if re.search(pattern, upper)), None)
         selected_symbol = match[1] if match else {"crypto": "BTC/USDT", "forex": "EUR_USD", "commodity": "XAU_USD"}[asset_kind]
+        if match and asset not in _ALLOWED_ASSETS:
+            asset_kind = _SYMBOL_ASSET.get(match[1], asset_kind)
     explicit_timeframe = timeframe if timeframe in _ALLOWED_TIMEFRAMES else None
-    prompt_timeframes = list(dict.fromkeys(
-        match.group(1) for match in re.finditer(
-            r"(?<![a-z0-9])(5m|15m|30m|1h|4h|1d)(?![a-z0-9])", text.lower()
-        )
-    ))
+    mentions = _timeframe_mentions(text.lower())
+    prompt_timeframes = list(dict.fromkeys(mention.tf for mention in mentions if mention.tf))[:5]
+    unsupported_timeframes = list(dict.fromkeys(mention.raw for mention in mentions if not mention.tf))
     # A selected UI/API timeframe is authoritative. Only infer multiple condition-level
     # timeframes from the prompt when the caller leaves the timeframe unset.
     requested_timeframes = (
@@ -215,7 +356,8 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     # describes an exit. Only explicit direction phrases or a known instrument imply side.
     known_symbol = (
         r"(?:btc(?:\s*[/_-]?\s*usdt?)?|bitcoin|eth(?:\s*[/_-]?\s*usdt?)?|ethereum|"
-        r"eur\s*[/_-]?\s*usd|gbp\s*[/_-]?\s*usd|xau(?:\s*[/_-]?\s*usd)?|gold|wti|crude\s+oil)"
+        r"eur\s*[/_-]?\s*usd|gbp\s*[/_-]?\s*usd|xau(?:\s*[/_-]?\s*usd)?|gold|"
+        r"xag(?:\s*[/_-]?\s*usd)?|silver|wti|crude\s+oil)"
     )
     asks_short = bool(
         re.search(r"\b(?:bearish|downtrend|shorting|go\s+short|short\s+only|short[-\s]sell)\b", direction_text)
@@ -241,6 +383,13 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     warnings = [
         "Generated locally by Atlas Native AI from supported templates; not a general-purpose language-model response.",
         "This draft is not backtest evidence; cost-aware out-of-sample and walk-forward validation remain mandatory before paper promotion."]
+    supported_list = ", ".join(_ALLOWED_TIMEFRAMES)
+    if unsupported_timeframes:
+        warnings.append(
+            f"Unsupported timeframe(s) in the prompt were ignored: {', '.join(unsupported_timeframes)}. "
+            f"Supported: {supported_list}. The draft uses {', '.join(requested_timeframes)}; confirm before use.")
+    if timeframe and not explicit_timeframe:
+        warnings.append(f"Selected timeframe {str(timeframe)[:12]!r} is not supported and was ignored. Supported: {supported_list}.")
     if direction_ambiguous:
         warnings.append(
             "No affirmative trading direction was supplied; AUTO is used when the prompt only excludes a direction."
@@ -255,7 +404,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         warnings.append(
             f"Selected timeframe {explicit_timeframe} overrides the draft's multi-timeframe setup inferred from the prompt."
         )
-    risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*(%|percent|bps|bp)?", lower)
+    risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s{0,6}(?:of|=|:)?\s{0,6}(\d{1,6}(?:\.\d{1,6})?)\s{0,6}(%|percent|bps|bp)?", lower)
     if risk_match:
         amount = float(risk_match.group(1))
         unit = (risk_match.group(2) or "").lower()
@@ -264,10 +413,8 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
             risk = min(cap, requested)
             if requested > cap:
                 warnings.append(f"Requested risk capped at platform maximum {cap:.4f}.")
-    atr_match = re.search(r"(\d+(?:\.\d+)?)\s*atr", lower)
-    stop_atr = min(10.0, max(0.1, float(atr_match.group(1)))) if atr_match else 1.5
-    rr_match = re.search(r"(?:take.?profit|reward.?risk|risk.?reward|target)\s*(?:of|=|:)?\s*(\d+(?:\.\d+)?)\s*r\b", lower)
-    target_rr = min(10.0, max(0.1, float(rr_match.group(1)))) if rr_match else 2.0
+    stop_atr, target_rr, stop_notes = _parse_stop_and_target(lower)
+    warnings.extend(stop_notes)
     entries, exits = _template_rules(family)
     if explicit_timeframe:
         entry_conditions = [dict(x, timeframe=tf) for x in entries]
@@ -284,7 +431,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         "exit_conditions": exit_conditions, "risk_per_trade": risk,
         "stop_loss_atr": stop_atr, "take_profit_rr": target_rr, "sessions": sessions,
         "assumptions": ["Use completed candles only.", "Use verified market data and realistic costs.", "Platform risk controls override this draft."],
-        "validation_warnings": warnings, "requires_backtest": True, "requires_walk_forward": True,
+        "validation_warnings": warnings[:12], "requires_backtest": True, "requires_walk_forward": True,
         "execution_mode": "PAPER_SHADOW_ONLY", "implementation_status": "ATLAS_SUPPORTED_FAMILY"}
 
 
