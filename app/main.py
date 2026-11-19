@@ -3870,33 +3870,38 @@ async def get_customer(
     )).scalar_one_or_none()
 
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
-    email = str(claims.get("email") or (profile.email if profile is not None else "") or "").strip().lower()[:320]
+    # Never persist the email claim of an existing profile unless the Auth
+    # record confirms it. Existing encrypted email remains authoritative.
+    email = str(profile.email or "").strip().lower()[:320] if profile is not None else ""
     name = str(metadata.get("full_name") or metadata.get("name") or (
         profile.display_name if profile is not None else ""
     ) or "").strip()[:160]
 
     if profile is None:
         # A new profile is created only after an authoritative Auth lookup confirms
-        # the subject and email. Existing profiles do not depend on Auth availability.
+        # the subject and email.
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
         if not user.get("email_confirmed_at"):
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or email).strip().lower()[:320]
+        email = str(user.get("email") or "").strip().lower()[:320]
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
         name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
         if not email:
             raise HTTPException(403, "A confirmed email address is required")
     elif not email:
-        # Backfill an empty encrypted email when the signed JWT omits it. This is
-        # best-effort for an existing ACTIVE customer: Auth outages or an unconfirmed
-        # legacy address must not turn every wallet/trading route into an outage.
+        # An existing ACTIVE user remains available if Auth is temporarily down or
+        # the latest address is still unconfirmed. Do not persist an unconfirmed
+        # replacement address into the encrypted profile.
         try:
             user = await _supabase_user(_bearer_token(authorization))
             if str(user.get("id") or "") != uid:
                 raise HTTPException(401, "Customer Auth identity could not be verified")
-            email = str(user.get("email") or "").strip().lower()[:320]
+            if user.get("email_confirmed_at"):
+                email = str(user.get("email") or "").strip().lower()[:320]
+            else:
+                logger.info("customer_auth_pii_backfill_unconfirmed auth_user_id=%s", uid)
             user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
             name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
         except HTTPException as exc:
@@ -3904,20 +3909,33 @@ async def get_customer(
                 raise
             logger.warning("customer_auth_pii_backfill_unavailable: status=%s", exc.status_code)
 
-    identity_review_required = await has_unmapped_legacy_customer_identity(db)
+    # The global legacy gate applies to new provisioning, and to existing profiles
+    # already flagged or missing an encrypted email. It must not suspend unrelated
+    # ACTIVE customers whose encrypted identity is already populated.
+    profile_needs_identity_review = (
+        profile is None
+        or (
+            profile is not None
+            and (
+                str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+                or not str(profile.email or "").strip()
+            )
+        )
+    )
+    identity_review_required = (
+        await has_unmapped_legacy_customer_identity(db)
+        if profile_needs_identity_review else False
+    )
     if profile is None and identity_review_required:
         raise HTTPException(
             409,
             "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
         )
 
-    # Older releases persisted PENDING_IDENTITY_REVIEW for the global legacy-row
-    # condition. Once those rows are mapped, restore the account's prior ACTIVE
-    # access; while any unmapped row remains, the restriction is computed per request.
+    # Older releases persisted PENDING_IDENTITY_REVIEW for the legacy-row
+    # condition. Restore that specific quarantine once the global gate clears.
     if profile is not None and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW":
-        if identity_review_required:
-            identity_review_required = True
-        else:
+        if not identity_review_required:
             profile.status = "ACTIVE"
             await db.flush()
 
