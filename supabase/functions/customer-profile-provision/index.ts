@@ -64,32 +64,21 @@ export default {
       });
     }
 
-    // Do not silently create a second identity for an email already present on
-    // one of the 18 legacy profiles whose old Tron-based Auth reference is not a
-    // Supabase UUID. Such accounts require manual identity proof and mapping.
-    const { data: emailMatches, error: emailLookupError } = await profiles
-      .select("id,auth_user_id")
-      .ilike("email", email)
-      .limit(2);
-
-    if (emailLookupError) {
-      return response({ error: "Existing customer identity check failed" }, 503);
-    }
-    if ((emailMatches ?? []).some((profile: { auth_user_id: string }) => profile.auth_user_id !== userId)) {
-      return response({ error: "This email is already associated with an existing customer profile; manual identity review is required" }, 409);
-    }
-
-    const metadata = (user.user_metadata ?? {}) as Record<string, unknown>;
-    const displayName = String(metadata.full_name ?? metadata.name ?? "")
-      .trim()
-      .slice(0, 160);
+    // Atlas stores customer_profiles.email and display_name with application-layer
+    // Fernet encryption. This Edge Function intentionally has no encryption key,
+    // so it must leave both default-empty fields untouched. The paper-staging API
+    // reads confirmed email/display name from Supabase Auth instead.
+    //
+    // Legacy profiles currently have blank email fields and non-UUID legacy Auth
+    // references, so there is no safe email-based auto-link. Never rewrite or
+    // infer a legacy identity from a caller-supplied address.
     const now = new Date().toISOString();
 
     const { data: created, error: insertError } = await profiles
       .insert({
+        // email/display_name deliberately omitted: Atlas EncryptedText fields
+        // default to the empty string and must not receive plaintext here.
         auth_user_id: userId,
-        email: email.slice(0, 320),
-        display_name: displayName,
         status: "ACTIVE",
         created_at: now,
         updated_at: now,
