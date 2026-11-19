@@ -26,8 +26,8 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
     engine = create_engine("sqlite://")
     try:
         with engine.begin() as connection:
-            # This is the relevant 0035-era schema at revision 0060: both net
-            # result columns exist and still have NOT NULL constraints.
+            # This is the relevant 0035-era schema at revision 0060: all three
+            # observed return columns still have NOT NULL constraints.
             connection.execute(text("""
                 CREATE TABLE strategy_outcomes (
                     id INTEGER PRIMARY KEY,
@@ -65,7 +65,8 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
                     side VARCHAR(10),
                     exchange VARCHAR(50),
                     symbol VARCHAR(80),
-                    created_at DATETIME
+                    created_at DATETIME,
+                    updated_at DATETIME
                 )
             """))
             connection.execute(text("""
@@ -124,6 +125,7 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             }
             assert before["net_pnl"]["nullable"] is False
             assert before["net_return_bps"]["nullable"] is False
+            assert before["return_bps"]["nullable"] is False
 
             monkeypatch.setattr(
                 migration.context, "is_offline_mode", lambda: False
@@ -138,15 +140,17 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             }
             assert after["net_pnl"]["nullable"] is True
             assert after["net_return_bps"]["nullable"] is True
+            assert after["return_bps"]["nullable"] is True
 
             recovered = connection.execute(text("""
-                SELECT fee_basis_complete, net_pnl, net_return_bps
+                SELECT fee_basis_complete, return_bps, net_pnl, net_return_bps
                 FROM strategy_outcomes
                 WHERE id = 2
             """)).mappings().one()
             assert recovered["fee_basis_complete"] in (False, 0)
             assert recovered["net_pnl"] is None
             assert recovered["net_return_bps"] is None
+            assert recovered["return_bps"] is None
 
             # A second sell order was submitted before exit but only updated
             # after the old position closed. The migration must use the close
@@ -163,5 +167,6 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert completed["fee_basis_complete"] in (True, 1)
             assert float(completed["net_pnl"]) == 5.0
             assert float(completed["net_return_bps"]) == 500.0
+            assert float(completed["return_bps"]) == 500.0
     finally:
         engine.dispose()
