@@ -1300,6 +1300,7 @@ def test_pending_order_anchored_to_new_lifecycle_does_not_invalidate_old_closed_
             assert old_close.fee_reconciliation_pending is False
             assert old_outcome.fee_basis_complete is True
             assert old_outcome.net_pnl == pytest.approx(9.88)
-            assert old_outcome.net_return_bps == pytest.approx(988.0)
+            # Returns are basis points on closing notional: 9.88 / 110.00 * 10,000.
+            assert old_outcome.net_return_bps == pytest.approx(9.88 / 110.0 * 10_000)
 
     asyncio.run(with_database(check))
