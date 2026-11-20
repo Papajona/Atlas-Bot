@@ -85,6 +85,31 @@ def test_remaining_entry_fee_backfill_only_trusts_deterministic_paper_fees():
     ) is None
 
 
+def test_completed_learning_episode_is_quarantined_when_historical_fees_are_unknown():
+    should_quarantine = MIGRATION["_learning_episode_requires_fee_quarantine"]
+
+    assert should_quarantine(
+        {"status": "COMPLETED"},
+        lifecycle_closed=True,
+        fee_basis_complete=False,
+    ) is True
+    assert should_quarantine(
+        {"status": "COMPLETED"},
+        lifecycle_closed=True,
+        fee_basis_complete=True,
+    ) is False
+    assert should_quarantine(
+        {"status": "OPEN"},
+        lifecycle_closed=True,
+        fee_basis_complete=False,
+    ) is False
+    assert should_quarantine(
+        {"status": "COMPLETED"},
+        lifecycle_closed=False,
+        fee_basis_complete=False,
+    ) is False
+
+
 def test_open_lifecycle_with_repeated_partial_close_order_is_not_fee_complete():
     rows = [
         {"closing_trade_id": 21},
