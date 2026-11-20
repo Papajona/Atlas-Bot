@@ -543,7 +543,16 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
 
     asyncio.run(run())
 
-def test_breakeven_close_records_entry_and_exit_fees_on_completed_episode():
+@pytest.mark.parametrize(
+    "entry_basis_known,close_fee_verified,expected_status",
+    [
+        (True, True, "COMPLETED"),
+        (False, False, "FEE_RECONCILIATION_PENDING"),
+    ],
+)
+def test_breakeven_close_records_fees_and_gates_learning_replay(
+    entry_basis_known, close_fee_verified, expected_status
+):
     from decimal import Decimal
     from app import execution
     from app.db import (
@@ -584,7 +593,7 @@ def test_breakeven_close_records_entry_and_exit_fees_on_completed_episode():
                 symbol=symbol, quantity=1.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
                 reserved_capital=0.0, entry_fee=Decimal("0.10"),
-                entry_fee_basis_known=True, strategy="breakeven-regression",
+                entry_fee_basis_known=entry_basis_known, strategy="breakeven-regression",
                 entry_regime="UNKNOWN", entry_trade_id=entry.id,
             ))
             db.add(TradeLearningEpisode(
@@ -605,7 +614,7 @@ def test_breakeven_close_records_entry_and_exit_fees_on_completed_episode():
             await execution._apply_fill_to_position(
                 db, close, 1.0, 100.0,
                 current_fill_fee=Decimal("0.25"),
-                current_fill_fee_verified=True,
+                current_fill_fee_verified=close_fee_verified,
             )
             await db.commit()
 
@@ -622,13 +631,18 @@ def test_breakeven_close_records_entry_and_exit_fees_on_completed_episode():
                 )
             )).scalar_one()
 
-            assert episode.status == "COMPLETED"
+            assert episode.status == expected_status
             assert episode.gross_pnl == pytest.approx(0.0)
             assert Decimal(str(episode.total_fees)) == Decimal("0.35")
-            assert Decimal(str(episode.net_pnl)) == Decimal("-0.35")
-            assert outcome.fee_basis_complete is True
-            assert Decimal(str(outcome.fee)) == Decimal("0.35")
-            assert Decimal(str(outcome.net_pnl)) == Decimal("-0.35")
+            if expected_status == "COMPLETED":
+                assert Decimal(str(episode.net_pnl)) == Decimal("-0.35")
+                assert outcome.fee_basis_complete is True
+                assert Decimal(str(outcome.fee)) == Decimal("0.35")
+                assert Decimal(str(outcome.net_pnl)) == Decimal("-0.35")
+            else:
+                assert outcome.fee_basis_complete is False
+                assert outcome.net_pnl is None
+                assert outcome.net_return_bps is None
 
     asyncio.run(run())
 
