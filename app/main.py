@@ -4036,9 +4036,18 @@ async def get_customer(
         # for ordinary signups. Any remaining non-UUID identity is quarantined.
         identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
     elif stale_legacy_quarantine:
-        # Recheck whether a remaining legacy row belongs to this confirmed Auth
-        # identity. Unrelated legacy customers must not keep this profile locked.
+        # Recheck both the current confirmed Auth email and the profile's
+        # previously stored email. A changed Auth email must not erase a legacy
+        # conflict attached to the old identity and permanently unlock the row.
         identity_review_required = await _legacy_customer_email_conflict(db, uid, email)
+        if (
+            not identity_review_required
+            and stored_email
+            and stored_email.casefold() != email.casefold()
+        ):
+            identity_review_required = await _legacy_customer_email_conflict(
+                db, uid, stored_email
+            )
         if not identity_review_required:
             profile.status = "ACTIVE"
             profile.email = email
