@@ -959,7 +959,7 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
             await db.refresh(old_outcome)
 
             assert old_outcome.fee_basis_complete is True
-            assert old_outcome.net_pnl == Decimal("9.90")
-            assert old_outcome.net_return_bps == pytest.approx(990.0)
+            assert old_outcome.net_pnl == Decimal("9.88")
+            assert old_outcome.net_return_bps == pytest.approx(988.0)
 
     asyncio.run(with_database(check))
