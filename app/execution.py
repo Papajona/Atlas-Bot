@@ -1836,7 +1836,7 @@ async def _apply_fill_to_position(
             elif episode.entry_quantity > 0:
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
- 
+
         # Attribute realized P&L to the lifecycle that was actually reduced.
         # On a flip, the active episode variable refers to the newly opened opposite leg.
         closing_episode_to_update = closing_episode if position_flipped else episode
