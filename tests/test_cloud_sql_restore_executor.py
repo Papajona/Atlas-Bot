@@ -305,6 +305,8 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
     assert "--sanitized-backup-reference" in workflow
     assert "ATLAS_CLOUD_SQL_SOURCE_PREPARED_CANONICAL_SHA256" in workflow
     assert "--expected-source-prepared-canonical-sha256" in workflow
+    assert "expected_source_prepared_sql_canonical_sha256" in workflow
+    assert '"expected_source_prepared_sql_canonical_sha256": candidate_evidence[' in executor
     assert "verify_sanitized_artifacts(" in executor
     assert '"status": "IMPORT_COMPLETE"' in executor
     assert "IMPORT_COMPLETE_NOT_CERTIFIED" in workflow
