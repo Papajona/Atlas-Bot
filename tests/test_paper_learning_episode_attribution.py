@@ -669,6 +669,7 @@ def test_breakeven_close_records_fees_and_gates_learning_replay(
     asyncio.run(run())
 
 def test_learning_episode_api_hides_unverified_fee_adjusted_results():
+    from decimal import Decimal
     from types import SimpleNamespace
     from app.main import _learning_episode_accounting_fields
 
