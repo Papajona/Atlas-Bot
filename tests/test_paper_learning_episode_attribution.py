@@ -81,7 +81,8 @@ def test_closing_paper_order_episode_is_not_replayed_as_position_entry():
                 mark_price=100.0,
                 realized_pnl=0.0,
                 unrealized_pnl=0.0,
-                reserved_capital=0.0,
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True,
                 strategy="regression-test",
                 entry_regime="UNKNOWN",
                 entry_trade_id=entry.id,
@@ -119,7 +120,10 @@ def test_closing_paper_order_episode_is_not_replayed_as_position_entry():
             closing = (await db.execute(
                 select(Trade).where(Trade.id == closing_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, closing, 1.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, closing, 1.0, 99.0,
+                current_fill_fee=0.1, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -186,7 +190,8 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
                 customer_id=None, trading_account_id=None, exchange="binance",
                 symbol=symbol, quantity=1.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
-                reserved_capital=0.0, strategy="old-strategy",
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True, strategy="old-strategy",
                 entry_regime="OLD", entry_trade_id=entry.id,
             ))
             db.add_all([
@@ -216,14 +221,20 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
             close_trade = (await db.execute(
                 select(Trade).where(Trade.id == close_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, close_trade, 1.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, close_trade, 1.0, 99.0,
+                current_fill_fee=0.1, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
             new_trade = (await db.execute(
                 select(Trade).where(Trade.id == reopen_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, new_trade, 1.0, 101.0)
+            await execution._apply_fill_to_position(
+                db, new_trade, 1.0, 101.0,
+                current_fill_fee=0.1, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -286,7 +297,8 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
                 customer_id=None, trading_account_id=None, exchange="binance",
                 symbol=symbol, quantity=1.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
-                reserved_capital=0.0, strategy="old-strategy",
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True, strategy="old-strategy",
                 entry_regime="OLD", entry_trade_id=entry.id,
             ))
             db.add_all([
@@ -310,7 +322,10 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
             order = (await db.execute(
                 select(Trade).where(Trade.id == reversal_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, order, 1.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, order, 1.0, 99.0,
+                current_fill_fee=0.0, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -318,7 +333,10 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
                 select(Trade).where(Trade.id == reversal_id)
             )).scalar_one()
             assert order.filled_quantity == pytest.approx(1.0)
-            await execution._apply_fill_to_position(db, order, 2.0, 98.0)
+            await execution._apply_fill_to_position(
+                db, order, 2.0, 98.0,
+                current_fill_fee=0.0, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -489,7 +507,8 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
                 customer_id=None, trading_account_id=None, exchange="binance",
                 symbol=symbol, quantity=1.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
-                reserved_capital=0.0, strategy="old-strategy",
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True, strategy="old-strategy",
                 entry_regime="OLD", entry_trade_id=entry.id,
             ))
             db.add_all([
@@ -513,7 +532,10 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
             order = (await db.execute(
                 select(Trade).where(Trade.id == reversal_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, order, 2.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, order, 2.0, 99.0,
+                current_fill_fee=0.0, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
