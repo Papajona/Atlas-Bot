@@ -8120,7 +8120,14 @@ def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
             except (TypeError, ValueError, ArithmeticError):
                 continue
             closed_at = outcome.created_at
-            if notional <= 0 or notional.is_finite() or not net_pnl.is_finite() or closed_at is None:
+            # Complete aggregate values must be finite and positive. Reject
+            # NaN/Infinity explicitly; finite values are the ordinary valid case.
+            if (
+                not notional.is_finite()
+                or not net_pnl.is_finite()
+                or notional <= 0
+                or closed_at is None
+            ):
                 continue
             completed.append((float(net_pnl / notional), closed_at))
             continue
