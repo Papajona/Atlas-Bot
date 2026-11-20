@@ -565,8 +565,7 @@ def upgrade() -> None:
         SET status = 'FEE_RECONCILIATION_PENDING',
             replay_status = 'PENDING',
             replay_version = '',
-            replay_error = 'Fee basis incomplete; awaiting authoritative reconciliation',
-            learning_memory_json = '{}'
+            replay_error = 'Fee basis incomplete; awaiting authoritative reconciliation'
         WHERE entry_trade_id = :entry_trade_id
           AND status = 'COMPLETED'
     """)
