@@ -16,6 +16,7 @@ on:
       - 'tests/test_postgres_ledger_concurrency_3_10_46.py'
       - 'tests/test_ledger_invariants_3_10_46.py'
       - 'tests/test_ledger_all_paths_concurrent_3_10_46.py'
+      - 'tests/test_audit_2026_11_20_destination_race_postgres.py'
       - 'tests/test_unified_custody.py'
       # Changes to the customer paper execution/ledger/provisioning path must
       # receive the dedicated PostgreSQL gate, not only the general pytest job.
@@ -218,6 +219,7 @@ jobs:
           pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py::test_concurrent_withdrawal_reserves_never_overdraw -vv --tb=short
           pytest -q tests/test_postgres_ledger_concurrency_3_10_46.py::test_withdrawal_reserve_acquires_row_lock_before_mutation -vv --tb=short -s
           pytest -q -rs --junitxml=pg-ledger.xml tests/test_postgres_ledger_concurrency_3_10_46.py -v
+          pytest -q -rs --junitxml=pg-destination-race.xml tests/test_audit_2026_11_20_destination_race_postgres.py -v --tb=short
           EXIT_CODE=$?
           if [ $EXIT_CODE -ne 0 ]; then
             echo "ERROR: Postgres concurrency tests failed. This is a BLOCKER for ledger safety."
@@ -293,7 +295,7 @@ jobs:
             -v --tb=short
 
       - name: Reject skipped mandatory PostgreSQL tests
-        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml pg-paper.xml pg-paper-shared.xml pg-custody.xml
+        run: python scripts/assert_no_skips.py pg-ledger.xml pg-paths.xml pg-paper.xml pg-paper-shared.xml pg-custody.xml pg-destination-race.xml
 
       - name: Report success
         if: success()
