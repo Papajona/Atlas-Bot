@@ -166,28 +166,73 @@ def _episode_entry_quantity(
     return min(quantity, filled_quantity)
 
 
+def _episode_position_quantity(
+    episode: dict | None,
+    *,
+    lifecycle_closed: bool,
+) -> Decimal | None:
+    """Read the quantity opened in this lifecycle, including its later add-ons."""
+    if episode is None:
+        return None
+    try:
+        quantity = Decimal(str(episode.get("entry_quantity") or 0))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    status = str(episode.get("status") or "").upper()
+    allowed = {"COMPLETED"} if lifecycle_closed else {"OPEN", "COMPLETED"}
+    if status not in allowed or not quantity.is_finite() or quantity <= 0:
+        return None
+    return quantity
+
+
 def _expected_closing_order_quantity(
     order: dict | None,
-    episode: dict | None,
+    remaining_position_quantity: Decimal,
 ) -> Decimal | None:
-    """Exclude a reversal order's newly opened opposite leg from its old close."""
+    """Allocate an order's fills to the old position before its reversal leg."""
     if order is None:
         return None
     try:
         filled = Decimal(str(order.get("filled_quantity") or 0))
+        remaining = Decimal(str(remaining_position_quantity))
     except (TypeError, ValueError, ArithmeticError):
         return None
-    if not filled.is_finite() or filled <= 0:
+    if (
+        not filled.is_finite() or filled <= 0
+        or not remaining.is_finite() or remaining <= 0
+    ):
         return None
-    if episode is None:
-        return filled
-    opened_quantity = _episode_entry_quantity(episode, filled)
-    if opened_quantity is None:
+    return min(filled, remaining)
+
+
+def _allocate_lifecycle_closing_quantities(
+    orders: list[dict],
+    entry_episode: dict | None,
+    *,
+    lifecycle_closed: bool,
+) -> dict[int, Decimal] | None:
+    """Allocate closing orders against the entry episode, never the reversal's later episode."""
+    remaining = _episode_position_quantity(
+        entry_episode, lifecycle_closed=lifecycle_closed
+    )
+    if remaining is None:
         return None
-    expected = filled - opened_quantity
-    if expected <= 0:
+    allocations: dict[int, Decimal] = {}
+    for order in orders:
+        try:
+            order_id = int(order["id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        expected = _expected_closing_order_quantity(order, remaining)
+        if expected is None:
+            return None
+        allocations[order_id] = expected
+        remaining -= expected
+    if lifecycle_closed and remaining > _AMOUNT_TOLERANCE:
+        # At least one executed close is missing from strategy_outcomes. This
+        # also catches omitted zero-PnL fills which per-order checks cannot see.
         return None
-    return expected
+    return allocations
 
 
 def _entry_order_fee_fraction(
@@ -215,17 +260,21 @@ def _entry_order_fee_fraction(
 
 def _closing_order_fee_fraction(
     order: dict | None,
-    episode: dict | None,
+    expected_closing_quantity: Decimal | None,
 ) -> Decimal | None:
-    """Allocate only the part of a reversal order that closed the old position."""
-    if order is None:
+    """Allocate only the source-order fee attributable to the old position close."""
+    if order is None or expected_closing_quantity is None:
         return None
     try:
         filled = Decimal(str(order.get("filled_quantity") or 0))
+        expected_close = Decimal(str(expected_closing_quantity))
     except (TypeError, ValueError, ArithmeticError):
         return None
-    expected_close = _expected_closing_order_quantity(order, episode)
-    if expected_close is None or not filled.is_finite() or filled <= 0:
+    if (
+        not filled.is_finite() or filled <= 0
+        or not expected_close.is_finite()
+        or expected_close <= 0 or expected_close > filled
+    ):
         return None
     return expected_close / filled
 
@@ -557,33 +606,64 @@ def upgrade() -> None:
                 entry_order_reused = (
                     reused_entry_order or entry_trade_id in cross_role_reused_ids
                 )
+                has_closed_fill = any(
+                    str(row["lifecycle_status"] or "").upper() == "CLOSED"
+                    for row in rows
+                )
                 entry_fee_fraction = _entry_order_fee_fraction(
                     source_trades.get(entry_trade_id),
                     episodes_by_trade_id.get(entry_trade_id),
                     reused_entry_order=entry_order_reused,
                 )
-                expected_closing_quantities: dict[int, Decimal | None] = {}
+                # The old position's own episode includes its initial entry and
+                # every later add-on. A reversal order's episode instead describes
+                # the opposite leg and keeps growing as that new position is added
+                # to. Allocate closing fills from the old lifecycle quantity.
+                closing_order_sequence: dict[int, int] = {}
+                for row in rows:
+                    close_id = row["closing_trade_id"]
+                    if close_id is None:
+                        continue
+                    close_id = int(close_id)
+                    sequence = int(row["sequence"] or 0)
+                    closing_order_sequence[close_id] = min(
+                        sequence,
+                        closing_order_sequence.get(close_id, sequence),
+                    )
+                ordered_closing_orders = [
+                    closing_trades[closing_id]
+                    for closing_id in sorted(
+                        closing_ids,
+                        key=lambda value: (
+                            closing_order_sequence.get(value, 0), value
+                        ),
+                    )
+                    if closing_id in closing_trades
+                ]
+                expected_allocations = (
+                    None
+                    if reused_entry_order
+                    else _allocate_lifecycle_closing_quantities(
+                        ordered_closing_orders,
+                        episodes_by_trade_id.get(entry_trade_id),
+                        lifecycle_closed=has_closed_fill,
+                    )
+                )
+                expected_closing_quantities: dict[int, Decimal | None] = {
+                    closing_id: (
+                        expected_allocations.get(closing_id)
+                        if expected_allocations is not None else None
+                    )
+                    for closing_id in closing_ids
+                }
                 closing_fee_fractions: dict[int, Decimal | None] = {}
                 for closing_id in closing_ids:
-                    closing_order = closing_trades.get(closing_id)
-                    closing_episode = episodes_by_trade_id.get(closing_id)
-                    if closing_id in cross_role_reused_ids:
-                        # The unique episode row now describes the later entry leg,
-                        # not necessarily the historical closing leg. Preserve the
-                        # outcomes but do not invent either quantity or fee shares.
-                        expected_closing_quantities[closing_id] = None
-                        closing_fee_fractions[closing_id] = None
-                    else:
-                        expected_closing_quantities[closing_id] = (
-                            _expected_closing_order_quantity(
-                                closing_order, closing_episode
-                            )
+                    closing_fee_fractions[closing_id] = (
+                        _closing_order_fee_fraction(
+                            closing_trades.get(closing_id),
+                            expected_closing_quantities.get(closing_id),
                         )
-                        closing_fee_fractions[closing_id] = (
-                            _closing_order_fee_fraction(
-                                closing_order, closing_episode
-                            )
-                        )
+                    )
                 fee_total = _reconstruct_lifecycle_fee_total(
                     entry_trade_id,
                     closing_ids,
@@ -598,11 +678,15 @@ def upgrade() -> None:
                 # zero-PnL fills that the old producer never inserted.
                 row_notionals = {}
                 row_quantities = {}
-                complete = bool(closing_ids) and len(closing_ids) == len({
-                    int(row["closing_trade_id"])
-                    for row in rows
-                    if row["closing_trade_id"] is not None
-                })
+                complete = (
+                    bool(closing_ids)
+                    and expected_allocations is not None
+                    and len(closing_ids) == len({
+                        int(row["closing_trade_id"])
+                        for row in rows
+                        if row["closing_trade_id"] is not None
+                    })
+                )
                 notionals_by_closing_trade = {}
                 quantities_by_closing_trade = {}
     
@@ -644,10 +728,6 @@ def upgrade() -> None:
                     ):
                         complete = False
     
-                has_closed_fill = any(
-                    str(row["lifecycle_status"] or "").upper() == "CLOSED"
-                    for row in rows
-                )
                 total_realized = sum(
                     (Decimal(str(row["realized_pnl"] or 0)) for row in rows),
                     Decimal("0"),
