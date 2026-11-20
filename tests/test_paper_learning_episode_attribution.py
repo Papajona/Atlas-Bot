@@ -569,7 +569,7 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
     "entry_basis_known,close_fee_verified,expected_status",
     [
         (True, True, "COMPLETED"),
-        (False, False, "FEE_RECONCILIATION_PENDING"),
+        (False, False, "FEE_PENDING"),
     ],
 )
 def test_breakeven_close_records_fees_and_gates_learning_replay(
