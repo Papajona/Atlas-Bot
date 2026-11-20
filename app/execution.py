@@ -1756,6 +1756,9 @@ async def _apply_fill_to_position(
         episode = (await db.execute(
             select(TradeLearningEpisode).where(TradeLearningEpisode.entry_trade_id == episode_trade_id).with_for_update()
         )).scalar_one_or_none()
+        # Preserve the old position episode before selecting the opposite leg.
+        closing_episode = episode if position_flipped else None
+        closing_episode_trade_id = episode_trade_id if position_flipped else None
         if position_flipped and episode is not None:
             # The previous position lifecycle has ended even though a new opposite
             # position was opened by the same order. Close the old episode before
@@ -1768,6 +1771,8 @@ async def _apply_fill_to_position(
             episode.exit_at = utcnow()
 
         if position_flipped:
+            # Never fall back to mutating the old closed episode as the new leg.
+            episode = None
             new_episode = (await db.execute(
                 select(TradeLearningEpisode).where(TradeLearningEpisode.entry_trade_id == trade.id).with_for_update()
             )).scalar_one_or_none()
@@ -1784,6 +1789,8 @@ async def _apply_fill_to_position(
                 episode.exit_price = 0.0
                 episode.exit_at = None
                 episode.closing_trade_id = None
+                # Only the unclosed opposite leg's residual fee belongs here.
+                episode.total_fees = Decimal(str(position.entry_fee or 0))
         if episode is not None:
             if old_qty == 0:
                 # A single partially filled reversal order can first close the old
@@ -1822,44 +1829,6 @@ async def _apply_fill_to_position(
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
-            if closing_decimal > 0:
-                # A breakeven close still realizes an exit fee and completes a
-                # learning episode; gate fee/exit bookkeeping on closed quantity,
-                # not on whether gross price movement happened to be nonzero.
-                episode.gross_pnl = (
-                    Decimal(str(episode.gross_pnl or 0)) + realized_decimal
-                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
-                episode.exit_price = float(fill_price)
-                episode.closing_trade_id = trade.id
-                episode.exit_at = utcnow()
-                # Fees are recomputed from the immutable entry and closing trades so
-                # cumulative broker fee fields cannot be double-counted.
-                entry_trade = await db.get(Trade, episode_trade_id)
-                close_rows = (await db.execute(
-                    select(Trade).where(Trade.id.in_(
-                        select(StrategyOutcome.closing_trade_id).where(
-                            StrategyOutcome.trade_id == episode_trade_id,
-                            StrategyOutcome.lifecycle_status == "OPEN",
-                            StrategyOutcome.closing_trade_id.is_not(None),
-                        )
-                    ))
-                )).scalars().all()
-                total_fees = Decimal(str(entry_trade.fee or 0)) if entry_trade else Decimal("0")
-                total_fees += sum(
-                    (Decimal(str(row.fee or 0)) for row in close_rows if row.id != trade.id),
-                    Decimal("0"),
-                )
-                total_fees += Decimal(str(trade.fee or 0))
-                episode.total_fees = total_fees
-                episode.net_pnl = (
-                    Decimal(str(episode.gross_pnl or 0)) - total_fees
-                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
-                notional = abs(
-                    Decimal(str(episode.entry_quantity or 0)) * Decimal(str(episode.entry_price or 0))
-                )
-                episode.return_bps = float(
-                    Decimal(str(episode.net_pnl)) / notional * Decimal("10000")
-                ) if notional > 0 else 0.0
             if abs(float(position.quantity or 0.0)) < 1e-12:
                 episode.status = "COMPLETED"
                 episode.exit_price = float(fill_price)
@@ -1867,6 +1836,51 @@ async def _apply_fill_to_position(
             elif episode.entry_quantity > 0:
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
+ 
+        # Attribute realized P&L to the lifecycle that was actually reduced.
+        # On a flip, the active episode variable refers to the newly opened opposite leg.
+        closing_episode_to_update = closing_episode if position_flipped else episode
+        closing_episode_entry_id = (
+            closing_episode_trade_id if position_flipped else episode_trade_id
+        )
+        if closing_decimal > 0 and closing_episode_to_update is not None:
+            closing_episode_to_update.gross_pnl = (
+                Decimal(str(closing_episode_to_update.gross_pnl or 0))
+                + realized_decimal
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+            closing_episode_to_update.exit_price = float(fill_price)
+            closing_episode_to_update.closing_trade_id = trade.id
+            closing_episode_to_update.exit_at = utcnow()
+            entry_trade = await db.get(Trade, closing_episode_entry_id)
+            close_rows = (await db.execute(
+                select(Trade).where(Trade.id.in_(
+                    select(StrategyOutcome.closing_trade_id).where(
+                        StrategyOutcome.trade_id == closing_episode_entry_id,
+                        StrategyOutcome.lifecycle_status == "OPEN",
+                        StrategyOutcome.closing_trade_id.is_not(None),
+                    )
+                ))
+            )).scalars().all()
+            total_fees = Decimal(str(entry_trade.fee or 0)) if entry_trade else Decimal("0")
+            total_fees += sum(
+                (Decimal(str(row.fee or 0)) for row in close_rows if row.id != trade.id),
+                Decimal("0"),
+            )
+            total_fees += Decimal(str(trade.fee or 0))
+            closing_episode_to_update.total_fees = total_fees
+            closing_episode_to_update.net_pnl = (
+                Decimal(str(closing_episode_to_update.gross_pnl or 0)) - total_fees
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+            notional = abs(
+                Decimal(str(closing_episode_to_update.entry_quantity or 0))
+                * Decimal(str(closing_episode_to_update.entry_price or 0))
+            )
+            closing_episode_to_update.return_bps = float(
+                Decimal(str(closing_episode_to_update.net_pnl))
+                / notional * Decimal("10000")
+            ) if notional > 0 else 0.0
+            closing_episode_to_update.updated_at = utcnow()
+
 
         # Orders that add to or close an existing position are not new position
         # lifecycles. Preserve their decision snapshot, but exclude their order-level
