@@ -38,6 +38,7 @@ def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator(monk
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
 
     async def run():
         try:
@@ -86,6 +87,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
@@ -254,6 +256,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
         monkeypatch.setattr(app_db, "engine", test_engine)
         monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
         monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
         await init_db()
         async with test_sessions() as db:
             state = await execution._get_state_locked(db)
@@ -384,6 +387,7 @@ def test_platform_paper_submission_rejects_fx_and_unverified_derivatives(monkeyp
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     SessionLocal = test_sessions
 
     async def run():
@@ -469,6 +473,7 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     SessionLocal = test_sessions
 
     async def run():
@@ -620,6 +625,7 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     SessionLocal = test_sessions
 
     async def run():
@@ -812,6 +818,7 @@ def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch, tmp_pa
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     SessionLocal = test_sessions
 
     async def run():
@@ -947,6 +954,7 @@ def test_missing_calibrated_quote_still_scans_closed_bar_for_protective_stop(mon
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     SessionLocal = test_sessions
 
     async def run():
@@ -1060,6 +1068,7 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch, t
     monkeypatch.setattr(app_db, "engine", test_engine)
     monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
     monkeypatch.setattr(execution, "SessionLocal", test_sessions)
+    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
     SessionLocal = test_sessions
 
     async def run():
