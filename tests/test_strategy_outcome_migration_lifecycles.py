@@ -98,7 +98,7 @@ def test_completed_lifecycle_reconstructs_a_repeated_partial_order_fee_once():
 
 def test_reversal_close_quantity_uses_old_position_not_later_add_ons_to_new_leg():
     old_position_episode = {"entry_quantity": "10", "status": "COMPLETED"}
-    reversal_order = {"id": 20, "filled_quantity": "10"}
+    reversal_order = {"id": 20, "filled_quantity": "12"}
     # The reversal initially opened 2 units, then later add-ons raised the
     # reversal episode to 5. That later total must not determine the old close.
     later_reversal_episode = {"entry_quantity": "5", "status": "OPEN"}
@@ -111,7 +111,7 @@ def test_reversal_close_quantity_uses_old_position_not_later_add_ons_to_new_leg(
     assert allocations == {20: Decimal("10")}
     assert MIGRATION["_closing_order_fee_fraction"](
         reversal_order, allocations[20]
-    ) == Decimal("1")
+    ) == Decimal("0.8333333333333333333333333333")
 
 
 def test_reversal_close_quantity_consumes_prior_closes_before_reversal_leg():
