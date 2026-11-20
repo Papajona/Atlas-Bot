@@ -122,6 +122,41 @@ def _reconstruct_remaining_entry_fee(
         return None
     return fee * remaining / entered
 
+
+
+def _split_outcome_lifecycles(rows: list[dict]) -> list[list[dict]]:
+    """Split reused entry-order outcomes at each terminal close marker.
+
+    Historical producers marked partial closes OPEN and the terminal fill CLOSED.
+    A reused entry order can therefore contain multiple lifecycles under one
+    trade_id; aggregating the whole trade_id would combine separate positions.
+    """
+    lifecycles: list[list[dict]] = []
+    current: list[dict] = []
+    for row in rows:
+        current.append(row)
+        if str(row.get("lifecycle_status") or "").upper() == "CLOSED":
+            lifecycles.append(current)
+            current = []
+    if current:
+        lifecycles.append(current)
+    return lifecycles
+
+
+def _reconstruct_lifecycle_fee_total(
+    entry_trade_id: int,
+    closing_trade_ids: list[int],
+    source_trades: dict[int, dict],
+    *,
+    reused_entry_order: bool,
+) -> Decimal | None:
+    """Do not reuse a cumulative entry-order fee as the fee for multiple lifecycles."""
+    if reused_entry_order:
+        return None
+    return _reconstruct_trade_fee_total(
+        entry_trade_id, closing_trade_ids, source_trades
+    )
+
 def upgrade() -> None:
     if context.is_offline_mode():
         raise RuntimeError(
@@ -304,153 +339,162 @@ def upgrade() -> None:
             if not rows:
                 continue
 
-            closing_ids = sorted({
-                int(row["closing_trade_id"])
-                for row in rows
-                if row["closing_trade_id"] is not None
-            })
-            source_trade_ids = sorted({entry_trade_id, *closing_ids})
-            source_trades = {
-                int(row["id"]): dict(row)
-                for row in bind.execute(
-                    trade_lookup, {"trade_ids": source_trade_ids}
-                ).mappings().all()
-            }
-            closing_trades = {
-                closing_id: source_trades[closing_id]
-                for closing_id in closing_ids
-                if closing_id in source_trades
-            }
-            fee_total = _reconstruct_trade_fee_total(
-                entry_trade_id, closing_ids, source_trades
-            )
-
-            # Reconstruct fill notionals, then verify every closing order's full
-            # filled notional/quantity is represented. This catches historical
-            # zero-PnL fills that the old producer never inserted.
-            row_notionals = {}
-            row_quantities = {}
-            complete = bool(closing_ids) and len(closing_ids) == len({
-                int(row["closing_trade_id"])
-                for row in rows
-                if row["closing_trade_id"] is not None
-            })
-            notionals_by_closing_trade = {}
-            quantities_by_closing_trade = {}
-
-            for row in rows:
-                closing_id = row["closing_trade_id"]
-                if closing_id is None or int(closing_id) not in closing_trades:
-                    complete = False
+            lifecycle_groups = _split_outcome_lifecycles(rows)
+            reused_entry_order = len(lifecycle_groups) > 1
+            for lifecycle_rows in lifecycle_groups:
+                if not lifecycle_rows:
                     continue
-                closing_trade = closing_trades[int(closing_id)]
-                notional = _reconstruct_notional(row)
-                quantity = Decimal(str(row["closing_quantity"] or 0))
-                avg_price = Decimal(str(closing_trade["average_fill_price"] or 0))
-                if quantity <= 0 and notional > 0 and avg_price > 0:
-                    quantity = notional / avg_price
-                if notional <= 0 or quantity <= 0:
-                    complete = False
-                row_notionals[int(row["id"])] = notional
-                row_quantities[int(row["id"])] = quantity
-                notionals_by_closing_trade[int(closing_id)] = (
-                    notionals_by_closing_trade.get(int(closing_id), Decimal("0")) + notional
+                rows = lifecycle_rows
+                closing_ids = sorted({
+                    int(row["closing_trade_id"])
+                    for row in rows
+                    if row["closing_trade_id"] is not None
+                })
+                source_trade_ids = sorted({entry_trade_id, *closing_ids})
+                source_trades = {
+                    int(row["id"]): dict(row)
+                    for row in bind.execute(
+                        trade_lookup, {"trade_ids": source_trade_ids}
+                    ).mappings().all()
+                }
+                closing_trades = {
+                    closing_id: source_trades[closing_id]
+                    for closing_id in closing_ids
+                    if closing_id in source_trades
+                }
+                fee_total = _reconstruct_lifecycle_fee_total(
+                    entry_trade_id,
+                    closing_ids,
+                    source_trades,
+                    reused_entry_order=reused_entry_order,
                 )
-                quantities_by_closing_trade[int(closing_id)] = (
-                    quantities_by_closing_trade.get(int(closing_id), Decimal("0")) + quantity
-                )
-
-            for closing_id in closing_ids:
-                order = closing_trades.get(closing_id)
-                if order is None:
-                    complete = False
-                    continue
-                expected_quantity = Decimal(str(order["filled_quantity"] or 0))
-                actual_notional = notionals_by_closing_trade.get(closing_id, Decimal("0"))
-                actual_quantity = quantities_by_closing_trade.get(closing_id, Decimal("0"))
-                if not _reconcile_closing_order_fill_evidence(
-                    expected_quantity, actual_quantity, actual_notional
-                ):
-                    complete = False
-
-            has_closed_fill = any(
-                str(row["lifecycle_status"] or "").upper() == "CLOSED"
-                for row in rows
-            )
-            total_realized = sum(
-                (Decimal(str(row["realized_pnl"] or 0)) for row in rows),
-                Decimal("0"),
-            )
-            # Historical outcome rows can repeat a closing order's cumulative
-            # fee. Reconstruct from each source order once rather than summing rows.
-            fee_basis_complete = bool(complete and fee_total is not None)
-            total_fee = fee_total if fee_basis_complete else Decimal("0")
-            total_net = (
-                total_realized - total_fee
-                if fee_basis_complete else Decimal("0")
-            )
-            total_notional = sum(row_notionals.values(), Decimal("0"))
-            total_quantity = sum(row_quantities.values(), Decimal("0"))
-
-            # For still-open historical positions, store only per-fill evidence;
-            # leave the lifecycle OPEN so a later live close can aggregate it.
-            if not has_closed_fill:
+    
+                # Reconstruct fill notionals, then verify every closing order's full
+                # filled notional/quantity is represented. This catches historical
+                # zero-PnL fills that the old producer never inserted.
+                row_notionals = {}
+                row_quantities = {}
+                complete = bool(closing_ids) and len(closing_ids) == len({
+                    int(row["closing_trade_id"])
+                    for row in rows
+                    if row["closing_trade_id"] is not None
+                })
+                notionals_by_closing_trade = {}
+                quantities_by_closing_trade = {}
+    
                 for row in rows:
-                    row_id = int(row["id"])
+                    closing_id = row["closing_trade_id"]
+                    if closing_id is None or int(closing_id) not in closing_trades:
+                        complete = False
+                        continue
+                    closing_trade = closing_trades[int(closing_id)]
+                    notional = _reconstruct_notional(row)
+                    quantity = Decimal(str(row["closing_quantity"] or 0))
+                    avg_price = Decimal(str(closing_trade["average_fill_price"] or 0))
+                    if quantity <= 0 and notional > 0 and avg_price > 0:
+                        quantity = notional / avg_price
+                    if notional <= 0 or quantity <= 0:
+                        complete = False
+                    row_notionals[int(row["id"])] = notional
+                    row_quantities[int(row["id"])] = quantity
+                    notionals_by_closing_trade[int(closing_id)] = (
+                        notionals_by_closing_trade.get(int(closing_id), Decimal("0")) + notional
+                    )
+                    quantities_by_closing_trade[int(closing_id)] = (
+                        quantities_by_closing_trade.get(int(closing_id), Decimal("0")) + quantity
+                    )
+    
+                for closing_id in closing_ids:
+                    order = closing_trades.get(closing_id)
+                    if order is None:
+                        complete = False
+                        continue
+                    expected_quantity = Decimal(str(order["filled_quantity"] or 0))
+                    actual_notional = notionals_by_closing_trade.get(closing_id, Decimal("0"))
+                    actual_quantity = quantities_by_closing_trade.get(closing_id, Decimal("0"))
+                    if not _reconcile_closing_order_fill_evidence(
+                        expected_quantity, actual_quantity, actual_notional
+                    ):
+                        complete = False
+    
+                has_closed_fill = any(
+                    str(row["lifecycle_status"] or "").upper() == "CLOSED"
+                    for row in rows
+                )
+                total_realized = sum(
+                    (Decimal(str(row["realized_pnl"] or 0)) for row in rows),
+                    Decimal("0"),
+                )
+                # Historical outcome rows can repeat a closing order's cumulative
+                # fee. Reconstruct from each source order once rather than summing rows.
+                fee_basis_complete = bool(complete and fee_total is not None)
+                total_fee = fee_total if fee_basis_complete else Decimal("0")
+                total_net = (
+                    total_realized - total_fee
+                    if fee_basis_complete else Decimal("0")
+                )
+                total_notional = sum(row_notionals.values(), Decimal("0"))
+                total_quantity = sum(row_quantities.values(), Decimal("0"))
+    
+                # For still-open historical positions, store only per-fill evidence;
+                # leave the lifecycle OPEN so a later live close can aggregate it.
+                if not has_closed_fill:
+                    for row in rows:
+                        row_id = int(row["id"])
+                        bind.execute(update_outcome, {
+                            "id": row_id,
+                            "closing_quantity": row_quantities.get(row_id, Decimal("0")) if complete else Decimal("0"),
+                            "closing_notional": row_notionals.get(row_id, Decimal("0")) if complete else Decimal("0"),
+                            "realized_pnl": row["realized_pnl"],
+                            "fee": row["fee"],
+                            "net_pnl": row["net_pnl"],
+                            "return_bps": row["return_bps"],
+                            "net_return_bps": row["net_return_bps"],
+                            "lifecycle_status": row["lifecycle_status"],
+                            "fee_basis_complete": fee_basis_complete,
+                        })
+                    continue
+    
+                # A completed trade must have every closing order and every filled
+                # unit represented. Unknown historical fills are retained for audit
+                # but cannot enter dashboard, edge-decay, or execution-health samples.
+                final = rows[-1]
+                valid_notional = total_notional if complete and total_notional > 0 else Decimal("0")
+                valid_quantity = total_quantity if complete and total_quantity > 0 else Decimal("0")
+                gross_return_bps = (
+                    float(total_realized / total_notional * Decimal("10000"))
+                    if valid_notional > 0 else 0.0
+                )
+                net_return_bps = (
+                    float(total_net / total_notional * Decimal("10000"))
+                    if valid_notional > 0 and fee_basis_complete else 0.0
+                )
+                for row in rows[:-1]:
                     bind.execute(update_outcome, {
-                        "id": row_id,
-                        "closing_quantity": row_quantities.get(row_id, Decimal("0")) if complete else Decimal("0"),
-                        "closing_notional": row_notionals.get(row_id, Decimal("0")) if complete else Decimal("0"),
+                        "id": int(row["id"]),
+                        "closing_quantity": row_quantities.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
+                        "closing_notional": row_notionals.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                         "realized_pnl": row["realized_pnl"],
                         "fee": row["fee"],
                         "net_pnl": row["net_pnl"],
                         "return_bps": row["return_bps"],
                         "net_return_bps": row["net_return_bps"],
-                        "lifecycle_status": row["lifecycle_status"],
+                        "lifecycle_status": "PARTIAL_CLOSED",
                         "fee_basis_complete": fee_basis_complete,
                     })
-                continue
-
-            # A completed trade must have every closing order and every filled
-            # unit represented. Unknown historical fills are retained for audit
-            # but cannot enter dashboard, edge-decay, or execution-health samples.
-            final = rows[-1]
-            valid_notional = total_notional if complete and total_notional > 0 else Decimal("0")
-            valid_quantity = total_quantity if complete and total_quantity > 0 else Decimal("0")
-            gross_return_bps = (
-                float(total_realized / total_notional * Decimal("10000"))
-                if valid_notional > 0 else 0.0
-            )
-            net_return_bps = (
-                float(total_net / total_notional * Decimal("10000"))
-                if valid_notional > 0 and fee_basis_complete else 0.0
-            )
-            for row in rows[:-1]:
                 bind.execute(update_outcome, {
-                    "id": int(row["id"]),
-                    "closing_quantity": row_quantities.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
-                    "closing_notional": row_notionals.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
-                    "realized_pnl": row["realized_pnl"],
-                    "fee": row["fee"],
-                    "net_pnl": row["net_pnl"],
-                    "return_bps": row["return_bps"],
-                    "net_return_bps": row["net_return_bps"],
-                    "lifecycle_status": "PARTIAL_CLOSED",
+                    "id": int(final["id"]),
+                    "closing_quantity": valid_quantity,
+                    "closing_notional": valid_notional,
+                    "realized_pnl": total_realized,
+                    "fee": total_fee,
+                    "net_pnl": total_net,
+                    "return_bps": gross_return_bps,
+                    "net_return_bps": net_return_bps,
+                    "lifecycle_status": "CLOSED",
                     "fee_basis_complete": fee_basis_complete,
                 })
-            bind.execute(update_outcome, {
-                "id": int(final["id"]),
-                "closing_quantity": valid_quantity,
-                "closing_notional": valid_notional,
-                "realized_pnl": total_realized,
-                "fee": total_fee,
-                "net_pnl": total_net,
-                "return_bps": gross_return_bps,
-                "net_return_bps": net_return_bps,
-                "lifecycle_status": "CLOSED",
-                "fee_basis_complete": fee_basis_complete,
-            })
-
+    
     # Server defaults are used only to make existing rows valid while adding
     # NOT NULL fields; the ORM owns defaults after the migration completes.
     op.alter_column("strategy_outcomes", "closing_quantity", server_default=None)
@@ -480,6 +524,7 @@ def upgrade() -> None:
         FROM strategy_outcomes
         WHERE trade_id = :entry_trade_id
           AND closing_trade_id IS NOT NULL
+          AND lifecycle_status = 'OPEN'
     """)
     update_position = sa.text("""
         UPDATE positions
