@@ -1420,7 +1420,16 @@ async def _apply_fill_to_position(
                 "trade_learning_entry_record_failed trade_id=%s", trade.id, exc_info=True
             )
     else:
-        old_qty = position.quantity
+        # Position.quantity is float-backed in the ORM, but newly-created or
+        # unrefreshed identity-map objects can still contain a Decimal assigned
+        # by a caller/test fixture. Normalize before mixing with the float fill
+        # delta below; Decimal + float otherwise raises during an ordinary close.
+        try:
+            old_qty = float(position.quantity or 0.0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("stored position quantity is not numeric") from exc
+        if not math.isfinite(old_qty):
+            raise ValueError("stored position quantity is not finite")
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
             if old_qty == 0:
                 # A flat Position row can remain after the previous lifecycle closes.
