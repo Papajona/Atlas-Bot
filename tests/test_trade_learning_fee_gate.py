@@ -17,7 +17,7 @@ def test_episode_quarantined_during_fetch_is_not_persisted_as_replayed(monkeypat
     )
     locked_row = SimpleNamespace(
         id=7,
-        status="FEE_RECONCILIATION_PENDING",
+        status="FEE_PENDING",
         replay_status="PENDING",
         replay_version="",
     )
@@ -83,4 +83,4 @@ def test_episode_quarantined_during_fetch_is_not_persisted_as_replayed(monkeypat
     assert result["skipped"] == 1
     assert result["failed"] == 0
     assert sessions[1].commits == 0
-    assert locked_row.status == "FEE_RECONCILIATION_PENDING"
+    assert locked_row.status == "FEE_PENDING"
