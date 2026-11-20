@@ -135,8 +135,8 @@ def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert
     retry_amount, tmp_path
 ):
     async def check():
-        # A file-backed SQLite database gives the incident writer a genuinely
-        # independent connection, matching the production transaction boundary.
+        # A file-backed SQLite database reproduces the single-writer lock that
+        # can be held by a live-fill caller before replay validation.
         database_path = tmp_path / f"legacy-shortfall-{retry_amount}.db"
         engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
         try:
@@ -198,7 +198,7 @@ def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert
                         db, 5, retry_amount, reference_id=reference_id
                     )
                 # The caller's failed trade transaction is rolled back. The HIGH
-                # replay incident must already have committed in its own session.
+                # replay incident must have committed after that rollback.
                 await db.rollback()
 
             async with sessions() as verify_db:
@@ -222,7 +222,7 @@ def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert
                 ).scalar_one()
                 assert ledger.trading_reserved == Decimal("0.000000")
                 # The rejected fill's uncommitted caller mutation was rolled
-                # back before the independent incident write was committed.
+                # back before the incident write was committed.
                 assert ledger.available == Decimal("11.000000")
         finally:
             await engine.dispose()
