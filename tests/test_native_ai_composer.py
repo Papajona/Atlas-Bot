@@ -209,7 +209,7 @@ def test_a_timeframe_after_the_word_risk_is_not_a_risk_percentage():
         ("do not use mean reversion; use breakout BTC long 1h", "BREAKOUT"),
         ("avoid breakout, use momentum BTC long 1h", "MOMENTUM"),
         ("no momentum; use trend following BTC long 1h", "TREND"),
-        ("not only momentum but breakout BTC long 1h", "BREAKOUT"),
+        ("not only momentum but breakout BTC long 1h", "ENSEMBLE"),
     ],
 )
 def test_negated_strategy_family_does_not_override_affirmative_family(
