@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.customer_funds import release_trading
-from app.db import Base, CustomerLedgerAccount, Incident
+from app.db import Base, CustomerLedgerAccount, Incident, LedgerEntry
 
 
 @pytest.fixture(autouse=True)
@@ -106,6 +106,20 @@ def test_release_replay_accepts_same_request_and_preserves_shortfall_request_amo
 
             await release_trading(db, 4, 25, reference_id="replay-shortfall:1")
             await db.commit()
+
+            # Exercise compatibility with rows written before requested amounts
+            # were copied into LedgerEntry.metadata_json. The old incident is the
+            # only authoritative record of the original over-reserve request.
+            legacy_entry = (
+                await db.execute(
+                    select(LedgerEntry).where(
+                        LedgerEntry.idempotency_key == "release:replay-shortfall:1:4"
+                    )
+                )
+            ).scalar_one()
+            legacy_entry.metadata_json = "{}"
+            await db.commit()
+
             await release_trading(db, 4, 25, reference_id="replay-shortfall:1")
             await db.commit()
 
