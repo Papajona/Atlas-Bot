@@ -794,3 +794,172 @@ def test_entry_fee_true_up_does_not_mark_basis_complete_while_add_on_fee_is_pend
             assert episode.net_pnl == pytest.approx(0.5)
 
     asyncio.run(with_database(check))
+
+
+def test_reconciled_partial_close_restores_remaining_entry_fee_basis_for_later_close():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=1, signal_id="entry-close-basis-restore",
+                client_order_id="entry-close-basis-restore", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                fee=Decimal("0.10"), fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            first_close = _trade(
+                customer_id=1, signal_id="first-partial-close",
+                client_order_id="first-partial-close", side="sell",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0.5,
+                fee=Decimal("0.01"), fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            reconciled_close = _trade(
+                customer_id=1, signal_id="reconciled-partial-close",
+                client_order_id="reconciled-partial-close", side="sell",
+                quantity=0.25, requested_quantity=0.25, filled_quantity=0.25,
+                fee=Decimal("0.02"), fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            later_close = _trade(
+                customer_id=1, signal_id="later-final-close",
+                client_order_id="later-final-close", side="sell",
+                quantity=0.25, requested_quantity=0.25, filled_quantity=0,
+                fee=Decimal("0"), fee_reconciliation_pending=False,
+                status="OPEN",
+            )
+            db.add_all([entry, first_close, reconciled_close, later_close])
+            await db.flush()
+
+            position = Position(
+                customer_id=1, exchange="binance", symbol="BTC/USDT",
+                quantity=0.25, average_entry_price=100,
+                entry_trade_id=entry.id, entry_fee=Decimal("0.05"),
+                # Reproduce the stale false flag left by an earlier pending close.
+                entry_fee_basis_known=False,
+            )
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=1,
+                exchange="binance", symbol="BTC/USDT", side="buy",
+                entry_quantity=1.0, entry_price=100, gross_pnl=Decimal("5"),
+                total_fees=Decimal("0.10"), net_pnl=Decimal("4.90"),
+                status="OPEN",
+            )
+            outcome = StrategyOutcome(
+                trade_id=entry.id, closing_trade_id=reconciled_close.id,
+                customer_id=1, strategy="test", regime="UNKNOWN",
+                asset="crypto", symbol="BTC/USDT", side="buy",
+                realized_pnl=Decimal("2.5"), fee=Decimal("0.02"),
+                return_bps=1000.0, net_pnl=None, net_return_bps=None,
+                closing_quantity=Decimal("0.25"), closing_notional=Decimal("25"),
+                fee_basis_complete=False, lifecycle_status="OPEN", sequence=1,
+                metadata_json=(
+                    '{"allocated_entry_fee":"0","closing_fee":"0",'
+                    '"fee_basis_complete":false}'
+                ),
+            )
+            db.add_all([position, episode, outcome])
+            await db.commit()
+
+            await execution._apply_reconciled_live_fee_basis(
+                db, reconciled_close, Decimal("0.02")
+            )
+            await db.commit()
+            await db.refresh(position)
+            await db.refresh(outcome)
+
+            assert position.entry_fee_basis_known is True
+            assert outcome.fee_basis_complete is True
+
+            await execution._apply_fill_to_position(
+                db,
+                later_close,
+                0.25,
+                110.0,
+                current_fill_fee=Decimal("0.01"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+
+            later_outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry.id,
+                    StrategyOutcome.closing_trade_id == later_close.id,
+                )
+            )).scalar_one()
+            metadata = __import__("json").loads(later_outcome.metadata_json or "{}")
+            # The remaining position's entry fee is allocated to the later close,
+            # rather than silently omitted because an earlier close had an unknown fee.
+            assert metadata["allocated_entry_fee"] == "0.05"
+            assert later_outcome.fee_basis_complete is True
+
+    asyncio.run(with_database(check))
+
+
+def test_old_completed_return_ignores_pending_fee_from_newer_independent_position():
+    async def check(sessions):
+        async with sessions() as db:
+            old_entry = _trade(
+                customer_id=1, signal_id="old-completed-entry",
+                client_order_id="old-completed-entry", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                fee=Decimal("0"), fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            old_close = _trade(
+                customer_id=1, signal_id="old-completed-close",
+                client_order_id="old-completed-close", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                fee=Decimal("0.02"), fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            new_entry = _trade(
+                customer_id=1, signal_id="new-independent-entry",
+                client_order_id="new-independent-entry", side="buy",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0.5,
+                fee=Decimal("0"), fee_reconciliation_pending=True,
+                status="FILLED",
+            )
+            db.add_all([old_entry, old_close, new_entry])
+            await db.flush()
+
+            current_position = Position(
+                customer_id=1, exchange="binance", symbol="BTC/USDT",
+                quantity=0.5, average_entry_price=120,
+                entry_trade_id=new_entry.id, entry_fee=Decimal("0"),
+                entry_fee_basis_known=False,
+            )
+            old_episode = TradeLearningEpisode(
+                entry_trade_id=old_entry.id, customer_id=1,
+                exchange="binance", symbol="BTC/USDT", side="buy",
+                entry_quantity=1.0, entry_price=100, gross_pnl=Decimal("10"),
+                total_fees=Decimal("0.02"), net_pnl=Decimal("9.98"),
+                status="COMPLETED",
+            )
+            old_outcome = StrategyOutcome(
+                trade_id=old_entry.id, closing_trade_id=old_close.id,
+                customer_id=1, strategy="test", regime="UNKNOWN",
+                asset="crypto", symbol="BTC/USDT", side="buy",
+                realized_pnl=Decimal("10"), fee=Decimal("0.02"),
+                return_bps=1000.0, net_pnl=Decimal("9.98"),
+                net_return_bps=998.0, closing_quantity=Decimal("1"),
+                closing_notional=Decimal("100"), fee_basis_complete=True,
+                lifecycle_status="CLOSED", sequence=1,
+                metadata_json=(
+                    '{"allocated_entry_fee":"0","closing_fee":"0.02",'
+                    '"fee_basis_complete":true}'
+                ),
+            )
+            db.add_all([current_position, old_episode, old_outcome])
+            await db.commit()
+
+            await execution._apply_reconciled_live_fee_basis(
+                db, old_entry, Decimal("0.10")
+            )
+            await db.commit()
+            await db.refresh(old_outcome)
+
+            assert old_outcome.fee_basis_complete is True
+            assert old_outcome.net_pnl == Decimal("9.90")
+            assert old_outcome.net_return_bps == pytest.approx(990.0)
+
+    asyncio.run(with_database(check))

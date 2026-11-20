@@ -1001,27 +1001,81 @@ async def _apply_reconciled_live_fee_basis(
             quantities[int(final.id)] = final_quantity
         return quantities
 
-    pending_fee_order_cache: dict[int, bool] = {}
+    lifecycle_end_cache: dict[int, dict[int, int | None]] = {}
+    pending_fee_order_cache: dict[tuple[int, int | None], bool] = {}
 
-    async def _has_pending_fee_order(entry_trade: Trade | None) -> bool:
-        """Keep a position's fee basis incomplete while any scoped order is unresolved."""
+    async def _lifecycle_end_trade_id(
+        entry_trade: Trade | None, outcome_row_id: int
+    ) -> int | None:
+        """Return this outcome's terminal close ID, or None for the active lifecycle.
+
+        A missing terminal boundary is not treated as an unlimited history window:
+        only a row group anchored to the currently open Position can be considered
+        active. This prevents a later independent position from poisoning old returns.
+        """
         if entry_trade is None:
+            return -1
+        entry_id = int(entry_trade.id)
+        if entry_id not in lifecycle_end_cache:
+            lifecycle_rows = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry_id
+                ).order_by(StrategyOutcome.sequence, StrategyOutcome.id)
+            )).scalars().all()
+            row_ends: dict[int, int | None] = {}
+            group: list[StrategyOutcome] = []
+            for lifecycle_row in lifecycle_rows:
+                group.append(lifecycle_row)
+                if str(lifecycle_row.lifecycle_status or "").upper() == "CLOSED":
+                    close_ids = [
+                        int(item.closing_trade_id)
+                        for item in group
+                        if item.closing_trade_id is not None
+                    ]
+                    end_id = max(close_ids) if close_ids else -1
+                    for item in group:
+                        row_ends[int(item.id)] = end_id
+                    group = []
+
+            if group:
+                position_is_active = bool(
+                    position is not None
+                    and int(position.entry_trade_id or 0) == entry_id
+                    and abs(float(position.quantity or 0.0)) > 1e-12
+                )
+                end_id = None if position_is_active else -1
+                for item in group:
+                    row_ends[int(item.id)] = end_id
+            lifecycle_end_cache[entry_id] = row_ends
+        return lifecycle_end_cache[entry_id].get(int(outcome_row_id), -1)
+
+    async def _has_pending_fee_order(
+        entry_trade: Trade | None,
+        lifecycle_end_trade_id: int | None,
+    ) -> bool:
+        """Check unresolved opening/add-on fees only within this position lifecycle."""
+        if entry_trade is None or lifecycle_end_trade_id == -1:
             return True
         entry_id = int(entry_trade.id)
-        if entry_id not in pending_fee_order_cache:
-            pending = (await db.execute(
-                select(Trade.id).where(
-                    Trade.id != trade.id,
-                    Trade.id >= entry_id,
-                    Trade.customer_id == entry_trade.customer_id,
-                    Trade.mode == entry_trade.mode,
-                    Trade.exchange == entry_trade.exchange,
-                    Trade.symbol == entry_trade.symbol,
-                    Trade.fee_reconciliation_pending.is_(True),
-                ).limit(1)
-            )).scalar_one_or_none()
-            pending_fee_order_cache[entry_id] = pending is not None
-        return pending_fee_order_cache[entry_id]
+        cache_key = (entry_id, lifecycle_end_trade_id)
+        if cache_key not in pending_fee_order_cache:
+            statement = select(Trade.id).where(
+                Trade.id != trade.id,
+                Trade.id > entry_id,
+                Trade.customer_id == entry_trade.customer_id,
+                Trade.mode == entry_trade.mode,
+                Trade.exchange == entry_trade.exchange,
+                Trade.symbol == entry_trade.symbol,
+                # A position's closing order has the opposite side. Only later
+                # same-side orders can add to this entry-fee basis.
+                Trade.side == entry_trade.side,
+                Trade.fee_reconciliation_pending.is_(True),
+            )
+            if lifecycle_end_trade_id is not None:
+                statement = statement.where(Trade.id <= lifecycle_end_trade_id)
+            pending = (await db.execute(statement.limit(1))).scalar_one_or_none()
+            pending_fee_order_cache[cache_key] = pending is not None
+        return pending_fee_order_cache[cache_key]
 
     entry_fill_quantities = _source_fill_quantities(entry_rows)
     closing_fill_quantities = _source_fill_quantities(closing_rows)
@@ -1122,13 +1176,20 @@ async def _apply_reconciled_live_fee_basis(
         # to the still-open aggregate position anchored to an earlier entry trade.
         # It is safe only before any close outcomes exist; once lots have closed,
         # the old schema cannot attribute that add-on fee across the realized legs.
+        position_entry_id = int(position.entry_trade_id or 0) if position is not None else 0
+        position_entry_trade = (
+            await db.get(Trade, position_entry_id) if position_entry_id > 0 else None
+        )
         if (
             position is None
+            or position_entry_trade is None
+            or int(trade.id) <= position_entry_id
+            or str(trade.side).lower() != str(position_entry_trade.side).lower()
             or abs(float(position.quantity or 0.0)) <= 1e-12
             or (str(trade.side).lower() == "buy") != (float(position.quantity or 0.0) > 0)
         ):
             raise ValueError(
-                f"cannot associate recovered fee for trade {trade.id} with an open position or outcome"
+                f"cannot associate recovered fee for trade {trade.id} with its own open position lifecycle"
             )
         prior_outcomes = int((await db.execute(
             select(func.count(StrategyOutcome.id)).where(
@@ -1164,7 +1225,9 @@ async def _apply_reconciled_live_fee_basis(
             position.entry_fee_basis_known = bool(
                 entry_trade is not None
                 and not bool(entry_trade.fee_reconciliation_pending)
-                and not await _has_pending_fee_order(entry_trade)
+                and not await _has_pending_fee_order(
+                    entry_trade, lifecycle_end_trade_id=None
+                )
             )
 
         if add_on_fee_only and bool(position.entry_fee_basis_known):
@@ -1190,6 +1253,28 @@ async def _apply_reconciled_live_fee_basis(
                     if entry_notional > 0 else 0.0
                 )
                 entry_episode.updated_at = utcnow()
+
+    # A closing-order fee is separate from the remaining position's entry-fee
+    # basis. Once that close is reconciled, restore the open position's basis from
+    # its own entry/add-on orders; never let another pending close poison it.
+    if position is not None and abs(float(position.quantity or 0.0)) > 1e-12:
+        for closing_row in closing_rows:
+            if int(position.entry_trade_id or 0) != int(closing_row.trade_id):
+                continue
+            entry_trade = await db.get(Trade, closing_row.trade_id)
+            lifecycle_end = await _lifecycle_end_trade_id(
+                entry_trade, int(closing_row.id)
+            )
+            if lifecycle_end is not None:
+                continue
+            position.entry_fee_basis_known = bool(
+                entry_trade is not None
+                and not bool(entry_trade.fee_reconciliation_pending)
+                and not await _has_pending_fee_order(
+                    entry_trade, lifecycle_end_trade_id=None
+                )
+            )
+            break
 
     changed_row_ids = set(entry_fee_by_row) | set(closing_fee_by_row)
     affected_entry_ids: set[int] = set()
@@ -1222,9 +1307,11 @@ async def _apply_reconciled_live_fee_basis(
             trade if int(row.closing_trade_id or 0) == int(trade.id)
             else await db.get(Trade, row.closing_trade_id)
         )
-        has_pending_fee_order = (
-            await _has_pending_fee_order(entry_trade)
-            if entry_trade is not None else True
+        lifecycle_end = await _lifecycle_end_trade_id(
+            entry_trade, int(row.id)
+        )
+        has_pending_fee_order = await _has_pending_fee_order(
+            entry_trade, lifecycle_end
         )
         basis_known = bool(
             entry_trade is not None
