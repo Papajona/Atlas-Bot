@@ -143,19 +143,138 @@ def _split_outcome_lifecycles(rows: list[dict]) -> list[list[dict]]:
     return lifecycles
 
 
+def _episode_entry_quantity(
+    episode: dict | None,
+    filled_quantity: Decimal,
+) -> Decimal | None:
+    """Read an episode's actual opened leg only when its lifecycle state supports it."""
+    if episode is None:
+        return None
+    try:
+        quantity = Decimal(str(episode.get("entry_quantity") or 0))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    status = str(episode.get("status") or "").upper()
+    if not quantity.is_finite() or quantity < 0:
+        return None
+    if status == "NOT_POSITION_ENTRY":
+        return Decimal("0") if quantity == 0 else None
+    if status not in {"OPEN", "COMPLETED"} or quantity <= 0:
+        return None
+    if quantity > filled_quantity + _AMOUNT_TOLERANCE:
+        return None
+    return min(quantity, filled_quantity)
+
+
+def _expected_closing_order_quantity(
+    order: dict | None,
+    episode: dict | None,
+) -> Decimal | None:
+    """Exclude a reversal order's newly opened opposite leg from its old close."""
+    if order is None:
+        return None
+    try:
+        filled = Decimal(str(order.get("filled_quantity") or 0))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if not filled.is_finite() or filled <= 0:
+        return None
+    if episode is None:
+        return filled
+    opened_quantity = _episode_entry_quantity(episode, filled)
+    if opened_quantity is None:
+        return None
+    expected = filled - opened_quantity
+    if expected <= 0:
+        return None
+    return expected
+
+
+def _entry_order_fee_fraction(
+    order: dict | None,
+    episode: dict | None,
+    *,
+    reused_entry_order: bool,
+) -> Decimal | None:
+    """Allocate only the part of a reversal order that opened this position."""
+    if order is None or reused_entry_order:
+        return None
+    try:
+        filled = Decimal(str(order.get("filled_quantity") or 0))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if not filled.is_finite() or filled <= 0:
+        return None
+    if episode is None:
+        return Decimal("1")
+    opened_quantity = _episode_entry_quantity(episode, filled)
+    if opened_quantity is None or opened_quantity <= 0:
+        return None
+    return opened_quantity / filled
+
+
+def _closing_order_fee_fraction(
+    order: dict | None,
+    episode: dict | None,
+) -> Decimal | None:
+    """Allocate only the part of a reversal order that closed the old position."""
+    if order is None:
+        return None
+    try:
+        filled = Decimal(str(order.get("filled_quantity") or 0))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    expected_close = _expected_closing_order_quantity(order, episode)
+    if expected_close is None or not filled.is_finite() or filled <= 0:
+        return None
+    return expected_close / filled
+
+
 def _reconstruct_lifecycle_fee_total(
     entry_trade_id: int,
     closing_trade_ids: list[int],
     source_trades: dict[int, dict],
     *,
     reused_entry_order: bool,
+    entry_fee_fraction: Decimal | None,
+    closing_fee_fractions: dict[int, Decimal | None],
 ) -> Decimal | None:
-    """Do not reuse a cumulative entry-order fee as the fee for multiple lifecycles."""
-    if reused_entry_order:
+    """Sum each source order once, prorating reversal fees across both positions."""
+    if reused_entry_order or entry_fee_fraction is None:
         return None
-    return _reconstruct_trade_fee_total(
-        entry_trade_id, closing_trade_ids, source_trades
-    )
+    if int(entry_trade_id) in {int(value) for value in closing_trade_ids}:
+        return None
+    total = Decimal("0")
+    fractions = {int(entry_trade_id): entry_fee_fraction}
+    fractions.update({
+        int(order_id): fraction
+        for order_id, fraction in closing_fee_fractions.items()
+    })
+    for order_id in {int(entry_trade_id), *(int(value) for value in closing_trade_ids)}:
+        fraction = fractions.get(order_id)
+        if fraction is None or not fraction.is_finite() or fraction < 0 or fraction > 1:
+            return None
+        order_fee = _reconstruct_trade_fee_total(order_id, [], source_trades)
+        if order_fee is None:
+            return None
+        total += order_fee * fraction
+    return total
+
+
+def _fee_value_to_persist(
+    reconstructed_fee: Decimal,
+    recorded_fee: Decimal | None,
+    *,
+    fee_basis_complete: bool,
+) -> Decimal:
+    """Never erase historical fee evidence merely because its basis is unverified."""
+    if fee_basis_complete:
+        return reconstructed_fee
+    try:
+        previous = Decimal(str(recorded_fee or 0))
+    except (TypeError, ValueError, ArithmeticError):
+        return Decimal("0")
+    return previous if previous.is_finite() and previous >= 0 else Decimal("0")
 
 
 def _historical_lifecycle_fee_basis_complete(
@@ -343,6 +462,11 @@ def upgrade() -> None:
         FROM trades
         WHERE id IN :trade_ids
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
+    episode_lookup = sa.text("""
+        SELECT entry_trade_id, entry_quantity, status
+        FROM trade_learning_episodes
+        WHERE entry_trade_id IN :trade_ids
+    """).bindparams(sa.bindparam("trade_ids", expanding=True))
 
     while True:
         trade_ids = [
@@ -389,11 +513,39 @@ def upgrade() -> None:
                     for closing_id in closing_ids
                     if closing_id in source_trades
                 }
+                episode_rows = bind.execute(
+                    episode_lookup, {"trade_ids": source_trade_ids}
+                ).mappings().all()
+                episodes_by_trade_id = {
+                    int(row["entry_trade_id"]): dict(row) for row in episode_rows
+                }
+                entry_fee_fraction = _entry_order_fee_fraction(
+                    source_trades.get(entry_trade_id),
+                    episodes_by_trade_id.get(entry_trade_id),
+                    reused_entry_order=reused_entry_order,
+                )
+                expected_closing_quantities: dict[int, Decimal | None] = {}
+                closing_fee_fractions: dict[int, Decimal | None] = {}
+                for closing_id in closing_ids:
+                    closing_order = closing_trades.get(closing_id)
+                    closing_episode = episodes_by_trade_id.get(closing_id)
+                    expected_closing_quantities[closing_id] = (
+                        _expected_closing_order_quantity(
+                            closing_order, closing_episode
+                        )
+                    )
+                    closing_fee_fractions[closing_id] = (
+                        _closing_order_fee_fraction(
+                            closing_order, closing_episode
+                        )
+                    )
                 fee_total = _reconstruct_lifecycle_fee_total(
                     entry_trade_id,
                     closing_ids,
                     source_trades,
                     reused_entry_order=reused_entry_order,
+                    entry_fee_fraction=entry_fee_fraction,
+                    closing_fee_fractions=closing_fee_fractions,
                 )
     
                 # Reconstruct fill notionals, then verify every closing order's full
@@ -436,7 +588,10 @@ def upgrade() -> None:
                     if order is None:
                         complete = False
                         continue
-                    expected_quantity = Decimal(str(order["filled_quantity"] or 0))
+                    expected_quantity = expected_closing_quantities.get(closing_id)
+                    if expected_quantity is None:
+                        complete = False
+                        continue
                     actual_notional = notionals_by_closing_trade.get(closing_id, Decimal("0"))
                     actual_quantity = quantities_by_closing_trade.get(closing_id, Decimal("0"))
                     if not _reconcile_closing_order_fill_evidence(
@@ -491,8 +646,11 @@ def upgrade() -> None:
                 # unit represented. Unknown historical fills are retained for audit
                 # but cannot enter dashboard, edge-decay, or execution-health samples.
                 final = rows[-1]
-                valid_notional = total_notional if complete and total_notional > 0 else Decimal("0")
-                valid_quantity = total_quantity if complete and total_quantity > 0 else Decimal("0")
+                # Keep the reconstructed historical quantities/notionals for audit even
+                # when another evidence gate fails. fee_basis_complete remains false,
+                # so these rows cannot enter net-return risk samples.
+                valid_notional = total_notional if total_notional > 0 else Decimal("0")
+                valid_quantity = total_quantity if total_quantity > 0 else Decimal("0")
                 gross_return_bps = (
                     float(total_realized / total_notional * Decimal("10000"))
                     if valid_notional > 0 else 0.0
@@ -519,10 +677,16 @@ def upgrade() -> None:
                     "closing_quantity": valid_quantity,
                     "closing_notional": valid_notional,
                     "realized_pnl": total_realized,
-                    "fee": total_fee,
-                    "net_pnl": total_net,
+                    "fee": _fee_value_to_persist(
+                        total_fee,
+                        Decimal(str(final["fee"] or 0)) if final["fee"] is not None else None,
+                        fee_basis_complete=fee_basis_complete,
+                    ),
+                    "net_pnl": total_net if fee_basis_complete else final["net_pnl"],
                     "return_bps": gross_return_bps,
-                    "net_return_bps": net_return_bps,
+                    "net_return_bps": (
+                        net_return_bps if fee_basis_complete else final["net_return_bps"]
+                    ),
                     "lifecycle_status": "CLOSED",
                     "fee_basis_complete": fee_basis_complete,
                 })
