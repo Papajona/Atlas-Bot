@@ -332,6 +332,9 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 symbol="BTC/USDT", side="buy", entry_quantity=0.2,
                 entry_price=100, gross_pnl=3, total_fees=0.1,
                 net_pnl=2.9, status="COMPLETED",
+                replay_status="COMPLETE", replay_version="old-version",
+                replay_error="old fee-basis replay",
+                learning_memory_json='{"net_pnl":2.9,"source":"pre-reconciliation"}',
             ))
             first = StrategyOutcome(
                 trade_id=entry.id, closing_trade_id=closing.id,
@@ -383,6 +386,11 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
             assert final.net_return_bps == pytest.approx(2.7 / 23 * 10000)
             assert episode.total_fees == pytest.approx(0.30)
             assert episode.net_pnl == pytest.approx(2.70)
+            assert episode.status == "COMPLETED"
+            assert episode.replay_status == "PENDING"
+            assert episode.replay_version == ""
+            assert episode.replay_error == ""
+            assert episode.learning_memory_json == "{}"
 
     asyncio.run(with_database(check))
 
