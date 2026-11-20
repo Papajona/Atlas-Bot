@@ -133,7 +133,7 @@ def test_closing_paper_order_episode_is_not_replayed_as_position_entry():
                 )
             )).scalars().all()
             by_entry = {row.entry_trade_id: row for row in episodes}
-            assert by_entry[entry_id].status == "COMPLETED"
+            assert by_entry[entry_id].status == "FEE_RECONCILIATION_PENDING"
             assert by_entry[entry_id].closing_trade_id == closing_id
             assert by_entry[closing_id].status == "NOT_POSITION_ENTRY"
             position = (await db.execute(
@@ -251,7 +251,7 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
             assert position.entry_trade_id == reopen_id
             assert position.strategy == "new-strategy"
             assert position.entry_regime == "NEW"
-            assert by_entry[old_entry_id].status == "COMPLETED"
+            assert by_entry[old_entry_id].status == "FEE_RECONCILIATION_PENDING"
             assert by_entry[close_id].status == "NOT_POSITION_ENTRY"
             assert by_entry[reopen_id].status == "OPEN"
             assert by_entry[reopen_id].entry_quantity == pytest.approx(1.0)
