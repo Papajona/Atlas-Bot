@@ -1819,7 +1819,7 @@ async def _adaptive_bot_runtime_gate(bot_id: int, customer_id: int, trading_acco
         state = await db.get(AppState, 1)
         if not bot or bot.status != "RUNNING":
             return False, True, "bot_stopped"
-        if not profile or profile.status != "ACTIVE":
+        if not profile or not await _customer_profile_effectively_active(db, profile):
             return False, True, "customer_inactive"
         if not account or account.status != "ACTIVE":
             return False, True, "trading_account_inactive"
@@ -2696,8 +2696,12 @@ async def _executor_controller_loop():
                             account = await db.get(TradingAccount, row.trading_account_id)
                             state = await db.get(AppState, 1)
                             plan, _ = await _subscription_entitlements(db, cid)
+                            profile_active = bool(
+                                profile
+                                and await _customer_profile_effectively_active(db, profile)
+                            )
                             live_ok = bool(
-                                live_approved and profile and profile.status == "ACTIVE" and account and account.status == "ACTIVE"
+                                live_approved and profile_active and account and account.status == "ACTIVE"
                                 and state and not state.kill_switch and state.live_enabled
                                 and settings.customer_live_trading_enabled and settings.live_trading_enabled and not settings.paper_trading
                                 and not settings.broker_sandbox and bool(plan.get("live"))
