@@ -103,6 +103,24 @@ def canonical_dump_sha256(path: str | Path) -> tuple[str, bool]:
     return digest.hexdigest(), has_guard
 
 
+def fingerprint_dump(path: str | Path) -> dict[str, object]:
+    """Report the raw and canonical SHA-256 for an already-prepared source SQL file."""
+    source = Path(path)
+    canonical_hash, has_guard = canonical_dump_sha256(source)
+    digest = hashlib.sha256()
+    with source.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "status": "PASS",
+        "source_prepared_sql_bytes": source.stat().st_size,
+        "source_prepared_sql_sha256": digest.hexdigest(),
+        "canonical_sha256": canonical_hash,
+        "pg_dump_guard_keys_normalized": has_guard,
+        "only_outer_guard_key_values_normalized": True,
+    }
+
+
 def compare_dumps(expected_path: str | Path, actual_path: str | Path) -> dict[str, object]:
     expected_hash, expected_has_guard = canonical_dump_sha256(expected_path)
     actual_hash, actual_has_guard = canonical_dump_sha256(actual_path)
@@ -120,11 +138,27 @@ def compare_dumps(expected_path: str | Path, actual_path: str | Path) -> dict[st
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--expected", required=True)
-    parser.add_argument("--actual", required=True)
+    parser.add_argument(
+        "--fingerprint",
+        metavar="PREPARED_SQL",
+        help="report raw and canonical SHA-256 for a source SQL file already prepared with pinned PostgreSQL tooling",
+    )
+    parser.add_argument("--expected", help="expected prepared SQL file for byte-equivalence comparison")
+    parser.add_argument("--actual", help="actual prepared SQL file for byte-equivalence comparison")
     args = parser.parse_args()
+
+    if args.fingerprint:
+        if args.expected or args.actual:
+            parser.error("--fingerprint cannot be combined with --expected or --actual")
+    elif not args.expected or not args.actual:
+        parser.error("provide --fingerprint PREPARED_SQL or both --expected and --actual")
+
     try:
-        result = compare_dumps(args.expected, args.actual)
+        result = (
+            fingerprint_dump(args.fingerprint)
+            if args.fingerprint
+            else compare_dumps(args.expected, args.actual)
+        )
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as exc:
