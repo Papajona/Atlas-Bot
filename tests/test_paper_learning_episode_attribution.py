@@ -668,3 +668,33 @@ def test_breakeven_close_records_fees_and_gates_learning_replay(
 
     asyncio.run(run())
 
+def test_learning_episode_api_hides_unverified_fee_adjusted_results():
+    from types import SimpleNamespace
+    from app.main import _learning_episode_accounting_fields
+
+    pending = SimpleNamespace(
+        status="FEE_PENDING",
+        total_fees=Decimal("0.35"),
+        net_pnl=Decimal("-0.35"),
+        return_bps=-35.0,
+    )
+    assert _learning_episode_accounting_fields(pending) == {
+        "fee_basis_status": "PENDING_RECONCILIATION",
+        "total_fees": None,
+        "net_pnl": None,
+        "return_bps": None,
+    }
+
+    completed = SimpleNamespace(
+        status="COMPLETED",
+        total_fees=Decimal("0.35"),
+        net_pnl=Decimal("-0.35"),
+        return_bps=-35.0,
+    )
+    assert _learning_episode_accounting_fields(completed) == {
+        "fee_basis_status": "VERIFIED",
+        "total_fees": Decimal("0.35"),
+        "net_pnl": Decimal("-0.35"),
+        "return_bps": -35.0,
+    }
+
