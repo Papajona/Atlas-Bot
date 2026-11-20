@@ -963,3 +963,168 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
             assert old_outcome.net_return_bps == pytest.approx(988.0)
 
     asyncio.run(with_database(check))
+
+
+
+def test_recovered_entry_fee_settles_before_first_close_outcome_exists():
+    async def check(sessions):
+        async with sessions() as db:
+            account = CustomerLedgerAccount(
+                customer_id=1, available=Decimal("1000")
+            )
+            entry = _trade(
+                signal_id="entry-fee-before-first-close",
+                client_order_id="entry-fee-before-first-close",
+                side="buy", quantity=1.0, requested_quantity=1.0,
+                filled_quantity=1.0, fee=Decimal("0"),
+                fee_reconciliation_pending=True, status="FILLED",
+            )
+            position = Position(
+                customer_id=1, exchange="binance", symbol="BTC/USDT",
+                quantity=Decimal("1"), average_entry_price=100,
+                entry_trade_id=None, entry_fee=Decimal("0"),
+                entry_fee_basis_known=False,
+            )
+            db.add_all([account, entry])
+            await db.flush()
+            position.entry_trade_id = entry.id
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=1,
+                exchange="binance", symbol="BTC/USDT", side="buy",
+                entry_quantity=Decimal("1"), entry_price=100,
+                gross_pnl=Decimal("0"), total_fees=Decimal("0"),
+                net_pnl=Decimal("0"), status="OPEN",
+            )
+            db.add_all([position, episode])
+            await db.commit()
+
+            delta, cumulative, quality, note = execution._prepare_live_fee(
+                entry,
+                {"fee": {"currency": "USDT", "cost": "0.10"}},
+                1.0,
+                100.0,
+            )
+            assert delta == Decimal("0.100000")
+            assert quality == "exact"
+            await execution._apply_reconciled_live_fee_basis(db, entry, delta)
+            await execution._post_live_fee(
+                db, entry, delta, cumulative, quality, note
+            )
+            await db.commit()
+
+            await db.refresh(position)
+            await db.refresh(episode)
+            await db.refresh(account)
+            assert position.entry_fee == pytest.approx(0.10)
+            assert position.entry_fee_basis_known is True
+            assert episode.total_fees == pytest.approx(0.10)
+            assert episode.net_pnl == pytest.approx(-0.10)
+            assert account.available == Decimal("999.900000")
+            assert len((await db.execute(select(LedgerJournal))).scalars().all()) == 1
+
+    asyncio.run(with_database(check))
+
+
+def test_pending_add_on_filled_after_close_order_creation_keeps_closed_return_unverified():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                signal_id="entry-before-out-of-order-close",
+                client_order_id="entry-before-out-of-order-close",
+                side="buy", quantity=1.0, requested_quantity=1.0,
+                filled_quantity=1.0, fee=Decimal("0.10"),
+                fee_reconciliation_pending=False, status="FILLED",
+            )
+            closing = _trade(
+                signal_id="close-created-before-addon",
+                client_order_id="close-created-before-addon",
+                side="sell", quantity=1.5, requested_quantity=1.5,
+                filled_quantity=0.0, fee=Decimal("0"),
+                fee_reconciliation_pending=True, status="OPEN",
+            )
+            add_on = _trade(
+                signal_id="addon-created-after-close",
+                client_order_id="addon-created-after-close",
+                side="buy", quantity=0.5, requested_quantity=0.5,
+                filled_quantity=0.0, fee=Decimal("0"),
+                fee_reconciliation_pending=True, status="OPEN",
+            )
+            db.add_all([entry, closing, add_on])
+            await db.flush()
+            assert add_on.id > closing.id
+
+            position = Position(
+                customer_id=1, exchange="binance", symbol="BTC/USDT",
+                quantity=Decimal("1"), average_entry_price=100,
+                entry_trade_id=entry.id, entry_fee=Decimal("0.10"),
+                entry_fee_basis_known=True,
+            )
+            entry_episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=1,
+                exchange="binance", symbol="BTC/USDT", side="buy",
+                entry_quantity=Decimal("1"), entry_price=100,
+                gross_pnl=Decimal("0"), total_fees=Decimal("0.10"),
+                net_pnl=Decimal("-0.10"), status="OPEN",
+            )
+            add_on_episode = TradeLearningEpisode(
+                entry_trade_id=add_on.id, customer_id=1,
+                exchange="binance", symbol="BTC/USDT", side="buy",
+                entry_quantity=Decimal("0"), entry_price=100,
+                gross_pnl=Decimal("0"), total_fees=Decimal("0"),
+                net_pnl=Decimal("0"), status="PENDING",
+            )
+            db.add_all([position, entry_episode, add_on_episode])
+            await db.commit()
+
+            # The close order received its database ID first, but the add-on
+            # actually filled first and joined the entry position's fee basis.
+            await execution._apply_fill_to_position(
+                db, add_on, 0.5, 100.0,
+                current_fill_fee=Decimal("0"),
+                current_fill_fee_verified=False,
+            )
+            await db.flush()
+            context = __import__("json").loads(add_on.reason or "{}")
+            assert context["fee_basis_lifecycle_entry_trade_ids"] == [entry.id]
+            assert position.entry_fee_basis_known is False
+
+            # The closing fill then completes the lifecycle with an unresolved
+            # close fee. Its later authoritative fee reconciliation must still
+            # see the pending add-on despite the add-on's larger Trade.id.
+            await execution._apply_fill_to_position(
+                db, closing, 1.5, 110.0,
+                current_fill_fee=Decimal("0"),
+                current_fill_fee_verified=False,
+            )
+            await db.commit()
+
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry.id,
+                    StrategyOutcome.closing_trade_id == closing.id,
+                    StrategyOutcome.lifecycle_status == "CLOSED",
+                )
+            )).scalar_one()
+            assert outcome.fee_basis_complete is False
+
+            close_delta, cumulative, quality, note = execution._prepare_live_fee(
+                closing,
+                {"fee": {"currency": "USDT", "cost": "0.02"}},
+                1.5,
+                110.0,
+            )
+            assert close_delta == Decimal("0.020000")
+            assert quality == "exact"
+            await execution._apply_reconciled_live_fee_basis(
+                db, closing, close_delta
+            )
+            await db.commit()
+            await db.refresh(outcome)
+
+            assert outcome.fee_basis_complete is False
+            assert outcome.net_pnl is None
+            assert outcome.net_return_bps is None
+            assert closing.fee_reconciliation_pending is False
+            assert add_on.fee_reconciliation_pending is True
+
+    asyncio.run(with_database(check))
