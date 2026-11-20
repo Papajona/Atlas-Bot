@@ -2206,7 +2206,19 @@ async def _run_persisted_adaptive_bot_cycle(
         profile = await db.get(CustomerProfile, bot.customer_id)
         account = await db.get(TradingAccount, bot.trading_account_id)
         state = await db.get(AppState, 1)
-        if not profile or not account or account.status != "ACTIVE" or not state or state.kill_switch:
+        if not profile or not await _customer_profile_effectively_active(db, profile):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Customer identity is pending manual review or remains conflicted"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "customer_identity"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "customer_identity",
+                "reason": "Customer identity must be verified before another persisted bot cycle",
+            }
+        if not account or account.status != "ACTIVE" or not state or state.kill_switch:
             return {"decision": "NO_TRADE", "stage": "risk_state"}
         # Do not mask malformed or non-finite equity by clamping it to zero.
         # Customer-paper cycles replace this value with their isolated paper cash below.
