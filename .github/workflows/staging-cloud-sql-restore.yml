@@ -172,6 +172,7 @@ jobs:
               "operation_id", "target_instance_connection_name", "target_database",
               "source_backup_reference", "source_supabase_project_ref",
               "source_prepared_sql_canonical_sha256",
+              "expected_source_prepared_sql_canonical_sha256",
               "sanitized_backup_reference", "sanitized_import_sha256",
               "import_object_reference", "import_object_sha256",
           )
