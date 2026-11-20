@@ -935,4 +935,34 @@ def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
     assert 'if self.max_request_body_bytes < 0:' in src
     assert 'if self.environment in {"staging", "production"} and self.max_request_body_bytes == 0:' in src
 
-\ndef test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles():\n    archive = (\n        ROOT / "alembic" / "versions" / "0051_research_trial_archive.py"\n    ).read_text(encoding="utf-8")\n    integrity = (\n        ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"\n    ).read_text(encoding="utf-8")\n\n    assert "REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM PUBLIC" in archive\n    assert "'atlas_api_runtime', 'atlas_audit_reader'" in archive\n\n    for function_name in (\n        "atlas_block_ledger_mutation()",\n        "atlas_ledger_journal_deferred_check()",\n        "atlas_validate_ledger_journal(integer)",\n        "atlas_research_trial_archive_immutable()",\n        "atlas_research_holdout_registry_immutable()",\n    ):\n        assert f"public.{function_name}" in integrity\n    assert "atlas_ledger_trigger_owner" in integrity\n    assert "NOLOGIN NOINHERIT BYPASSRLS" in integrity\n    assert "SECURITY DEFINER" in integrity\n    assert "SET search_path = pg_catalog, public, pg_temp" in integrity\n    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner" in integrity\n    assert "has_table_privilege(role_name, 'public.ledger_journals', 'INSERT')" in integrity\n    assert "has_table_privilege(role_name, 'public.ledger_journals', 'UPDATE')" in integrity\n    assert "has_schema_privilege(role_name, 'public', 'CREATE')" in integrity\n    assert "atlas_api_runtime" in integrity and "atlas_audit_reader" in integrity\n    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_api_runtime" not in integrity\n    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_audit_reader" not in integrity\n
+
+def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles():
+    archive = (
+        ROOT / "alembic" / "versions" / "0051_research_trial_archive.py"
+    ).read_text(encoding="utf-8")
+    integrity = (
+        ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"
+    ).read_text(encoding="utf-8")
+
+    assert "REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM PUBLIC" in archive
+    assert "'atlas_api_runtime', 'atlas_audit_reader'" in archive
+
+    for function_name in (
+        "atlas_block_ledger_mutation()",
+        "atlas_ledger_journal_deferred_check()",
+        "atlas_validate_ledger_journal(integer)",
+        "atlas_research_trial_archive_immutable()",
+        "atlas_research_holdout_registry_immutable()",
+    ):
+        assert f"public.{function_name}" in integrity
+    assert "atlas_ledger_trigger_owner" in integrity
+    assert "NOLOGIN NOINHERIT BYPASSRLS" in integrity
+    assert "SECURITY DEFINER" in integrity
+    assert "SET search_path = pg_catalog, public, pg_temp" in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner" in integrity
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'INSERT')" in integrity
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'UPDATE')" in integrity
+    assert "has_schema_privilege(role_name, 'public', 'CREATE')" in integrity
+    assert "atlas_api_runtime" in integrity and "atlas_audit_reader" in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_api_runtime" not in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_audit_reader" not in integrity
