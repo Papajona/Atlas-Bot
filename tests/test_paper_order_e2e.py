@@ -85,7 +85,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
     # discipline rule that requires a protective stop for every new position.
     monkeypatch.setattr(settings, "discipline_enabled", False)
 
-    async def run():
+    async def run_test():
         await init_db()
         async with test_sessions() as db:
             state = await execution._get_state_locked(db)
@@ -187,10 +187,13 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         assert repeated["fills"] == 0
         assert repeated["attempts"] == 0
 
-    try:
-        asyncio.run(run())
-    finally:
-        asyncio.run(test_engine.dispose())
+    async def run():
+        try:
+            await run_test()
+        finally:
+            await test_engine.dispose()
+
+    asyncio.run(run())
 
 
 

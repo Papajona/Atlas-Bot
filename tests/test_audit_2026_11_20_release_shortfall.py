@@ -2,11 +2,32 @@
 import asyncio
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.customer_funds import release_trading
-from app.db import CustomerLedgerAccount, Incident
-from tests.test_money_safety_fixes import with_database
+from app.db import Base, CustomerLedgerAccount, Incident
+
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+
+
+async def with_database(check):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await check(async_sessionmaker(engine, expire_on_commit=False))
+    finally:
+        await engine.dispose()
 
 
 def test_release_larger_than_reserve_releases_only_reserve_and_opens_incident():
