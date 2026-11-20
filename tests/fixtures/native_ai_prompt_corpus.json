@@ -220,7 +220,7 @@
     "prompt": "conservative BTC trend long 1h",
     "expect": {
       "risk_per_trade": 0.0025,
-      "stop_loss_atr": 2.0,
+      "stop_loss_atr": 2,
       "strategy_family": "TREND",
       "warns": [
         "Conservative profile"
@@ -251,6 +251,44 @@
   {
     "id": "family-fallback",
     "prompt": "buy BTC on the 1h",
+    "expect": {
+      "strategy_family": "TREND",
+      "warns": [
+        "No strategy type was recognised"
+      ]
+    }
+  },
+  {
+    "id": "negated-family-mean-reversion-breakout",
+    "prompt": "do not use mean reversion; use breakout BTC long 1h",
+    "expect": {
+      "strategy_family": "BREAKOUT"
+    }
+  },
+  {
+    "id": "negated-family-breakout-momentum",
+    "prompt": "avoid breakout, use momentum BTC long 1h",
+    "expect": {
+      "strategy_family": "MOMENTUM"
+    }
+  },
+  {
+    "id": "negated-family-momentum-trend",
+    "prompt": "no momentum; use trend following BTC long 1h",
+    "expect": {
+      "strategy_family": "TREND"
+    }
+  },
+  {
+    "id": "not-only-family-ensemble",
+    "prompt": "not only momentum but breakout BTC long 1h",
+    "expect": {
+      "strategy_family": "ENSEMBLE"
+    }
+  },
+  {
+    "id": "negated-family-fallback",
+    "prompt": "do not use mean reversion or momentum for BTC long 1h",
     "expect": {
       "strategy_family": "TREND",
       "warns": [
