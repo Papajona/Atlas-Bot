@@ -51,6 +51,32 @@ def uncompiled_candidate_safeguards(spec: Any) -> list[str]:
     return sorted(found)
 
 
+def record_validation_unavailable_reason(gate: dict[str, Any], reason: str) -> None:
+    """Preserve every independent reason a candidate cannot be validated.
+
+    Keep the first reason as the backwards-compatible primary field while exposing
+    the complete ordered list to API callers and the append-only validation history.
+    """
+    if not isinstance(gate, dict):
+        raise TypeError("validation gate must be a dictionary")
+    normalized = str(reason or "").strip()
+    if not normalized:
+        raise ValueError("validation-unavailable reason must not be empty")
+    existing = gate.get("validation_unavailable_reason")
+    prior = gate.get("validation_unavailable_reasons")
+    reasons: list[str] = []
+    candidates = [existing]
+    if isinstance(prior, list):
+        candidates.extend(prior)
+    candidates.append(normalized)
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value and value not in reasons:
+            reasons.append(value)
+    gate.setdefault("validation_unavailable_reason", normalized)
+    gate["validation_unavailable_reasons"] = reasons
+
+
 def strategy_lab_candidate_passes(
     oos_gate: dict,
     *,

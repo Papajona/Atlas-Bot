@@ -1,5 +1,6 @@
 from app.strategy_lab_validation import (
     UNCOMPILED_CANDIDATE_SAFEGUARDS,
+    record_validation_unavailable_reason,
     uncompiled_candidate_safeguards,
     strategy_lab_candidate_passes,
 )
@@ -48,3 +49,28 @@ def test_candidate_cannot_pass_when_safeguard_validation_is_unavailable():
     )
     assert passed is False
     assert metrics["sharpe"] == 2.0
+
+
+
+def test_uncompiled_safeguards_preserve_trial_archive_failure_reason():
+    gate = {
+        "validation_available": False,
+        "validation_unavailable_reason": "TRIAL_HISTORY_RECORDING_FAILED",
+    }
+
+    record_validation_unavailable_reason(gate, "UNCOMPILED_STRATEGY_SAFEGUARDS")
+
+    assert gate["validation_unavailable_reason"] == "TRIAL_HISTORY_RECORDING_FAILED"
+    assert gate["validation_unavailable_reasons"] == [
+        "TRIAL_HISTORY_RECORDING_FAILED",
+        "UNCOMPILED_STRATEGY_SAFEGUARDS",
+    ]
+
+
+def test_uncompiled_safeguard_is_primary_reason_when_no_other_failure_exists():
+    gate = {"validation_available": False}
+
+    record_validation_unavailable_reason(gate, "UNCOMPILED_STRATEGY_SAFEGUARDS")
+
+    assert gate["validation_unavailable_reason"] == "UNCOMPILED_STRATEGY_SAFEGUARDS"
+    assert gate["validation_unavailable_reasons"] == ["UNCOMPILED_STRATEGY_SAFEGUARDS"]

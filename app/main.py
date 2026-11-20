@@ -7512,6 +7512,7 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             "in_sample_note": "Selected-on data. Diagnostic only; never a pass criterion.",
         }
         from .strategy_lab_validation import (
+            record_validation_unavailable_reason,
             strategy_lab_candidate_passes,
             uncompiled_candidate_safeguards,
         )
@@ -7532,7 +7533,9 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             passed = False
             validation_unavailable = True
             gate["validation_available"] = False
-            gate["validation_unavailable_reason"] = "UNCOMPILED_STRATEGY_SAFEGUARDS"
+            record_validation_unavailable_reason(
+                gate, "UNCOMPILED_STRATEGY_SAFEGUARDS"
+            )
             gate["uncompiled_safeguards"] = uncompiled_safeguards
             result["strategy_condition_validation"] = {
                 "status": "UNCOMPILED",
