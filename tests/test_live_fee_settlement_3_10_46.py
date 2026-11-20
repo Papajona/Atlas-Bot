@@ -577,7 +577,7 @@ def test_corrected_add_on_fee_survives_the_later_completed_close():
                 db, add_on, Decimal("0.05")
             )
             assert position.entry_fee_basis_known is True
-            assert position.entry_fee == pytest.approx(0.15)
+            assert Decimal(str(position.entry_fee)) == Decimal("0.15")
 
             await execution._apply_fill_to_position(
                 db,
