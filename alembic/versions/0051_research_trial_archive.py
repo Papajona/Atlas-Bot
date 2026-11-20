@@ -95,6 +95,29 @@ def upgrade():
         $atlas_trial_immutable$;
         """
     )
+    # CREATE FUNCTION grants EXECUTE to PUBLIC by PostgreSQL default unless
+    # the creating role has matching default ACLs. Revoke explicitly so this
+    # trigger implementation never becomes a callable public function.
+    op.execute(sa.text("""
+        DO $atlas_research_trial_function_acl$
+        DECLARE role_name text;
+        BEGIN
+            EXECUTE 'REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM PUBLIC';
+            FOREACH role_name IN ARRAY ARRAY[
+                'anon', 'authenticated', 'service_role',
+                'atlas_paper_reader', 'atlas_customer_paper',
+                'atlas_api_runtime', 'atlas_audit_reader'
+            ] LOOP
+                IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                    EXECUTE format(
+                        'REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM %I',
+                        role_name
+                    );
+                END IF;
+            END LOOP;
+        END
+        $atlas_research_trial_function_acl$;
+    """))
     op.execute(
         """
         CREATE TRIGGER trg_research_trial_archive_immutable
