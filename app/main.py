@@ -3857,10 +3857,31 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     if not normalized:
         return False
     try:
-        rows = (await db.execute(
-            select(CustomerProfile.auth_user_id, CustomerProfile.email)
-            .where(CustomerProfile.auth_user_id != auth_user_id)
-        )).all()
+        bind_getter = getattr(db, "get_bind", None)
+        bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+        dialect = getattr(getattr(bind, "dialect", None), "name", "")
+        statement = select(
+            CustomerProfile.auth_user_id, CustomerProfile.email
+        ).where(CustomerProfile.auth_user_id != auth_user_id)
+        if dialect == "postgresql":
+            # Use revision 0060's partial index to avoid decrypting every
+            # UUID-backed customer profile on a legacy-identity comparison.
+            uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+            statement = statement.where(
+                CustomerProfile.auth_user_id.op("!~*")(uuid_pattern)
+            )
+        elif dialect == "sqlite":
+            uuid_glob = (
+                "[0-9a-fA-F]" * 8 + "-"
+                + "[0-9a-fA-F]" * 4 + "-"
+                + "[0-9a-fA-F]" * 4 + "-"
+                + "[0-9a-fA-F]" * 4 + "-"
+                + "[0-9a-fA-F]" * 12
+            )
+            statement = statement.where(
+                ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob)
+            )
+        rows = (await db.execute(statement)).all()
     except Exception as exc:
         logger.exception("legacy_customer_identity_lookup_failed")
         raise HTTPException(503, "Customer identity verification is temporarily unavailable") from exc
