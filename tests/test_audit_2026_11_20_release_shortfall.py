@@ -72,3 +72,45 @@ def test_one_micro_usdt_release_shortfall_is_not_hidden_by_tolerance():
             assert ledger.available == Decimal("11.000000")
 
     asyncio.run(with_database(check))
+
+
+def test_release_replay_rejects_different_requested_amount_without_mutating_ledger():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(
+                customer_id=3, available=Decimal("1"), trading_reserved=Decimal("10")
+            ))
+            await db.commit()
+
+            await release_trading(db, 3, 4, reference_id="replay-mismatch:1")
+            await db.commit()
+
+            with pytest.raises(ValueError, match="idempotency key already used"):
+                await release_trading(db, 3, 5, reference_id="replay-mismatch:1")
+            await db.rollback()
+
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("6.000000")
+            assert ledger.available == Decimal("5.000000")
+
+    asyncio.run(with_database(check))
+
+
+def test_release_replay_accepts_same_request_and_preserves_shortfall_request_amount():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(
+                customer_id=4, available=Decimal("1"), trading_reserved=Decimal("10")
+            ))
+            await db.commit()
+
+            await release_trading(db, 4, 25, reference_id="replay-shortfall:1")
+            await db.commit()
+            await release_trading(db, 4, 25, reference_id="replay-shortfall:1")
+            await db.commit()
+
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("0.000000")
+            assert ledger.available == Decimal("11.000000")
+
+    asyncio.run(with_database(check))
