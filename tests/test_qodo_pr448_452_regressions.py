@@ -94,13 +94,15 @@ def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
         id=1, sequence=1, closing_notional=Decimal("100"),
         net_pnl=Decimal("1.90"), realized_pnl=Decimal("2.00"),
         fee=Decimal("0.10"), return_bps=200.0, net_return_bps=190.0,
-        closing_quantity=Decimal("1"), lifecycle_status="OPEN", metadata_json="{}",
+        closing_quantity=Decimal("1"), fee_basis_complete=True,
+        lifecycle_status="OPEN", metadata_json="{}",
     )
     final = SimpleNamespace(
         id=2, sequence=2, closing_notional=Decimal("300"),
         net_pnl=Decimal("5.70"), realized_pnl=Decimal("6.00"),
         fee=Decimal("0.30"), return_bps=200.0, net_return_bps=190.0,
-        closing_quantity=Decimal("3"), lifecycle_status="CLOSED", metadata_json="{}",
+        closing_quantity=Decimal("3"), fee_basis_complete=True,
+        lifecycle_status="CLOSED", metadata_json="{}",
     )
 
     result = execution._aggregate_completed_strategy_outcomes([first, final])
