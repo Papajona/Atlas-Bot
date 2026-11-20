@@ -619,3 +619,95 @@ def test_later_verified_fee_snapshot_charges_only_unsettled_authoritative_delta(
     assert delta == Decimal("0.250000")
     assert cumulative == Decimal("0.250000")
     assert trade.fee == Decimal("0.250000")
+
+def test_stale_identity_quarantine_recovery_persists_for_read_only_requests(
+    monkeypatch, tmp_path
+):
+    """A read-only request may close its session without rolling back recovery."""
+    from cryptography.fernet import Fernet
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app.config import settings
+    from app.db import CustomerProfile
+
+    customer_uid = "8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7"
+    confirmed_email = "recovered@example.invalid"
+    key = Fernet.generate_key().decode("ascii")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "qodo-test")
+    monkeypatch.setattr(settings, "app_encryption_keys_json", json.dumps({"qodo-test": key}))
+    monkeypatch.setattr(settings, "app_encryption_key", "")
+
+    test_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'identity-recovery.db'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+    )
+    test_sessions = async_sessionmaker(
+        test_engine, expire_on_commit=False, class_=AsyncSession
+    )
+
+    async def fake_customer_claims(_authorization, require_aal2=True):
+        assert require_aal2 is False
+        return {
+            "sub": customer_uid,
+            "email": confirmed_email,
+            "user_metadata": {"full_name": "Recovered Customer"},
+        }
+
+    async def fake_supabase_user(_token):
+        return {
+            "id": customer_uid,
+            "email": confirmed_email,
+            "email_confirmed_at": "2026-11-20T00:00:00Z",
+            "user_metadata": {"full_name": "Recovered Customer"},
+        }
+
+    async def no_subscription_write(_db, _profile, referral_code=None):
+        return None
+
+    monkeypatch.setattr(main, "customer_claims", fake_customer_claims)
+    monkeypatch.setattr(main, "_supabase_user", fake_supabase_user)
+    monkeypatch.setattr(main, "_ensure_customer_subscription", no_subscription_write)
+
+    async def run():
+        try:
+            async with test_engine.begin() as connection:
+                await connection.run_sync(
+                    lambda sync_connection: CustomerProfile.__table__.create(sync_connection)
+                )
+            async with test_sessions() as db:
+                db.add_all([
+                    CustomerProfile(
+                        auth_user_id=customer_uid,
+                        email="stale@example.invalid",
+                        display_name="Legacy Name",
+                        status="PENDING_IDENTITY_REVIEW",
+                    ),
+                    CustomerProfile(
+                        auth_user_id="legacy-account-001",
+                        email="different-owner@example.invalid",
+                        display_name="Unrelated Legacy Owner",
+                        status="ACTIVE",
+                    ),
+                ])
+                await db.commit()
+
+            # Simulate GET /api/customer/billing: get_customer() returns, then
+            # the route closes its session without issuing a commit itself.
+            async with test_sessions() as db:
+                profile, claims = await main.get_customer(
+                    "Bearer test-customer-token", db, require_aal2=False
+                )
+                assert profile.status == "ACTIVE"
+                assert profile.email == confirmed_email
+                assert claims["email"] == confirmed_email
+
+            # A new request/session must observe the committed recovery.
+            async with test_sessions() as db:
+                recovered = await db.get(CustomerProfile, 1)
+                assert recovered is not None
+                assert recovered.status == "ACTIVE"
+                assert recovered.email == confirmed_email
+                assert recovered.display_name == "Recovered Customer"
+        finally:
+            await test_engine.dispose()
+
+    asyncio.run(run())
