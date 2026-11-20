@@ -2010,7 +2010,7 @@ async def _apply_fill_to_position(
                     else:
                         # TradeLearningEpisode is the replay worker's input. Do
                         # not replay estimated/unknown net results as completed.
-                        completed_episode.status = "FEE_RECONCILIATION_PENDING"
+                        completed_episode.status = "FEE_PENDING"
                         completed_episode.updated_at = utcnow()
         if position.quantity:
             position.unrealized_pnl = (
