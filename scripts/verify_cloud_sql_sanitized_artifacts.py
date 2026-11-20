@@ -38,6 +38,7 @@ def verify_sanitized_artifacts(
     *,
     source_backup_reference: str,
     source_prepared_sql_path: str | Path,
+    expected_source_prepared_canonical_sha256: str,
     sanitized_backup_reference: str,
     sanitized_sql_path: str | Path,
     imported_sql_path: str | Path | None = None,
@@ -54,10 +55,21 @@ def verify_sanitized_artifacts(
     if ".." in object_name.split("/"):
         raise ValueError("sanitized backup object path contains a traversal segment")
 
+    if not isinstance(expected_source_prepared_canonical_sha256, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", expected_source_prepared_canonical_sha256
+    ):
+        raise ValueError(
+            "expected source prepared SQL canonical SHA-256 must be a lowercase 64-character hex fingerprint"
+        )
+
     source_prepared_sha256 = sha256_file(source_prepared_sql_path)
     source_prepared_canonical_sha256, source_has_guard = canonical_dump_sha256(
         source_prepared_sql_path
     )
+    if source_prepared_canonical_sha256 != expected_source_prepared_canonical_sha256:
+        raise ValueError(
+            "source prepared SQL canonical SHA-256 does not match the independently reviewed source fingerprint"
+        )
 
     sanitized_path = Path(sanitized_sql_path)
     sanitized_size = sanitized_path.stat().st_size
@@ -78,6 +90,7 @@ def verify_sanitized_artifacts(
         "source_backup_reference": source_backup_reference,
         "source_prepared_sql_sha256": source_prepared_sha256,
         "source_prepared_sql_canonical_sha256": source_prepared_canonical_sha256,
+        "expected_source_prepared_sql_canonical_sha256": expected_source_prepared_canonical_sha256,
         "source_prepared_sql_has_outer_guard": source_has_guard,
         "sanitized_backup_reference": sanitized_backup_reference,
         "sanitized_import_sha256": sanitized_sha256,
@@ -91,6 +104,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-backup-reference", required=True)
     parser.add_argument("--source-prepared-sql", required=True)
+    parser.add_argument("--expected-source-prepared-canonical-sha256", required=True)
     parser.add_argument("--sanitized-backup-reference", required=True)
     parser.add_argument("--sanitized-sql", required=True)
     parser.add_argument("--imported-sql")
@@ -100,6 +114,7 @@ def main() -> int:
         result = verify_sanitized_artifacts(
             source_backup_reference=args.source_backup_reference,
             source_prepared_sql_path=args.source_prepared_sql,
+            expected_source_prepared_canonical_sha256=args.expected_source_prepared_canonical_sha256,
             sanitized_backup_reference=args.sanitized_backup_reference,
             sanitized_sql_path=args.sanitized_sql,
             imported_sql_path=args.imported_sql,
