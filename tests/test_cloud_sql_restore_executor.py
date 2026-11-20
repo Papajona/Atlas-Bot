@@ -337,7 +337,10 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
 
     installer = Path("scripts/install_pinned_postgresql_client.sh").read_text(encoding="utf-8")
     assert "POSTGRES_CLIENT_MAJOR=17" in installer
-    assert '"postgresql-client-$POSTGRES_CLIENT_MAJOR"' in installer
+    assert "POSTGRES_CLIENT_RELEASE=17.12" in installer
+    assert "apt-cache madison" in installer
+    assert '"postgresql-client-${POSTGRES_CLIENT_MAJOR}=${package_version}"' in installer
+    assert r"\\(PostgreSQL\\) 17\\.12([[:space:]]|$)" in installer
     ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "Verify a real PostgreSQL 17 custom archive conversion" in ci
     assert "pg_dump --format=custom" in ci
