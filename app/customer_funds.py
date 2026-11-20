@@ -84,23 +84,24 @@ async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMisma
         await db.flush()
 
 
-async def persist_trading_release_replay_mismatch(incident_args: dict) -> None:
-    """Commit a HIGH replay incident independently of the trade transaction.
+async def persist_trading_release_replay_mismatch(db, incident_args: dict) -> None:
+    """Roll back the rejected trade transaction, then durably record its HIGH alert.
 
-    A replay mismatch aborts its caller's trade transaction. Persisting the
-    incident through that same session would therefore roll the alert back.
+    Use the caller's session after rollback. A second SQLite session cannot write
+    while the failed fill transaction still owns SQLite's single-writer lock.
+    The rejected fill must not commit its position or ledger mutations.
     """
-    async with SessionLocal() as incident_db:
-        try:
-            async with incident_db.begin_nested():
-                await record_ledger_incident(incident_db, **incident_args)
-                await incident_db.flush()
-        except IntegrityError:
-            # A concurrent replay may have inserted the deterministic incident
-            # key after our SELECT. Retry the upsert outside the failed savepoint.
-            await record_ledger_incident(incident_db, **incident_args)
-            await incident_db.flush()
-        await incident_db.commit()
+    await db.rollback()
+    try:
+        async with db.begin_nested():
+            await record_ledger_incident(db, **incident_args)
+            await db.flush()
+    except IntegrityError:
+        # A concurrent replay may have inserted the deterministic incident
+        # key after our SELECT. Retry the upsert outside the failed savepoint.
+        await record_ledger_incident(db, **incident_args)
+        await db.flush()
+    await db.commit()
 
 
 async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> CustomerLedgerAccount:
@@ -468,6 +469,7 @@ async def _check_trading_release_replay(
             customer_id, idem, amount_d, ",".join(problems),
         )
         await persist_trading_release_replay_mismatch(
+            db,
             {
                 "key": f"RELEASE_REPLAY_MISMATCH:{idem}",
                 "summary": "Idempotent trading release replayed with a different or inconsistent operation",
