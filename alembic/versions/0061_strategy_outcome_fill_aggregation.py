@@ -157,6 +157,33 @@ def _reconstruct_lifecycle_fee_total(
         entry_trade_id, closing_trade_ids, source_trades
     )
 
+
+def _historical_lifecycle_fee_basis_complete(
+    rows: list[dict],
+    *,
+    fill_evidence_complete: bool,
+    fee_total: Decimal | None,
+    lifecycle_open: bool,
+) -> bool:
+    """Reject open lifecycles whose partial rows repeat one order's cumulative fee."""
+    if not fill_evidence_complete or fee_total is None:
+        return False
+    if lifecycle_open:
+        closing_order_counts: dict[int, int] = {}
+        for row in rows:
+            closing_trade_id = row.get("closing_trade_id")
+            if closing_trade_id is None:
+                continue
+            order_id = int(closing_trade_id)
+            closing_order_counts[order_id] = closing_order_counts.get(order_id, 0) + 1
+        if any(count > 1 for count in closing_order_counts.values()):
+            # Historical open rows can store the same cumulative trades.fee and
+            # net_pnl on several fills from one closing order. The migration cannot
+            # allocate that cumulative fee back to each fill without encrypted
+            # per-fill metadata, so preserve the rows for audit but fail closed.
+            return False
+    return True
+
 def upgrade() -> None:
     if context.is_offline_mode():
         raise RuntimeError(
@@ -427,7 +454,12 @@ def upgrade() -> None:
                 )
                 # Historical outcome rows can repeat a closing order's cumulative
                 # fee. Reconstruct from each source order once rather than summing rows.
-                fee_basis_complete = bool(complete and fee_total is not None)
+                fee_basis_complete = _historical_lifecycle_fee_basis_complete(
+                    rows,
+                    fill_evidence_complete=complete,
+                    fee_total=fee_total,
+                    lifecycle_open=not has_closed_fill,
+                )
                 total_fee = fee_total if fee_basis_complete else Decimal("0")
                 total_net = (
                     total_realized - total_fee
