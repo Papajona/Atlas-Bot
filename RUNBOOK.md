@@ -174,7 +174,7 @@ bash scripts/install_pinned_postgresql_client.sh
 export PATH="/usr/lib/postgresql/17/bin:$PATH"
 test "$(command -v pg_restore)" = "/usr/lib/postgresql/17/bin/pg_restore"
 pg_restore --version
-pg_restore --version | grep -Eq '\\(PostgreSQL\\) 17(\\.|$)'
+pg_restore --version | grep -Eq '\(PostgreSQL\) 17(\.|$)'
 
 PYTHONPATH=. python scripts/prepare_cloud_sql_import_dump.py \
   --input /secure/path/to/verified-source-generation.dump \
