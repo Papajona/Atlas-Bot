@@ -340,7 +340,7 @@ def test_outcome_aggregation_excludes_unknown_quantity_or_notional():
     assert result.lifecycle_status == "CLOSED"
     assert result.closing_quantity == Decimal("0")
     assert result.closing_notional == Decimal("0")
-    assert result.net_return_bps == 0.0
+    assert result.net_return_bps is None
 
 
 def test_revision_0060_is_batched_online_only_and_refuses_a_false_downgrade():
@@ -400,8 +400,11 @@ def test_strategy_outcome_aggregates_only_current_lifecycle_and_carries_fee_comp
     aggregate = execution._aggregate_completed_strategy_outcomes([partial, final])
     assert aggregate is final
     assert final.fee_basis_complete is False
+    assert final.net_pnl is None
+    assert final.net_return_bps is None
     metadata = json.loads(final.metadata_json)
     assert metadata["aggregate_fee_basis_complete"] is False
+    assert metadata["net_pnl"] is None
     assert old_lifecycle.lifecycle_status == "CLOSED"
 
 
