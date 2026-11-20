@@ -84,6 +84,49 @@ class Settings(BaseSettings):
             )
         return parsed
 
+    @field_validator("initial_equity")
+    @classmethod
+    def _validate_initial_equity(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            raise ValueError("INITIAL_EQUITY must be finite and positive")
+        return parsed
+
+    @field_validator("max_leverage", "risk_per_trade")
+    @classmethod
+    def _validate_position_sizing_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError("MAX_LEVERAGE and RISK_PER_TRADE must be finite and non-negative")
+        return parsed
+
+    @field_validator("max_drawdown", "daily_loss_limit")
+    @classmethod
+    def _validate_loss_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or not 0.0 <= parsed < 1.0:
+            raise ValueError("MAX_DRAWDOWN and DAILY_LOSS_LIMIT must be finite fractions in [0, 1)")
+        return parsed
+
+    @field_validator(
+        "max_notional_usd",
+        "max_position_notional_usd",
+        "max_total_exposure_usd",
+    )
+    @classmethod
+    def _validate_exposure_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError("exposure limits must be finite and non-negative")
+        return parsed
+
+    @field_validator("max_open_positions")
+    @classmethod
+    def _validate_max_open_positions(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("MAX_OPEN_POSITIONS must be non-negative")
+        return value
+
     @field_validator("discipline_risk_tolerance")
     @classmethod
     def _validate_discipline_risk_tolerance(cls, value: float) -> float:
