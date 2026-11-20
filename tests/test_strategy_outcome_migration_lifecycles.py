@@ -96,55 +96,85 @@ def test_completed_lifecycle_reconstructs_a_repeated_partial_order_fee_once():
     ) is True
 
 
-def test_reversal_close_quantity_excludes_the_new_opposite_position_leg():
-    order = {"filled_quantity": "8"}
-    reversal_episode = {"entry_quantity": "3", "status": "OPEN"}
+def test_reversal_close_quantity_uses_old_position_not_later_add_ons_to_new_leg():
+    old_position_episode = {"entry_quantity": "10", "status": "COMPLETED"}
+    reversal_order = {"id": 20, "filled_quantity": "10"}
+    # The reversal initially opened 2 units, then later add-ons raised the
+    # reversal episode to 5. That later total must not determine the old close.
+    later_reversal_episode = {"entry_quantity": "5", "status": "OPEN"}
 
-    assert MIGRATION["_expected_closing_order_quantity"](
-        order, reversal_episode
-    ) == Decimal("5")
+    allocations = MIGRATION["_allocate_lifecycle_closing_quantities"](
+        [reversal_order], old_position_episode, lifecycle_closed=True
+    )
+
+    assert later_reversal_episode["entry_quantity"] == Decimal("5")
+    assert allocations == {20: Decimal("10")}
+    assert MIGRATION["_closing_order_fee_fraction"](
+        reversal_order, allocations[20]
+    ) == Decimal("1")
 
 
-def test_reversal_close_fee_and_new_entry_fee_are_prorated_without_overlap():
-    source_trades = {
-        7: {"fee": "0.20", "mode": "PAPER"},
-        11: {"fee": "0.80", "mode": "PAPER"},
+def test_reversal_close_quantity_consumes_prior_closes_before_reversal_leg():
+    old_position_episode = {"entry_quantity": "10", "status": "COMPLETED"}
+    closing_orders = [
+        {"id": 10, "filled_quantity": "3"},
+        {"id": 20, "filled_quantity": "10"},
+    ]
+
+    allocations = MIGRATION["_allocate_lifecycle_closing_quantities"](
+        closing_orders, old_position_episode, lifecycle_closed=True
+    )
+
+    assert allocations == {
+        10: Decimal("3"),
+        20: Decimal("7"),
     }
-    reversal_order = {"filled_quantity": "8"}
-    reversal_episode = {"entry_quantity": "3", "status": "OPEN"}
-    expected_close = MIGRATION["_expected_closing_order_quantity"](
-        reversal_order, reversal_episode
-    )
-    close_fraction = MIGRATION["_closing_order_fee_fraction"](
-        reversal_order, reversal_episode
-    )
-    entry_fraction = MIGRATION["_entry_order_fee_fraction"](
-        reversal_order, reversal_episode, reused_entry_order=False
+    assert MIGRATION["_closing_order_fee_fraction"](
+        closing_orders[1], allocations[20]
+    ) == Decimal("0.7")
+
+
+def test_missing_zero_pnl_closing_order_prevents_completed_lifecycle_eligibility():
+    old_position_episode = {"entry_quantity": "10", "status": "COMPLETED"}
+    # A zero-PnL close for 2 units is absent. The surviving order records only 8.
+    recorded_closing_orders = [
+        {"id": 10, "filled_quantity": "3"},
+        {"id": 20, "filled_quantity": "5"},
+    ]
+
+    assert MIGRATION["_allocate_lifecycle_closing_quantities"](
+        recorded_closing_orders,
+        old_position_episode,
+        lifecycle_closed=True,
+    ) is None
+
+
+def test_missing_zero_pnl_fill_within_reversal_order_fails_per_order_reconciliation():
+    old_position_episode = {"entry_quantity": "10", "status": "COMPLETED"}
+    closing_orders = [
+        {"id": 10, "filled_quantity": "3"},
+        {"id": 20, "filled_quantity": "10"},
+    ]
+    allocations = MIGRATION["_allocate_lifecycle_closing_quantities"](
+        closing_orders, old_position_episode, lifecycle_closed=True
     )
 
-    old_position_fee = MIGRATION["_reconstruct_lifecycle_fee_total"](
-        7,
-        [11],
-        source_trades,
-        reused_entry_order=False,
-        entry_fee_fraction=Decimal("1"),
-        closing_fee_fractions={11: close_fraction},
-    )
-    new_position_fee = MIGRATION["_reconstruct_lifecycle_fee_total"](
-        11,
-        [],
-        source_trades,
-        reused_entry_order=False,
-        entry_fee_fraction=entry_fraction,
-        closing_fee_fractions={},
-    )
+    assert allocations == {10: Decimal("3"), 20: Decimal("7")}
+    assert MIGRATION["_reconcile_closing_order_fill_evidence"](
+        allocations[20], Decimal("5"), Decimal("490")
+    ) is False
 
-    assert expected_close == Decimal("5")
-    assert close_fraction == Decimal("0.625")
-    assert entry_fraction == Decimal("0.375")
-    assert old_position_fee == Decimal("0.700")
-    assert new_position_fee == Decimal("0.300")
-    assert old_position_fee + new_position_fee - Decimal("0.20") == Decimal("0.80")
+
+def test_reversal_entry_fee_basis_is_withheld_when_later_add_ons_hide_original_leg():
+    reversal_order = {"filled_quantity": "10"}
+    # This quantity includes the original 2-unit reversal leg plus later add-ons.
+    reversal_episode = {"entry_quantity": "5", "status": "OPEN"}
+
+    assert MIGRATION["_entry_order_fee_fraction"](
+        reversal_order,
+        reversal_episode,
+        reused_entry_order=True,
+    ) is None
 
 
 def test_invalid_or_missing_reversal_quantity_fails_closed_for_old_close():
