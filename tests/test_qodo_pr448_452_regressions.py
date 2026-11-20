@@ -572,11 +572,34 @@ def test_aggregate_trade_return_rejects_non_finite_notional_and_pnl():
             created_at=close_time,
         )
 
-    # NaN/Infinity must never enter platform risk samples, even if the
-    # aggregate completeness flag was mistakenly persisted as true.
+    # Aggregate summaries must reject non-finite or unrepresentable returns.
     assert main._aggregate_closed_outcome_fills([
         final_outcome(notional="NaN", net_pnl="39")
     ]) == []
     assert main._aggregate_closed_outcome_fills([
         final_outcome(notional="5000", net_pnl="Infinity")
     ]) == []
+    assert main._aggregate_closed_outcome_fills([
+        final_outcome(notional="1", net_pnl="1e10000")
+    ]) == []
+
+    def historical_outcome(*, net_pnl, notional="100"):
+        return SimpleNamespace(
+            id=3,
+            trade_id=94,
+            metadata_json=json.dumps({"closing_notional": notional}),
+            realized_pnl="1",
+            return_bps="100",
+            net_pnl=net_pnl,
+            created_at=close_time,
+        )
+
+    # Historical per-fill rows have no aggregate metadata and must apply the
+    # same finiteness checks before contributing to platform risk samples.
+    for invalid_pnl in ("NaN", "Infinity", "-Infinity", "1e10000"):
+        assert main._aggregate_closed_outcome_fills([
+            historical_outcome(net_pnl=invalid_pnl)
+        ]) == []
+    assert main._aggregate_closed_outcome_fills([
+        historical_outcome(net_pnl="2.5")
+    ]) == [(0.025, close_time)]

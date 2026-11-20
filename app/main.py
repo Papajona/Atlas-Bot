@@ -8129,7 +8129,13 @@ def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
                 or closed_at is None
             ):
                 continue
-            completed.append((float(net_pnl / notional), closed_at))
+            ratio = net_pnl / notional
+            if not ratio.is_finite():
+                continue
+            ratio_value = float(ratio)
+            if not math.isfinite(ratio_value):
+                continue
+            completed.append((ratio_value, closed_at))
             continue
 
         # Historical rows have no aggregate metadata; preserve per-fill reconstruction.
@@ -8151,7 +8157,14 @@ def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
                 state["valid"] = False
                 continue
             try:
-                state["net_pnl"] += Decimal(str(outcome.net_pnl or "0"))
+                fill_net_pnl = Decimal(str(outcome.net_pnl or "0"))
+                if not fill_net_pnl.is_finite():
+                    state["valid"] = False
+                    continue
+                state["net_pnl"] += fill_net_pnl
+                if not state["net_pnl"].is_finite():
+                    state["valid"] = False
+                    continue
             except (TypeError, ValueError, ArithmeticError):
                 state["valid"] = False
                 continue
@@ -8162,7 +8175,15 @@ def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
             elif state["closed_at"] is None or created_at > state["closed_at"]:
                 state["closed_at"] = created_at
         if state["valid"] and state["notional"] > 0 and state["closed_at"] is not None:
-            completed.append((float(state["net_pnl"] / state["notional"]), state["closed_at"]))
+            try:
+                ratio = state["net_pnl"] / state["notional"]
+                if not ratio.is_finite():
+                    continue
+                ratio_value = float(ratio)
+            except (ArithmeticError, OverflowError, ValueError):
+                continue
+            if math.isfinite(ratio_value):
+                completed.append((ratio_value, state["closed_at"]))
     return sorted(completed, key=lambda item: item[1], reverse=True)
 
 
