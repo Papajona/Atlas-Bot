@@ -565,3 +565,42 @@ def test_later_verified_fee_snapshot_charges_only_unsettled_authoritative_delta(
     assert delta == Decimal("0.250000")
     assert cumulative == Decimal("0.250000")
     assert trade.fee == Decimal("0.250000")
+
+def test_stale_identity_quarantine_reactivates_only_after_conflict_clears(monkeypatch):
+    profile = SimpleNamespace(
+        status="PENDING_IDENTITY_REVIEW",
+        auth_user_id="customer-auth-id",
+        email="customer@example.test",
+    )
+
+    async def no_conflict(_db, _auth_user_id, _email):
+        return False
+
+    async def conflict_remains(_db, _auth_user_id, _email):
+        return True
+
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_conflict)
+    assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is True
+
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", conflict_remains)
+    assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is False
+
+    inactive = SimpleNamespace(status="SUSPENDED", auth_user_id="customer-auth-id", email="customer@example.test")
+    assert asyncio.run(main._customer_profile_effectively_active(object(), inactive)) is False
+
+
+def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status():
+    source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    adaptive = source[
+        source.index("async def _adaptive_bot_runtime_gate"):
+        source.index("async def _")
+    ]
+    executor = source[
+        source.index("async def _executor_controller_loop"):
+        source.index("async def _")
+    ]
+    assert "await _customer_profile_effectively_active(db, profile)" in adaptive
+    assert "await _customer_profile_effectively_active(db, profile)" in executor
+    assert 'profile.status != "ACTIVE"' not in adaptive
+    assert 'profile.status == "ACTIVE"' not in executor
+
