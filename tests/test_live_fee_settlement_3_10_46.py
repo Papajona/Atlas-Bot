@@ -716,3 +716,81 @@ def test_reused_partial_entry_order_episode_fees_exclude_prior_lifecycles():
             assert prior_lifecycle.lifecycle_status == "CLOSED"
 
     asyncio.run(with_database(check))
+
+
+def test_entry_fee_true_up_does_not_mark_basis_complete_while_add_on_fee_is_pending():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=1, signal_id="entry-fee-pending-addon",
+                client_order_id="entry-fee-pending-addon", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                fee=Decimal("0"), fee_reconciliation_pending=False,
+                status="PARTIAL",
+            )
+            add_on = _trade(
+                customer_id=1, signal_id="pending-addon-fee",
+                client_order_id="pending-addon-fee", side="buy",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0.5,
+                fee=Decimal("0"), fee_reconciliation_pending=True,
+                status="FILLED",
+            )
+            closing = _trade(
+                customer_id=1, signal_id="partial-close-with-pending-addon",
+                client_order_id="partial-close-with-pending-addon", side="sell",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0.5,
+                fee=Decimal("0.02"), fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            db.add_all([entry, add_on, closing])
+            await db.flush()
+
+            position = Position(
+                customer_id=1, exchange="binance", symbol="BTC/USDT",
+                quantity=0.5, average_entry_price=100,
+                entry_trade_id=entry.id, entry_fee=Decimal("0"),
+                entry_fee_basis_known=False,
+            )
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=1,
+                exchange="binance", symbol="BTC/USDT", side="buy",
+                entry_quantity=1.0, entry_price=100,
+                gross_pnl=Decimal("0.5"), total_fees=Decimal("0"),
+                net_pnl=Decimal("0.5"), status="OPEN",
+            )
+            outcome = StrategyOutcome(
+                trade_id=entry.id, closing_trade_id=closing.id,
+                customer_id=1, strategy="test", regime="UNKNOWN",
+                asset="crypto", symbol="BTC/USDT", side="buy",
+                realized_pnl=Decimal("0.5"), fee=Decimal("0"),
+                return_bps=100.0, net_pnl=Decimal("0.5"),
+                net_return_bps=100.0, closing_quantity=Decimal("0.5"),
+                closing_notional=Decimal("50"), fee_basis_complete=False,
+                lifecycle_status="OPEN", sequence=1,
+                metadata_json=(
+                    '{"allocated_entry_fee":"0","closing_fee":"0",'
+                    '"fee_basis_complete":false}'
+                ),
+            )
+            db.add_all([position, episode, outcome])
+            await db.commit()
+
+            await execution._apply_reconciled_live_fee_basis(
+                db, entry, Decimal("0.10")
+            )
+            await db.commit()
+            await db.refresh(position)
+            await db.refresh(outcome)
+            await db.refresh(episode)
+
+            # The opening fee is now known, but the add-on is still unresolved.
+            # Neither the position nor its partial outcome is net-fee complete.
+            assert position.entry_fee == pytest.approx(0.05)
+            assert position.entry_fee_basis_known is False
+            assert outcome.fee_basis_complete is False
+            assert outcome.net_pnl is None
+            assert outcome.net_return_bps is None
+            assert episode.total_fees == pytest.approx(0)
+            assert episode.net_pnl == pytest.approx(0.5)
+
+    asyncio.run(with_database(check))

@@ -1001,6 +1001,28 @@ async def _apply_reconciled_live_fee_basis(
             quantities[int(final.id)] = final_quantity
         return quantities
 
+    pending_fee_order_cache: dict[int, bool] = {}
+
+    async def _has_pending_fee_order(entry_trade: Trade | None) -> bool:
+        """Keep a position's fee basis incomplete while any scoped order is unresolved."""
+        if entry_trade is None:
+            return True
+        entry_id = int(entry_trade.id)
+        if entry_id not in pending_fee_order_cache:
+            pending = (await db.execute(
+                select(Trade.id).where(
+                    Trade.id != trade.id,
+                    Trade.id >= entry_id,
+                    Trade.customer_id == entry_trade.customer_id,
+                    Trade.mode == entry_trade.mode,
+                    Trade.exchange == entry_trade.exchange,
+                    Trade.symbol == entry_trade.symbol,
+                    Trade.fee_reconciliation_pending.is_(True),
+                ).limit(1)
+            )).scalar_one_or_none()
+            pending_fee_order_cache[entry_id] = pending is not None
+        return pending_fee_order_cache[entry_id]
+
     entry_fill_quantities = _source_fill_quantities(entry_rows)
     closing_fill_quantities = _source_fill_quantities(closing_rows)
     entry_fee_by_row: dict[int, Decimal] = {}
@@ -1134,28 +1156,15 @@ async def _apply_reconciled_live_fee_basis(
         position.entry_fee = (
             Decimal(str(position.entry_fee or 0)) + position_entry_fee_delta
         )
-        if is_position_entry:
-            position.entry_fee_basis_known = True
-        elif add_on_fee_only:
-            # An unknown add-on previously made the aggregate position fee basis
-            # incomplete. Re-enable it only when the opening order is verified and
-            # every other add-on/close fee in this position's scope is reconciled.
+        if is_position_entry or add_on_fee_only:
+            # The aggregate basis includes the opening order and every add-on/close
+            # order scoped to this position. Resolving one order must not clear an
+            # outstanding fee reconciliation for another order.
             entry_trade = await db.get(Trade, position.entry_trade_id)
-            pending_fee_order = (await db.execute(
-                select(Trade.id).where(
-                    Trade.id != trade.id,
-                    Trade.id >= int(position.entry_trade_id),
-                    Trade.customer_id == position.customer_id,
-                    Trade.mode == trade.mode,
-                    Trade.exchange == position.exchange,
-                    Trade.symbol == position.symbol,
-                    Trade.fee_reconciliation_pending.is_(True),
-                ).limit(1)
-            )).scalar_one_or_none()
             position.entry_fee_basis_known = bool(
                 entry_trade is not None
                 and not bool(entry_trade.fee_reconciliation_pending)
-                and pending_fee_order is None
+                and not await _has_pending_fee_order(entry_trade)
             )
 
         if add_on_fee_only and bool(position.entry_fee_basis_known):
@@ -1213,11 +1222,16 @@ async def _apply_reconciled_live_fee_basis(
             trade if int(row.closing_trade_id or 0) == int(trade.id)
             else await db.get(Trade, row.closing_trade_id)
         )
+        has_pending_fee_order = (
+            await _has_pending_fee_order(entry_trade)
+            if entry_trade is not None else True
+        )
         basis_known = bool(
             entry_trade is not None
             and close_trade is not None
             and not bool(getattr(entry_trade, "fee_reconciliation_pending", False))
             and not bool(getattr(close_trade, "fee_reconciliation_pending", False))
+            and not has_pending_fee_order
         )
         row.fee = total_fee
         row.fee_basis_complete = basis_known
