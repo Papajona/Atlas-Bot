@@ -24,8 +24,9 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "stale_legacy_quarantine" in block
     assert "or stale_legacy_quarantine" in block
     assert "if needs_auth_identity:" in block
-    assert "await _has_unmapped_legacy_customer_profile(db, uid)" in block
-    assert "_legacy_customer_email_conflict(db, uid, email)" not in block
+    assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in block
+    assert "identity_review_required = await _legacy_customer_email_conflict(db, uid, email)" in block
+    assert "await _customer_profile_effectively_active(db, profile, email)" in block
     assert "casefold()" in block
 
 
@@ -37,6 +38,9 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
     ]
     assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in block
     assert "uuid.UUID" in block
+    assert 'op("!~*")' in block
+    assert 'op("GLOB")' in block
+    assert "func.lower(CustomerProfile.auth_user_id)" in block
     assert ".ilike(" not in block
 
 
@@ -234,6 +238,58 @@ def test_unmapped_legacy_profile_with_blank_email_blocks_new_identity():
     assert unrelated_uuid is False
 
 
+def test_existing_profile_identity_review_is_scoped_to_confirmed_legacy_email():
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def all(self):
+            return self.rows
+
+    class Database:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def execute(self, _statement):
+            return Result(self.rows)
+
+    def conflicts(rows):
+        return asyncio.run(
+            main._legacy_customer_email_conflict(
+                Database(rows), "customer-uuid", "owner@example.invalid"
+            )
+        )
+
+    # An unrelated, identified legacy customer must not lock this customer.
+    assert conflicts([("legacy-other", "other@example.invalid")]) is False
+    # Matching is case-insensitive and blocks a possible duplicate identity.
+    assert conflicts([("legacy-same", "OWNER@example.invalid")]) is True
+    # An unmapped row with no recoverable email remains fail-closed.
+    assert conflicts([("legacy-unknown", "")]) is True
+    # UUID-backed customers are not legacy identities.
+    assert conflicts([
+        ("8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7", "owner@example.invalid")
+    ]) is False
+
+    profile = SimpleNamespace(
+        status="ACTIVE", email="", auth_user_id="customer-uuid"
+    )
+    assert asyncio.run(
+        main._customer_profile_effectively_active(
+            Database([("legacy-other", "other@example.invalid")]),
+            profile,
+            "owner@example.invalid",
+        )
+    ) is True
+    assert asyncio.run(
+        main._customer_profile_effectively_active(
+            Database([("legacy-same", "owner@example.invalid")]),
+            profile,
+            "owner@example.invalid",
+        )
+    ) is False
+
+
 
 def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unlocking_customer_access():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
@@ -254,9 +310,9 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
     assert "if profile is None:" in get_customer
     assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
     assert "if stale_legacy_quarantine:" in get_customer
+    assert "identity_review_required = await _legacy_customer_email_conflict(db, uid, email)" in get_customer
     assert "profile.status = \"ACTIVE\"" in get_customer
-    assert "await _legacy_customer_email_conflict(db, uid, email)" not in get_customer
-    assert "await _customer_profile_effectively_active(db, profile)" in get_customer
+    assert "await _customer_profile_effectively_active(db, profile, email)" in get_customer
     assert 'profile.status = "PENDING_IDENTITY_REVIEW"' not in get_customer
     assert "profile.identity_review_required = bool(identity_review_required)" in get_customer
     assert "if not identity_review_required:" in get_customer
@@ -312,7 +368,7 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
     assert "not str(profile.display_name or" not in customer
     assert "or stale_legacy_quarantine" in customer
     assert "if needs_auth_identity:" in customer
-    assert "_legacy_customer_email_conflict(db, uid, email)" not in customer
+    assert "_legacy_customer_email_conflict(db, uid, email)" in customer
     assert 'profile.status = "PENDING_IDENTITY_REVIEW"' not in customer
     assert "profile.identity_review_required = bool(identity_review_required)" in customer
     assert 'profile.status = "ACTIVE"' in customer
