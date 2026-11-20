@@ -34,6 +34,8 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
     ]
     assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in block
     assert "uuid.UUID" in block
+    assert 'CustomerProfile.auth_user_id.op("!~*")' in block
+    assert 'CustomerProfile.auth_user_id.op("GLOB")' in block
     assert ".ilike(" not in block
 
 
