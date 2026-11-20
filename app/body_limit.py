@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 
 
@@ -24,12 +25,19 @@ class BodySizeLimitMiddleware:
         body_idle_timeout_seconds: float = 2.0,
         body_total_timeout_seconds: float = 10.0,
     ) -> None:
+        idle_timeout = float(body_idle_timeout_seconds)
+        total_timeout = float(body_total_timeout_seconds)
+        if not math.isfinite(idle_timeout) or idle_timeout <= 0.0:
+            raise ValueError("body idle timeout must be finite and positive")
+        if not math.isfinite(total_timeout) or total_timeout <= 0.0:
+            raise ValueError("body total timeout must be finite and positive")
+        if total_timeout < idle_timeout:
+            raise ValueError("body total timeout must be greater than or equal to the idle timeout")
+
         self.app = app
         self.max_bytes = int(max_bytes)
-        self.body_idle_timeout_seconds = max(0.01, float(body_idle_timeout_seconds))
-        self.body_total_timeout_seconds = max(
-            self.body_idle_timeout_seconds, float(body_total_timeout_seconds)
-        )
+        self.body_idle_timeout_seconds = max(0.01, idle_timeout)
+        self.body_total_timeout_seconds = total_timeout
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http" or self.max_bytes <= 0:
