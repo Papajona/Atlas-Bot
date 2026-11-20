@@ -1,5 +1,7 @@
 """scripts/paper_preflight.py: each check must fail for the reason it names and only that reason."""
 import importlib.util
+
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
