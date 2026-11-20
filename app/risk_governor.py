@@ -2,6 +2,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 
+MAX_RISK_TOLERANCE = 0.10
+
+
+def bounded_risk_tolerance(value: float) -> float:
+    """Keep optional risk headroom finite, non-negative, and capped at 10%."""
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    if not math.isfinite(parsed) or parsed < 0.0:
+        return 0.0
+    return min(parsed, MAX_RISK_TOLERANCE)
+
+
 @dataclass(frozen=True)
 class RiskGovernorDecision:
     action: str
@@ -33,10 +47,17 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
     # from notional alone. This is the core discipline rule for risk-per-trade sizing.
     if equity is not None and risk_per_trade is not None and stop_loss_price is not None and equity > 0 and risk_per_trade > 0:
         risk_cash = abs(price - stop_loss_price) * quantity
-        allowed = equity * risk_per_trade * (1.0 + max(0.0, risk_tolerance))
+        allowed = equity * risk_per_trade * (1.0 + bounded_risk_tolerance(risk_tolerance))
         if not math.isfinite(risk_cash) or risk_cash > allowed + 1e-9:
             reasons.append("risk_per_trade_limit")
-    if spread_bps is not None and (not math.isfinite(spread_bps) or spread_bps < 0 or spread_bps > max_spread_bps): reasons.append("spread_guard")
+    if not math.isfinite(max_spread_bps) or max_spread_bps < 0:
+        reasons.append("spread_guard_config_invalid")
+    elif spread_bps is not None and (
+        not math.isfinite(spread_bps)
+        or spread_bps < 0
+        or spread_bps > max_spread_bps
+    ):
+        reasons.append("spread_guard")
     data_quality=(signal.get("data_quality") or {}) if isinstance(signal,dict) else {}
     if live and not data_quality: reasons.append("market_data_quality_missing")
     if data_quality.get("valid") is False: reasons.append("market_data_quality")
