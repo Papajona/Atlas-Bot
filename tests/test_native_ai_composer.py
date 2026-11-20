@@ -219,6 +219,22 @@ def test_negated_strategy_family_does_not_override_affirmative_family(
     assert draft["strategy_family"] == expected_family
 
 
+@pytest.mark.parametrize(
+    "prompt,expected_family",
+    [
+        ("don’t use mean reversion; use breakout BTC long 1h", "BREAKOUT"),
+        ("avoid breakout, use momentum BTC long 1h", "MOMENTUM"),
+        ("don’t use mean reversion or momentum for BTC long 1h", "TREND"),
+        ("don’t use mean reversion; use breakout BTC long 1h", "BREAKOUT"),
+    ],
+)
+def test_smart_quote_strategy_family_negation_is_normalized(prompt, expected_family):
+    draft = compose_strategy_spec(prompt=prompt, name="Smart quote negation")
+    assert draft["strategy_family"] == expected_family
+    if expected_family == "TREND":
+        assert any("No strategy type was recognised" in w for w in draft["validation_warnings"])
+
+
 def test_only_negated_strategy_families_are_treated_as_unnamed_fallback():
     draft = compose_strategy_spec(
         prompt="do not use mean reversion or momentum for BTC long 1h",
