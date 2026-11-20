@@ -423,7 +423,8 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
                           symbol: str | None = None, timeframe: str | None = None,
                           max_risk_per_trade: float = 0.005) -> dict[str, Any]:
     """Map a request to a supported strategy template, not to generated executable code."""
-    text = str(prompt or "").strip()
+    # Normalize mobile smart quotes before every semantic classifier, including strategy-family negation.
+    text = str(prompt or "").replace("\u2019", "'").replace("\u2018", "'").strip()
     if not text:
         raise NativeAIError("Enter a strategy request before generating a draft.")
     title = re.sub(r"\s+", " ", str(name or "Atlas Native Strategy").strip())[:120] or "Atlas Native Strategy"
