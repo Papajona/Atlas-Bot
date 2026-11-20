@@ -37,7 +37,8 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
         source.index("async def _customer_profile_effectively_active")
     ]
     block = conflict_block + unmapped_block
-    assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in conflict_block
+    normalized_conflict = " ".join(conflict_block.split())
+    assert "select( CustomerProfile.auth_user_id, CustomerProfile.email )" in normalized_conflict
     assert "select(CustomerProfile.id)" in unmapped_block
     assert "uuid.UUID" in block
     assert 'CustomerProfile.auth_user_id.op("!~*")' in block
