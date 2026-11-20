@@ -591,14 +591,12 @@ def test_stale_identity_quarantine_reactivates_only_after_conflict_clears(monkey
 
 def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    adaptive = source[
-        source.index("async def _adaptive_bot_runtime_gate"):
-        source.index("async def _")
-    ]
-    executor = source[
-        source.index("async def _executor_controller_loop"):
-        source.index("async def _")
-    ]
+    adaptive_start = source.index("async def _adaptive_bot_runtime_gate")
+    adaptive_end = source.index("\\nasync def ", adaptive_start + 1)
+    adaptive = source[adaptive_start:adaptive_end]
+    executor_start = source.index("async def _executor_controller_loop")
+    executor_end = source.index("\\nasync def ", executor_start + 1)
+    executor = source[executor_start:executor_end]
     assert "await _customer_profile_effectively_active(db, profile)" in adaptive
     assert "await _customer_profile_effectively_active(db, profile)" in executor
     assert 'profile.status != "ACTIVE"' not in adaptive
