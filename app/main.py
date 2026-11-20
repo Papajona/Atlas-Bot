@@ -9669,10 +9669,13 @@ async def admin_learning_episode_detail(episode_id: int, x_admin_token: str | No
             "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
             "market_flow": json.loads(ep.market_flow_json or "{}") if str(ep.status).upper() == "COMPLETED" else {},
             "memory": json.loads(ep.learning_memory_json or "{}") if str(ep.status).upper() == "COMPLETED" else {},
-            "replays": [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
-                         "entry_decision_return_bps": x.entry_decision_return_bps,
-                         "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
-                         "comparison_scope": x.comparison_scope} for x in replays],
+            "replays": (
+                [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
+                  "entry_decision_return_bps": x.entry_decision_return_bps,
+                  "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
+                  "comparison_scope": x.comparison_scope} for x in replays]
+                if str(ep.status).upper() == "COMPLETED" else []
+            ),
         }
 
 
