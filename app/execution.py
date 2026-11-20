@@ -1605,6 +1605,7 @@ async def _apply_fill_to_position(
                     select(Trade).where(Trade.id.in_(
                         select(StrategyOutcome.closing_trade_id).where(
                             StrategyOutcome.trade_id == episode_trade_id,
+                            StrategyOutcome.lifecycle_status == "OPEN",
                             StrategyOutcome.closing_trade_id.is_not(None),
                         )
                     ))
@@ -1716,12 +1717,14 @@ async def _apply_fill_to_position(
                 # but metadata retains one fee allocation per underlying fill.
                 # Recompute the episode from those per-fill components so a
                 # corrected add-on fee cannot be lost by trade-level fee totals.
-                fee_rows = (await db.execute(
-                    select(StrategyOutcome).where(
-                        StrategyOutcome.trade_id == attribution_trade_id,
-                        StrategyOutcome.closing_trade_id.is_not(None),
-                    ).order_by(StrategyOutcome.sequence, StrategyOutcome.id)
-                )).scalars().all()
+                # Reuse the exact current-lifecycle rows selected for aggregation.
+                # A partially filled entry order may be reused after a prior position
+                # closes, so a trade_id-only query would pull old lifecycle fees back
+                # into this episode's net return.
+                fee_rows = [
+                    row for row in completed_outcomes
+                    if row.closing_trade_id is not None
+                ]
                 fee_components: list[Decimal] = []
                 fee_basis_complete = bool(fee_rows)
                 for fee_row in fee_rows:
