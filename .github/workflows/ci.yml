@@ -615,15 +615,15 @@ jobs:
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             INSERT INTO public.ledger_journals
-                (currency, entry_type, idempotency_key)
-            VALUES ('USDT', 'ACL_TRIGGER_PROBE', 'atlas-acl-probe:balanced');
+                (currency, entry_type, idempotency_key, created_at)
+            VALUES ('USDT', 'ACL_TRIGGER_PROBE', 'atlas-acl-probe:balanced', now());
             INSERT INTO public.ledger_journal_lines
-                (journal_id, line_no, account_code, currency, debit, credit)
-            SELECT id, 1, 'acl-probe-debit', 'USDT', 1, 0
+                (journal_id, line_no, account_code, currency, debit, credit, created_at)
+            SELECT id, 1, 'acl-probe-debit', 'USDT', 1, 0, now()
             FROM public.ledger_journals
             WHERE idempotency_key = 'atlas-acl-probe:balanced'
             UNION ALL
-            SELECT id, 2, 'acl-probe-credit', 'USDT', 0, 1
+            SELECT id, 2, 'acl-probe-credit', 'USDT', 0, 1, now()
             FROM public.ledger_journals
             WHERE idempotency_key = 'atlas-acl-probe:balanced';
             SET CONSTRAINTS ALL IMMEDIATE;
@@ -635,11 +635,11 @@ jobs:
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             INSERT INTO public.ledger_journals
-                (currency, entry_type, idempotency_key)
-            VALUES ('USDT', 'ACL_TRIGGER_PROBE', 'atlas-acl-probe:unbalanced');
+                (currency, entry_type, idempotency_key, created_at)
+            VALUES ('USDT', 'ACL_TRIGGER_PROBE', 'atlas-acl-probe:unbalanced', now());
             INSERT INTO public.ledger_journal_lines
-                (journal_id, line_no, account_code, currency, debit, credit)
-            SELECT id, 1, 'acl-probe-debit', 'USDT', 1, 0
+                (journal_id, line_no, account_code, currency, debit, credit, created_at)
+            SELECT id, 1, 'acl-probe-debit', 'USDT', 1, 0, now()
             FROM public.ledger_journals
             WHERE idempotency_key = 'atlas-acl-probe:unbalanced';
             SET CONSTRAINTS ALL IMMEDIATE;
