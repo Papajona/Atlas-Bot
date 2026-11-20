@@ -164,6 +164,8 @@ The original backup source has been independently correlated to Supabase logs. O
 Once the bucket retention policy is locked, the dedicated Cloud SQL target/database exist, IAM is provisioned, and the generation-pinned sanitized candidate has been uploaded, run **Execute isolated Cloud SQL recovery restore** from `main`. Supply the exact original source object URI, the sanitized SQL candidate URI under `gs://atlas-staging-510915-db-backups/sanitized-imports/`, the authenticated source project ref, and type `RESTORE` for target confirmation. The candidate is not an arbitrary SQL file: `scripts/verify_cloud_sql_sanitized_artifacts.py` accepts only the reviewed October 22 source generation and candidate fingerprint (SHA-256 `fa3b14ec305a9d87313c19a57a441879a4b9977f0e43cd8a349476398d59dfa4`, 195036 bytes). It requires the canonical SHA-256 of the PostgreSQL 17 prepared source SQL to match the independently reviewed, protected staging environment variable `ATLAS_CLOUD_SQL_SOURCE_PREPARED_CANONICAL_SHA256`; it also verifies the exact candidate fingerprint and that the immutable imported bytes are identical to that candidate. A missing, malformed or mismatched source fingerprint blocks both import and audit. Establish the source fingerprint from the exact generation-pinned original archive after checksum verification and offline conversion with the reviewed PostgreSQL 17 preparation script. From the repository checkout containing the reviewed preparation and comparison scripts, run:
 
 ```bash
+set -euo pipefail
+
 # Installs the pinned PostgreSQL 17 client packages in this Cloud Shell environment.
 bash scripts/install_pinned_postgresql_client.sh
 
