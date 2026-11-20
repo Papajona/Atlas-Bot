@@ -95,12 +95,10 @@ _SYMBOL_ASSET = {
 }
 
 
-_FAMILY_NEGATION_PREFIX = re.compile(
+_FAMILY_NEGATION_CUE = re.compile(
     r"\\b(?:do\\s+not|does\\s+not|did\\s+not|don't|dont|doesn't|doesnt|never|"
     r"is\\s+not|are\\s+not|was\\s+not|were\\s+not|isn't|isnt|aren't|arent|"
-    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?|non[-\\s]+)\\b"
-    r"(?:\\s+(?:please|use|using|choose|select|apply|adopt|enable|switch|to|the|a|an|"
-    r"this|that|strategy|strategies|approach|profile|mode)){0,6}\\s*$"
+    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\\b"
 )
 
 _FAMILY_HINT_TERMS = (
@@ -121,9 +119,17 @@ def _has_affirmed_family_phrase(text: str, phrases: tuple[str, ...]) -> bool:
         for match in pattern.finditer(value):
             before = value[max(0, match.start() - 120):match.start()]
             before = re.split(
-                r"[.!?;,:]|\\b(?:but|however|instead|rather)\\b", before
+                r"[.!?;,:]|\\b(?:but|however|instead|rather)\\b|"
+                r"\\b(?:and|or)\\b(?=\\s+(?:please|use|using|choose|select|"
+                r"apply|adopt|enable|switch|prefer)\\b)",
+                before,
             )[-1]
-            if _FAMILY_NEGATION_PREFIX.search(before):
+            # "Not only X" is affirmative emphasis, not a rejection of X.
+            before = re.sub(r"\\bnot\\s+(?:only|just)\\b", "", before)
+            if (
+                _FAMILY_NEGATION_CUE.search(before)
+                or re.search(r"\\bnon[-\\s]+$", before)
+            ):
                 continue
             return True
     return False
