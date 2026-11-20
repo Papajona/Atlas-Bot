@@ -40,8 +40,16 @@ def test_episode_quarantined_during_fetch_is_not_persisted_as_replayed(monkeypat
         async def __aexit__(self, _type, _value, _traceback):
             return False
 
-        async def execute(self, _statement):
+        async def execute(self, statement):
             assert self.initial
+            from sqlalchemy.dialects import sqlite
+            sql = str(statement.compile(
+                dialect=sqlite.dialect(),
+                compile_kwargs={"literal_binds": True},
+            ))
+            assert "strategy_outcomes.fee_basis_complete" in sql
+            assert "strategy_outcomes.closing_trade_id IS NOT NULL" in sql
+            assert "trade_learning_episodes.entry_trade_id IN" in sql
             return Result()
 
         async def get(self, _model, episode_id, *, with_for_update=False):
