@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Restore and audit must use the same PostgreSQL 17 archive tooling.
-# Keep this major pinned in one script rather than using Ubuntu's unversioned
-# postgresql-client metapackage (which can select a different major).
+# Pin the same PostgreSQL minor release used by the verified recovery CI run.
+# Fail closed when PGDG no longer offers that release; never silently drift.
 readonly POSTGRES_CLIENT_MAJOR=17
 readonly POSTGRES_CLIENT_RELEASE=17.12
 readonly POSTGRES_BIN_DIR="/usr/lib/postgresql/$POSTGRES_CLIENT_MAJOR/bin"
@@ -77,11 +77,11 @@ test -x "$POSTGRES_BIN_DIR/pg_restore"
 test -x "$POSTGRES_BIN_DIR/pg_dump"
 restore_version="$("$POSTGRES_BIN_DIR/pg_restore" --version)"
 dump_version="$("$POSTGRES_BIN_DIR/pg_dump" --version)"
-if ! grep -Eq '\(PostgreSQL\) 17(\.|$)' <<<"$restore_version"; then
+if ! grep -Eq '\(PostgreSQL\) 17\.12([[:space:]]|$)' <<<"$restore_version"; then
   echo "BLOCKED: expected PostgreSQL 17 pg_restore, got: $restore_version" >&2
   exit 1
 fi
-if ! grep -Eq '\(PostgreSQL\) 17(\.|$)' <<<"$dump_version"; then
+if ! grep -Eq '\(PostgreSQL\) 17\.12([[:space:]]|$)' <<<"$dump_version"; then
   echo "BLOCKED: expected PostgreSQL 17 pg_dump, got: $dump_version" >&2
   exit 1
 fi
