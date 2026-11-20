@@ -1802,7 +1802,10 @@ async def _apply_fill_to_position(
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
-            if realized_decimal != 0:
+            if closing_decimal > 0:
+                # A breakeven close still realizes an exit fee and completes a
+                # learning episode; gate fee/exit bookkeeping on closed quantity,
+                # not on whether gross price movement happened to be nonzero.
                 episode.gross_pnl = (
                     Decimal(str(episode.gross_pnl or 0)) + realized_decimal
                 ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
