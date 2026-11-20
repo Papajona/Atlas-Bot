@@ -504,7 +504,7 @@ def test_sanitized_import_verifier_rejects_changed_source_prepared_sql(tmp_path,
         )
 
 
-@pytest.mark.parametrize("fingerprint", ["", "not-a-hash", "A" * 64, "0" * 63])
+@pytest.mark.parametrize("fingerprint", ["", "not-a-hash", "A" * 64, "0" * 63, None, 123])
 def test_sanitized_import_verifier_rejects_missing_or_malformed_source_fingerprint(
     tmp_path, monkeypatch, fingerprint
 ):
