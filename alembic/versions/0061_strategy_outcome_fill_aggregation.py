@@ -303,6 +303,26 @@ def _historical_lifecycle_fee_basis_complete(
             return False
     return True
 
+
+def _cross_role_reused_order_ids(
+    role_rows: list[dict],
+    candidate_order_ids: set[int],
+) -> set[int]:
+    """Find orders used both to open and close position lifecycles."""
+    entry_ids = {
+        int(row["trade_id"])
+        for row in role_rows
+        if row.get("trade_id") is not None
+    }
+    closing_ids = {
+        int(row["closing_trade_id"])
+        for row in role_rows
+        if row.get("closing_trade_id") is not None
+    }
+    return (entry_ids & closing_ids) & {
+        int(value) for value in candidate_order_ids
+    }
+
 def upgrade() -> None:
     if context.is_offline_mode():
         raise RuntimeError(
@@ -467,6 +487,12 @@ def upgrade() -> None:
         FROM trade_learning_episodes
         WHERE entry_trade_id IN :trade_ids
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
+    order_role_lookup = sa.text("""
+        SELECT trade_id, closing_trade_id
+        FROM strategy_outcomes
+        WHERE trade_id IN :trade_ids
+           OR closing_trade_id IN :trade_ids
+    """).bindparams(sa.bindparam("trade_ids", expanding=True))
 
     while True:
         trade_ids = [
@@ -519,31 +545,50 @@ def upgrade() -> None:
                 episodes_by_trade_id = {
                     int(row["entry_trade_id"]): dict(row) for row in episode_rows
                 }
+                role_rows = [
+                    dict(row)
+                    for row in bind.execute(
+                        order_role_lookup, {"trade_ids": source_trade_ids}
+                    ).mappings().all()
+                ]
+                cross_role_reused_ids = _cross_role_reused_order_ids(
+                    role_rows, set(source_trade_ids)
+                )
+                entry_order_reused = (
+                    reused_entry_order or entry_trade_id in cross_role_reused_ids
+                )
                 entry_fee_fraction = _entry_order_fee_fraction(
                     source_trades.get(entry_trade_id),
                     episodes_by_trade_id.get(entry_trade_id),
-                    reused_entry_order=reused_entry_order,
+                    reused_entry_order=entry_order_reused,
                 )
                 expected_closing_quantities: dict[int, Decimal | None] = {}
                 closing_fee_fractions: dict[int, Decimal | None] = {}
                 for closing_id in closing_ids:
                     closing_order = closing_trades.get(closing_id)
                     closing_episode = episodes_by_trade_id.get(closing_id)
-                    expected_closing_quantities[closing_id] = (
-                        _expected_closing_order_quantity(
-                            closing_order, closing_episode
+                    if closing_id in cross_role_reused_ids:
+                        # The unique episode row now describes the later entry leg,
+                        # not necessarily the historical closing leg. Preserve the
+                        # outcomes but do not invent either quantity or fee shares.
+                        expected_closing_quantities[closing_id] = None
+                        closing_fee_fractions[closing_id] = None
+                    else:
+                        expected_closing_quantities[closing_id] = (
+                            _expected_closing_order_quantity(
+                                closing_order, closing_episode
+                            )
                         )
-                    )
-                    closing_fee_fractions[closing_id] = (
-                        _closing_order_fee_fraction(
-                            closing_order, closing_episode
+                        closing_fee_fractions[closing_id] = (
+                            _closing_order_fee_fraction(
+                                closing_order, closing_episode
+                            )
                         )
-                    )
                 fee_total = _reconstruct_lifecycle_fee_total(
                     entry_trade_id,
                     closing_ids,
                     source_trades,
-                    reused_entry_order=reused_entry_order,
+                    reused_entry_order=entry_order_reused,
                     entry_fee_fraction=entry_fee_fraction,
                     closing_fee_fractions=closing_fee_fractions,
                 )
