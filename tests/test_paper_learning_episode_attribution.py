@@ -354,7 +354,7 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
             assert position.entry_trade_id == reversal_id
             assert position.strategy == "reversal-strategy"
             assert position.entry_regime == "NEW_DOWN"
-            assert by_entry[old_entry_id].status == "COMPLETED"
+            assert by_entry[old_entry_id].status == "FEE_PENDING"
             assert reopened.status == "OPEN"
             assert reopened.entry_quantity == pytest.approx(1.0)
             assert reopened.entry_price == pytest.approx(98.0)
@@ -557,7 +557,7 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
 
             assert position.quantity == pytest.approx(-1.0)
             assert position.entry_trade_id == reversal_id
-            assert by_entry[old_entry_id].status == "COMPLETED"
+            assert by_entry[old_entry_id].status == "FEE_PENDING"
             assert by_entry[reversal_id].status == "OPEN"
             assert by_entry[reversal_id].entry_quantity == pytest.approx(1.0)
             assert outcome.lifecycle_status == "CLOSED"
