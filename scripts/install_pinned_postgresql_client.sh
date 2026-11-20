@@ -78,11 +78,11 @@ test -x "$POSTGRES_BIN_DIR/pg_dump"
 restore_version="$("$POSTGRES_BIN_DIR/pg_restore" --version)"
 dump_version="$("$POSTGRES_BIN_DIR/pg_dump" --version)"
 if ! grep -Eq '\(PostgreSQL\) 17\.12([[:space:]]|$)' <<<"$restore_version"; then
-  echo "BLOCKED: expected PostgreSQL 17 pg_restore, got: $restore_version" >&2
+  echo "BLOCKED: expected PostgreSQL 17.12 pg_restore, got: $restore_version" >&2
   exit 1
 fi
 if ! grep -Eq '\(PostgreSQL\) 17\.12([[:space:]]|$)' <<<"$dump_version"; then
-  echo "BLOCKED: expected PostgreSQL 17 pg_dump, got: $dump_version" >&2
+  echo "BLOCKED: expected PostgreSQL 17.12 pg_dump, got: $dump_version" >&2
   exit 1
 fi
 
