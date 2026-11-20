@@ -65,6 +65,14 @@ class BodySizeLimitMiddleware:
         if len(set(declared_lengths)) > 1:
             await self._reject(send, close_connection=close_connection, status=400, detail="Conflicting Content-Length headers")
             return
+        if has_transfer_encoding and declared_lengths:
+            await self._reject(
+                send,
+                close_connection=close_connection,
+                status=400,
+                detail="Conflicting Transfer-Encoding and Content-Length headers",
+            )
+            return
 
         method = str(scope.get("method") or "GET").upper()
         body_declared = any(length > 0 for length in declared_lengths) or has_transfer_encoding

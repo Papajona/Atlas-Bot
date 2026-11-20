@@ -53,6 +53,33 @@ def test_chunked_oversize_rejected_when_no_content_length():
     assert sent[0]["status"] == 413
 
 
+def test_transfer_encoding_with_content_length_is_rejected_before_route():
+    mw = BodySizeLimitMiddleware(_reader_app(), max_bytes=10)
+    sent = _run(_drive(
+        mw,
+        headers=[
+            (b"content-length", b"4"),
+            (b"transfer-encoding", b"chunked"),
+        ],
+        chunks=[b"data"],
+    ))
+    assert sent[0]["status"] == 400
+    assert sent[-1]["body"] == b'{"detail":"Conflicting Transfer-Encoding and Content-Length headers"}'
+
+
+def test_conflicting_content_lengths_are_rejected():
+    mw = BodySizeLimitMiddleware(_reader_app(), max_bytes=10)
+    sent = _run(_drive(
+        mw,
+        headers=[
+            (b"content-length", b"4"),
+            (b"content-length", b"5"),
+        ],
+        chunks=[b"data!"],
+    ))
+    assert sent[0]["status"] == 400
+
+
 def test_within_limit_passes_through():
     mw = BodySizeLimitMiddleware(_reader_app(), max_bytes=10)
     sent = _run(_drive(mw, headers=[(b"content-length", b"10")], chunks=[b"x" * 10]))
