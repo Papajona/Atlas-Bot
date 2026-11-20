@@ -95,29 +95,67 @@ _SYMBOL_ASSET = {
 }
 
 
-def _classify_family(text: str) -> str:
+_FAMILY_NEGATION_PREFIX = re.compile(
+    r"\\b(?:do\\s+not|does\\s+not|did\\s+not|don't|dont|doesn't|doesnt|never|"
+    r"is\\s+not|are\\s+not|was\\s+not|were\\s+not|isn't|isnt|aren't|arent|"
+    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?|non[-\\s]+)\\b"
+    r"(?:\\s+(?:please|use|using|choose|select|apply|adopt|enable|switch|to|the|a|an|"
+    r"this|that|strategy|strategies|approach|profile|mode)){0,6}\\s*$"
+)
+
+_FAMILY_HINT_TERMS = (
+    "trend", "trending", "moving average", "ema", "sma", "golden cross",
+    "death cross", "mean reversion", "mean-reversion", "meanreversion",
+    "revert", "range-bound", "rangebound", "oversold", "overbought",
+    "breakout", "break out", "prior high", "range high", "range low",
+    "momentum", "roc", "rate of change", "acceleration", "ensemble",
+    "combine", "multiple strategies",
+)
+
+
+def _has_affirmed_family_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    """Match an explicit family cue unless its local clause rejects that cue."""
     value = text.lower()
+    for phrase in phrases:
+        pattern = re.compile(r"\\b" + re.escape(phrase) + r"\\b")
+        for match in pattern.finditer(value):
+            before = value[max(0, match.start() - 120):match.start()]
+            before = re.split(
+                r"[.!?;,:]|\\b(?:but|however|instead|rather)\\b", before
+            )[-1]
+            if _FAMILY_NEGATION_PREFIX.search(before):
+                continue
+            return True
+    return False
+
+
+def _classify_family(text: str) -> str:
     # Explicit multi-strategy intent takes precedence over component keywords.
-    if any(x in value for x in ("ensemble", "combine strategies", "multiple strategies", "combine momentum and trend")):
+    if _has_affirmed_family_phrase(
+        text, ("ensemble", "combine strategies", "multiple strategies",
+               "combine momentum and trend")
+    ):
         return "ENSEMBLE"
-    if any(x in value for x in ("mean reversion", "mean-reversion", "revert to mean", "range-bound", "oversold", "overbought")):
+    if _has_affirmed_family_phrase(
+        text, ("mean reversion", "mean-reversion", "meanreversion",
+               "revert to mean", "range-bound", "rangebound",
+               "oversold", "overbought")
+    ):
         return "MEAN_REVERSION"
-    if any(x in value for x in ("breakout", "break out", "prior high", "range high", "range low")):
+    if _has_affirmed_family_phrase(
+        text, ("breakout", "break out", "prior high", "range high", "range low")
+    ):
         return "BREAKOUT"
-    if any(x in value for x in ("momentum", "rate of change", "acceleration")) or re.search(r"\broc\b", value):
+    if _has_affirmed_family_phrase(
+        text, ("momentum", "rate of change", "acceleration", "roc")
+    ):
         return "MOMENTUM"
     return "TREND"
 
 
-_FAMILY_HINT = re.compile(
-    r"\b(?:trend|trending|moving\s+average|ema|sma|golden\s+cross|death\s+cross|mean[-\s]?reversion|"
-    r"revert|range[-\s]?bound|oversold|overbought|breakout|break\s+out|prior\s+high|range\s+high|range\s+low|"
-    r"momentum|roc|rate\s+of\s+change|acceleration|ensemble|combine|multiple\s+strategies)\b")
-
-
 def _family_was_inferred(text: str) -> bool:
-    """True when the prompt named a strategy type; False when TREND is only the fallback."""
-    return _FAMILY_HINT.search(text.lower()) is not None
+    """True when the prompt affirmed a strategy cue; False for a fallback TREND."""
+    return _has_affirmed_family_phrase(text, _FAMILY_HINT_TERMS)
 
 
 _PROFILE_NEGATION_PREFIX = re.compile(
