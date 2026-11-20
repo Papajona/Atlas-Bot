@@ -369,7 +369,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
 def test_platform_paper_submission_rejects_fx_and_unverified_derivatives(monkeypatch, tmp_path):
     import pandas as pd
     from app import execution
-    from app.db import init_db, SessionLocal, Trade
+    from app.db import init_db, Trade
 
     fx_symbol = f"FXPAPER-{uuid.uuid4().hex[:8]}"
     derivative_symbol = f"SWAPPAPER-{uuid.uuid4().hex[:8]}"
