@@ -96,9 +96,9 @@ _SYMBOL_ASSET = {
 
 
 _FAMILY_NEGATION_CUE = re.compile(
-    r"\b(?:do\s+not|does\s+not|did\s+not|don't|dont|doesn't|doesnt|never|"
-    r"is\s+not|are\s+not|was\s+not|were\s+not|isn't|isnt|aren't|arent|"
-    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\b"
+    r"\\b(?:do\\s+not|does\\s+not|did\\s+not|don't|dont|doesn't|doesnt|never|"
+    r"is\\s+not|are\\s+not|was\\s+not|were\\s+not|isn't|isnt|aren't|arent|"
+    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\\b"
 )
 
 _FAMILY_HINT_TERMS = (
