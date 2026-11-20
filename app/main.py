@@ -4001,22 +4001,47 @@ async def get_customer(
         profile is not None
         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     )
-    identity_review_required = stale_legacy_quarantine
-
+    # Recheck an existing quarantine against the bounded identity index. A
+    # previously unresolved legacy reference may have been manually reconciled;
+    # it must not lock the customer out forever after the conflict is gone.
+    needs_auth_identity = (
+        profile is None or not stored_email or stale_legacy_quarantine
+    )
     if needs_auth_identity:
-        guard_db = db
-        current_profile = profile
-        profile_effectively_active = await _customer_profile_effectively_active(guard_db, current_profile)
-        if profile is None:
-            identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
-        elif (
-            not identity_review_required
-            and str(profile.status or "").upper() == "ACTIVE"
-            and not profile_effectively_active
-        ):
-            identity_review_required = True
+        user = await _supabase_user(_bearer_token(authorization))
+        if str(user.get("id") or "") != uid:
+            raise HTTPException(401, "Customer Auth identity could not be verified")
+        if not user.get("email_confirmed_at"):
+            raise HTTPException(403, "A confirmed email address is required")
+        auth_email = str(user.get("email") or "").strip().lower()[:320]
+        if auth_email:
+            email = auth_email
+            claims = dict(claims)
+            claims["email"] = auth_email
+        user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
+        name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
+    if not email:
+        raise HTTPException(403, "A confirmed email address is required")
+
+    identity_review_required = False
+    if profile is None:
+        # This indexed, bounded check avoids decrypting every stored customer
+        # email on the normal signup path. Any remaining legacy Auth ID is a
+        # quarantine condition; no full-table PII scan is needed.
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+    elif stale_legacy_quarantine:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
         if not identity_review_required:
-            identity_review_required = await _legacy_customer_email_conflict(db, uid, email)
+            profile.status = "ACTIVE"
+            profile.email = email
+            if name:
+                profile.display_name = name
+    elif needs_auth_identity:
+        profile_effectively_active = await _customer_profile_effectively_active(db, profile)
+        identity_review_required = (
+            str(profile.status or "").upper() == "ACTIVE"
+            and not profile_effectively_active
+        )
 
     if profile is None and identity_review_required:
         raise HTTPException(
