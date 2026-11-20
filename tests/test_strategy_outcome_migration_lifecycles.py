@@ -267,6 +267,16 @@ def test_unverified_fee_reconstruction_preserves_existing_historical_fee():
         fee_basis_complete=True,
     ) == Decimal("0.45")
 
+    # Keep the recorded fee for audit, but never retain a net result whose
+    # fee basis is unknown, whether the lifecycle is open or already closed.
+    verified_net_values = MIGRATION["_verified_net_values"]
+    assert verified_net_values(
+        Decimal("0.65"), 125.0, fee_basis_complete=False
+    ) == (None, None)
+    assert verified_net_values(
+        Decimal("0.65"), 125.0, fee_basis_complete=True
+    ) == (Decimal("0.65"), 125.0)
+
 
 def test_cross_role_reused_order_ids_are_not_reconstructed_from_latest_episode():
     role_rows = [
