@@ -562,7 +562,7 @@ def upgrade() -> None:
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
     quarantine_learning_episode = sa.text("""
         UPDATE trade_learning_episodes
-        SET status = 'FEE_RECONCILIATION_PENDING',
+        SET status = 'FEE_PENDING',
             replay_status = 'PENDING',
             replay_version = '',
             replay_error = 'Fee basis incomplete; awaiting authoritative reconciliation'
