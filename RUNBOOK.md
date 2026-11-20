@@ -170,11 +170,13 @@ set -euo pipefail
 bash scripts/install_pinned_postgresql_client.sh
 
 # The installer exports PATH only within its own process, so select and verify
-# PostgreSQL 17 explicitly in this shell before preparing the custom archive.
+# PostgreSQL 17.12 explicitly in this shell before preparing the custom archive.
 export PATH="/usr/lib/postgresql/17/bin:$PATH"
 test "$(command -v pg_restore)" = "/usr/lib/postgresql/17/bin/pg_restore"
 pg_restore --version
-pg_restore --version | grep -Eq '\(PostgreSQL\) 17(\.|$)'
+pg_dump --version
+pg_restore --version | grep -Eq '\(PostgreSQL\) 17\.12([[:space:]]|$)'
+pg_dump --version | grep -Eq '\(PostgreSQL\) 17\.12([[:space:]]|$)'
 
 PYTHONPATH=. python scripts/prepare_cloud_sql_import_dump.py \
   --input /secure/path/to/verified-source-generation.dump \
@@ -183,7 +185,7 @@ PYTHONPATH=. python scripts/compare_cloud_sql_import_dumps.py \
   --fingerprint /secure/path/to/source-prepared-postgresql-17.sql
 ```
 
-The installer changes only the Cloud Shell VM's local package/repository configuration; it does not create or modify Google Cloud resources. Do not run the conversion unless the pg_restore version check confirms PostgreSQL 17. The preparation helper calls pg_restore by its PATH name, so the explicit PATH export is required in a separate Cloud Shell session.
+The installer changes only the Cloud Shell VM's local package/repository configuration; it does not create or modify Google Cloud resources. Do not run the conversion unless both pg_restore and pg_dump report PostgreSQL 17.12; the restore and audit workflows install that same minor release and fail closed if PGDG no longer provides it. The preparation helper calls pg_restore by its PATH name, so the explicit PATH export is required in a separate Cloud Shell session.
 
 The second command reports both the raw prepared-file SHA-256 and the canonical SHA-256. Record the **canonical** value only after independently checking the source object's exact generation, size/checksum and PostgreSQL 17 conversion evidence. Review and record that value before setting the protected staging environment variable; never derive the expected value from the import job's own output or substitute the sanitized candidate hash. The fingerprint command is read-only and does not upload the source SQL, contact a database, or set the GitHub variable. Keep the original source reference, source-conversion fingerprint and candidate reference as separate evidence.
 
