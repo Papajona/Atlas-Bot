@@ -221,3 +221,39 @@ def test_bodyless_get_route_is_not_blocked_waiting_for_request_body():
 
     _run(middleware(scope, receive, capture))
     assert sent[0]["status"] == 200
+
+def test_body_timeouts_must_be_finite_and_positive():
+    for invalid in (float("nan"), float("inf"), float("-inf"), 0.0, -1.0):
+        try:
+            BodySizeLimitMiddleware(
+                _reader_app(),
+                body_idle_timeout_seconds=invalid,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid idle timeout accepted: {invalid!r}")
+
+        try:
+            BodySizeLimitMiddleware(
+                _reader_app(),
+                body_total_timeout_seconds=invalid,
+            )
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid total timeout accepted: {invalid!r}")
+
+
+def test_body_total_timeout_cannot_be_shorter_than_idle_timeout():
+    try:
+        BodySizeLimitMiddleware(
+            _reader_app(),
+            body_idle_timeout_seconds=2.0,
+            body_total_timeout_seconds=1.0,
+        )
+    except ValueError as exc:
+        assert "greater than or equal" in str(exc)
+    else:
+        raise AssertionError("total timeout shorter than idle timeout was accepted")
+
