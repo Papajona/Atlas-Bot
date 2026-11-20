@@ -332,7 +332,11 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
             result = await asyncio.to_thread(replay_trade_episode, df, episode)
             async with SessionLocal() as db:
                 ep = await db.get(TradeLearningEpisode, episode.id, with_for_update=True)
-                if not ep:
+                if not ep or str(ep.status or "").upper() != "COMPLETED":
+                    # Fee reconciliation can quarantine an episode while market
+                    # data is being fetched. Recheck under the row lock so an
+                    # obsolete replay cannot overwrite the new fee gate.
+                    skipped += 1
                     continue
                 ep.replay_status = "COMPLETE"
                 ep.replay_version = REPLAY_VERSION
