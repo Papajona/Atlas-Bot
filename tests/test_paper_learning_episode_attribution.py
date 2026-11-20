@@ -449,3 +449,96 @@ def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
             assert outcomes[1].net_return_bps == pytest.approx(17.25 / 220 * 10000)
 
     asyncio.run(run())
+
+
+def test_single_fill_reversal_episode_records_only_new_opposite_leg():
+    from app import execution
+    from app.db import (
+        init_db, SessionLocal, Trade, Position, TradeLearningEpisode, StrategyOutcome,
+    )
+
+    suffix = uuid.uuid4().hex
+    symbol = f"EPISODE-SINGLE-FLIP-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"single-flip-old-entry-{suffix}",
+                client_order_id=f"single-flip-old-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=0.1, notional=100.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"old-strategy","regime":"OLD"}',
+            )
+            reversal = Trade(
+                signal_id=f"single-flip-reversal-{suffix}",
+                client_order_id=f"single-flip-reversal-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=0.0,
+                remaining_quantity=2.0, requested_price=99.0,
+                average_fill_price=0.0, fee=0.0, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"reversal-strategy","regime":"NEW_DOWN"}',
+            )
+            db.add_all([entry, reversal])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=1.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, strategy="old-strategy",
+                entry_regime="OLD", entry_trade_id=entry.id,
+            ))
+            db.add_all([
+                TradeLearningEpisode(
+                    entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                    symbol=symbol, timeframe="1h", side="buy",
+                    strategy="old-strategy", status="OPEN",
+                    entry_quantity=1.0, entry_price=100.0,
+                ),
+                TradeLearningEpisode(
+                    entry_trade_id=reversal.id, customer_id=None, exchange="binance",
+                    symbol=symbol, timeframe="1h", side="sell",
+                    strategy="reversal-strategy", status="OPEN",
+                    entry_quantity=0.0, entry_price=0.0,
+                ),
+            ])
+            await db.commit()
+            old_entry_id, reversal_id = entry.id, reversal.id
+
+        async with SessionLocal() as db:
+            order = (await db.execute(
+                select(Trade).where(Trade.id == reversal_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(db, order, 2.0, 99.0)
+            await db.commit()
+
+        async with SessionLocal() as db:
+            position = (await db.execute(
+                select(Position).where(Position.symbol == symbol)
+            )).scalar_one()
+            episodes = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id.in_([old_entry_id, reversal_id])
+                )
+            )).scalars().all()
+            by_entry = {row.entry_trade_id: row for row in episodes}
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == old_entry_id,
+                    StrategyOutcome.closing_trade_id == reversal_id,
+                )
+            )).scalar_one()
+
+            assert position.quantity == pytest.approx(-1.0)
+            assert position.entry_trade_id == reversal_id
+            assert by_entry[old_entry_id].status == "COMPLETED"
+            assert by_entry[reversal_id].status == "OPEN"
+            assert by_entry[reversal_id].entry_quantity == pytest.approx(1.0)
+            assert outcome.lifecycle_status == "CLOSED"
+            assert outcome.closing_quantity == pytest.approx(1.0)
+
+    asyncio.run(run())
