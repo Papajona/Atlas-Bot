@@ -74,3 +74,19 @@ def test_uncompiled_safeguard_is_primary_reason_when_no_other_failure_exists():
 
     assert gate["validation_unavailable_reason"] == "UNCOMPILED_STRATEGY_SAFEGUARDS"
     assert gate["validation_unavailable_reasons"] == ["UNCOMPILED_STRATEGY_SAFEGUARDS"]
+
+def test_blank_primary_reason_is_replaced_by_first_concrete_reason():
+    gate = {
+        "validation_available": False,
+        "validation_unavailable_reason": "   ",
+        "validation_unavailable_reasons": ["TRIAL_HISTORY_RECORDING_FAILED"],
+    }
+
+    record_validation_unavailable_reason(gate, "UNCOMPILED_STRATEGY_SAFEGUARDS")
+
+    assert gate["validation_unavailable_reason"] == "TRIAL_HISTORY_RECORDING_FAILED"
+    assert gate["validation_unavailable_reasons"] == [
+        "TRIAL_HISTORY_RECORDING_FAILED",
+        "UNCOMPILED_STRATEGY_SAFEGUARDS",
+    ]
+
