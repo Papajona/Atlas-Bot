@@ -451,7 +451,7 @@ def test_paper_protective_stop_triggers_on_completed_bar_and_fills_later(monkeyp
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
+    from app.db import init_db, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"STOP-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
@@ -595,7 +595,7 @@ def test_paper_simulator_stress_shared_capacity_idempotency_and_fee_accounting(m
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, AppState, Trade, Position, PaperOrderState, PaperFillEvent, PaperBarState
+    from app.db import init_db, AppState, Trade, Position, PaperOrderState, PaperFillEvent, PaperBarState
 
     suffix = uuid.uuid4().hex[:12]
     symbol = f"STRESS-{suffix}"
@@ -796,7 +796,7 @@ def test_existing_position_stop_preempts_same_bar_entry_fill(monkeypatch, tmp_pa
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
+    from app.db import init_db, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"STOP-STRESS-{uuid.uuid4().hex[:10]}"
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
@@ -933,7 +933,7 @@ def test_missing_calibrated_quote_still_scans_closed_bar_for_protective_stop(mon
     import pandas as pd
     from sqlalchemy import select
     from app import execution
-    from app.db import init_db, SessionLocal, Trade, Position
+    from app.db import init_db, Trade, Position
 
     symbol = f"MISSING-QUOTE-STOP-{uuid.uuid4().hex[:8]}"
     monkeypatch.setattr(
@@ -1043,7 +1043,7 @@ def test_expired_take_profit_does_not_suppress_same_bar_stop_loss(monkeypatch, t
     from sqlalchemy import select
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
+    from app.db import init_db, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"TP-TTL-STOP-{uuid.uuid4().hex[:8]}"
     monkeypatch.setattr(settings, "paper_fill_latency_bars", 1)
