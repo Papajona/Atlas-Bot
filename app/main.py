@@ -3864,22 +3864,32 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
             CustomerProfile.auth_user_id, CustomerProfile.email
         ).where(CustomerProfile.auth_user_id != auth_user_id)
         if dialect == "postgresql":
-            # Use revision 0060's partial index to avoid decrypting every
-            # UUID-backed customer profile on a legacy-identity comparison.
+            # Match revision 0060's partial-index predicate exactly. The fixed
+            # literal lets PostgreSQL prove the query implies the index predicate;
+            # a bind parameter may prevent partial-index selection.
+            from sqlalchemy import literal_column
+
             uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
             statement = statement.where(
-                CustomerProfile.auth_user_id.op("!~*")(uuid_pattern)
+                CustomerProfile.auth_user_id.op("!~*")(
+                    literal_column(f"'{uuid_pattern}'")
+                )
             )
         elif dialect == "sqlite":
+            # Match the SQLite partial index expression and predicate exactly.
+            from sqlalchemy import literal_column
+
             uuid_glob = (
-                "[0-9a-fA-F]" * 8 + "-"
-                + "[0-9a-fA-F]" * 4 + "-"
-                + "[0-9a-fA-F]" * 4 + "-"
-                + "[0-9a-fA-F]" * 4 + "-"
-                + "[0-9a-fA-F]" * 12
+                "[0-9a-f]" * 8 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 12
             )
             statement = statement.where(
-                ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob)
+                ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(
+                    literal_column(f"'{uuid_glob}'")
+                )
             )
         rows = (await db.execute(statement)).all()
     except Exception as exc:
