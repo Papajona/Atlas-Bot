@@ -92,7 +92,8 @@ def test_completed_learning_episode_is_quarantined_when_historical_fees_are_unkn
     ).read_text(encoding="utf-8")
     assert "SET status = 'FEE_RECONCILIATION_PENDING'" in source
     assert "replay_status = 'PENDING'" in source
-    assert "learning_memory_json = '{}'" in source
+    assert "replay_version = ''" in source
+    assert "Fee basis incomplete; awaiting authoritative reconciliation" in source
 
     assert should_quarantine(
         {"status": "COMPLETED"},
