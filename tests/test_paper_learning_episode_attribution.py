@@ -555,11 +555,20 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
                 )
             )).scalar_one()
 
+            old_episode = by_entry[old_entry_id]
+            new_episode = by_entry[reversal_id]
             assert position.quantity == pytest.approx(-1.0)
             assert position.entry_trade_id == reversal_id
-            assert by_entry[old_entry_id].status == "COMPLETED"
-            assert by_entry[reversal_id].status == "OPEN"
-            assert by_entry[reversal_id].entry_quantity == pytest.approx(1.0)
+            assert old_episode.status == "COMPLETED"
+            assert old_episode.gross_pnl == pytest.approx(-1.0)
+            assert old_episode.total_fees == pytest.approx(0.1)
+            assert old_episode.net_pnl == pytest.approx(-1.1)
+            assert new_episode.status == "OPEN"
+            assert new_episode.entry_quantity == pytest.approx(1.0)
+            assert new_episode.gross_pnl == pytest.approx(0.0)
+            assert new_episode.exit_at is None
+            assert new_episode.closing_trade_id is None
+            assert new_episode.total_fees == pytest.approx(0.0)
             assert outcome.lifecycle_status == "CLOSED"
             assert outcome.closing_quantity == pytest.approx(1.0)
 
