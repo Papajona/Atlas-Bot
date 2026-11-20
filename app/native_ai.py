@@ -121,7 +121,7 @@ def _family_was_inferred(text: str) -> bool:
 
 
 _PROFILE_NEGATION_PREFIX = re.compile(
-    r"\b(?:do\s+not|does\s+not|did\s+not|don't|dont|doesn't|doesnt|never|"
+    r"\b(?:non[-\s]+|do\s+not|does\s+not|did\s+not|don't|dont|doesn't|doesnt|never|"
     r"is\s+not|are\s+not|was\s+not|were\s+not|isn't|isnt|aren't|arent|"
     r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\b"
     r"(?:\s+(?:please|use|using|choose|select|apply|adopt|enable|switch|to|the|a|an|"
