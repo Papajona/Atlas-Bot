@@ -503,7 +503,7 @@ def test_open_add_on_fee_true_up_updates_aggregate_position_and_learning_episode
             position = Position(
                 customer_id=None, exchange="binance", symbol="BTC/USDT",
                 quantity=1.5, average_entry_price=100, entry_trade_id=entry.id,
-                entry_fee=Decimal("0.10"), entry_fee_basis_known=True,
+                entry_fee=Decimal("0.10"), entry_fee_basis_known=False,
             )
             episode = TradeLearningEpisode(
                 entry_trade_id=entry.id, customer_id=None, exchange="binance",
@@ -526,5 +526,82 @@ def test_open_add_on_fee_true_up_updates_aggregate_position_and_learning_episode
             assert position.entry_fee_basis_known is True
             assert episode.total_fees == Decimal("0.15")
             assert episode.net_pnl == Decimal("-0.15")
+
+    asyncio.run(with_database(check))
+
+
+def test_corrected_add_on_fee_survives_the_later_completed_close():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, signal_id="entry-with-add-on",
+                client_order_id="entry-with-add-on", side="buy",
+                quantity=1.0, requested_quantity=1.0,
+                filled_quantity=1.0, fee=Decimal("0.10"),
+                fee_reconciliation_pending=False, status="FILLED",
+            )
+            add_on = _trade(
+                customer_id=None, signal_id="corrected-add-on",
+                client_order_id="corrected-add-on", side="buy",
+                quantity=0.5, requested_quantity=0.5,
+                filled_quantity=0.5, fee=Decimal("0"),
+                fee_reconciliation_pending=False, status="FILLED",
+            )
+            closing = _trade(
+                customer_id=None, signal_id="close-after-add-on-correction",
+                client_order_id="close-after-add-on-correction", side="sell",
+                quantity=1.5, requested_quantity=1.5,
+                filled_quantity=0, fee=Decimal("0.02"),
+                fee_reconciliation_pending=False, status="OPEN",
+            )
+            db.add_all([entry, add_on, closing])
+            await db.flush()
+            position = Position(
+                customer_id=None, exchange="binance", symbol="BTC/USDT",
+                quantity=Decimal("1.5"), average_entry_price=100,
+                entry_trade_id=entry.id, entry_fee=Decimal("0.10"),
+                # The original entry fee is known; an earlier unknown add-on
+                # fee made the aggregate basis incomplete until this true-up.
+                entry_fee_basis_known=False,
+            )
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                symbol="BTC/USDT", side="buy", entry_quantity=Decimal("1.5"),
+                entry_price=100, gross_pnl=0, total_fees=Decimal("0.10"),
+                net_pnl=Decimal("-0.10"), status="OPEN",
+            )
+            db.add_all([position, episode])
+            await db.commit()
+
+            await execution._apply_reconciled_live_fee_basis(
+                db, add_on, Decimal("0.05")
+            )
+            assert position.entry_fee_basis_known is True
+            assert position.entry_fee == Decimal("0.15")
+
+            await execution._apply_fill_to_position(
+                db,
+                closing,
+                1.5,
+                110.0,
+                current_fill_fee=Decimal("0.02"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+            await db.refresh(episode)
+
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry.id,
+                    StrategyOutcome.lifecycle_status == "CLOSED",
+                )
+            )).scalar_one()
+            metadata = __import__("json").loads(outcome.metadata_json or "{}")
+            assert outcome.fee_basis_complete is True
+            assert outcome.fee == Decimal("0.17")
+            assert metadata["allocated_entry_fee"] == "0.15"
+            assert metadata["closing_fee"] == "0.02"
+            assert episode.total_fees == Decimal("0.17")
+            assert episode.net_pnl == Decimal("14.83")
 
     asyncio.run(with_database(check))
