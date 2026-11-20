@@ -555,6 +555,7 @@ def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_pat
         verifier.verify_sanitized_artifacts(
             source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
             source_prepared_sql_path=source,
+            expected_source_prepared_canonical_sha256=verifier.canonical_dump_sha256(source)[0],
             sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
             sanitized_sql_path=candidate,
             imported_sql_path=imported,
