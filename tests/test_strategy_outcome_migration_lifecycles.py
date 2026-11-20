@@ -54,6 +54,36 @@ def test_remaining_entry_fee_backfill_counts_only_current_open_lifecycle_closes(
     assert "AND lifecycle_status = 'OPEN'" in source
 
 
+def test_remaining_entry_fee_backfill_only_trusts_deterministic_paper_fees():
+    reconstruct = MIGRATION["_reconstruct_remaining_entry_fee"]
+    remaining = Decimal("1")
+    closed = Decimal("1")
+
+    assert reconstruct(
+        {"filled_quantity": "2", "fee": "0.40", "mode": "PAPER"},
+        remaining,
+        closed,
+    ) == Decimal("0.20")
+    assert reconstruct(
+        {"filled_quantity": "2", "fee": "0.40", "mode": "PAPER_SHADOW"},
+        remaining,
+        closed,
+    ) == Decimal("0.20")
+
+    # Historical live fee fields had no source-quality provenance: even a
+    # reconciled quantity and non-null fee must not certify an estimated fee.
+    assert reconstruct(
+        {"filled_quantity": "2", "fee": "0.40", "mode": "LIVE"},
+        remaining,
+        closed,
+    ) is None
+    assert reconstruct(
+        {"filled_quantity": "2", "fee": "0.40"},
+        remaining,
+        closed,
+    ) is None
+
+
 def test_open_lifecycle_with_repeated_partial_close_order_is_not_fee_complete():
     rows = [
         {"closing_trade_id": 21},
