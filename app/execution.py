@@ -1134,11 +1134,29 @@ async def _apply_reconciled_live_fee_basis(
         position.entry_fee = (
             Decimal(str(position.entry_fee or 0)) + position_entry_fee_delta
         )
-        # An add-on true-up must not certify the earlier entry's fee basis. Keep
-        # the existing flag unchanged; it remains true only when the original
-        # entry fee was already authoritative.
         if is_position_entry:
             position.entry_fee_basis_known = True
+        elif add_on_fee_only:
+            # An unknown add-on previously made the aggregate position fee basis
+            # incomplete. Re-enable it only when the opening order is verified and
+            # every other add-on/close fee in this position's scope is reconciled.
+            entry_trade = await db.get(Trade, position.entry_trade_id)
+            pending_fee_order = (await db.execute(
+                select(Trade.id).where(
+                    Trade.id != trade.id,
+                    Trade.id >= int(position.entry_trade_id),
+                    Trade.customer_id == position.customer_id,
+                    Trade.mode == trade.mode,
+                    Trade.exchange == position.exchange,
+                    Trade.symbol == position.symbol,
+                    Trade.fee_reconciliation_pending.is_(True),
+                ).limit(1)
+            )).scalar_one_or_none()
+            position.entry_fee_basis_known = bool(
+                entry_trade is not None
+                and not bool(entry_trade.fee_reconciliation_pending)
+                and pending_fee_order is None
+            )
 
         if add_on_fee_only and bool(position.entry_fee_basis_known):
             entry_episode = (await db.execute(
@@ -1147,10 +1165,9 @@ async def _apply_reconciled_live_fee_basis(
                 ).with_for_update()
             )).scalar_one_or_none()
             if entry_episode is not None:
-                entry_episode.total_fees = (
-                    Decimal(str(entry_episode.total_fees or 0))
-                    + position_entry_fee_delta
-                )
+                # The open position's entry_fee is the complete verified total,
+                # including the original entry and all reconciled add-on fills.
+                entry_episode.total_fees = Decimal(str(position.entry_fee or 0))
                 entry_episode.net_pnl = (
                     Decimal(str(entry_episode.gross_pnl or 0))
                     - Decimal(str(entry_episode.total_fees))
@@ -1693,6 +1710,61 @@ async def _apply_fill_to_position(
                     ).with_for_update()
                 )).scalars().all()
                 _aggregate_completed_strategy_outcomes(completed_outcomes)
+                await db.flush()
+
+                # A final aggregate row's fee column includes its earlier peers,
+                # but metadata retains one fee allocation per underlying fill.
+                # Recompute the episode from those per-fill components so a
+                # corrected add-on fee cannot be lost by trade-level fee totals.
+                fee_rows = (await db.execute(
+                    select(StrategyOutcome).where(
+                        StrategyOutcome.trade_id == attribution_trade_id,
+                        StrategyOutcome.closing_trade_id.is_not(None),
+                    ).order_by(StrategyOutcome.sequence, StrategyOutcome.id)
+                )).scalars().all()
+                fee_components: list[Decimal] = []
+                fee_basis_complete = bool(fee_rows)
+                for fee_row in fee_rows:
+                    try:
+                        fee_metadata = json.loads(fee_row.metadata_json or "{}")
+                        allocated_fee = Decimal(str(fee_metadata["allocated_entry_fee"]))
+                        closing_fee = Decimal(str(fee_metadata["closing_fee"]))
+                    except (KeyError, TypeError, ValueError, ArithmeticError):
+                        fee_basis_complete = False
+                        break
+                    if (
+                        not allocated_fee.is_finite() or allocated_fee < 0
+                        or not closing_fee.is_finite() or closing_fee < 0
+                    ):
+                        fee_basis_complete = False
+                        break
+                    fee_components.append(allocated_fee + closing_fee)
+                    fee_basis_complete = fee_basis_complete and bool(fee_row.fee_basis_complete)
+                if fee_basis_complete:
+                    completed_episode = (await db.execute(
+                        select(TradeLearningEpisode).where(
+                            TradeLearningEpisode.entry_trade_id == attribution_trade_id
+                        ).with_for_update()
+                    )).scalar_one_or_none()
+                    if completed_episode is not None:
+                        total_episode_fees = sum(fee_components, Decimal("0"))
+                        completed_episode.total_fees = total_episode_fees
+                        completed_episode.net_pnl = (
+                            Decimal(str(completed_episode.gross_pnl or 0))
+                            - total_episode_fees
+                        ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+                        episode_notional = abs(
+                            Decimal(str(completed_episode.entry_quantity or 0))
+                            * Decimal(str(completed_episode.entry_price or 0))
+                        )
+                        completed_episode.return_bps = (
+                            float(
+                                Decimal(str(completed_episode.net_pnl))
+                                / episode_notional * Decimal("10000")
+                            )
+                            if episode_notional > 0 else 0.0
+                        )
+                        completed_episode.updated_at = utcnow()
         if position.quantity:
             position.unrealized_pnl = (
                 Decimal(str(position.quantity))
