@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.schemas import MarketRequest
+from app.main import _customer_paper_configuration_ready
 
 from app import paper_staging
 
@@ -497,3 +498,38 @@ def test_pending_paper_identity_does_not_materialize_encrypted_email_without_key
     selected_names = {column.name for column in db.statements[0].selected_columns}
     assert "email" not in selected_names
     assert "has_stored_email" in selected_names
+
+
+@pytest.mark.parametrize("flag,enabled", [
+    ("live_trading_enabled", True),
+    ("customer_live_trading_enabled", True),
+    ("payout_live_enabled", True),
+    ("usdt_tron_enabled", True),
+    ("usdt_tron_sweep_enabled", True),
+    ("deriv_live_enabled", True),
+    ("forex_live_enabled", True),
+    ("binance_arbitrage_live_enabled", True),
+    ("broker_sandbox", False),
+])
+def test_customer_paper_runtime_gate_rejects_each_unsafe_money_path(monkeypatch, flag, enabled):
+    settings = paper_staging.settings
+    safe_values = {
+        "paper_trading": True,
+        "live_trading_enabled": False,
+        "customer_live_trading_enabled": False,
+        "payout_live_enabled": False,
+        "usdt_tron_enabled": False,
+        "usdt_tron_sweep_enabled": False,
+        "deriv_live_enabled": False,
+        "forex_live_enabled": False,
+        "binance_arbitrage_live_enabled": False,
+        "broker_sandbox": True,
+        "customer_paper_ledger_enabled": True,
+        "customer_paper_database_url": "postgresql+asyncpg://paper:secret@db.example/paper",
+    }
+    for name, value in safe_values.items():
+        monkeypatch.setattr(settings, name, value)
+    assert _customer_paper_configuration_ready() is True
+
+    monkeypatch.setattr(settings, flag, enabled)
+    assert _customer_paper_configuration_ready() is False

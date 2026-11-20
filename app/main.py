@@ -1782,6 +1782,9 @@ def _customer_paper_configuration_ready() -> bool:
         and settings.broker_sandbox
         and not getattr(settings, "deriv_live_enabled", False)
         and not settings.usdt_tron_enabled
+        and not getattr(settings, "usdt_tron_sweep_enabled", False)
+        and not getattr(settings, "forex_live_enabled", False)
+        and not getattr(settings, "binance_arbitrage_live_enabled", False)
         and settings.customer_paper_ledger_enabled
         and str(settings.customer_paper_database_url or "").strip()
     )
