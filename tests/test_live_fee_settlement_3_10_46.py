@@ -605,3 +605,114 @@ def test_corrected_add_on_fee_survives_the_later_completed_close():
             assert episode.net_pnl == Decimal("14.83")
 
     asyncio.run(with_database(check))
+
+def test_reused_partial_entry_order_episode_fees_exclude_prior_lifecycles():
+    async def check(sessions):
+        async with sessions() as db:
+            # This entry order has already closed one position and then continued
+            # filling. Its prior CLOSED outcome must not enter the new episode.
+            entry = _trade(
+                customer_id=None, signal_id="reused-partial-entry",
+                client_order_id="reused-partial-entry", side="buy",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=1.5,
+                fee=Decimal("0.10"), fee_reconciliation_pending=False,
+                status="PARTIAL",
+            )
+            prior_close = _trade(
+                customer_id=None, signal_id="prior-lifecycle-close",
+                client_order_id="prior-lifecycle-close", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                fee=Decimal("0.80"), status="FILLED",
+            )
+            current_partial_close = _trade(
+                customer_id=None, signal_id="current-lifecycle-partial-close",
+                client_order_id="current-lifecycle-partial-close", side="sell",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0.5,
+                fee=Decimal("0.05"), status="FILLED",
+            )
+            current_final_close = _trade(
+                customer_id=None, signal_id="current-lifecycle-final-close",
+                client_order_id="current-lifecycle-final-close", side="sell",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0,
+                fee=Decimal("0.02"), fee_reconciliation_pending=False,
+                status="OPEN",
+            )
+            db.add_all([
+                entry, prior_close, current_partial_close, current_final_close
+            ])
+            await db.flush()
+
+            position = Position(
+                customer_id=None, exchange="binance", symbol="BTC/USDT",
+                quantity=Decimal("0.5"), average_entry_price=100,
+                entry_trade_id=entry.id, entry_fee=Decimal("0.05"),
+                entry_fee_basis_known=True,
+            )
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                symbol="BTC/USDT", side="buy", entry_quantity=Decimal("1.0"),
+                entry_price=100, gross_pnl=Decimal("5"),
+                total_fees=Decimal("0.15"), net_pnl=Decimal("4.85"),
+                status="OPEN",
+            )
+            prior_lifecycle = StrategyOutcome(
+                trade_id=entry.id, closing_trade_id=prior_close.id,
+                customer_id=None, strategy="test", regime="UNKNOWN",
+                asset="crypto", symbol="BTC/USDT", side="buy",
+                realized_pnl=Decimal("10"), fee=Decimal("0.90"),
+                return_bps=1000.0, net_pnl=Decimal("9.10"),
+                net_return_bps=910.0, closing_quantity=Decimal("1.0"),
+                closing_notional=Decimal("100"), fee_basis_complete=True,
+                lifecycle_status="CLOSED", sequence=1,
+                metadata_json=(
+                    '{"allocated_entry_fee":"0.10","closing_fee":"0.80",'
+                    '"fee_basis_complete":true}'
+                ),
+            )
+            current_lifecycle_partial = StrategyOutcome(
+                trade_id=entry.id, closing_trade_id=current_partial_close.id,
+                customer_id=None, strategy="test", regime="UNKNOWN",
+                asset="crypto", symbol="BTC/USDT", side="buy",
+                realized_pnl=Decimal("5"), fee=Decimal("0.10"),
+                return_bps=1000.0, net_pnl=Decimal("4.90"),
+                net_return_bps=980.0, closing_quantity=Decimal("0.5"),
+                closing_notional=Decimal("50"), fee_basis_complete=True,
+                lifecycle_status="OPEN", sequence=2,
+                metadata_json=(
+                    '{"allocated_entry_fee":"0.05","closing_fee":"0.05",'
+                    '"fee_basis_complete":true}'
+                ),
+            )
+            db.add_all([position, episode, prior_lifecycle, current_lifecycle_partial])
+            await db.commit()
+
+            await execution._apply_fill_to_position(
+                db,
+                current_final_close,
+                0.5,
+                110.0,
+                current_fill_fee=Decimal("0.02"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+            await db.refresh(episode)
+
+            current_final = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry.id,
+                    StrategyOutcome.sequence == 3,
+                )
+            )).scalar_one()
+            await db.refresh(prior_lifecycle)
+
+            # Only current-lifecycle fees count: entry 0.10, prior current
+            # close 0.05, and this final close 0.02. The older 0.90 is excluded.
+            assert episode.total_fees == Decimal("0.17")
+            assert episode.net_pnl == Decimal("9.83")
+            assert current_final.fee == Decimal("0.17")
+            assert current_final.net_pnl == Decimal("9.83")
+            assert current_final.lifecycle_status == "CLOSED"
+            assert prior_lifecycle.fee == Decimal("0.90")
+            assert prior_lifecycle.lifecycle_status == "CLOSED"
+
+    asyncio.run(with_database(check))
