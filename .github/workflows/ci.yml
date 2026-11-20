@@ -648,7 +648,7 @@ jobs:
               echo "ERROR: unbalanced journal unexpectedly committed" >&2
               exit 1
           elif [[ "$unbalanced_output" != *"Unbalanced or invalid ledger journal"* ]]; then
-              printf '%s\\n' "$unbalanced_output" >&2
+              echo "$unbalanced_output" >&2
               echo "ERROR: unbalanced journal failed for an unexpected reason" >&2
               exit 1
           fi
@@ -665,7 +665,7 @@ jobs:
               echo "ERROR: immutable ledger journal unexpectedly updated" >&2
               exit 1
           elif [[ "$ledger_immutable_output" != *"Ledger journal records are immutable"* ]]; then
-              printf '%s\\n' "$ledger_immutable_output" >&2
+              echo "$ledger_immutable_output" >&2
               echo "ERROR: ledger immutability trigger failed for an unexpected reason" >&2
               exit 1
           fi
@@ -693,7 +693,7 @@ jobs:
               echo "ERROR: research archive unexpectedly updated" >&2
               exit 1
           elif [[ "$archive_immutable_output" != *"research_trial_archive is append-only"* ]]; then
-              printf '%s\\n' "$archive_immutable_output" >&2
+              echo "$archive_immutable_output" >&2
               echo "ERROR: research archive trigger failed for an unexpected reason" >&2
               exit 1
           fi
@@ -710,7 +710,7 @@ jobs:
               echo "ERROR: one-time holdout registry unexpectedly updated" >&2
               exit 1
           elif [[ "$holdout_immutable_output" != *"research_holdout_registry is write-once"* ]]; then
-              printf '%s\\n' "$holdout_immutable_output" >&2
+              echo "$holdout_immutable_output" >&2
               echo "ERROR: holdout immutability trigger failed for an unexpected reason" >&2
               exit 1
           fi
