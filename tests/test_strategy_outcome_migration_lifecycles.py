@@ -48,3 +48,45 @@ def test_remaining_entry_fee_backfill_counts_only_current_open_lifecycle_closes(
     ).read_text(encoding="utf-8")
 
     assert "AND lifecycle_status = 'OPEN'" in source
+
+
+def test_open_lifecycle_with_repeated_partial_close_order_is_not_fee_complete():
+    rows = [
+        {"closing_trade_id": 21},
+        {"closing_trade_id": 21},
+    ]
+
+    assert MIGRATION["_historical_lifecycle_fee_basis_complete"](
+        rows,
+        fill_evidence_complete=True,
+        fee_total=Decimal("0.30"),
+        lifecycle_open=True,
+    ) is False
+
+
+def test_open_lifecycle_with_distinct_close_orders_can_be_fee_complete():
+    rows = [
+        {"closing_trade_id": 21},
+        {"closing_trade_id": 22},
+    ]
+
+    assert MIGRATION["_historical_lifecycle_fee_basis_complete"](
+        rows,
+        fill_evidence_complete=True,
+        fee_total=Decimal("0.30"),
+        lifecycle_open=True,
+    ) is True
+
+
+def test_completed_lifecycle_reconstructs_a_repeated_partial_order_fee_once():
+    rows = [
+        {"closing_trade_id": 21},
+        {"closing_trade_id": 21},
+    ]
+
+    assert MIGRATION["_historical_lifecycle_fee_basis_complete"](
+        rows,
+        fill_evidence_complete=True,
+        fee_total=Decimal("0.30"),
+        lifecycle_open=False,
+    ) is True
