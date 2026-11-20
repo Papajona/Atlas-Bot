@@ -1525,6 +1525,13 @@ async def _apply_reconciled_live_fee_basis(
             float(Decimal(str(episode.net_pnl)) / episode_notional * Decimal("10000"))
             if episode_notional > 0 else 0.0
         )
+        if any(
+            str(row.lifecycle_status or "").upper() == "CLOSED"
+            for row in all_rows
+        ):
+            # A completed lifecycle can enter replay only after every fill fee
+            # has an authoritative, reconciled basis.
+            episode.status = "COMPLETED"
         episode.updated_at = utcnow()
 
 
@@ -1964,13 +1971,13 @@ async def _apply_fill_to_position(
                         break
                     fee_components.append(allocated_fee + closing_fee)
                     fee_basis_complete = fee_basis_complete and bool(fee_row.fee_basis_complete)
-                if fee_basis_complete:
-                    completed_episode = (await db.execute(
-                        select(TradeLearningEpisode).where(
-                            TradeLearningEpisode.entry_trade_id == attribution_trade_id
-                        ).with_for_update()
-                    )).scalar_one_or_none()
-                    if completed_episode is not None:
+                completed_episode = (await db.execute(
+                    select(TradeLearningEpisode).where(
+                        TradeLearningEpisode.entry_trade_id == attribution_trade_id
+                    ).with_for_update()
+                )).scalar_one_or_none()
+                if completed_episode is not None:
+                    if fee_basis_complete:
                         total_episode_fees = sum(fee_components, Decimal("0"))
                         completed_episode.total_fees = total_episode_fees
                         completed_episode.net_pnl = (
@@ -1988,6 +1995,12 @@ async def _apply_fill_to_position(
                             )
                             if episode_notional > 0 else 0.0
                         )
+                        completed_episode.status = "COMPLETED"
+                        completed_episode.updated_at = utcnow()
+                    else:
+                        # TradeLearningEpisode is the replay worker's input. Do
+                        # not replay estimated/unknown net results as completed.
+                        completed_episode.status = "FEE_RECONCILIATION_PENDING"
                         completed_episode.updated_at = utcnow()
         if position.quantity:
             position.unrealized_pnl = (
