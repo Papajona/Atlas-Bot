@@ -202,3 +202,31 @@ def test_unrecognised_strategy_type_is_flagged_instead_of_silently_trend():
 def test_a_timeframe_after_the_word_risk_is_not_a_risk_percentage():
     draft = compose_strategy_spec(prompt="low risk 1h BTC trend long", name="Risk word")
     assert draft["risk_per_trade"] == pytest.approx(0.0025)
+
+@pytest.mark.parametrize(
+    "prompt,expected_family",
+    [
+        ("do not use mean reversion; use breakout BTC long 1h", "BREAKOUT"),
+        ("avoid breakout, use momentum BTC long 1h", "MOMENTUM"),
+        ("no momentum; use trend following BTC long 1h", "TREND"),
+        ("not only momentum but breakout BTC long 1h", "BREAKOUT"),
+    ],
+)
+def test_negated_strategy_family_does_not_override_affirmative_family(
+    prompt, expected_family
+):
+    draft = compose_strategy_spec(prompt=prompt, name="Negated family")
+    assert draft["strategy_family"] == expected_family
+
+
+def test_only_negated_strategy_families_are_treated_as_unnamed_fallback():
+    draft = compose_strategy_spec(
+        prompt="do not use mean reversion or momentum for BTC long 1h",
+        name="No named family",
+    )
+    assert draft["strategy_family"] == "TREND"
+    assert any(
+        "No strategy type was recognised" in warning
+        for warning in draft["validation_warnings"]
+    )
+
