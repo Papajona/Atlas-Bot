@@ -90,7 +90,7 @@ def test_completed_learning_episode_is_quarantined_when_historical_fees_are_unkn
     source = (
         ROOT / "alembic" / "versions" / "0061_strategy_outcome_fill_aggregation.py"
     ).read_text(encoding="utf-8")
-    assert "SET status = 'FEE_RECONCILIATION_PENDING'" in source
+    assert "SET status = 'FEE_PENDING'" in source
     assert "replay_status = 'PENDING'" in source
     assert "replay_version = ''" in source
     assert "Fee basis incomplete; awaiting authoritative reconciliation" in source
