@@ -4051,6 +4051,13 @@ async def get_customer(
             and not profile_effectively_active
         )
 
+    # A confirmed identity can clear a stale quarantine after all remaining
+    # legacy identities have been checked. Remember that transition so it can be
+    # persisted even when the caller is a read-only endpoint.
+    recovered_from_identity_review = bool(
+        stale_legacy_quarantine and not identity_review_required
+    )
+
     if profile is None and identity_review_required:
         raise HTTPException(
             409,
@@ -4096,6 +4103,11 @@ async def get_customer(
         await db.flush()
 
     profile.identity_review_required = bool(identity_review_required)
+    if recovered_from_identity_review:
+        # get_customer() is also used by read-only routes. Persist this security-
+        # relevant recovery now; otherwise closing their request session rolls
+        # ACTIVE/email back to the old quarantine and repeats identity review.
+        await db.commit()
     if profile.status != "ACTIVE" and not (
         allow_identity_review_summary
         and identity_review_required
