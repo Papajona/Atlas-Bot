@@ -9604,6 +9604,24 @@ async def model_experiments_history(model_path: str | None = None, status: str |
         return out
 
 
+def _learning_episode_accounting_fields(episode):
+    """Expose fee-adjusted episode results only after authoritative fee reconciliation."""
+    status = str(getattr(episode, "status", "") or "").upper()
+    verified = status == "COMPLETED"
+    if verified:
+        fee_basis_status = "VERIFIED"
+    elif status == "FEE_PENDING":
+        fee_basis_status = "PENDING_RECONCILIATION"
+    else:
+        fee_basis_status = "NOT_FINAL"
+    return {
+        "fee_basis_status": fee_basis_status,
+        "total_fees": episode.total_fees if verified else None,
+        "net_pnl": episode.net_pnl if verified else None,
+        "return_bps": episode.return_bps if verified else None,
+    }
+
+
 @app.get("/api/admin/learning/episodes")
 async def admin_learning_episodes(limit: int = 50, status: str | None = None, replay_status: str | None = None, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     """Operator view of Atlas trade memory and post-trade replay evidence."""
@@ -9625,10 +9643,10 @@ async def admin_learning_episodes(limit: int = 50, status: str | None = None, re
                 "timeframe": r.timeframe, "strategy": r.strategy, "regime": r.regime, "side": r.side,
                 "status": r.status, "replay_status": r.replay_status, "replay_version": r.replay_version,
                 "entry_price": r.entry_price, "exit_price": r.exit_price, "gross_pnl": r.gross_pnl,
-                "total_fees": r.total_fees, "net_pnl": r.net_pnl, "return_bps": r.return_bps,
+                **_learning_episode_accounting_fields(r),
                 "bars_held": r.bars_held, "mfe_bps": r.mfe_bps, "mae_bps": r.mae_bps,
-                "market_flow": json.loads(r.market_flow_json or "{}"),
-                "memory": json.loads(r.learning_memory_json or "{}"),
+                "market_flow": json.loads(r.market_flow_json or "{}") if str(r.status).upper() == "COMPLETED" else {},
+                "memory": json.loads(r.learning_memory_json or "{}") if str(r.status).upper() == "COMPLETED" else {},
                 "created_at": r.created_at.isoformat(), "updated_at": r.updated_at.isoformat(),
             })
         return out
@@ -9647,10 +9665,10 @@ async def admin_learning_episode_detail(episode_id: int, x_admin_token: str | No
             "id": ep.id, "entry_trade_id": ep.entry_trade_id, "closing_trade_id": ep.closing_trade_id,
             "strategy": ep.strategy, "regime": ep.regime, "symbol": ep.symbol, "timeframe": ep.timeframe,
             "status": ep.status, "replay_status": ep.replay_status, "replay_error": ep.replay_error,
-            "gross_pnl": ep.gross_pnl, "total_fees": ep.total_fees, "net_pnl": ep.net_pnl,
-            "return_bps": ep.return_bps, "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
-            "market_flow": json.loads(ep.market_flow_json or "{}"),
-            "memory": json.loads(ep.learning_memory_json or "{}"),
+            "gross_pnl": ep.gross_pnl, **_learning_episode_accounting_fields(ep),
+            "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
+            "market_flow": json.loads(ep.market_flow_json or "{}") if str(ep.status).upper() == "COMPLETED" else {},
+            "memory": json.loads(ep.learning_memory_json or "{}") if str(ep.status).upper() == "COMPLETED" else {},
             "replays": [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
                          "entry_decision_return_bps": x.entry_decision_return_bps,
                          "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
