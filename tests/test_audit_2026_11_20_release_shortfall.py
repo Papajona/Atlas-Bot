@@ -132,7 +132,7 @@ def test_release_replay_accepts_same_request_and_preserves_shortfall_request_amo
 
 @pytest.mark.parametrize("retry_amount", [10, 25])
 def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert_survives_rollback(
-    retry_amount, monkeypatch, tmp_path
+    retry_amount, tmp_path
 ):
     async def check():
         # A file-backed SQLite database gives the incident writer a genuinely
@@ -143,7 +143,6 @@ def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
             sessions = async_sessionmaker(engine, expire_on_commit=False)
-            monkeypatch.setattr("app.customer_funds.SessionLocal", sessions)
 
             async with sessions() as db:
                 db.add(
@@ -181,6 +180,19 @@ def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert
                 await db.delete(legacy_incident)
                 await db.commit()
 
+                # Hold SQLite's writer lock with a pending change in the caller
+                # transaction, matching a fill path that has already autoflushed
+                # position mutations before replay validation.
+                caller_ledger = (
+                    await db.execute(
+                        select(CustomerLedgerAccount).where(
+                            CustomerLedgerAccount.customer_id == 5
+                        )
+                    )
+                ).scalar_one()
+                caller_ledger.available += Decimal("7")
+                await db.flush()
+
                 with pytest.raises(ValueError, match="idempotency key already used"):
                     await release_trading(
                         db, 5, retry_amount, reference_id=reference_id
@@ -209,6 +221,8 @@ def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert
                     )
                 ).scalar_one()
                 assert ledger.trading_reserved == Decimal("0.000000")
+                # The rejected fill's uncommitted caller mutation was rolled
+                # back before the independent incident write was committed.
                 assert ledger.available == Decimal("11.000000")
         finally:
             await engine.dispose()
