@@ -47,14 +47,29 @@ def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator():
     asyncio.run(run())
 
 
-def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_completed_bar(monkeypatch):
+def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_completed_bar(monkeypatch, tmp_path):
     import pandas as pd
     from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app import db as app_db
     from app import execution
     from app.config import settings
-    from app.db import init_db, SessionLocal, Trade, Position, PaperOrderState, PaperFillEvent
+    from app.db import init_db, Trade, Position, PaperOrderState, PaperFillEvent
 
     symbol = f"PAPER-{uuid.uuid4().hex[:10]}"
+    # Use a private database so this test does not inherit unrelated platform
+    # positions created by earlier tests in the shared CI database.
+    test_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'paper-order-e2e-isolated.db'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_pre_ping=True,
+    )
+    test_sessions = async_sessionmaker(
+        test_engine, expire_on_commit=False, class_=AsyncSession
+    )
+    monkeypatch.setattr(app_db, "engine", test_engine)
+    monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
+    monkeypatch.setattr(execution, "SessionLocal", test_sessions)
     monkeypatch.setattr(settings, "paper_queue_fill_probability", 1.0)
     monkeypatch.setattr(settings, "paper_rejection_probability", 0.0)
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.10)
@@ -72,7 +87,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
 
     async def run():
         await init_db()
-        async with SessionLocal() as db:
+        async with test_sessions() as db:
             state = await execution._get_state_locked(db)
             state.kill_switch = False
             await db.commit()
@@ -115,7 +130,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         assert submitted["filled_quantity"] == 0.0
         assert submitted["remaining_quantity"] == pytest.approx(0.3)
 
-        async with SessionLocal() as db:
+        async with test_sessions() as db:
             trade = (await db.execute(select(Trade).where(
                 Trade.symbol == symbol, Trade.mode == "PAPER"
             ))).scalar_one()
@@ -148,7 +163,7 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         assert result["stop_triggers"] == 0
         assert result["protective_exit_orders_created"] == 0
 
-        async with SessionLocal() as db:
+        async with test_sessions() as db:
             trade = await db.get(Trade, trade_id)
             assert trade is not None
             position = (await db.execute(select(Position).where(
@@ -172,7 +187,10 @@ def test_platform_paper_order_is_unfilled_then_partially_filled_once_per_complet
         assert repeated["fills"] == 0
         assert repeated["attempts"] == 0
 
-    asyncio.run(run())
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.run(test_engine.dispose())
 
 
 

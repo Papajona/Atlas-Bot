@@ -4731,15 +4731,19 @@ async def _ensure_customer_subscription(db, profile: CustomerProfile, referral_c
     now = datetime.now(timezone.utc)
     from datetime import timedelta
     trial_end = now + timedelta(days=max(0, settings.billing_trial_days))
-    try:
-        async with db.begin_nested():
-            sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
-            db.add(sub)
-            await db.flush()
-    except IntegrityError:
-        sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
-        if not sub:
-            raise
+    # A lapsed trial is downgraded to an expired free row that keeps this stable key, so look it up
+    # first; blindly inserting would hit the unique key (and burn a sequence value) on every call.
+    sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
+    if sub is None:
+        try:
+            async with db.begin_nested():
+                sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
+                db.add(sub)
+                await db.flush()
+        except IntegrityError:
+            sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
+            if not sub:
+                raise
     code = (referral_code or "").strip().upper()
     if code:
         rc = (await db.execute(select(ReferralCode).where(ReferralCode.code == code, ReferralCode.active == True))).scalar_one_or_none()

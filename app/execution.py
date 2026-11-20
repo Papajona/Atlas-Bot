@@ -2989,7 +2989,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
-        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
+        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade, risk_tolerance=settings.discipline_risk_tolerance)
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)

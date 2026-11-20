@@ -107,7 +107,10 @@ def test_reversal_close_quantity_uses_old_position_not_later_add_ons_to_new_leg(
         [reversal_order], old_position_episode, lifecycle_closed=True
     )
 
-    assert later_reversal_episode["entry_quantity"] == Decimal("5")
+    assert Decimal(str(later_reversal_episode["entry_quantity"])) == Decimal("5")
+    assert MIGRATION["_expected_closing_order_quantity"](
+        reversal_order, old_position_episode
+    ) == Decimal("10")
     assert allocations == {20: Decimal("10")}
     assert MIGRATION["_closing_order_fee_fraction"](
         reversal_order, allocations[20]

@@ -347,7 +347,21 @@ async def release_trading(
     ).scalar_one_or_none()
     if existing:
         return fresh_ledger
-    release = min(amount_d, fresh_ledger.trading_reserved)
+    reserved_now = D(str(fresh_ledger.trading_reserved))
+    release = min(amount_d, reserved_now)
+    if amount_d - release > D("0.00001"):
+        # The caller expects more collateral to be reserved than the ledger holds. Releasing the
+        # smaller amount is the safe action, but the gap must not be silent: it means the position
+        # row and the ledger have drifted apart.
+        await record_ledger_incident(
+            db,
+            key=f"RELEASE_EXCEEDS_RESERVE:{reference_id}:{customer_id}",
+            summary="Trading release requested more than the customer's reserved balance",
+            detail={"customer_id": customer_id, "reference_id": str(reference_id),
+                    "requested": str(amount_d), "reserved": str(reserved_now),
+                    "released": str(max(release, D("0")))},
+            customer_id=customer_id, severity="HIGH", reopen_resolved=False,
+        )
     if release <= 0:
         return fresh_ledger
     fresh_ledger.trading_reserved -= release
