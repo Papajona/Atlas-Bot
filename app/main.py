@@ -3909,16 +3909,18 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
         ) from exc
 
 
-async def _customer_profile_effectively_active(guard_db, current_profile) -> bool:
-    """An active row with a blank email is not usable while unmapped Auth IDs remain."""
+async def _customer_profile_effectively_active(
+    guard_db, current_profile, confirmed_email: str
+) -> bool:
+    """An active row with a blank email is usable when no legacy identity matches it."""
     if current_profile is None:
         return False
     if str(current_profile.status or "").upper() != "ACTIVE":
         return False
     if str(current_profile.email or "").strip():
         return True
-    return not await _has_unmapped_legacy_customer_profile(
-        guard_db, str(current_profile.auth_user_id or "")
+    return not await _legacy_customer_email_conflict(
+        guard_db, str(current_profile.auth_user_id or ""), confirmed_email
     )
 
 
@@ -3931,20 +3933,43 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     normalized = str(email or "").strip().casefold()
     if not normalized:
         return False
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    statement = select(
+        CustomerProfile.auth_user_id, CustomerProfile.email
+    ).where(CustomerProfile.auth_user_id != auth_user_id)
+    legacy_ids_filtered_in_sql = dialect in {"postgresql", "sqlite"}
+    if dialect == "postgresql":
+        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        statement = statement.where(
+            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern)
+        )
+    elif dialect == "sqlite":
+        uuid_glob = (
+            "[0-9a-f]" * 8 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 12
+        )
+        statement = statement.where(
+            ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(uuid_glob)
+        )
     try:
-        rows = (await db.execute(
-            select(CustomerProfile.auth_user_id, CustomerProfile.email)
-            .where(CustomerProfile.auth_user_id != auth_user_id)
-        )).all()
+        # The partial legacy-ID index bounds this lookup to unmapped identities;
+        # encrypted email is decrypted only for those rows, never for all customers.
+        rows = (await db.execute(statement)).all()
     except Exception as exc:
         logger.exception("legacy_customer_identity_lookup_failed")
         raise HTTPException(503, "Customer identity verification is temporarily unavailable") from exc
     for legacy_auth_id, stored_email in rows:
-        try:
-            uuid.UUID(str(legacy_auth_id))
-            continue
-        except (ValueError, TypeError, AttributeError):
-            pass
+        if not legacy_ids_filtered_in_sql:
+            try:
+                uuid.UUID(str(legacy_auth_id))
+                continue
+            except (ValueError, TypeError, AttributeError):
+                pass
         # An unmapped legacy identity with no recoverable email must be treated
         # as a conflict: absence of stored PII is not proof of a distinct person.
         if not str(stored_email or "").strip():
@@ -4011,16 +4036,16 @@ async def get_customer(
         # for ordinary signups. Any remaining non-UUID identity is quarantined.
         identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
     elif stale_legacy_quarantine:
-        # Recheck the legacy identity reference on every quarantined summary or
-        # access attempt. Once an operator has reconciled it, restore access.
-        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+        # Recheck whether a remaining legacy row belongs to this confirmed Auth
+        # identity. Unrelated legacy customers must not keep this profile locked.
+        identity_review_required = await _legacy_customer_email_conflict(db, uid, email)
         if not identity_review_required:
             profile.status = "ACTIVE"
             profile.email = email
             if name:
                 profile.display_name = name
     elif needs_auth_identity:
-        profile_effectively_active = await _customer_profile_effectively_active(db, profile)
+        profile_effectively_active = await _customer_profile_effectively_active(db, profile, email)
         identity_review_required = (
             str(profile.status or "").upper() == "ACTIVE"
             and not profile_effectively_active
