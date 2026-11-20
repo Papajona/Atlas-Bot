@@ -52,6 +52,7 @@ def test_remaining_entry_fee_backfill_counts_only_current_open_lifecycle_closes(
     ).read_text(encoding="utf-8")
 
     assert "AND lifecycle_status = 'OPEN'" in source
+    assert "SELECT id, filled_quantity, fee, mode" in source
 
 
 def test_remaining_entry_fee_backfill_only_trusts_deterministic_paper_fees():
