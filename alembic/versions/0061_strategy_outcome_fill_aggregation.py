@@ -103,8 +103,17 @@ def _reconstruct_remaining_entry_fee(
     remaining_quantity: Decimal,
     closed_quantity: Decimal,
 ) -> Decimal | None:
-    """Backfill only when the entry order and all recorded closes reconcile."""
-    if entry_trade is None or entry_trade.get("fee") is None:
+    """Backfill only deterministic paper fees with fully reconciled quantities.
+
+    Legacy live Trade.fee values did not retain fee-quality provenance; a
+    non-null amount may be estimated and must not certify a customer's entry
+    fee basis. Leave those positions unknown for authoritative live settlement.
+    """
+    if (
+        entry_trade is None
+        or entry_trade.get("fee") is None
+        or str(entry_trade.get("mode") or "").upper() not in {"PAPER", "PAPER_SHADOW"}
+    ):
         return None
     try:
         entered = Decimal(str(entry_trade.get("filled_quantity") or 0))
@@ -836,7 +845,7 @@ def upgrade() -> None:
         LIMIT :batch_size
     """)
     entry_trade_query = sa.text("""
-        SELECT id, filled_quantity, fee
+        SELECT id, filled_quantity, fee, mode
         FROM trades
         WHERE id IN :trade_ids
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
