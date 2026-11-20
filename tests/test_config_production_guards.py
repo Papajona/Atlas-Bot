@@ -100,3 +100,9 @@ def test_zero_limits_are_explicit_trade_halts_not_unbounded_values():
     assert settings.risk_per_trade == 0.0
     assert settings.max_open_positions == 0
 
+def test_initial_equity_and_open_position_count_cannot_disable_validation():
+    with pytest.raises(ValueError, match="INITIAL_EQUITY"):
+        Settings(environment="test", initial_equity=0.0)
+    with pytest.raises(ValueError, match="MAX_OPEN_POSITIONS"):
+        Settings(environment="test", max_open_positions=-1)
+
