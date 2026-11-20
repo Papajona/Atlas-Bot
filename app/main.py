@@ -2703,8 +2703,17 @@ async def _executor_controller_loop():
                         target = float(row.target_quantity or 0)
                         mode = str(row.mode or "PAPER").upper()
                         live_approved = bool(row.live_approved)
+                        profile = await db.get(CustomerProfile, cid) if cid is not None else None
+                        if cid is not None and (
+                            not profile
+                            or not await _customer_profile_effectively_active(db, profile)
+                        ):
+                            row.status = "STOPPED"
+                            row.next_run_at = None
+                            row.last_error = "Customer identity is pending manual review or remains conflicted"
+                            await db.commit()
+                            continue
                         if mode == "LIVE":
-                            profile = await db.get(CustomerProfile, cid)
                             account = await db.get(TradingAccount, row.trading_account_id)
                             state = await db.get(AppState, 1)
                             plan, _ = await _subscription_entitlements(db, cid)
