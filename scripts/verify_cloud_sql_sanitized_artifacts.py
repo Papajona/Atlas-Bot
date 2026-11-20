@@ -55,7 +55,9 @@ def verify_sanitized_artifacts(
     if ".." in object_name.split("/"):
         raise ValueError("sanitized backup object path contains a traversal segment")
 
-    if not re.fullmatch(r"[a-f0-9]{64}", expected_source_prepared_canonical_sha256 or ""):
+    if not isinstance(expected_source_prepared_canonical_sha256, str) or not re.fullmatch(
+        r"[a-f0-9]{64}", expected_source_prepared_canonical_sha256
+    ):
         raise ValueError(
             "expected source prepared SQL canonical SHA-256 must be a lowercase 64-character hex fingerprint"
         )
