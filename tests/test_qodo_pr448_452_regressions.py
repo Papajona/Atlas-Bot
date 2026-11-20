@@ -597,8 +597,14 @@ def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status
     executor_start = source.index("async def _executor_controller_loop")
     executor_end = source.index("\nasync def ", executor_start + 1)
     executor = source[executor_start:executor_end]
+    cycle_start = source.index("async def _run_persisted_adaptive_bot_cycle")
+    cycle_end = source.index("\nasync def ", cycle_start + 1)
+    cycle = source[cycle_start:cycle_end]
     assert "await _customer_profile_effectively_active(db, profile)" in adaptive
     assert "await _customer_profile_effectively_active(db, profile)" in executor
+    assert "await _customer_profile_effectively_active(db, profile)" in cycle
     assert 'profile.status != "ACTIVE"' not in adaptive
     assert 'profile.status == "ACTIVE"' not in executor
+    assert 'profile.status == "ACTIVE"' not in cycle
+    assert 'bot.last_stage = "customer_identity"' in cycle
 
