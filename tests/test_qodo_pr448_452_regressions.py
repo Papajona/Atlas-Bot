@@ -21,9 +21,11 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
     assert "PENDING_IDENTITY_REVIEW" in block
-    assert 'needs_auth_identity = profile is None or not stored_email' in block
+    assert "stale_legacy_quarantine" in block
+    assert "or stale_legacy_quarantine" in block
     assert "if needs_auth_identity:" in block
-    assert "await _legacy_customer_email_conflict(db, uid, email)" in block
+    assert "await _has_unmapped_legacy_customer_profile(db, uid)" in block
+    assert "_legacy_customer_email_conflict(db, uid, email)" not in block
     assert "casefold()" in block
 
 
@@ -240,7 +242,9 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index('@app.get("/api/customer/wallets")')
     ]
     assert "allow_identity_review_summary=True" in summary
-    assert '"identity_review_required": bool(getattr(profile, "identity_review_required", False))' in summary
+    assert '"identity_review_required": identity_review_required' in summary
+    assert '"PENDING_IDENTITY_REVIEW"' in summary
+    assert 'claims.get("email")' in summary
 
     get_customer = source[
         source.index("async def get_customer("):
@@ -249,8 +253,10 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
     assert "if profile is None:" in get_customer
     assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
-    assert "await _legacy_customer_email_conflict(db, uid, email)" in get_customer
-    assert "await _customer_profile_effectively_active(guard_db, current_profile)" in source
+    assert "if stale_legacy_quarantine:" in get_customer
+    assert "profile.status = \"ACTIVE\"" in get_customer
+    assert "await _legacy_customer_email_conflict(db, uid, email)" not in get_customer
+    assert "await _customer_profile_effectively_active(db, profile)" in get_customer
     assert 'profile.status = "PENDING_IDENTITY_REVIEW"' not in get_customer
     assert "profile.identity_review_required = bool(identity_review_required)" in get_customer
     assert "if not identity_review_required:" in get_customer
@@ -304,12 +310,12 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
         source.index("def _funding_signature_valid")
     ]
     assert "not str(profile.display_name or" not in customer
-    assert 'needs_auth_identity = profile is None or not stored_email' in customer
+    assert "or stale_legacy_quarantine" in customer
     assert "if needs_auth_identity:" in customer
-    assert "_legacy_customer_email_conflict(db, uid, email)" in customer
+    assert "_legacy_customer_email_conflict(db, uid, email)" not in customer
     assert 'profile.status = "PENDING_IDENTITY_REVIEW"' not in customer
     assert "profile.identity_review_required = bool(identity_review_required)" in customer
-    assert 'profile.status = "ACTIVE"' not in customer
+    assert 'profile.status = "ACTIVE"' in customer
     assert "if not identity_review_required:" in customer
 
 
