@@ -707,6 +707,37 @@ def test_stale_identity_quarantine_recovery_persists_for_read_only_requests(
                 assert recovered.status == "ACTIVE"
                 assert recovered.email == confirmed_email
                 assert recovered.display_name == "Recovered Customer"
+
+            # A changed but confirmed Auth email must not clear a conflict
+            # attached to the profile's previously stored email.
+            async with test_sessions() as db:
+                recovered = await db.get(CustomerProfile, 1)
+                recovered.status = "PENDING_IDENTITY_REVIEW"
+                recovered.email = "stale@example.invalid"
+                db.add(CustomerProfile(
+                    auth_user_id="legacy-old-email-002",
+                    email="stale@example.invalid",
+                    display_name="Previous Legacy Owner",
+                    status="ACTIVE",
+                ))
+                await db.commit()
+
+            async with test_sessions() as db:
+                try:
+                    await main.get_customer(
+                        "Bearer test-customer-token", db, require_aal2=False
+                    )
+                except main.HTTPException as exc:
+                    assert exc.status_code == 409
+                else:
+                    raise AssertionError(
+                        "a legacy conflict on the previous email must keep the customer quarantined"
+                    )
+
+            async with test_sessions() as db:
+                still_quarantined = await db.get(CustomerProfile, 1)
+                assert still_quarantined.status == "PENDING_IDENTITY_REVIEW"
+                assert still_quarantined.email == "stale@example.invalid"
         finally:
             await test_engine.dispose()
 
