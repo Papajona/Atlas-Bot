@@ -37,3 +37,20 @@ def test_execute_signal_wires_live_equity_and_risk_budget_into_governor():
     assert "risk_equity = float(account.equity if account is not None else s.equity)" in source
     assert "equity=risk_equity, risk_per_trade=settings.risk_per_trade" in source
     assert "risk_tolerance=bounded_risk_tolerance(settings.discipline_risk_tolerance)" in source
+
+def test_invalid_spread_ceiling_fails_closed():
+    for ceiling in (float("nan"), float("inf"), float("-inf"), -1.0):
+        decision = evaluate_trade(
+            side="buy",
+            price=100.0,
+            quantity=1.0,
+            live=False,
+            stop_loss_price=95.0,
+            take_profit_price=110.0,
+            signal={},
+            spread_bps=1.0,
+            max_spread_bps=ceiling,
+        )
+        assert decision.action == "BLOCK"
+        assert "spread_guard_config_invalid" in decision.reasons
+
