@@ -542,3 +542,93 @@ def test_single_fill_reversal_episode_records_only_new_opposite_leg():
             assert outcome.closing_quantity == pytest.approx(1.0)
 
     asyncio.run(run())
+
+def test_breakeven_close_records_entry_and_exit_fees_on_completed_episode():
+    from decimal import Decimal
+    from app import execution
+    from app.db import (
+        init_db, SessionLocal, Trade, Position, TradeLearningEpisode,
+        StrategyOutcome,
+    )
+
+    suffix = uuid.uuid4().hex
+    symbol = f"EPISODE-BREAKEVEN-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"breakeven-entry-{suffix}",
+                client_order_id=f"breakeven-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=0.10, notional=100.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"breakeven-regression","asset":"crypto"}',
+            )
+            closing = Trade(
+                signal_id=f"breakeven-close-{suffix}",
+                client_order_id=f"breakeven-close-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=100.0,
+                average_fill_price=0.0, fee=0.25, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"breakeven-regression","asset":"crypto"}',
+            )
+            db.add_all([entry, closing])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=1.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, entry_fee=Decimal("0.10"),
+                entry_fee_basis_known=True, strategy="breakeven-regression",
+                entry_regime="UNKNOWN", entry_trade_id=entry.id,
+            ))
+            db.add(TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                symbol=symbol, timeframe="1h", side="buy",
+                strategy="breakeven-regression", status="OPEN",
+                entry_quantity=1.0, entry_price=100.0,
+                gross_pnl=Decimal("0"), total_fees=Decimal("0.10"),
+                net_pnl=Decimal("-0.10"),
+            ))
+            await db.commit()
+            entry_id, close_id = entry.id, closing.id
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == close_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 100.0,
+                current_fill_fee=Decimal("0.25"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            episode = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id == entry_id
+                )
+            )).scalar_one()
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry_id,
+                    StrategyOutcome.closing_trade_id == close_id,
+                )
+            )).scalar_one()
+
+            assert episode.status == "COMPLETED"
+            assert episode.gross_pnl == pytest.approx(0.0)
+            assert Decimal(str(episode.total_fees)) == Decimal("0.35")
+            assert Decimal(str(episode.net_pnl)) == Decimal("-0.35")
+            assert outcome.fee_basis_complete is True
+            assert Decimal(str(outcome.fee)) == Decimal("0.35")
+            assert Decimal(str(outcome.net_pnl)) == Decimal("-0.35")
+
+    asyncio.run(run())
+
