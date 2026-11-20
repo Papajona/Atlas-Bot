@@ -3209,9 +3209,14 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else None
             elif live:
                 raise RiskBlocked("Broker did not return a usable bid/ask spread for live execution")
+            if (
+                not math.isfinite(float(settings.max_slippage_bps))
+                or float(settings.max_slippage_bps) < 0.0
+            ):
+                raise RiskBlocked("Live slippage limit configuration is invalid")
             if price > 0:
                 slip = abs(quote / price - 1) * 10_000
-                if slip > settings.max_slippage_bps:
+                if not math.isfinite(slip) or slip > settings.max_slippage_bps:
                     raise RiskBlocked("Requested reference price is too far from live market")
 
         if live and settings.require_protective_stop_for_live:
