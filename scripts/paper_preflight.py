@@ -135,12 +135,13 @@ def check_settings(settings: Any, *, encryption_check=None, calibration_check=No
                 else:
                     out.append((PASS, "paper_fill_calibration", "complete (artifact/dataset hashes are verified at runtime, not here)"))
 
-    # 4. Customer paper ledger.
+    # 4. Customer paper ledger. The runtime paper API requires an explicit target URL;
+    # SHARED_DATABASE_ENABLED only permits that target to be the primary database.
     if _s(settings, "customer_paper_ledger_enabled", False):
-        if not _text(_s(settings, "customer_paper_database_url")) and not _s(settings, "customer_paper_shared_database_enabled", False):
-            out.append((FAIL, "customer_paper_ledger", "enabled but neither CUSTOMER_PAPER_DATABASE_URL nor CUSTOMER_PAPER_SHARED_DATABASE_ENABLED is set"))
+        if not _text(_s(settings, "customer_paper_database_url")):
+            out.append((FAIL, "customer_paper_ledger", "enabled but CUSTOMER_PAPER_DATABASE_URL is empty; the shared-database flag does not replace the target URL"))
         else:
-            out.append((PASS, "customer_paper_ledger", "enabled with a database target (role/RLS preflight runs at startup)"))
+            out.append((PASS, "customer_paper_ledger", "enabled with an explicit database URL (role/RLS preflight runs at startup)"))
     else:
         out.append((INFO, "customer_paper_ledger", "disabled (default): customer paper orders are unavailable"))
     if _s(settings, "customer_totp_required", True):
@@ -160,6 +161,15 @@ def _safe_url(url: str) -> str:
     # Query parameters may contain credentials too (for example password= or sslpassword=).
     # This string is display-only, so omit the entire query rather than risk exposing a token.
     return parsed.set(query={}).render_as_string(hide_password=True)
+
+
+def _async_engine_url(url: str) -> str:
+    """Normalize a plain PostgreSQL URL exactly as the customer-paper runtime does."""
+    from sqlalchemy.engine import make_url
+    parsed = make_url(url)
+    if parsed.drivername == "postgresql":
+        parsed = parsed.set(drivername="postgresql+asyncpg")
+    return parsed.render_as_string(hide_password=False)
 
 
 async def check_database(settings: Any) -> list[Result]:
@@ -211,7 +221,7 @@ async def check_database(settings: Any) -> list[Result]:
         out.append((FAIL, "paper_ledger_db", "customer paper ledger needs a PostgreSQL target"))
         return out
     try:
-        engine = create_async_engine(ledger_url)
+        engine = create_async_engine(_async_engine_url(ledger_url))
         try:
             async with engine.connect() as conn:
                 present = (await conn.execute(text("SELECT to_regclass('customer_paper.journals') IS NOT NULL"))).scalar()

@@ -154,11 +154,32 @@ def test_conservative_and_adaptive_combine():
     assert draft.risk_per_trade == pytest.approx(0.0025)
 
 
-@pytest.mark.parametrize("prompt", ["not conservative BTC trend long 1h", "non-adaptive BTC trend long 1h", "BTC trend long 1h without a regime filter"])
+@pytest.mark.parametrize("prompt", [
+    "not conservative BTC trend long 1h",
+    "non-adaptive BTC trend long 1h",
+    "BTC trend long 1h without a regime filter",
+    "do not use a conservative profile BTC trend long 1h",
+    "isn't conservative BTC trend long 1h",
+    "isn’t conservative BTC trend long 1h",
+    "please don't choose an adaptive profile for ETH momentum long 4h",
+    "without using the conservative profile, BTC trend long 1h",
+])
 def test_negated_profile_words_do_not_activate_a_profile(prompt):
     draft = compose_strategy_spec(prompt=prompt, name="Negated")
     assert draft["risk_per_trade"] == pytest.approx(0.005)
     assert not any("profile" in w.lower() for w in draft["validation_warnings"])
+    condition_types = _types(draft["entry_conditions"]) + _types(draft["exit_conditions"])
+    assert not ({"HIGHER_TIMEFRAME_AGREEMENT", "CONSERVATIVE_VOLATILITY_CAP", "TIME_STOP",
+                 "REGIME_ADAPTATION", "VOLATILITY_SCALED_RISK"} & set(condition_types))
+
+
+def test_profile_negation_is_clause_local():
+    draft = compose_strategy_spec(
+        prompt="do not use conservative, but use adaptive BTC trend long 1h",
+        name="Clause-local profile",
+    )
+    assert "REGIME_ADAPTATION" in _types(draft["entry_conditions"])
+    assert "HIGHER_TIMEFRAME_AGREEMENT" not in _types(draft["entry_conditions"])
 
 
 def test_aggressive_wording_never_raises_risk_and_is_reported():

@@ -19,6 +19,38 @@ def _finite(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+UNCOMPILED_CANDIDATE_SAFEGUARDS = frozenset({
+    "HIGHER_TIMEFRAME_AGREEMENT",
+    "CONSERVATIVE_VOLATILITY_CAP",
+    "TIME_STOP",
+    "REGIME_ADAPTATION",
+    "VOLATILITY_SCALED_RISK",
+})
+
+
+def uncompiled_candidate_safeguards(spec: Any) -> list[str]:
+    """List Native AI profile safeguards not yet executed by the Strategy Lab backtester.
+
+    These rule objects are descriptive StrategyCondition values, not executable filters.
+    Until the backtest compiles and exercises them, a candidate containing one must not
+    receive a VALIDATED result based only on the base strategy-family/stop/target test.
+    """
+    if not isinstance(spec, dict):
+        return []
+    found: set[str] = set()
+    for field in ("entry_conditions", "exit_conditions"):
+        conditions = spec.get(field)
+        if not isinstance(conditions, list):
+            continue
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            condition_type = str(condition.get("type") or "").strip().upper()
+            if condition_type in UNCOMPILED_CANDIDATE_SAFEGUARDS:
+                found.add(condition_type)
+    return sorted(found)
+
+
 def strategy_lab_candidate_passes(
     oos_gate: dict,
     *,

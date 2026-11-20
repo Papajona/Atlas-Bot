@@ -98,10 +98,22 @@ def test_partial_calibration_fails_and_complete_calibration_passes():
     assert _status(missing, "paper_fill_calibration") == [pf.WARN]
 
 
-def test_ledger_enabled_needs_a_database_target():
+def test_ledger_enabled_needs_an_explicit_database_target_even_in_shared_mode():
     assert _status(_run(_settings(customer_paper_ledger_enabled=True)), "customer_paper_ledger") == [pf.FAIL]
-    assert _status(_run(_settings(customer_paper_ledger_enabled=True, customer_paper_database_url="postgresql+asyncpg://u:p@h/d")), "customer_paper_ledger") == [pf.PASS]
-    assert _status(_run(_settings(customer_paper_ledger_enabled=True, customer_paper_shared_database_enabled=True)), "customer_paper_ledger") == [pf.PASS]
+    assert _status(_run(_settings(customer_paper_ledger_enabled=True, customer_paper_shared_database_enabled=True)), "customer_paper_ledger") == [pf.FAIL]
+    separate = _run(_settings(customer_paper_ledger_enabled=True, customer_paper_database_url="postgresql+asyncpg://u:p@h/d"))
+    assert _status(separate, "customer_paper_ledger") == [pf.PASS]
+    shared = _run(_settings(customer_paper_ledger_enabled=True, customer_paper_database_url="postgresql+asyncpg://u:p@h/d", customer_paper_shared_database_enabled=True))
+    assert _status(shared, "customer_paper_ledger") == [pf.PASS]
+
+
+def test_plain_postgresql_ledger_url_is_normalized_for_async_engine():
+    from sqlalchemy.engine import make_url
+
+    plain = pf._async_engine_url("postgresql://atlas:secret@db.example:5432/atlas")
+    already_async = pf._async_engine_url("postgresql+asyncpg://atlas:secret@db.example:5432/atlas")
+    assert make_url(plain).drivername == "postgresql+asyncpg"
+    assert make_url(already_async).drivername == "postgresql+asyncpg"
 
 
 def test_database_passwords_are_never_printed():

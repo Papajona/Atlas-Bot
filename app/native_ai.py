@@ -120,7 +120,13 @@ def _family_was_inferred(text: str) -> bool:
     return _FAMILY_HINT.search(text.lower()) is not None
 
 
-_NEGATION = r"(?:not|non|never|isn't|aren't|no)[-\s]+(?:very\s+|too\s+|that\s+)?"
+_PROFILE_NEGATION_PREFIX = re.compile(
+    r"\b(?:do\s+not|does\s+not|did\s+not|don't|dont|doesn't|doesnt|never|"
+    r"is\s+not|are\s+not|was\s+not|were\s+not|isn't|isnt|aren't|arent|"
+    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\b"
+    r"(?:\s+(?:please|use|using|choose|select|apply|adopt|enable|switch|to|the|a|an|"
+    r"this|that|very|too|profile|mode|setting|strategy|approach)){0,6}\s*$"
+)
 _CONSERVATIVE_RE = re.compile(
     r"\b(?:conservative(?:ly)?|cautious(?:ly)?|defensive|capital\s+preservation|preserve\s+capital|"
     r"low[-\s]?risk|risk[-\s]?averse|safe(?:ly|r|st)?)\b")
@@ -131,10 +137,13 @@ _AGGRESSIVE_RE = re.compile(r"\b(?:aggressive(?:ly)?|high[-\s]?risk|max(?:imum)?
 
 
 def _profile_flag(pattern: re.Pattern[str], lower: str) -> bool:
-    """Match a profile keyword unless it is negated (\"not conservative\", \"non-adaptive\")."""
+    """Match a profile keyword unless the surrounding prompt explicitly rejects it."""
     for match in pattern.finditer(lower):
-        before = lower[max(0, match.start() - 16):match.start()]
-        if re.search(_NEGATION + r"$", before) or re.search(r"\b(?:avoid|without|no)\s+(?:an?\s+)?$", before):
+        before = lower[max(0, match.start() - 80):match.start()]
+        # A negation applies only within its local clause; a later corrective clause such
+        # as "but use adaptive" must not inherit an earlier "do not use conservative".
+        before = re.split(r"[.!?;,:]|\b(?:but|however|instead|rather)\b", before)[-1]
+        if _PROFILE_NEGATION_PREFIX.search(before):
             continue
         return True
     return False
@@ -396,7 +405,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     )
     tf = requested_timeframes[0]
     family = _classify_family(text)
-    lower = text.lower()
+    lower = text.lower().replace("\u2019", "'").replace("\u2018", "'")
     # Curly apostrophes are common on mobile keyboards and must share ASCII negation semantics.
     direction_source = lower.replace("\u2019", "'").replace("\u2018", "'")
     direction_text = _strip_negated_direction(direction_source)

@@ -7511,7 +7511,10 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             "in_sample_max_drawdown": float(selected.get("max_drawdown", -1.0)),
             "in_sample_note": "Selected-on data. Diagnostic only; never a pass criterion.",
         }
-        from .strategy_lab_validation import strategy_lab_candidate_passes
+        from .strategy_lab_validation import (
+            strategy_lab_candidate_passes,
+            uncompiled_candidate_safeguards,
+        )
         passed, oos_metrics = strategy_lab_candidate_passes(
             oos_gate,
             validation_available=not validation_unavailable,
@@ -7521,6 +7524,24 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             min_total_return=settings.adaptive_min_total_return,
         )
         gate["oos"] = oos_metrics
+        uncompiled_safeguards = uncompiled_candidate_safeguards(spec)
+        if uncompiled_safeguards:
+            # The current Strategy Lab backtest evaluates the supported family and
+            # stop/target configuration only. Do not let descriptive Native AI profile
+            # rules appear to have been validated when they were never executed.
+            passed = False
+            validation_unavailable = True
+            gate["validation_available"] = False
+            gate["validation_unavailable_reason"] = "UNCOMPILED_STRATEGY_SAFEGUARDS"
+            gate["uncompiled_safeguards"] = uncompiled_safeguards
+            result["strategy_condition_validation"] = {
+                "status": "UNCOMPILED",
+                "blocked_conditions": uncompiled_safeguards,
+                "message": (
+                    "The Strategy Lab backtest did not execute these Native AI safeguards; "
+                    "this result is diagnostic only and cannot be VALIDATED."
+                ),
+            }
     except Exception as exc:
         result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True
     async with SessionLocal() as db:
@@ -7533,7 +7554,7 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         attempt=int(prior or 0)+1
         db.add(StrategyCandidateRun(candidate_id=candidate_id,attempt=attempt,backtest_json=json.dumps(result,default=str),oos_json=json.dumps(oos,default=str),gate_json=json.dumps(gate,default=str),passed=bool(passed)))
         await db.commit()
-    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
+    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family only; uncompiled Native AI profile safeguards block VALIDATED status and remain research specifications until the backtester executes them.","real_money_execution":False}
 
 @app.get("/api/customer/strategy-lab/candidates/{candidate_id}/runs")
 async def list_strategy_candidate_runs(candidate_id:int, authorization:str|None=Header(default=None)):
