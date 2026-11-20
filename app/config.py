@@ -74,6 +74,16 @@ class Settings(BaseSettings):
             raise ValueError("paper participation and probabilities must be finite values between 0 and 1")
         return float(value)
 
+    @field_validator("max_slippage_bps", "max_spread_bps")
+    @classmethod
+    def _validate_market_quality_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError(
+                "MAX_SLIPPAGE_BPS and MAX_SPREAD_BPS must be finite and non-negative"
+            )
+        return parsed
+
     @field_validator("discipline_risk_tolerance")
     @classmethod
     def _validate_discipline_risk_tolerance(cls, value: float) -> float:
