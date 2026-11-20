@@ -693,6 +693,14 @@ def test_learning_episode_api_hides_unverified_fee_adjusted_results():
         return_bps=-35.0,
     )
     assert _learning_episode_accounting_fields(completed) == {
+        "fee_basis_status": "PENDING_RECONCILIATION",
+        "total_fees": None,
+        "net_pnl": None,
+        "return_bps": None,
+    }
+    assert _learning_episode_accounting_fields(
+        completed, fee_basis_verified=True
+    ) == {
         "fee_basis_status": "VERIFIED",
         "total_fees": Decimal("0.35"),
         "net_pnl": Decimal("-0.35"),
