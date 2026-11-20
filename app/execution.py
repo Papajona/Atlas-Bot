@@ -1532,6 +1532,12 @@ async def _apply_reconciled_live_fee_basis(
             # A completed lifecycle can enter replay only after every fill fee
             # has an authoritative, reconciled basis.
             episode.status = "COMPLETED"
+            # Fee true-up can make a previously quarantined episode replayable.
+            # Discard any replay calculated before the authoritative fee basis.
+            episode.replay_status = "PENDING"
+            episode.replay_version = ""
+            episode.replay_error = ""
+            episode.learning_memory_json = "{}"
         episode.updated_at = utcnow()
 
 
@@ -1996,6 +2002,10 @@ async def _apply_fill_to_position(
                             if episode_notional > 0 else 0.0
                         )
                         completed_episode.status = "COMPLETED"
+                        completed_episode.replay_status = "PENDING"
+                        completed_episode.replay_version = ""
+                        completed_episode.replay_error = ""
+                        completed_episode.learning_memory_json = "{}"
                         completed_episode.updated_at = utcnow()
                     else:
                         # TradeLearningEpisode is the replay worker's input. Do
