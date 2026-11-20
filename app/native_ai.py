@@ -109,6 +109,56 @@ def _classify_family(text: str) -> str:
     return "TREND"
 
 
+_FAMILY_HINT = re.compile(
+    r"\b(?:trend|trending|moving\s+average|ema|sma|golden\s+cross|death\s+cross|mean[-\s]?reversion|"
+    r"revert|range[-\s]?bound|oversold|overbought|breakout|break\s+out|prior\s+high|range\s+high|range\s+low|"
+    r"momentum|roc|rate\s+of\s+change|acceleration|ensemble|combine|multiple\s+strategies)\b")
+
+
+def _family_was_inferred(text: str) -> bool:
+    """True when the prompt named a strategy type; False when TREND is only the fallback."""
+    return _FAMILY_HINT.search(text.lower()) is not None
+
+
+_NEGATION = r"(?:not|non|never|isn't|aren't|no)[-\s]+(?:very\s+|too\s+|that\s+)?"
+_CONSERVATIVE_RE = re.compile(
+    r"\b(?:conservative(?:ly)?|cautious(?:ly)?|defensive|capital\s+preservation|preserve\s+capital|"
+    r"low[-\s]?risk|risk[-\s]?averse|safe(?:ly|r|st)?)\b")
+_ADAPTIVE_RE = re.compile(
+    r"\b(?:adaptive|adaptively|regime[-\s]?(?:aware|adaptive|switching|based|filter(?:ed)?)|self[-\s]?adjust(?:ing)?|"
+    r"volatility[-\s]?(?:adjusted|scaled|aware)|dynamic(?:ally)?\s+(?:size|sizing|adjust\w*))\b")
+_AGGRESSIVE_RE = re.compile(r"\b(?:aggressive(?:ly)?|high[-\s]?risk|max(?:imum)?\s+leverage|all[-\s]?in|yolo)\b")
+
+
+def _profile_flag(pattern: re.Pattern[str], lower: str) -> bool:
+    """Match a profile keyword unless it is negated (\"not conservative\", \"non-adaptive\")."""
+    for match in pattern.finditer(lower):
+        before = lower[max(0, match.start() - 16):match.start()]
+        if re.search(_NEGATION + r"$", before) or re.search(r"\b(?:avoid|without|no)\s+(?:an?\s+)?$", before):
+            continue
+        return True
+    return False
+
+
+def _detect_profiles(lower: str) -> tuple[bool, bool, bool]:
+    """Return (conservative, adaptive, aggressive) request flags from the prompt."""
+    conservative = _profile_flag(_CONSERVATIVE_RE, lower)
+    aggressive = _profile_flag(_AGGRESSIVE_RE, lower)
+    if conservative and aggressive:  # contradictory: the safer reading wins and the caller is told
+        aggressive = False
+    return conservative, _profile_flag(_ADAPTIVE_RE, lower), aggressive
+
+
+# Profile conditions are free-form StrategyCondition types, so no schema change is needed.
+_CONSERVATIVE_ENTRY = [
+    {"type": "HIGHER_TIMEFRAME_AGREEMENT", "rule": "Require the next-higher timeframe trend/regime to agree with the proposed side on completed bars; otherwise stand aside."},
+    {"type": "CONSERVATIVE_VOLATILITY_CAP", "rule": "Skip entries when ATR percentile or spread is above the configured cap, and stand aside around scheduled high-impact news."}]
+_ADAPTIVE_ENTRY = [
+    {"type": "REGIME_ADAPTATION", "rule": "Classify trend versus range and low versus high volatility on completed bars; enable trend/breakout/momentum rules only in a trending regime and mean-reversion rules only in a ranging regime."},
+    {"type": "VOLATILITY_SCALED_RISK", "rule": "Scale position size down as realized volatility rises so cash risk per trade stays at or below the configured fraction."}]
+_CONSERVATIVE_EXIT = {"type": "TIME_STOP", "rule": "Close a trade that has not reached its target or stop within a configured number of bars; never widen a stop after entry."}
+
+
 def _template_rules(family: str) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
     entries = {
         "TREND": [
@@ -247,11 +297,11 @@ def _reward_risk(lower: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def _parse_stop_and_target(lower: str) -> tuple[float, float, list[str]]:
+def _parse_stop_and_target(lower: str, default_stop_atr: float = 1.5, default_reward: float = 2.0) -> tuple[float, float, list[str]]:
     notes: list[str] = []
     stops, targets, plain = _atr_levels(lower)
     stop = stops[0] if stops else (plain[0] if plain else None)
-    stop_atr = _clamp(stop, 0.1, 10.0) if stop is not None else 1.5
+    stop_atr = _clamp(stop, 0.1, 10.0) if stop is not None else default_stop_atr
     reward = _reward_risk(lower)
     if reward is None and targets:
         reward = targets[0] / stop_atr
@@ -260,7 +310,7 @@ def _parse_stop_and_target(lower: str) -> tuple[float, float, list[str]]:
     if reward is None:
         if re.search(r"(?:reward|\brr\b)[^.;]{0,20}\d", lower):
             notes.append("A reward:risk target was mentioned but not understood; the default 2.0R was used. Write it as '3R' or 'reward risk 3'.")
-        reward = 2.0
+        reward = default_reward
     clamped = _clamp(reward, 0.1, 10.0)
     if clamped != reward:
         notes.append(f"Requested reward:risk {reward:g}R was limited to {clamped:g}R.")
@@ -404,7 +454,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         warnings.append(
             f"Selected timeframe {explicit_timeframe} overrides the draft's multi-timeframe setup inferred from the prompt."
         )
-    risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s{0,6}(?:of|=|:)?\s{0,6}(\d{1,6}(?:\.\d{1,6})?)\s{0,6}(%|percent|bps|bp)?", lower)
+    risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s{0,6}(?:of|=|:)?\s{0,6}(\d{1,6}(?:\.\d{1,6})?)\s{0,6}(%|percent|bps|bp)?(?![a-z])", lower)
     if risk_match:
         amount = float(risk_match.group(1))
         unit = (risk_match.group(2) or "").lower()
@@ -413,9 +463,28 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
             risk = min(cap, requested)
             if requested > cap:
                 warnings.append(f"Requested risk capped at platform maximum {cap:.4f}.")
-    stop_atr, target_rr, stop_notes = _parse_stop_and_target(lower)
+    conservative, adaptive, aggressive = _detect_profiles(lower)
+    profile_notes: list[str] = []
+    if conservative and not risk_match:
+        risk = min(risk, 0.0025)  # half the platform default; an explicit risk in the prompt still wins
+    stop_atr, target_rr, stop_notes = _parse_stop_and_target(
+        lower, default_stop_atr=2.0 if conservative else 1.5)
     warnings.extend(stop_notes)
+    if conservative:
+        profile_notes.append("Conservative profile: default risk 0.25%, default 2 ATR stop (explicit values in the prompt still apply), higher-timeframe agreement, volatility cap and a time stop were added.")
+    if adaptive:
+        profile_notes.append("Adaptive profile: regime classification and volatility-scaled sizing rules were added; regime thresholds are not tuned here and must be validated out of sample.")
+    if aggressive:
+        profile_notes.append("Aggressive wording was ignored: risk is never raised above the platform cap and the default balanced template was kept.")
+    if not _family_was_inferred(text):
+        profile_notes.append("No strategy type was recognised in the prompt; the TREND template is only a draft default, so confirm or name a strategy type.")
+    warnings.extend(profile_notes)
     entries, exits = _template_rules(family)
+    if conservative:
+        entries = entries + _CONSERVATIVE_ENTRY
+        exits = exits + [_CONSERVATIVE_EXIT]
+    if adaptive:
+        entries = entries + _ADAPTIVE_ENTRY
     if explicit_timeframe:
         entry_conditions = [dict(x, timeframe=tf) for x in entries]
         exit_conditions = [dict(x, timeframe=tf) for x in exits]

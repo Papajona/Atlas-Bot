@@ -214,5 +214,48 @@
       "asset": "commodity",
       "symbol": "XAG_USD"
     }
+  },
+  {
+    "id": "profile-conservative",
+    "prompt": "conservative BTC trend long 1h",
+    "expect": {
+      "risk_per_trade": 0.0025,
+      "stop_loss_atr": 2.0,
+      "strategy_family": "TREND",
+      "warns": [
+        "Conservative profile"
+      ]
+    }
+  },
+  {
+    "id": "profile-adaptive",
+    "prompt": "adaptive regime-aware ETH momentum long 4h",
+    "expect": {
+      "risk_per_trade": 0.005,
+      "strategy_family": "MOMENTUM",
+      "warns": [
+        "Adaptive profile"
+      ]
+    }
+  },
+  {
+    "id": "profile-negated",
+    "prompt": "not conservative BTC breakout long 1h",
+    "expect": {
+      "risk_per_trade": 0.005,
+      "no_warns": [
+        "Conservative profile"
+      ]
+    }
+  },
+  {
+    "id": "family-fallback",
+    "prompt": "buy BTC on the 1h",
+    "expect": {
+      "strategy_family": "TREND",
+      "warns": [
+        "No strategy type was recognised"
+      ]
+    }
   }
 ]
