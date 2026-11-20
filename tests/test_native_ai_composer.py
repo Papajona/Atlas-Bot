@@ -226,6 +226,7 @@ def test_negated_strategy_family_does_not_override_affirmative_family(
         ("avoid breakout, use momentum BTC long 1h", "MOMENTUM"),
         ("don’t use mean reversion or momentum for BTC long 1h", "TREND"),
         ("don’t use mean reversion; use breakout BTC long 1h", "BREAKOUT"),
+        ("don‘t use mean reversion; use breakout BTC long 1h", "BREAKOUT"),
     ],
 )
 def test_smart_quote_strategy_family_negation_is_normalized(prompt, expected_family):
