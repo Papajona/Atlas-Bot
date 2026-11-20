@@ -147,7 +147,7 @@ def _profile_flag(pattern: re.Pattern[str], lower: str) -> bool:
         # so the generic trailing word-boundary assertion cannot match the slice.
         if (
             _PROFILE_NEGATION_PREFIX.search(before)
-            or re.search(r"\\bnon[-\\s]+$", before)
+            or re.search(r"\bnon[-\s]+$", before)
         ):
             continue
         return True
