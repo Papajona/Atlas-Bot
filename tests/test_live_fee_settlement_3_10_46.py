@@ -810,7 +810,7 @@ def test_reconciled_partial_close_restores_remaining_entry_fee_basis_for_later_c
                 customer_id=1, signal_id="first-partial-close",
                 client_order_id="first-partial-close", side="sell",
                 quantity=0.5, requested_quantity=0.5, filled_quantity=0.5,
-                fee=Decimal("0.01"), fee_reconciliation_pending=False,
+                fee=Decimal("0.01"), fee_reconciliation_pending=True,
                 status="FILLED",
             )
             reconciled_close = _trade(
