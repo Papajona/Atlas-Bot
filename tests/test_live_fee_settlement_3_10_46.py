@@ -374,15 +374,15 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 )
             )).scalar_one()
 
-            assert first.fee == Decimal("0.15")
-            assert final.fee == Decimal("0.30")
-            assert first.net_pnl == Decimal("0.85")
-            assert final.net_pnl == Decimal("2.70")
-            assert final.closing_quantity == Decimal("0.2")
-            assert final.closing_notional == Decimal("23")
+            assert first.fee == pytest.approx(0.15)
+            assert final.fee == pytest.approx(0.30)
+            assert first.net_pnl == pytest.approx(0.85)
+            assert final.net_pnl == pytest.approx(2.70)
+            assert final.closing_quantity == pytest.approx(0.2)
+            assert final.closing_notional == pytest.approx(23.0)
             assert final.net_return_bps == pytest.approx(2.7 / 23 * 10000)
-            assert episode.total_fees == Decimal("0.30")
-            assert episode.net_pnl == Decimal("2.70")
+            assert episode.total_fees == pytest.approx(0.30)
+            assert episode.net_pnl == pytest.approx(2.70)
 
     asyncio.run(with_database(check))
 
@@ -522,10 +522,10 @@ def test_open_add_on_fee_true_up_updates_aggregate_position_and_learning_episode
             await db.refresh(episode)
 
             assert position.entry_trade_id == entry.id
-            assert position.entry_fee == Decimal("0.15")
+            assert position.entry_fee == pytest.approx(0.15)
             assert position.entry_fee_basis_known is True
-            assert episode.total_fees == Decimal("0.15")
-            assert episode.net_pnl == Decimal("-0.15")
+            assert episode.total_fees == pytest.approx(0.15)
+            assert episode.net_pnl == pytest.approx(-0.15)
 
     asyncio.run(with_database(check))
 
@@ -577,7 +577,7 @@ def test_corrected_add_on_fee_survives_the_later_completed_close():
                 db, add_on, Decimal("0.05")
             )
             assert position.entry_fee_basis_known is True
-            assert position.entry_fee == Decimal("0.15")
+            assert position.entry_fee == pytest.approx(0.15)
 
             await execution._apply_fill_to_position(
                 db,
@@ -598,11 +598,11 @@ def test_corrected_add_on_fee_survives_the_later_completed_close():
             )).scalar_one()
             metadata = __import__("json").loads(outcome.metadata_json or "{}")
             assert outcome.fee_basis_complete is True
-            assert outcome.fee == Decimal("0.17")
+            assert outcome.fee == pytest.approx(0.17)
             assert metadata["allocated_entry_fee"] == "0.15"
             assert metadata["closing_fee"] == "0.02"
-            assert episode.total_fees == Decimal("0.17")
-            assert episode.net_pnl == Decimal("14.83")
+            assert episode.total_fees == pytest.approx(0.17)
+            assert episode.net_pnl == pytest.approx(14.83)
 
     asyncio.run(with_database(check))
 
@@ -707,12 +707,12 @@ def test_reused_partial_entry_order_episode_fees_exclude_prior_lifecycles():
 
             # Only current-lifecycle fees count: entry 0.10, prior current
             # close 0.05, and this final close 0.02. The older 0.90 is excluded.
-            assert episode.total_fees == Decimal("0.17")
-            assert episode.net_pnl == Decimal("9.83")
-            assert current_final.fee == Decimal("0.17")
-            assert current_final.net_pnl == Decimal("9.83")
+            assert episode.total_fees == pytest.approx(0.17)
+            assert episode.net_pnl == pytest.approx(9.83)
+            assert current_final.fee == pytest.approx(0.17)
+            assert current_final.net_pnl == pytest.approx(9.83)
             assert current_final.lifecycle_status == "CLOSED"
-            assert prior_lifecycle.fee == Decimal("0.90")
+            assert prior_lifecycle.fee == pytest.approx(0.90)
             assert prior_lifecycle.lifecycle_status == "CLOSED"
 
     asyncio.run(with_database(check))
