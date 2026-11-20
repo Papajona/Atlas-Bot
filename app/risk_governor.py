@@ -50,7 +50,14 @@ def evaluate_trade(*, side: str, price: float, quantity: float, live: bool,
         allowed = equity * risk_per_trade * (1.0 + bounded_risk_tolerance(risk_tolerance))
         if not math.isfinite(risk_cash) or risk_cash > allowed + 1e-9:
             reasons.append("risk_per_trade_limit")
-    if spread_bps is not None and (not math.isfinite(spread_bps) or spread_bps < 0 or spread_bps > max_spread_bps): reasons.append("spread_guard")
+    if not math.isfinite(max_spread_bps) or max_spread_bps < 0:
+        reasons.append("spread_guard_config_invalid")
+    elif spread_bps is not None and (
+        not math.isfinite(spread_bps)
+        or spread_bps < 0
+        or spread_bps > max_spread_bps
+    ):
+        reasons.append("spread_guard")
     data_quality=(signal.get("data_quality") or {}) if isinstance(signal,dict) else {}
     if live and not data_quality: reasons.append("market_data_quality_missing")
     if data_quality.get("valid") is False: reasons.append("market_data_quality")
