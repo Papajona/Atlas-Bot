@@ -73,7 +73,10 @@ def record_validation_unavailable_reason(gate: dict[str, Any], reason: str) -> N
         value = str(candidate or "").strip()
         if value and value not in reasons:
             reasons.append(value)
-    gate.setdefault("validation_unavailable_reason", normalized)
+    if not str(gate.get("validation_unavailable_reason") or "").strip():
+        # setdefault would preserve an existing empty/whitespace value and hide
+        # the concrete reason from legacy API consumers.
+        gate["validation_unavailable_reason"] = reasons[0]
     gate["validation_unavailable_reasons"] = reasons
 
 
