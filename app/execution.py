@@ -1562,8 +1562,10 @@ async def _apply_fill_to_position(
                 episode_trade_id = trade.id
                 if episode.entry_price <= 0:
                     episode.entry_price = float(fill_price)
-                if episode.entry_quantity <= 0:
-                    episode.entry_quantity = abs(float(position.quantity))
+                # The shared accumulator below records the new-leg part of
+                # this fill. Do not pre-add the residual position here: doing so
+                # would count the same crossing fill twice on a single-fill flip.
+                episode.entry_quantity = 0.0
                 episode.status = "OPEN"
                 episode.exit_price = 0.0
                 episode.exit_at = None
@@ -1591,12 +1593,18 @@ async def _apply_fill_to_position(
                 episode.entry_at = utcnow()
             if episode.entry_price <= 0:
                 episode.entry_price = float(fill_price)
-            # For a position-opening fill, accumulate the actual filled quantity.
+            # For a position-opening fill, accumulate only the units that
+            # belong to the new lifecycle. A fill that crosses through zero
+            # contains both an old-position close and a new-position open leg.
+            position_opening_quantity = (
+                abs(float(position.quantity)) if position_flipped
+                else abs(float(delta))
+            )
             if (episode.status == "OPEN" or episode.entry_quantity <= 0) and signed * (1 if episode.side == "buy" else -1) > 0:
                 prior_qty = float(episode.entry_quantity or 0.0)
-                new_qty = prior_qty + abs(float(delta))
+                new_qty = prior_qty + position_opening_quantity
                 if prior_qty > 0 and float(episode.entry_price) > 0:
-                    episode.entry_price = ((prior_qty * float(episode.entry_price)) + (abs(float(delta)) * float(fill_price))) / new_qty
+                    episode.entry_price = ((prior_qty * float(episode.entry_price)) + (position_opening_quantity * float(fill_price))) / new_qty
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
