@@ -147,10 +147,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
-                EXECUTE
-                    'CREATE ROLE atlas_ledger_trigger_owner '
-                    'NOLOGIN NOINHERIT BYPASSRLS NOSUPERUSER '
-                    'NOCREATEDB NOCREATEROLE NOREPLICATION';
+                EXECUTE 'CREATE ROLE atlas_ledger_trigger_owner NOLOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION';
             END IF;
 
             SELECT oid INTO role_oid
@@ -192,12 +189,8 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             END IF;
 
             EXECUTE 'GRANT USAGE ON SCHEMA public TO atlas_ledger_trigger_owner';
-            EXECUTE
-                'GRANT SELECT ON TABLE public.ledger_journals, public.ledger_journal_lines '
-                'TO atlas_ledger_trigger_owner';
-            EXECUTE
-                'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) '
-                'TO atlas_ledger_trigger_owner';
+            EXECUTE 'GRANT SELECT ON TABLE public.ledger_journals, public.ledger_journal_lines TO atlas_ledger_trigger_owner';
+            EXECUTE 'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner';
 
             SELECT proowner INTO trigger_function_owner
             FROM pg_proc
@@ -217,9 +210,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     role_name,
                     migration_role
                 );
-                EXECUTE
-                    'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() '
-                    'OWNER TO atlas_ledger_trigger_owner';
+                EXECUTE 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO atlas_ledger_trigger_owner';
                 EXECUTE format('REVOKE %I FROM %I', role_name, migration_role);
                 EXECUTE 'REVOKE CREATE ON SCHEMA public FROM atlas_ledger_trigger_owner';
             END IF;
@@ -230,10 +221,10 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SECURITY DEFINER';
             EXECUTE
                 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() '
-                'SET search_path = pg_catalog, public';
+                'SET search_path = pg_catalog, public, pg_temp';
             EXECUTE
                 'ALTER FUNCTION public.atlas_validate_ledger_journal(integer) '
-                'SET search_path = pg_catalog, public';
+                'SET search_path = pg_catalog, public, pg_temp';
 
             -- Explicitly revoke the built-in PUBLIC EXECUTE grant and any
             -- direct grants inherited from managed/default object creators.
@@ -269,9 +260,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             END LOOP;
 
             -- Only the internal trigger owner may call the validator helper.
-            EXECUTE
-                'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) '
-                'TO atlas_ledger_trigger_owner';
+            EXECUTE 'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner';
 
             IF has_schema_privilege(role_name, 'public', 'CREATE')
                OR NOT has_schema_privilege(role_name, 'public', 'USAGE')
@@ -314,7 +303,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     WHERE p.oid = to_regprocedure('public.atlas_ledger_journal_deferred_check()')
                       AND p.proowner = role_oid
                       AND p.prosecdef
-                      AND p.proconfig @> ARRAY['search_path=pg_catalog, public']
+                      AND p.proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']
                ) THEN
                 RAISE EXCEPTION
                     'atlas_ledger_trigger_owner must own only the fixed-search-path deferred trigger function';
