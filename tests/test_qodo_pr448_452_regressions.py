@@ -556,3 +556,27 @@ def test_incomplete_aggregate_partial_close_is_excluded_from_dashboard_ratios():
         created_at=close_time,
     )
     assert main._aggregate_closed_outcome_fills([partial, final]) == []
+
+def test_aggregate_trade_return_rejects_non_finite_notional_and_pnl():
+    close_time = datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc)
+
+    def final_outcome(*, notional, net_pnl):
+        return SimpleNamespace(
+            id=2,
+            trade_id=93,
+            metadata_json=json.dumps({
+                "aggregate_closing_notional": notional,
+                "aggregate_notional_complete": True,
+            }),
+            net_pnl=net_pnl,
+            created_at=close_time,
+        )
+
+    # NaN/Infinity must never enter platform risk samples, even if the
+    # aggregate completeness flag was mistakenly persisted as true.
+    assert main._aggregate_closed_outcome_fills([
+        final_outcome(notional="NaN", net_pnl="39")
+    ]) == []
+    assert main._aggregate_closed_outcome_fills([
+        final_outcome(notional="5000", net_pnl="Infinity")
+    ]) == []
