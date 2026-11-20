@@ -171,3 +171,26 @@ def test_unverified_fee_reconstruction_preserves_existing_historical_fee():
         Decimal("0.85"),
         fee_basis_complete=True,
     ) == Decimal("0.45")
+
+
+def test_cross_role_reused_order_ids_are_not_reconstructed_from_latest_episode():
+    role_rows = [
+        {"trade_id": 100, "closing_trade_id": 200},
+        {"trade_id": 200, "closing_trade_id": None},
+        {"trade_id": 300, "closing_trade_id": 400},
+    ]
+
+    assert MIGRATION["_cross_role_reused_order_ids"](
+        role_rows, {100, 200, 300, 400}
+    ) == {200}
+
+
+def test_unreused_order_ids_remain_eligible_for_reconciliation():
+    role_rows = [
+        {"trade_id": 100, "closing_trade_id": 200},
+        {"trade_id": 300, "closing_trade_id": 400},
+    ]
+
+    assert MIGRATION["_cross_role_reused_order_ids"](
+        role_rows, {100, 200, 300, 400}
+    ) == set()
