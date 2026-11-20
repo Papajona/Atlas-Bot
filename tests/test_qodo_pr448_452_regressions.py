@@ -28,11 +28,17 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
 
 def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
-    block = source[
+    conflict_block = source[
         source.index("async def _legacy_customer_email_conflict"):
-        source.index("async def get_customer")
+        source.index("async def _has_unmapped_legacy_customer_profile")
     ]
-    assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in block
+    unmapped_block = source[
+        source.index("async def _has_unmapped_legacy_customer_profile"):
+        source.index("async def _customer_profile_effectively_active")
+    ]
+    block = conflict_block + unmapped_block
+    assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in conflict_block
+    assert "select(CustomerProfile.id)" in unmapped_block
     assert "uuid.UUID" in block
     assert 'CustomerProfile.auth_user_id.op("!~*")' in block
     assert 'func.lower(CustomerProfile.auth_user_id).op("GLOB")' in block
@@ -447,7 +453,7 @@ def test_historical_fee_reconstruction_counts_each_source_order_once():
 
 def test_open_position_entry_fee_backfill_requires_full_quantity_reconciliation():
     migration = _load_strategy_outcome_migration()
-    entry_trade = {"filled_quantity": "4", "fee": "8"}
+    entry_trade = {"filled_quantity": "4", "fee": "8", "mode": "PAPER"}
     assert migration._reconstruct_remaining_entry_fee(
         entry_trade, Decimal("1"), Decimal("3")
     ) == Decimal("2")
