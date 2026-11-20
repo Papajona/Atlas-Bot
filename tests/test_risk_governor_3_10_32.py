@@ -36,3 +36,4 @@ def test_execute_signal_wires_live_equity_and_risk_budget_into_governor():
     source = inspect.getsource(execute_signal)
     assert "risk_equity = float(account.equity if account is not None else s.equity)" in source
     assert "equity=risk_equity, risk_per_trade=settings.risk_per_trade" in source
+    assert "risk_tolerance=bounded_risk_tolerance(settings.discipline_risk_tolerance)" in source

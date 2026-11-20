@@ -54,3 +54,21 @@ def test_exact_release_opens_no_incident():
             await db.commit()
             assert (await db.execute(select(Incident))).first() is None
     asyncio.run(with_database(check))
+
+
+
+def test_one_micro_usdt_release_shortfall_is_not_hidden_by_tolerance():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=2, available=Decimal("1"), trading_reserved=Decimal("10")))
+            await db.commit()
+            await release_trading(db, 2, 10.000001, reference_id="shortfall:one-micro")
+            await db.commit()
+            incident = (await db.execute(select(Incident))).scalar_one()
+            assert incident.incident_key == "RELEASE_EXCEEDS_RESERVE:shortfall:one-micro:2"
+            assert "0.000001" in incident.detail_json
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.trading_reserved == Decimal("0")
+            assert ledger.available == Decimal("11.000000")
+
+    asyncio.run(with_database(check))

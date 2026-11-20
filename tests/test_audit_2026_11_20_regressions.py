@@ -50,3 +50,29 @@ def test_sharpe_and_edge_decay_use_sample_standard_deviation():
     sample_vol = math.sqrt(sum((r - mean) ** 2 for r in RETURNS) / (n - 1))
     assert math.isclose(out["sharpe"], mean / sample_vol * math.sqrt(out["trades_per_year"]), rel_tol=1e-9)
     assert math.isclose(out["edge_decay_z"], mean / (sample_vol / math.sqrt(n)), rel_tol=1e-9)
+
+
+
+def test_risk_tolerance_is_finite_nonnegative_and_capped_at_ten_percent():
+    from app.risk_governor import MAX_RISK_TOLERANCE, bounded_risk_tolerance
+
+    assert MAX_RISK_TOLERANCE == 0.10
+    assert bounded_risk_tolerance(0.05) == 0.05
+    assert bounded_risk_tolerance(100.0) == 0.10
+    assert bounded_risk_tolerance(-1.0) == 0.0
+    assert bounded_risk_tolerance(float("nan")) == 0.0
+    assert bounded_risk_tolerance(float("inf")) == 0.0
+
+
+def test_governor_does_not_accept_more_than_ten_percent_risk_headroom():
+    common = dict(
+        side="buy", price=100.0, live=True, stop_loss_price=90.0,
+        take_profit_price=120.0, signal={"data_quality": {"valid": True}},
+        equity=1000.0, risk_per_trade=0.01, risk_tolerance=1000.0,
+    )
+    # The 10% ceiling permits $11 of stop risk, but not $11.01, regardless
+    # of how large an environment-supplied tolerance attempts to become.
+    assert evaluate_trade(quantity=1.10, **common).action == "ALLOW"
+    blocked = evaluate_trade(quantity=1.101, **common)
+    assert blocked.action == "BLOCK"
+    assert "risk_per_trade_limit" in blocked.reasons

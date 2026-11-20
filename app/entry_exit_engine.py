@@ -5,6 +5,7 @@ import pandas as pd
 
 from .strategy_engine import _atr, _adx, _rsi
 from .config import settings
+from .risk_governor import bounded_risk_tolerance
 
 
 @dataclass(frozen=True)
@@ -319,7 +320,7 @@ def gated_entry_exit_backtest(
                     if qty > 0:
                         if settings.discipline_enabled and settings.discipline_enforce_risk_per_trade:
                             risk_cash = initial_risk * qty
-                            allowed_risk = equity * risk_fraction * (1.0 + settings.discipline_risk_tolerance)
+                            allowed_risk = equity * risk_fraction * (1.0 + bounded_risk_tolerance(settings.discipline_risk_tolerance))
                             if risk_cash > allowed_risk + 1e-12:
                                 continue
                         entry_fee = abs(qty * fill) * fee_rate

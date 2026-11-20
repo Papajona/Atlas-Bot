@@ -19,30 +19,46 @@ def encryption_key(monkeypatch):
     monkeypatch.setattr(settings, "discipline_entry_cooldown_seconds", 0)
 
 
-def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator():
-    """Never record a perfect instant fill while the bar-driven simulator is unavailable."""
+def test_legacy_platform_paper_execution_fails_closed_without_bar_simulator(monkeypatch, tmp_path):
+    """Never record a perfect instant fill, and never touch the shared CI database."""
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+    from app import db as app_db
     from app import execution
-    from app.db import init_db, SessionLocal, Trade, Position
+    from app.db import init_db, Trade, Position
 
     sym = f"BLOCKED/{uuid.uuid4().hex[:12]}"
+    test_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path / 'paper-blocked-isolated.db'}",
+        connect_args={"check_same_thread": False, "timeout": 30},
+        pool_pre_ping=True,
+    )
+    test_sessions = async_sessionmaker(
+        test_engine, expire_on_commit=False, class_=AsyncSession
+    )
+    monkeypatch.setattr(app_db, "engine", test_engine)
+    monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
+    monkeypatch.setattr(execution, "SessionLocal", test_sessions)
 
     async def run():
-        await init_db()
-        async with SessionLocal() as db:
-            state = await execution._get_state_locked(db)
-            state.kill_switch = False
-            await db.commit()
-        with pytest.raises(execution.RiskBlocked, match="bar-driven paper simulator"):
-            await execution.execute_signal(
-                sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
-                uuid.uuid4().hex, force_paper=True,
-                stop_loss_price=49000.0, take_profit_price=52000.0,
-            )
-        async with SessionLocal() as db:
-            trades = (await db.execute(select(Trade).where(Trade.symbol == sym))).scalars().all()
-            positions = (await db.execute(select(Position).where(Position.symbol == sym))).scalars().all()
-            assert trades == []
-            assert positions == []
+        try:
+            await init_db()
+            async with test_sessions() as db:
+                state = await execution._get_state_locked(db)
+                state.kill_switch = False
+                await db.commit()
+            with pytest.raises(execution.RiskBlocked, match="bar-driven paper simulator"):
+                await execution.execute_signal(
+                    sym, "buy", 0.01, 50000.0, {"score": 0.9}, "binance", "1h",
+                    uuid.uuid4().hex, force_paper=True,
+                    stop_loss_price=49000.0, take_profit_price=52000.0,
+                )
+            async with test_sessions() as db:
+                trades = (await db.execute(select(Trade).where(Trade.symbol == sym))).scalars().all()
+                positions = (await db.execute(select(Position).where(Position.symbol == sym))).scalars().all()
+                assert trades == []
+                assert positions == []
+        finally:
+            await test_engine.dispose()
 
     asyncio.run(run())
 

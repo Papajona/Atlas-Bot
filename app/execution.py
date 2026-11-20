@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
-from .risk_governor import evaluate_trade
+from .risk_governor import bounded_risk_tolerance, evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .execution_costs import market_impact_bps
@@ -669,7 +669,7 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             if stop_loss_price is None or stop_loss_price <= 0:
                 raise RiskBlocked("Trading discipline requires a protective stop for new exposure")
             risk_cash = abs(price - float(stop_loss_price)) * quantity
-            allowed_risk = equity * settings.risk_per_trade * (1.0 + settings.discipline_risk_tolerance)
+            allowed_risk = equity * settings.risk_per_trade * (1.0 + bounded_risk_tolerance(settings.discipline_risk_tolerance))
             if not (risk_cash <= allowed_risk + 1e-9):
                 raise RiskBlocked("Per-trade risk exceeds the configured discipline limit")
         max_leverage = min(settings.max_leverage, pilot_max_leverage) if pilot_max_leverage is not None else settings.max_leverage
@@ -2989,7 +2989,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
-        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade, risk_tolerance=settings.discipline_risk_tolerance)
+        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade, risk_tolerance=bounded_risk_tolerance(settings.discipline_risk_tolerance))
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)

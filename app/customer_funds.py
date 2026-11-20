@@ -349,7 +349,9 @@ async def release_trading(
         return fresh_ledger
     reserved_now = D(str(fresh_ledger.trading_reserved))
     release = min(amount_d, reserved_now)
-    if amount_d - release > D("0.00001"):
+    # Both operands are quantized to the ledger's six-decimal scale. Any positive
+    # difference is a real, representable reserve shortfall and must be reported.
+    if amount_d > reserved_now:
         # The caller expects more collateral to be reserved than the ledger holds. Releasing the
         # smaller amount is the safe action, but the gap must not be silent: it means the position
         # row and the ledger have drifted apart.
