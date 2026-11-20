@@ -128,3 +128,89 @@ def test_release_replay_accepts_same_request_and_preserves_shortfall_request_amo
             assert ledger.available == Decimal("11.000000")
 
     asyncio.run(with_database(check))
+
+
+@pytest.mark.parametrize("retry_amount", [10, 25])
+def test_legacy_shortfall_replay_without_request_evidence_fails_closed_and_alert_survives_rollback(
+    retry_amount, monkeypatch, tmp_path
+):
+    async def check():
+        # A file-backed SQLite database gives the incident writer a genuinely
+        # independent connection, matching the production transaction boundary.
+        database_path = tmp_path / f"legacy-shortfall-{retry_amount}.db"
+        engine = create_async_engine(f"sqlite+aiosqlite:///{database_path}")
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            monkeypatch.setattr("app.customer_funds.SessionLocal", sessions)
+
+            async with sessions() as db:
+                db.add(
+                    CustomerLedgerAccount(
+                        customer_id=5,
+                        available=Decimal("1"),
+                        trading_reserved=Decimal("10"),
+                    )
+                )
+                await db.commit()
+
+                reference_id = f"legacy-shortfall:{retry_amount}"
+                await release_trading(db, 5, 25, reference_id=reference_id)
+                await db.commit()
+
+                # Model a release created before requested amounts and the
+                # RELEASE_EXCEEDS_RESERVE incident were persisted.
+                entry = (
+                    await db.execute(
+                        select(LedgerEntry).where(
+                            LedgerEntry.idempotency_key
+                            == f"release:{reference_id}:5"
+                        )
+                    )
+                ).scalar_one()
+                entry.metadata_json = "{}"
+                legacy_incident = (
+                    await db.execute(
+                        select(Incident).where(
+                            Incident.incident_key
+                            == f"RELEASE_EXCEEDS_RESERVE:{reference_id}:5"
+                        )
+                    )
+                ).scalar_one()
+                await db.delete(legacy_incident)
+                await db.commit()
+
+                with pytest.raises(ValueError, match="idempotency key already used"):
+                    await release_trading(
+                        db, 5, retry_amount, reference_id=reference_id
+                    )
+                # The caller's failed trade transaction is rolled back. The HIGH
+                # replay incident must already have committed in its own session.
+                await db.rollback()
+
+            async with sessions() as verify_db:
+                replay_incident = (
+                    await verify_db.execute(
+                        select(Incident).where(
+                            Incident.incident_key
+                            == f"RELEASE_REPLAY_MISMATCH:release:{reference_id}:5"
+                        )
+                    )
+                ).scalar_one()
+                assert replay_incident.severity == "HIGH"
+                assert replay_incident.status == "OPEN"
+
+                ledger = (
+                    await verify_db.execute(
+                        select(CustomerLedgerAccount).where(
+                            CustomerLedgerAccount.customer_id == 5
+                        )
+                    )
+                ).scalar_one()
+                assert ledger.trading_reserved == Decimal("0.000000")
+                assert ledger.available == Decimal("11.000000")
+        finally:
+            await engine.dispose()
+
+    asyncio.run(check())
