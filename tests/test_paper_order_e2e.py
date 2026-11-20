@@ -256,7 +256,7 @@ def test_platform_paper_order_persists_invalid_execution_cost_context(monkeypatc
         monkeypatch.setattr(app_db, "engine", test_engine)
         monkeypatch.setattr(app_db, "SessionLocal", test_sessions)
         monkeypatch.setattr(execution, "SessionLocal", test_sessions)
-    monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
+        monkeypatch.setattr("app.audit_chain.SessionLocal", test_sessions)
         await init_db()
         async with test_sessions() as db:
             state = await execution._get_state_locked(db)
