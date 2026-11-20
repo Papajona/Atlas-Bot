@@ -84,6 +84,25 @@ async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMisma
         await db.flush()
 
 
+async def persist_trading_release_replay_mismatch(incident_args: dict) -> None:
+    """Commit a HIGH replay incident independently of the trade transaction.
+
+    A replay mismatch aborts its caller's trade transaction. Persisting the
+    incident through that same session would therefore roll the alert back.
+    """
+    async with SessionLocal() as incident_db:
+        try:
+            async with incident_db.begin_nested():
+                await record_ledger_incident(incident_db, **incident_args)
+                await incident_db.flush()
+        except IntegrityError:
+            # A concurrent replay may have inserted the deterministic incident
+            # key after our SELECT. Retry the upsert outside the failed savepoint.
+            await record_ledger_incident(incident_db, **incident_args)
+            await incident_db.flush()
+        await incident_db.commit()
+
+
 async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> CustomerLedgerAccount:
     row = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
@@ -371,28 +390,29 @@ async def _check_trading_release_replay(
 
         recorded_request = metadata.get("requested_amount")
         if recorded_request is None:
-            # Compatibility with journal rows written before requested amounts
-            # were recorded. A non-shortfall legacy release has requested == paid.
-            if D(str(entry.amount)) == amount_d:
-                recorded_request = amount_d
-            else:
-                # Older shortfall releases have an immutable incident recording
-                # the original requested amount; use it only when the journal did
-                # not persist that value itself.
-                incident = (
-                    await db.execute(
-                        select(Incident).where(
-                            Incident.incident_key
-                            == f"RELEASE_EXCEEDS_RESERVE:{reference_id}:{customer_id}"
-                        )
+            # The paid amount does not prove the original requested amount:
+            # an old shortfall release can have paid less than was requested.
+            # Recover the request only from the immutable shortfall incident;
+            # otherwise the legacy replay is ambiguous and must fail closed.
+            incident = (
+                await db.execute(
+                    select(Incident).where(
+                        Incident.incident_key
+                        == f"RELEASE_EXCEEDS_RESERVE:{reference_id}:{customer_id}"
                     )
-                ).scalar_one_or_none()
-                if incident is not None:
-                    try:
-                        incident_detail = json.loads(incident.detail_json or "{}")
+                )
+            ).scalar_one_or_none()
+            if incident is not None:
+                try:
+                    incident_detail = json.loads(incident.detail_json or "{}")
+                    if (
+                        isinstance(incident_detail, dict)
+                        and str(incident_detail.get("customer_id")) == str(customer_id)
+                        and str(incident_detail.get("reference_id")) == str(reference_id)
+                    ):
                         recorded_request = incident_detail.get("requested")
-                    except (TypeError, ValueError, AttributeError):
-                        recorded_request = None
+                except (TypeError, ValueError, AttributeError):
+                    recorded_request = None
         try:
             if recorded_request is None or _q(recorded_request) != amount_d:
                 problems.append("requested amount")
@@ -447,19 +467,20 @@ async def _check_trading_release_replay(
             "trading_release_replay_mismatch customer=%s key=%s requested=%s problems=%s",
             customer_id, idem, amount_d, ",".join(problems),
         )
-        await record_ledger_incident(
-            db,
-            key=f"RELEASE_REPLAY_MISMATCH:{idem}",
-            summary="Idempotent trading release replayed with a different or inconsistent operation",
-            detail={
+        await persist_trading_release_replay_mismatch(
+            {
+                "key": f"RELEASE_REPLAY_MISMATCH:{idem}",
+                "summary": "Idempotent trading release replayed with a different or inconsistent operation",
+                "detail": {
+                    "customer_id": customer_id,
+                    "reference_id": reference_id,
+                    "idempotency_key": idem,
+                    "requested_amount": str(amount_d),
+                    "problems": problems,
+                },
                 "customer_id": customer_id,
-                "reference_id": reference_id,
-                "idempotency_key": idem,
-                "requested_amount": str(amount_d),
-                "problems": problems,
-            },
-            customer_id=customer_id,
-            severity="HIGH",
+                "severity": "HIGH",
+            }
         )
         raise ValueError(
             "trading release idempotency key already used by a different or inconsistent operation"
