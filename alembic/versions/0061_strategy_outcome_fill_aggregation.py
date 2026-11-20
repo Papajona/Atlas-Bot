@@ -335,6 +335,18 @@ def _fee_value_to_persist(
     return previous if previous.is_finite() and previous >= 0 else Decimal("0")
 
 
+def _verified_net_values(
+    net_pnl,
+    net_return_bps,
+    *,
+    fee_basis_complete: bool,
+) -> tuple[Decimal | None, float | None]:
+    """Never preserve a historical net result when the fee basis is unverified."""
+    if not fee_basis_complete:
+        return None, None
+    return net_pnl, net_return_bps
+
+
 def _historical_lifecycle_fee_basis_complete(
     rows: list[dict],
     *,
@@ -798,15 +810,20 @@ def upgrade() -> None:
                 if not has_closed_fill:
                     for row in rows:
                         row_id = int(row["id"])
+                        row_net_pnl, row_net_return_bps = _verified_net_values(
+                            row["net_pnl"],
+                            row["net_return_bps"],
+                            fee_basis_complete=fee_basis_complete,
+                        )
                         bind.execute(update_outcome, {
                             "id": row_id,
                             "closing_quantity": row_quantities.get(row_id, Decimal("0")) if complete else Decimal("0"),
                             "closing_notional": row_notionals.get(row_id, Decimal("0")) if complete else Decimal("0"),
                             "realized_pnl": row["realized_pnl"],
                             "fee": row["fee"],
-                            "net_pnl": row["net_pnl"],
+                            "net_pnl": row_net_pnl,
                             "return_bps": row["return_bps"],
-                            "net_return_bps": row["net_return_bps"],
+                            "net_return_bps": row_net_return_bps,
                             "lifecycle_status": row["lifecycle_status"],
                             "fee_basis_complete": fee_basis_complete,
                         })
@@ -830,18 +847,28 @@ def upgrade() -> None:
                     if valid_notional > 0 and fee_basis_complete else 0.0
                 )
                 for row in rows[:-1]:
+                    row_net_pnl, row_net_return_bps = _verified_net_values(
+                        row["net_pnl"],
+                        row["net_return_bps"],
+                        fee_basis_complete=fee_basis_complete,
+                    )
                     bind.execute(update_outcome, {
                         "id": int(row["id"]),
                         "closing_quantity": row_quantities.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                         "closing_notional": row_notionals.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                         "realized_pnl": row["realized_pnl"],
                         "fee": row["fee"],
-                        "net_pnl": row["net_pnl"],
+                        "net_pnl": row_net_pnl,
                         "return_bps": row["return_bps"],
-                        "net_return_bps": row["net_return_bps"],
+                        "net_return_bps": row_net_return_bps,
                         "lifecycle_status": "PARTIAL_CLOSED",
                         "fee_basis_complete": fee_basis_complete,
                     })
+                final_net_pnl, final_net_return_bps = _verified_net_values(
+                    total_net,
+                    net_return_bps,
+                    fee_basis_complete=fee_basis_complete,
+                )
                 bind.execute(update_outcome, {
                     "id": int(final["id"]),
                     "closing_quantity": valid_quantity,
@@ -852,11 +879,9 @@ def upgrade() -> None:
                         Decimal(str(final["fee"] or 0)) if final["fee"] is not None else None,
                         fee_basis_complete=fee_basis_complete,
                     ),
-                    "net_pnl": total_net if fee_basis_complete else final["net_pnl"],
+                    "net_pnl": final_net_pnl,
                     "return_bps": gross_return_bps,
-                    "net_return_bps": (
-                        net_return_bps if fee_basis_complete else final["net_return_bps"]
-                    ),
+                    "net_return_bps": final_net_return_bps,
                     "lifecycle_status": "CLOSED",
                     "fee_basis_complete": fee_basis_complete,
                 })
