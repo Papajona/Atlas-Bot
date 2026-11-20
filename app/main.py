@@ -3972,41 +3972,23 @@ async def get_customer(
         str(profile.email or "").strip().lower()[:320]
         if profile is not None else ""
     )
-    email = stored_email or str(claims.get("email") or "").strip().lower()[:320]
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(
         metadata.get("full_name") or metadata.get("name")
         or (profile.display_name if profile is not None else "")
         or ""
     ).strip()[:160]
-
-    # Only a missing profile or stored email requires a verified Auth lookup.
-    # An optional blank display name must not trigger repeated Auth network calls.
-    needs_auth_identity = profile is None or not stored_email
-    if needs_auth_identity:
-        user = await _supabase_user(_bearer_token(authorization))
-        if str(user.get("id") or "") != uid:
-            raise HTTPException(401, "Customer Auth identity could not be verified")
-        if not user.get("email_confirmed_at"):
-            raise HTTPException(403, "A confirmed email address is required")
-        auth_email = str(user.get("email") or "").strip().lower()[:320]
-        if auth_email:
-            email = auth_email
-        user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
-        name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
-    if not email:
-        raise HTTPException(403, "A confirmed email address is required")
-
     stale_legacy_quarantine = bool(
         profile is not None
         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
     )
-    # Recheck an existing quarantine against the bounded identity index. A
-    # previously unresolved legacy reference may have been manually reconciled;
-    # it must not lock the customer out forever after the conflict is gone.
+
+    # Only new/blank identities and an existing quarantine require a live,
+    # confirmed Auth identity lookup. A blank optional display name does not.
     needs_auth_identity = (
         profile is None or not stored_email or stale_legacy_quarantine
     )
+    email = stored_email or str(claims.get("email") or "").strip().lower()[:320]
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
@@ -4025,11 +4007,12 @@ async def get_customer(
 
     identity_review_required = False
     if profile is None:
-        # This indexed, bounded check avoids decrypting every stored customer
-        # email on the normal signup path. Any remaining legacy Auth ID is a
-        # quarantine condition; no full-table PII scan is needed.
+        # A bounded index lookup avoids decrypting every stored customer email
+        # for ordinary signups. Any remaining non-UUID identity is quarantined.
         identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
     elif stale_legacy_quarantine:
+        # Recheck the legacy identity reference on every quarantined summary or
+        # access attempt. Once an operator has reconciled it, restore access.
         identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
         if not identity_review_required:
             profile.status = "ACTIVE"
@@ -4081,14 +4064,12 @@ async def get_customer(
                     profile.display_name = name
                 await db.flush()
     elif not identity_review_required:
-        if not profile.email:
+        if not profile.email or stale_legacy_quarantine:
             profile.email = email
         if not profile.display_name and name:
             profile.display_name = name
         await db.flush()
 
-    # Identity review is request-local until an operator completes manual review.
-    # Do not rewrite the customer's persisted ACTIVE/SUSPENDED status here.
     profile.identity_review_required = bool(identity_review_required)
     if profile.status != "ACTIVE" and not (
         allow_identity_review_summary
@@ -5579,22 +5560,32 @@ async def admin_billing_margin(months: int = 1, authorization: str | None = Head
 @app.get("/api/customer/me")
 async def customer_me(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
-        # This endpoint is a read-only identity summary. It may show the verified
-        # user's own Auth PII while the account is quarantined for manual legacy
-        # identity review; all trading/ledger endpoints retain the default denial.
+        # This endpoint may show the customer's currently verified Auth identity
+        # while access remains quarantined; it never grants wallet/trading access.
         profile, claims = await get_customer(
             authorization, db, allow_identity_review_summary=True
         )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
-        metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
-        return {"id": profile.id, "auth_user_id": profile.auth_user_id,
-                "email": profile.email or claims.get("email") or "",
-                "display_name": profile.display_name or metadata.get("full_name") or metadata.get("name") or "",
-                "status": profile.status,
-                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
-                "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
-
+        identity_review_required = bool(
+            getattr(profile, "identity_review_required", False)
+        )
+        return {
+            "id": profile.id,
+            "auth_user_id": profile.auth_user_id,
+            "email": (
+                claims.get("email") or ""
+                if identity_review_required else profile.email or claims.get("email") or ""
+            ),
+            "display_name": profile.display_name or "",
+            "status": (
+                "PENDING_IDENTITY_REVIEW"
+                if identity_review_required else profile.status
+            ),
+            "identity_review_required": identity_review_required,
+            "plan": sub.plan_code if sub else "free",
+            "subscription_status": sub.status if sub else "active",
+        }
 
 @app.get("/api/customer/wallets")
 async def customer_wallets(authorization: str | None = Header(default=None)):
