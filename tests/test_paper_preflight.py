@@ -116,6 +116,11 @@ def test_plain_postgresql_ledger_url_is_normalized_for_async_engine():
     assert make_url(already_async).drivername == "postgresql+asyncpg"
 
 
+def test_shared_mode_never_infers_the_primary_database_as_the_paper_target():
+    settings = _settings(customer_paper_ledger_enabled=True, customer_paper_shared_database_enabled=True)
+    assert not pf._text(pf._s(settings, "customer_paper_database_url"))
+
+
 def test_database_passwords_are_never_printed():
     assert "hunter2" not in pf._safe_url("postgresql+asyncpg://atlas:hunter2@db.example:5432/atlas")
     assert "hunter2" not in pf._safe_url("postgresql+asyncpg://atlas@db.example:5432/atlas?password=hunter2&sslmode=require")

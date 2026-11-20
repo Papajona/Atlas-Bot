@@ -216,7 +216,7 @@ async def check_database(settings: Any) -> list[Result]:
 
     if not _s(settings, "customer_paper_ledger_enabled", False):
         return out
-    ledger_url = _text(_s(settings, "customer_paper_database_url")) or (url if _s(settings, "customer_paper_shared_database_enabled", False) else "")
+    ledger_url = _text(_s(settings, "customer_paper_database_url"))
     if not ledger_url or ledger_url.startswith("sqlite"):
         out.append((FAIL, "paper_ledger_db", "customer paper ledger needs a PostgreSQL target"))
         return out
