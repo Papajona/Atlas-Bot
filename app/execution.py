@@ -99,22 +99,29 @@ def _aggregate_completed_strategy_outcomes(outcomes):
         and Decimal(str(getattr(row, "closing_quantity", 0) or 0)) > 0
         for row in rows
     )
+    fee_basis_complete = all(
+        bool(getattr(row, "fee_basis_complete", False)) for row in rows
+    )
     if notional_complete and total_notional > 0 and total_quantity > 0:
         final.closing_quantity = total_quantity
         final.closing_notional = total_notional
-        final.net_return_bps = float(total_net_pnl / total_notional * Decimal("10000"))
+        final.net_return_bps = (
+            float(total_net_pnl / total_notional * Decimal("10000"))
+            if fee_basis_complete else None
+        )
         final.return_bps = float(total_realized_pnl / total_notional * Decimal("10000"))
     else:
         final.closing_quantity = Decimal("0")
         final.closing_notional = Decimal("0")
-        final.net_return_bps = 0.0
+        # A missing notional is not a zero-percent return. Keep it unavailable.
+        final.net_return_bps = None
         final.return_bps = 0.0
-    final.net_pnl = total_net_pnl
+    # Do not expose a partial sum as a completed net result when even one fill's
+    # fee denomination/basis is unverified. Gross P&L and fees remain auditable.
+    final.net_pnl = total_net_pnl if fee_basis_complete else None
     final.realized_pnl = total_realized_pnl
     final.fee = total_fee
-    final.fee_basis_complete = bool(
-        all(bool(getattr(row, "fee_basis_complete", False)) for row in rows)
-    )
+    final.fee_basis_complete = fee_basis_complete
     for row in rows[:-1]:
         row.lifecycle_status = "PARTIAL_CLOSED"
     final.lifecycle_status = "CLOSED"
@@ -134,7 +141,7 @@ def _aggregate_completed_strategy_outcomes(outcomes):
             final_fill_closing_notional
         )
         metadata["total_closing_notional"] = str(final.closing_notional)
-        metadata["net_pnl"] = str(total_net_pnl)
+        metadata["net_pnl"] = str(final.net_pnl) if final.net_pnl is not None else None
         metadata["aggregate_fee_basis_complete"] = bool(final.fee_basis_complete)
         final.metadata_json = json.dumps(metadata, default=str)
     return final
