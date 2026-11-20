@@ -1059,22 +1059,57 @@ async def _apply_reconciled_live_fee_basis(
         entry_id = int(entry_trade.id)
         cache_key = (entry_id, lifecycle_end_trade_id)
         if cache_key not in pending_fee_order_cache:
-            statement = select(Trade.id).where(
-                Trade.id != trade.id,
-                Trade.id > entry_id,
-                Trade.customer_id == entry_trade.customer_id,
-                Trade.mode == entry_trade.mode,
-                Trade.exchange == entry_trade.exchange,
-                Trade.symbol == entry_trade.symbol,
-                # A position's closing order has the opposite side. Only later
-                # same-side orders can add to this entry-fee basis.
-                Trade.side == entry_trade.side,
-                Trade.fee_reconciliation_pending.is_(True),
-            )
-            if lifecycle_end_trade_id is not None:
-                statement = statement.where(Trade.id <= lifecycle_end_trade_id)
-            pending = (await db.execute(statement.limit(1))).scalar_one_or_none()
-            pending_fee_order_cache[cache_key] = pending is not None
+            # Trade IDs describe order creation, not the order in which their
+            # fills joined a position. A same-side order can therefore be a
+            # legitimate add-on even when it was created after the close order.
+            # _apply_fill_to_position persists the exact position-entry anchor
+            # on each filled order so reconciliation does not infer fill order
+            # from unrelated auto-increment IDs.
+            candidates = (await db.execute(
+                select(Trade.id, Trade.reason).where(
+                    Trade.id != trade.id,
+                    Trade.customer_id == entry_trade.customer_id,
+                    Trade.mode == entry_trade.mode,
+                    Trade.exchange == entry_trade.exchange,
+                    Trade.symbol == entry_trade.symbol,
+                    Trade.side == entry_trade.side,
+                    Trade.fee_reconciliation_pending.is_(True),
+                )
+            )).all()
+            pending = False
+            for candidate_id, reason in candidates:
+                try:
+                    candidate_context = json.loads(reason or "{}")
+                except (TypeError, ValueError):
+                    candidate_context = {}
+                if not isinstance(candidate_context, dict):
+                    candidate_context = {}
+                lifecycle_ids = candidate_context.get(
+                    "fee_basis_lifecycle_entry_trade_ids", []
+                )
+                if not isinstance(lifecycle_ids, (list, tuple, set)):
+                    lifecycle_ids = []
+                associated = False
+                for lifecycle_id in lifecycle_ids:
+                    try:
+                        if int(lifecycle_id) == entry_id:
+                            associated = True
+                            break
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                # Keep the old ID boundary only as a compatibility fallback
+                # for pending orders created before lifecycle anchors existed.
+                legacy_in_lifecycle = (
+                    int(candidate_id) > entry_id
+                    and (
+                        lifecycle_end_trade_id is None
+                        or int(candidate_id) <= int(lifecycle_end_trade_id)
+                    )
+                )
+                if associated or legacy_in_lifecycle:
+                    pending = True
+                    break
+            pending_fee_order_cache[cache_key] = pending
         return pending_fee_order_cache[cache_key]
 
     entry_fill_quantities = _source_fill_quantities(entry_rows)
@@ -1171,38 +1206,59 @@ async def _apply_reconciled_live_fee_basis(
             )
 
     add_on_fee_only = False
+    entry_fee_only = False
     if not entry_rows and not closing_rows:
-        # An add-on order has no outcome rows of its own: its exact fee belongs
-        # to the still-open aggregate position anchored to an earlier entry trade.
-        # It is safe only before any close outcomes exist; once lots have closed,
-        # the old schema cannot attribute that add-on fee across the realized legs.
         position_entry_id = int(position.entry_trade_id or 0) if position is not None else 0
-        position_entry_trade = (
-            await db.get(Trade, position_entry_id) if position_entry_id > 0 else None
+        position_quantity = (
+            Decimal(str(position.quantity or 0)) if position is not None
+            else Decimal("0")
         )
-        if (
-            position is None
-            or position_entry_trade is None
-            or int(trade.id) <= position_entry_id
-            or str(trade.side).lower() != str(position_entry_trade.side).lower()
-            or abs(float(position.quantity or 0.0)) <= 1e-12
-            or (str(trade.side).lower() == "buy") != (float(position.quantity or 0.0) > 0)
-        ):
-            raise ValueError(
-                f"cannot associate recovered fee for trade {trade.id} with its own open position lifecycle"
+        if position is not None and position_entry_id == int(trade.id):
+            # The original entry can be reconciled before the first close has
+            # produced any StrategyOutcome rows. Its authoritative fee belongs
+            # to the still-open position; it is not an add-on order.
+            if (
+                not position_quantity.is_finite()
+                or abs(position_quantity) <= Decimal("0.000000000001")
+                or (str(trade.side).lower() == "buy") != (position_quantity > 0)
+            ):
+                raise ValueError(
+                    f"cannot reconcile entry fee for trade {trade.id}: "
+                    "the anchored open position is missing or has the wrong side"
+                )
+            position_entry_fee_delta = delta_fee
+            entry_fee_only = True
+        else:
+            # An add-on order has no outcome rows of its own: its exact fee belongs
+            # to the still-open aggregate position anchored to an earlier entry trade.
+            # It is safe only before any close outcomes exist; once lots have closed,
+            # the old schema cannot attribute that add-on fee across realized legs.
+            position_entry_trade = (
+                await db.get(Trade, position_entry_id) if position_entry_id > 0 else None
             )
-        prior_outcomes = int((await db.execute(
-            select(func.count(StrategyOutcome.id)).where(
-                StrategyOutcome.trade_id == int(position.entry_trade_id)
-            )
-        )).scalar_one() or 0)
-        if prior_outcomes:
-            raise ValueError(
-                f"cannot safely allocate recovered add-on fee for trade {trade.id}: "
-                "position already has closed outcome rows"
-            )
-        position_entry_fee_delta = delta_fee
-        add_on_fee_only = True
+            if (
+                position is None
+                or position_entry_trade is None
+                or int(trade.id) <= position_entry_id
+                or str(trade.side).lower() != str(position_entry_trade.side).lower()
+                or abs(float(position.quantity or 0.0)) <= 1e-12
+                or (str(trade.side).lower() == "buy") != (float(position.quantity or 0.0) > 0)
+            ):
+                raise ValueError(
+                    f"cannot associate recovered fee for trade {trade.id} with its own open position lifecycle"
+                )
+            prior_outcomes = int((await db.execute(
+                select(func.count(StrategyOutcome.id)).where(
+                    StrategyOutcome.trade_id == int(position.entry_trade_id)
+                )
+            )).scalar_one() or 0)
+            if prior_outcomes:
+                raise ValueError(
+                    f"cannot safely allocate recovered add-on fee for trade {trade.id}: "
+                    "position already has closed outcome rows"
+                )
+            position_entry_fee_delta = delta_fee
+            add_on_fee_only = True
 
     if position_entry_fee_delta:
         if position is None:
@@ -1230,7 +1286,7 @@ async def _apply_reconciled_live_fee_basis(
                 )
             )
 
-        if add_on_fee_only and bool(position.entry_fee_basis_known):
+        if (add_on_fee_only or entry_fee_only) and bool(position.entry_fee_basis_known):
             entry_episode = (await db.execute(
                 select(TradeLearningEpisode).where(
                     TradeLearningEpisode.entry_trade_id == position.entry_trade_id
@@ -1457,6 +1513,8 @@ async def _apply_fill_to_position(
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
         trade_context = {}
+    if not isinstance(trade_context, dict):
+        trade_context = {}
     # Position ownership is mode/account scoped. Paper orders must update their own
     # paper position rather than missing it because the entry trade is not LIVE.
     compatible_entry_ids = select(Trade.id).where(
@@ -1475,6 +1533,10 @@ async def _apply_fill_to_position(
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
+    # Capture the existing lifecycle before a close or reversal mutates Position.
+    # This identity is persisted on the filled order below and is independent of
+    # the order's auto-increment ID or submission time.
+    position_lifecycle_entry_id = None
     closing_decimal = Decimal("0")
     old_qty = 0.0
     current_fee_decimal = Decimal(str(current_fill_fee or 0))
@@ -1531,6 +1593,8 @@ async def _apply_fill_to_position(
             raise ValueError("stored position quantity is not numeric") from exc
         if not math.isfinite(old_qty):
             raise ValueError("stored position quantity is not finite")
+        if abs(old_qty) > 1e-12 and position.entry_trade_id is not None:
+            position_lifecycle_entry_id = int(position.entry_trade_id)
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
             if old_qty == 0:
                 # A flat Position row can remain after the previous lifecycle closes.
@@ -1894,6 +1958,28 @@ async def _apply_fill_to_position(
         else:
             position.unrealized_pnl = Decimal("0")
         position.updated_at = utcnow()
+    # Persist every position lifecycle touched by this fill. The same order can
+    # close one lifecycle and open the opposite side on a reversal, so retain all
+    # anchors observed across its fills rather than treating Trade.id as time.
+    lifecycle_ids = set()
+    prior_lifecycle_ids = trade_context.get(
+        "fee_basis_lifecycle_entry_trade_ids", []
+    )
+    if isinstance(prior_lifecycle_ids, (list, tuple, set)):
+        for lifecycle_id in prior_lifecycle_ids:
+            try:
+                parsed_id = int(lifecycle_id)
+                if parsed_id > 0:
+                    lifecycle_ids.add(parsed_id)
+            except (TypeError, ValueError, OverflowError):
+                continue
+    if position_lifecycle_entry_id is not None and position_lifecycle_entry_id > 0:
+        lifecycle_ids.add(position_lifecycle_entry_id)
+    if position_lifecycle_entry_id is None or position_flipped:
+        lifecycle_ids.add(int(trade.id))
+    if lifecycle_ids:
+        trade_context["fee_basis_lifecycle_entry_trade_ids"] = sorted(lifecycle_ids)
+        trade.reason = json.dumps(trade_context, default=str)
     trade.filled_quantity = new_filled
     trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
     trade.average_fill_price = Decimal(str(fill_price))
