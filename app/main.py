@@ -9604,13 +9604,13 @@ async def model_experiments_history(model_path: str | None = None, status: str |
         return out
 
 
-def _learning_episode_accounting_fields(episode):
-    """Expose fee-adjusted episode results only after authoritative fee reconciliation."""
+def _learning_episode_accounting_fields(episode, *, fee_basis_verified: bool = False):
+    """Expose fee-adjusted results only when all linked closing fees are authoritative."""
     status = str(getattr(episode, "status", "") or "").upper()
-    verified = status == "COMPLETED"
+    verified = status == "COMPLETED" and bool(fee_basis_verified)
     if verified:
         fee_basis_status = "VERIFIED"
-    elif status == "FEE_PENDING":
+    elif status == "FEE_PENDING" or status == "COMPLETED":
         fee_basis_status = "PENDING_RECONCILIATION"
     else:
         fee_basis_status = "NOT_FINAL"
@@ -9635,18 +9635,33 @@ async def admin_learning_episodes(limit: int = 50, status: str | None = None, re
         if replay_status:
             q = q.where(TradeLearningEpisode.replay_status == replay_status)
         rows = (await db.execute(q.order_by(desc(TradeLearningEpisode.created_at)).limit(limit))).scalars().all()
+        entry_ids = [int(row.entry_trade_id) for row in rows]
+        fee_rows = (await db.execute(
+            select(StrategyOutcome.trade_id, StrategyOutcome.fee_basis_complete).where(
+                StrategyOutcome.trade_id.in_(entry_ids),
+                StrategyOutcome.closing_trade_id.is_not(None),
+            )
+        )).all() if entry_ids else []
+        fee_complete_by_entry: dict[int, bool] = {}
+        for trade_id, fee_complete in fee_rows:
+            key = int(trade_id)
+            fee_complete_by_entry[key] = fee_complete_by_entry.get(key, True) and bool(fee_complete)
         out = []
         for r in rows:
+            accounting = _learning_episode_accounting_fields(
+                r, fee_basis_verified=fee_complete_by_entry.get(int(r.entry_trade_id), False)
+            )
+            outcome_verified = accounting["fee_basis_status"] == "VERIFIED"
             out.append({
                 "id": r.id, "entry_trade_id": r.entry_trade_id, "closing_trade_id": r.closing_trade_id,
                 "customer_id": r.customer_id, "bot_id": r.bot_id, "symbol": r.symbol, "exchange": r.exchange,
                 "timeframe": r.timeframe, "strategy": r.strategy, "regime": r.regime, "side": r.side,
                 "status": r.status, "replay_status": r.replay_status, "replay_version": r.replay_version,
                 "entry_price": r.entry_price, "exit_price": r.exit_price, "gross_pnl": r.gross_pnl,
-                **_learning_episode_accounting_fields(r),
+                **accounting,
                 "bars_held": r.bars_held, "mfe_bps": r.mfe_bps, "mae_bps": r.mae_bps,
-                "market_flow": json.loads(r.market_flow_json or "{}") if str(r.status).upper() == "COMPLETED" else {},
-                "memory": json.loads(r.learning_memory_json or "{}") if str(r.status).upper() == "COMPLETED" else {},
+                "market_flow": json.loads(r.market_flow_json or "{}") if outcome_verified else {},
+                "memory": json.loads(r.learning_memory_json or "{}") if outcome_verified else {},
                 "created_at": r.created_at.isoformat(), "updated_at": r.updated_at.isoformat(),
             })
         return out
@@ -9660,21 +9675,31 @@ async def admin_learning_episode_detail(episode_id: int, x_admin_token: str | No
         ep = await db.get(TradeLearningEpisode, int(episode_id))
         if not ep:
             raise HTTPException(404, "Learning episode not found")
+        fee_rows = (await db.execute(
+            select(StrategyOutcome.fee_basis_complete).where(
+                StrategyOutcome.trade_id == int(ep.entry_trade_id),
+                StrategyOutcome.closing_trade_id.is_not(None),
+            )
+        )).scalars().all()
+        accounting = _learning_episode_accounting_fields(
+            ep, fee_basis_verified=bool(fee_rows) and all(bool(value) for value in fee_rows)
+        )
+        outcome_verified = accounting["fee_basis_status"] == "VERIFIED"
         replays = (await db.execute(select(TradeReplayResult).where(TradeReplayResult.episode_id == ep.id).order_by(TradeReplayResult.strategy))).scalars().all()
         return {
             "id": ep.id, "entry_trade_id": ep.entry_trade_id, "closing_trade_id": ep.closing_trade_id,
             "strategy": ep.strategy, "regime": ep.regime, "symbol": ep.symbol, "timeframe": ep.timeframe,
             "status": ep.status, "replay_status": ep.replay_status, "replay_error": ep.replay_error,
-            "gross_pnl": ep.gross_pnl, **_learning_episode_accounting_fields(ep),
+            "gross_pnl": ep.gross_pnl, **accounting,
             "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
-            "market_flow": json.loads(ep.market_flow_json or "{}") if str(ep.status).upper() == "COMPLETED" else {},
-            "memory": json.loads(ep.learning_memory_json or "{}") if str(ep.status).upper() == "COMPLETED" else {},
+            "market_flow": json.loads(ep.market_flow_json or "{}") if outcome_verified else {},
+            "memory": json.loads(ep.learning_memory_json or "{}") if outcome_verified else {},
             "replays": (
                 [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
                   "entry_decision_return_bps": x.entry_decision_return_bps,
                   "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
                   "comparison_scope": x.comparison_scope} for x in replays]
-                if str(ep.status).upper() == "COMPLETED" else []
+                if outcome_verified else []
             ),
         }
 
