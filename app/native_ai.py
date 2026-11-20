@@ -136,6 +136,14 @@ def _has_affirmed_family_phrase(text: str, phrases: tuple[str, ...]) -> bool:
 
 
 def _classify_family(text: str) -> str:
+    # "Not only A but B" explicitly combines two strategy families.
+    not_only = re.search(r"\\bnot\\s+only\\b(.{0,100}?)\\bbut\\b(.{0,100})", text.lower())
+    if not_only and (
+        _has_affirmed_family_phrase(not_only.group(1), _FAMILY_HINT_TERMS)
+        and _has_affirmed_family_phrase(not_only.group(2), _FAMILY_HINT_TERMS)
+    ):
+        return "ENSEMBLE"
+
     # Explicit multi-strategy intent takes precedence over component keywords.
     if _has_affirmed_family_phrase(
         text, ("ensemble", "combine strategies", "multiple strategies",
