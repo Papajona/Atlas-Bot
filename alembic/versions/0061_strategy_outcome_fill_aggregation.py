@@ -362,6 +362,21 @@ def _historical_lifecycle_fee_basis_complete(
     return True
 
 
+def _learning_episode_requires_fee_quarantine(
+    episode: dict | None,
+    *,
+    lifecycle_closed: bool,
+    fee_basis_complete: bool,
+) -> bool:
+    """Keep an old completed episode out of replay when its fee basis is unknown."""
+    return bool(
+        episode is not None
+        and str(episode.get("status") or "").upper() == "COMPLETED"
+        and lifecycle_closed
+        and not fee_basis_complete
+    )
+
+
 def _cross_role_reused_order_ids(
     role_rows: list[dict],
     candidate_order_ids: set[int],
@@ -545,6 +560,16 @@ def upgrade() -> None:
         FROM trade_learning_episodes
         WHERE entry_trade_id IN :trade_ids
     """).bindparams(sa.bindparam("trade_ids", expanding=True))
+    quarantine_learning_episode = sa.text("""
+        UPDATE trade_learning_episodes
+        SET status = 'FEE_RECONCILIATION_PENDING',
+            replay_status = 'PENDING',
+            replay_version = '',
+            replay_error = 'Fee basis incomplete; awaiting authoritative reconciliation',
+            learning_memory_json = '{}'
+        WHERE entry_trade_id = :entry_trade_id
+          AND status = 'COMPLETED'
+    """)
     order_role_lookup = sa.text("""
         SELECT trade_id, closing_trade_id
         FROM strategy_outcomes
@@ -749,6 +774,18 @@ def upgrade() -> None:
                     fee_total=fee_total,
                     lifecycle_open=not has_closed_fill,
                 )
+                if _learning_episode_requires_fee_quarantine(
+                    episodes_by_trade_id.get(entry_trade_id),
+                    lifecycle_closed=has_closed_fill,
+                    fee_basis_complete=fee_basis_complete,
+                ):
+                    # The learner selects COMPLETED episodes, not StrategyOutcome
+                    # rows. Quarantine historical net results whose fee evidence
+                    # cannot be verified, and invalidate any previously stored replay.
+                    bind.execute(
+                        quarantine_learning_episode,
+                        {"entry_trade_id": entry_trade_id},
+                    )
                 total_fee = fee_total if fee_basis_complete else Decimal("0")
                 total_net = (
                     total_realized - total_fee
