@@ -143,7 +143,12 @@ def _profile_flag(pattern: re.Pattern[str], lower: str) -> bool:
         # A negation applies only within its local clause; a later corrective clause such
         # as "but use adaptive" must not inherit an earlier "do not use conservative".
         before = re.split(r"[.!?;,:]|\b(?:but|however|instead|rather)\b", before)[-1]
-        if _PROFILE_NEGATION_PREFIX.search(before):
+        # A non- prefix ends in a hyphen/space (both non-word characters),
+        # so the generic trailing word-boundary assertion cannot match the slice.
+        if (
+            _PROFILE_NEGATION_PREFIX.search(before)
+            or re.search(r"\\bnon[-\\s]+$", before)
+        ):
             continue
         return True
     return False

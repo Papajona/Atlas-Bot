@@ -157,6 +157,7 @@ def test_conservative_and_adaptive_combine():
 @pytest.mark.parametrize("prompt", [
     "not conservative BTC trend long 1h",
     "non-adaptive BTC trend long 1h",
+    "non-conservative BTC trend long 1h",
     "BTC trend long 1h without a regime filter",
     "do not use a conservative profile BTC trend long 1h",
     "isn't conservative BTC trend long 1h",
