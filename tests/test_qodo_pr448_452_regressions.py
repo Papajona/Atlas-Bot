@@ -607,4 +607,7 @@ def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status
     assert 'profile.status == "ACTIVE"' not in executor
     assert 'profile.status == "ACTIVE"' not in cycle
     assert 'bot.last_stage = "customer_identity"' in cycle
+    # Customer-owned PAPER executors also recheck identity before the LIVE/PAPER split.
+    assert executor.index("if cid is not None and (") < executor.index('if mode == "LIVE":')
+    assert 'row.last_error = "Customer identity is pending manual review or remains conflicted"' in executor
 
