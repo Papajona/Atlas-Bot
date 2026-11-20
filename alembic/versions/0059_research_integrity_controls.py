@@ -202,6 +202,13 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                         'migration must use a separate administrative identity to assign the ledger trigger owner';
                 END IF;
 
+                -- Configure the wrapper while the migration actor still owns
+                -- it. The helper's explicit pg_temp-last path prevents temporary
+                -- relation shadowing during its read-only ledger validation.
+                EXECUTE 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SECURITY DEFINER';
+                EXECUTE 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public, pg_temp';
+                EXECUTE 'ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public, pg_temp';
+
                 -- ALTER FUNCTION OWNER requires CREATE on its schema and the
                 -- migration actor to be able to SET ROLE to the new owner.
                 EXECUTE 'GRANT CREATE ON SCHEMA public TO atlas_ledger_trigger_owner';
@@ -215,14 +222,24 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 EXECUTE 'REVOKE CREATE ON SCHEMA public FROM atlas_ledger_trigger_owner';
             END IF;
 
-            -- The trigger wrapper runs with the narrowly scoped owner above.
-            -- Its fixed search_path prevents caller-controlled object shadowing.
-            EXECUTE
-                'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SECURITY DEFINER';
-            EXECUTE
-                'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public, pg_temp';
-            EXECUTE
-                'ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public, pg_temp';
+            -- A downgrade/upgrade round-trip re-enters this function with the
+            -- trigger owner already assigned. Do not mutate the function as a
+            -- caller that is no longer its owner; verify the pinned attributes.
+            IF NOT EXISTS (
+                SELECT 1
+                FROM pg_proc p
+                WHERE p.oid = to_regprocedure('public.atlas_ledger_journal_deferred_check()')
+                  AND p.prosecdef
+                  AND p.proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']
+            ) OR NOT EXISTS (
+                SELECT 1
+                FROM pg_proc p
+                WHERE p.oid = to_regprocedure('public.atlas_validate_ledger_journal(integer)')
+                  AND p.proconfig @> ARRAY['search_path=pg_catalog, public, pg_temp']
+            ) THEN
+                RAISE EXCEPTION
+                    'ledger validation functions must use their fixed pg_catalog/public/pg_temp search_path';
+            END IF;
 
             -- Explicitly revoke the built-in PUBLIC EXECUTE grant and any
             -- direct grants inherited from managed/default object creators.
@@ -291,9 +308,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             IF (
                 SELECT count(*)
                 FROM pg_proc p
-                JOIN pg_namespace n ON n.oid = p.pronamespace
-                WHERE n.nspname = 'public'
-                  AND p.proowner = role_oid
+                WHERE p.proowner = role_oid
             ) <> 1
                OR NOT EXISTS (
                     SELECT 1
