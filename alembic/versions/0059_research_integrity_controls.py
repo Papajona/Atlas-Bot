@@ -206,7 +206,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 -- migration actor to be able to SET ROLE to the new owner.
                 EXECUTE 'GRANT CREATE ON SCHEMA public TO atlas_ledger_trigger_owner';
                 EXECUTE format(
-                    'GRANT %I TO %I WITH ADMIN OPTION',
+                    'GRANT %I TO %I',
                     role_name,
                     migration_role
                 );
@@ -220,11 +220,9 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             EXECUTE
                 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SECURITY DEFINER';
             EXECUTE
-                'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() '
-                'SET search_path = pg_catalog, public, pg_temp';
+                'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public, pg_temp';
             EXECUTE
-                'ALTER FUNCTION public.atlas_validate_ledger_journal(integer) '
-                'SET search_path = pg_catalog, public, pg_temp';
+                'ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public, pg_temp';
 
             -- Explicitly revoke the built-in PUBLIC EXECUTE grant and any
             -- direct grants inherited from managed/default object creators.
