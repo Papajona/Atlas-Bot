@@ -1089,18 +1089,23 @@ async def _apply_reconciled_live_fee_basis(
                 )
                 if not isinstance(lifecycle_ids, (list, tuple, set)):
                     lifecycle_ids = []
-                associated = False
+                parsed_lifecycle_ids: set[int] = set()
                 for lifecycle_id in lifecycle_ids:
                     try:
-                        if int(lifecycle_id) == entry_id:
-                            associated = True
-                            break
+                        parsed_id = int(lifecycle_id)
+                        if parsed_id > 0:
+                            parsed_lifecycle_ids.add(parsed_id)
                     except (TypeError, ValueError, OverflowError):
                         continue
-                # Keep the old ID boundary only as a compatibility fallback
-                # for pending orders created before lifecycle anchors existed.
+                associated = entry_id in parsed_lifecycle_ids
+                # An explicit anchor is authoritative even when it names a
+                # different lifecycle. Never let an ID-range guess override it:
+                # a newer position can be filled after this lifecycle's close
+                # even if its order was created between the entry and close.
+                # The legacy boundary is only for pre-anchor orders.
                 legacy_in_lifecycle = (
-                    int(candidate_id) > entry_id
+                    not parsed_lifecycle_ids
+                    and int(candidate_id) > entry_id
                     and (
                         lifecycle_end_trade_id is None
                         or int(candidate_id) <= int(lifecycle_end_trade_id)
@@ -1236,10 +1241,34 @@ async def _apply_reconciled_live_fee_basis(
             position_entry_trade = (
                 await db.get(Trade, position_entry_id) if position_entry_id > 0 else None
             )
+            try:
+                add_on_context = json.loads(trade.reason or "{}")
+            except (TypeError, ValueError):
+                add_on_context = {}
+            if not isinstance(add_on_context, dict):
+                add_on_context = {}
+            raw_add_on_lifecycle_ids = add_on_context.get(
+                "fee_basis_lifecycle_entry_trade_ids", []
+            )
+            if not isinstance(raw_add_on_lifecycle_ids, (list, tuple, set)):
+                raw_add_on_lifecycle_ids = []
+            add_on_lifecycle_ids: set[int] = set()
+            for lifecycle_id in raw_add_on_lifecycle_ids:
+                try:
+                    parsed_id = int(lifecycle_id)
+                    if parsed_id > 0:
+                        add_on_lifecycle_ids.add(parsed_id)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            add_on_is_anchored = (
+                position_entry_id in add_on_lifecycle_ids
+                if add_on_lifecycle_ids
+                else int(trade.id) > position_entry_id
+            )
             if (
                 position is None
                 or position_entry_trade is None
-                or int(trade.id) <= position_entry_id
+                or not add_on_is_anchored
                 or str(trade.side).lower() != str(position_entry_trade.side).lower()
                 or abs(float(position.quantity or 0.0)) <= 1e-12
                 or (str(trade.side).lower() == "buy") != (float(position.quantity or 0.0) > 0)
