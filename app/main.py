@@ -3887,7 +3887,7 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
                 + "[0-9a-f]" * 12
             )
             statement = statement.where(
-                ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(
+                func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
                     literal_column(f"'{uuid_glob}'")
                 )
             )
@@ -3923,16 +3923,20 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
         ).limit(1)
         return (await db.execute(statement)).scalar_one_or_none() is not None
     if dialect == "sqlite":
+        from sqlalchemy import literal_column
+
         uuid_glob = (
-            "[0-9a-fA-F]" * 8 + "-"
-            + "[0-9a-fA-F]" * 4 + "-"
-            + "[0-9a-fA-F]" * 4 + "-"
-            + "[0-9a-fA-F]" * 4 + "-"
-            + "[0-9a-fA-F]" * 12
+            "[0-9a-f]" * 8 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 12
         )
         statement = select(CustomerProfile.id).where(
             CustomerProfile.auth_user_id != auth_user_id,
-            ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+            func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
+                literal_column(f"'{uuid_glob}'")
+            ),
         ).limit(1)
         return (await db.execute(statement)).scalar_one_or_none() is not None
     # Conservative fallback for a non-production/test dialect.
