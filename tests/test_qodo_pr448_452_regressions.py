@@ -104,16 +104,45 @@ def test_withdrawal_review_resolves_empty_encrypted_email_from_auth_admin():
 
 def test_risk_dashboard_uses_bounded_recent_trade_candidates_in_both_transports():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    helper = source[
+        source.index("async def _recent_closed_platform_trade_returns"):
+        source.index('@app.get("/api/risk-dashboard/metrics")')
+    ]
     assert source.count("_recent_closed_platform_trade_returns(db)") == 3
     assert "latest_closed = (" not in source
     assert "_RISK_OUTCOME_SAMPLE_SIZE = 100" in source
-    assert ".limit(_RISK_OUTCOME_SAMPLE_SIZE)" in source
-    assert ".group_by(StrategyOutcome.trade_id)" in source
-    assert "func.row_number().over(" in source
     assert "_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250" in source
-    assert "ranked_fills.c.fill_rank <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1" in source
-    assert "incomplete_trade_ids" in source
+    assert "_RISK_OUTCOME_RECENT_CANDIDATE_ROWS" in helper
+    assert "recent_closed_candidates = (" in helper
+    assert ".order_by(StrategyOutcome.created_at.desc(), StrategyOutcome.id.desc())" in helper
+    assert ".limit(_RISK_OUTCOME_RECENT_CANDIDATE_ROWS)" in helper
+    assert ".group_by(recent_closed_candidates.c.trade_id)" in helper
+    # Assert the candidate scan's LIMIT is inside the subquery, before outer GROUP BY.
+    compiled = str(main._recent_closed_platform_trade_query().compile(compile_kwargs={"literal_binds": True}))
+    assert "LIMIT 25100" in compiled
+    assert compiled.index("LIMIT 25100") < compiled.index("GROUP BY recent_closed_candidates.trade_id")
+    assert "ORDER BY strategy_outcomes.created_at DESC, strategy_outcomes.id DESC" in compiled
+    assert "func.row_number().over(" in helper
+    assert "ranked_fills.c.fill_rank <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1" in helper
+    assert "incomplete_trade_ids" in helper
     assert "ratio_sample_incomplete_trades" in source
+
+
+def test_recent_platform_closed_outcome_index_supports_bounded_reverse_time_scan():
+    index = next(
+        item for item in main.StrategyOutcome.__table__.indexes
+        if item.name == "ix_strategy_outcome_platform_closed_recent"
+    )
+    assert [column.name for column in index.columns] == ["created_at", "id", "trade_id"]
+    assert "customer_id IS NULL" in str(index.dialect_options["postgresql"]["where"])
+    assert "lifecycle_status = 'CLOSED'" in str(index.dialect_options["sqlite"]["where"])
+
+    migration = (ROOT / "alembic/versions/0061_strategy_outcome_recent_index.py").read_text(encoding="utf-8")
+    assert 'revision = "0061_strategy_outcome_recent_index"' in migration
+    assert 'down_revision = "0060_customer_identity_unmapped_index"' in migration
+    assert "ix_strategy_outcome_platform_closed_recent" in migration
+    assert '"created_at", "id", "trade_id"' in migration
+    assert "customer_id IS NULL AND lifecycle_status = 'CLOSED'" in migration
 
 
 def test_partial_close_fills_are_weighted_and_use_final_close_time():

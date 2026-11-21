@@ -8073,6 +8073,11 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
 
 _RISK_OUTCOME_SAMPLE_SIZE = 100
 _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250
+# Bound the rows examined before deduplicating trades. This accommodates the full
+# per-trade fill budget (plus its overflow sentinel) for every sampled trade.
+_RISK_OUTCOME_RECENT_CANDIDATE_ROWS = (
+    _RISK_OUTCOME_SAMPLE_SIZE * (_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1)
+)
 
 
 def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
@@ -8187,19 +8192,37 @@ def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
     return sorted(completed, key=lambda item: item[1], reverse=True)
 
 
-async def _recent_closed_platform_trade_returns(db):
-    """Select distinct recent completed trades and bound the fills loaded per trade."""
-    final_close = func.max(StrategyOutcome.created_at).label("final_close_at")
-    recent_trades = (await db.execute(
-        select(StrategyOutcome.trade_id, final_close)
+def _recent_closed_platform_trade_query():
+    """Build a recent-trade query whose source scan is bounded before grouping."""
+    recent_closed_candidates = (
+        select(
+            StrategyOutcome.trade_id.label("trade_id"),
+            StrategyOutcome.created_at.label("closed_at"),
+        )
         .where(
             StrategyOutcome.customer_id.is_(None),
             StrategyOutcome.lifecycle_status == "CLOSED",
         )
-        .group_by(StrategyOutcome.trade_id)
-        .order_by(final_close.desc(), StrategyOutcome.trade_id.desc())
+        # The partial (created_at, id, trade_id) index supplies this ordering.
+        # Crucially, LIMIT is applied before grouping, so older history is not
+        # regrouped on every HTTP poll or WebSocket refresh.
+        .order_by(StrategyOutcome.created_at.desc(), StrategyOutcome.id.desc())
+        .limit(_RISK_OUTCOME_RECENT_CANDIDATE_ROWS)
+        .subquery("recent_closed_candidates")
+    )
+    final_close = func.max(recent_closed_candidates.c.closed_at).label("final_close_at")
+    return (
+        select(recent_closed_candidates.c.trade_id, final_close)
+        .select_from(recent_closed_candidates)
+        .group_by(recent_closed_candidates.c.trade_id)
+        .order_by(final_close.desc(), recent_closed_candidates.c.trade_id.desc())
         .limit(_RISK_OUTCOME_SAMPLE_SIZE)
-    )).all()
+    )
+
+
+async def _recent_closed_platform_trade_returns(db):
+    """Select bounded recent completed trades and bound the fills loaded per trade."""
+    recent_trades = (await db.execute(_recent_closed_platform_trade_query())).all()
     selected = [row.trade_id for row in recent_trades if row.trade_id is not None]
     if not selected:
         return [], 0

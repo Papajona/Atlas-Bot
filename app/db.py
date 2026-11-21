@@ -1227,6 +1227,18 @@ class StrategyOutcome(Base):
                 "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
             ),
         ),
+        Index(
+            "ix_strategy_outcome_platform_closed_recent",
+            "created_at",
+            "id",
+            "trade_id",
+            postgresql_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+            sqlite_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
