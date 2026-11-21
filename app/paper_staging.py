@@ -22,6 +22,7 @@ from pydantic import Field
 from sqlalchemy import select, text
 
 from .config import settings
+from .customer_identity import has_unmapped_legacy_customer_identity
 from .body_limit import BodySizeLimitMiddleware
 from .monitoring import TelemetryMiddleware
 from .db import AppState, CustomerProfile, SessionLocal, engine
@@ -321,34 +322,26 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
-    # The legacy rows have non-UUID Auth references and blank encrypted PII.
-    # Until those identities are mapped, no UUID-linked paper account can be
-    # proven distinct from them. Do not allow trading against a potentially
-    # duplicate customer profile.
-    legacy_auth_refs = (
-        await db.execute(
-            select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
+    identity_review_required = await has_unmapped_legacy_customer_identity(db)
+    stored_status = str(row.status or "").upper()
+    # Older releases persisted PENDING_IDENTITY_REVIEW for the global legacy-row
+    # condition. Treat that old quarantine as ACTIVE after the unmapped rows clear.
+    effective_status = (
+        "ACTIVE"
+        if stored_status == "PENDING_IDENTITY_REVIEW" and not identity_review_required
+        else row.status
+    )
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
         )
-    ).scalars().all()
-    identity_review_required = str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    for legacy_auth_ref in legacy_auth_refs:
-        try:
-            uuid.UUID(str(legacy_auth_ref))
-        except (ValueError, TypeError, AttributeError):
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                raise HTTPException(
-                    409,
-                    "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
-                )
-            break
 
-    # Keep PII/encrypted columns out of the query: this service has no encryption
-    # keyring and only needs the numeric tenant ID and active status.
+    # Keep encrypted PII columns out of the query: this service has no keyring.
     profile = SimpleNamespace(
         id=row.id,
         auth_user_id=row.auth_user_id,
-        status=row.status,
+        status=effective_status,
         identity_review_required=identity_review_required,
     )
     if str(getattr(profile, "status", "")).upper() != "ACTIVE" and not (
@@ -624,9 +617,11 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
 
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
-    await _paper_state_guard()
     async with SessionLocal() as db:
         profile, _claims = await get_existing_customer(authorization, db)
+    # Authenticate before disclosing paper preflight or kill-switch state; keep the
+    # state guard ahead of all balance and position reads.
+    await _paper_state_guard()
     balances = await get_customer_paper_balances(customer_id=int(profile.id))
     positions = await get_customer_paper_positions(customer_id=int(profile.id))
     by_code = {

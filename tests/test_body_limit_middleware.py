@@ -8,7 +8,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _drive(mw, *, headers=(), chunks=(b"",), http_version="1.1"):
+async def _drive(mw, *, headers=(), chunks=(b"",), http_version="1.1", method="POST"):
     sent = []
     queue = list(chunks)
 
@@ -21,7 +21,7 @@ async def _drive(mw, *, headers=(), chunks=(b"",), http_version="1.1"):
     async def send(message):
         sent.append(message)
 
-    scope = {"type": "http", "http_version": http_version, "headers": list(headers), "path": "/x", "method": "POST"}
+    scope = {"type": "http", "http_version": http_version, "headers": list(headers), "path": "/x", "method": method}
     await mw(scope, receive, send)
     return sent
 
@@ -135,3 +135,187 @@ def test_http3_oversize_rejection_omits_connection_header():
     ))
     assert sent[0]["status"] == 413
     assert all(name != b"connection" for name, _value in sent[0]["headers"])
+
+
+
+def test_slow_streaming_body_times_out_before_route_execution():
+    called = []
+    sent = []
+
+    async def receive():
+        await asyncio.sleep(0.05)
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def route(scope, receive, send):
+        called.append(True)
+
+    async def send(message):
+        sent.append(message)
+
+    async def run():
+        mw = BodySizeLimitMiddleware(
+            route, max_bytes=10, idle_timeout_seconds=0.005,
+            total_timeout_seconds=0.05,
+        )
+        await mw(
+            {"type": "http", "http_version": "1.1", "headers": [],
+             "path": "/slow", "method": "POST"},
+            receive, send,
+        )
+
+    _run(run())
+    assert sent[0]["status"] == 408
+    assert sent[-1]["body"] == b'{"detail":"Request body timed out"}'
+    assert called == []
+
+
+def test_total_body_deadline_stops_clients_that_drip_before_idle_timeout():
+    sent = []
+    calls = []
+
+    async def receive():
+        calls.append(True)
+        await asyncio.sleep(0.008)
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def route(scope, receive, send):
+        raise AssertionError("route must not run after total body deadline")
+
+    async def send_message(message):
+        sent.append(message)
+
+    async def run():
+        mw = BodySizeLimitMiddleware(
+            route, max_bytes=100, idle_timeout_seconds=0.03,
+            total_timeout_seconds=0.025,
+        )
+        await mw(
+            {"type": "http", "http_version": "1.1", "headers": [],
+             "path": "/drip", "method": "POST"},
+            receive, send_message,
+        )
+
+    _run(run())
+    assert sent[0]["status"] == 408
+    assert len(calls) >= 2
+
+
+def test_get_route_is_not_held_open_by_an_unused_streamed_body():
+    sent = []
+    called = []
+
+    async def receive():
+        raise AssertionError("GET route body must not be pre-read")
+
+    async def route(scope, receive, send):
+        called.append(True)
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def send_message(message):
+        sent.append(message)
+
+    async def run():
+        mw = BodySizeLimitMiddleware(route, max_bytes=10)
+        await mw(
+            {"type": "http", "http_version": "1.1", "headers": [],
+             "path": "/no-body", "method": "GET"},
+            receive, send_message,
+        )
+
+    _run(run())
+    assert sent[0]["status"] == 204
+    assert called == [True]
+
+
+
+def test_safe_method_does_not_wait_for_an_unused_body():
+    called = []
+
+    async def route(scope, receive, send):
+        called.append(True)
+        await send({"type": "http.response.start", "status": 204, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def slow_receive():
+        await asyncio.sleep(1)
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def run():
+        sent = []
+        async def send(message):
+            sent.append(message)
+        middleware = BodySizeLimitMiddleware(route, max_bytes=10)
+        await middleware(
+            {"type": "http", "http_version": "1.1", "headers": [], "path": "/x", "method": "GET"},
+            slow_receive,
+            send,
+        )
+        return sent
+
+    sent = _run(run())
+    assert called == [True]
+    assert sent[0]["status"] == 204
+
+
+def test_idle_timeout_rejects_slow_body_before_route():
+    called = []
+
+    async def route(scope, receive, send):
+        called.append(True)
+
+    async def slow_receive():
+        await asyncio.sleep(0.05)
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def run():
+        sent = []
+        async def send(message):
+            sent.append(message)
+        middleware = BodySizeLimitMiddleware(
+            route, max_bytes=10, idle_timeout_seconds=0.005, total_timeout_seconds=0.05
+        )
+        await middleware(
+            {"type": "http", "http_version": "1.1", "headers": [], "path": "/x", "method": "POST"},
+            slow_receive,
+            send,
+        )
+        return sent
+
+    sent = _run(run())
+    assert sent[0]["status"] == 408
+    assert sent[-1]["body"] == b'{"detail":"Request body timed out"}'
+    assert called == []
+
+
+def test_total_timeout_rejects_a_client_that_keeps_dripping_small_chunks():
+    called = []
+    count = 0
+
+    async def route(scope, receive, send):
+        called.append(True)
+
+    async def dripping_receive():
+        nonlocal count
+        await asyncio.sleep(0.01)
+        count += 1
+        return {"type": "http.request", "body": b"x", "more_body": True}
+
+    async def run():
+        sent = []
+        async def send(message):
+            sent.append(message)
+        middleware = BodySizeLimitMiddleware(
+            route, max_bytes=100, idle_timeout_seconds=0.1, total_timeout_seconds=0.035
+        )
+        await middleware(
+            {"type": "http", "http_version": "1.1", "headers": [], "path": "/x", "method": "POST"},
+            dripping_receive,
+            send,
+        )
+        return sent
+
+    sent = _run(run())
+    assert sent[0]["status"] == 408
+    assert count >= 2
+    assert called == []

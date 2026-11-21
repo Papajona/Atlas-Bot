@@ -31,6 +31,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
+from .customer_identity import has_unmapped_legacy_customer_identity
 from .paper_execution_model import configured_paper_execution_settings
 from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
@@ -3618,6 +3619,103 @@ async def _supabase_request(path: str, payload: dict | None = None, method: str 
     return data if isinstance(data, dict) else {"data": data}
 
 
+_WITHDRAWAL_AUTH_EMAIL_CACHE: dict[str, tuple[float, str, str]] = {}
+_WITHDRAWAL_AUTH_EMAIL_CACHE_TTL_SECONDS = 300.0
+_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST = 50
+_WITHDRAWAL_AUTH_LOOKUP_DEADLINE_SECONDS = 12.0
+
+
+def _cached_withdrawal_auth_email(auth_user_id: str):
+    cached = _WITHDRAWAL_AUTH_EMAIL_CACHE.get(auth_user_id)
+    if not cached:
+        return None
+    expires_at, email, status = cached
+    if expires_at <= time.monotonic():
+        _WITHDRAWAL_AUTH_EMAIL_CACHE.pop(auth_user_id, None)
+        return None
+    return email, status
+
+
+def _store_withdrawal_auth_email(auth_user_id: str, email: str, status: str, ttl: float | None = None):
+    now = time.monotonic()
+    for key, value in list(_WITHDRAWAL_AUTH_EMAIL_CACHE.items()):
+        if value[0] <= now:
+            _WITHDRAWAL_AUTH_EMAIL_CACHE.pop(key, None)
+    if len(_WITHDRAWAL_AUTH_EMAIL_CACHE) >= 2000:
+        _WITHDRAWAL_AUTH_EMAIL_CACHE.pop(next(iter(_WITHDRAWAL_AUTH_EMAIL_CACHE)))
+    _WITHDRAWAL_AUTH_EMAIL_CACHE[auth_user_id] = (
+        now + (ttl if ttl is not None else _WITHDRAWAL_AUTH_EMAIL_CACHE_TTL_SECONDS),
+        email,
+        status,
+    )
+
+
+async def _resolve_withdrawal_auth_email(auth_user_id: str) -> tuple[str, str]:
+    """Fetch only confirmed Auth email, cache the result, and separate identity issues from outages."""
+    try:
+        normalized_id = str(uuid.UUID(auth_user_id))
+    except (ValueError, TypeError, AttributeError):
+        return "", "LEGACY_IDENTITY_UNMAPPED"
+
+    cached = _cached_withdrawal_auth_email(normalized_id)
+    if cached is not None:
+        return cached
+    try:
+        user = await _supabase_admin_user(normalized_id)
+    except HTTPException:
+        return "", "AUTH_LOOKUP_UNAVAILABLE"
+    if not user:
+        result = ("", "AUTH_EMAIL_UNAVAILABLE")
+        _store_withdrawal_auth_email(normalized_id, *result, ttl=60.0)
+        return result
+    if not user.get("email_confirmed_at"):
+        result = ("", "AUTH_EMAIL_UNCONFIRMED")
+        _store_withdrawal_auth_email(normalized_id, *result, ttl=60.0)
+        return result
+    email = str(user.get("email") or "").strip()
+    result = (email, "SUPABASE_AUTH" if email else "AUTH_EMAIL_UNAVAILABLE")
+    _store_withdrawal_auth_email(normalized_id, *result)
+    return result
+
+
+async def _supabase_admin_user(auth_user_id: str) -> dict:
+    """Resolve a customer through Supabase Auth Admin API using a server-only key."""
+    admin_key = str(settings.supabase_auth_admin_key or "").strip()
+    if not settings.supabase_url or not admin_key:
+        raise HTTPException(503, "Privileged Supabase Auth lookup is not configured")
+    try:
+        user_id = str(uuid.UUID(str(auth_user_id)))
+    except (ValueError, TypeError, AttributeError) as exc:
+        raise HTTPException(422, "Customer Auth reference is not a UUID") from exc
+
+    import httpx
+    url = settings.supabase_url.rstrip("/") + f"/auth/v1/admin/users/{user_id}"
+    headers = {
+        "apikey": admin_key,
+        "Authorization": f"Bearer {admin_key}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(url, headers=headers)
+    except httpx.RequestError as exc:
+        logger.warning("supabase_auth_admin_transport_error: %s", type(exc).__name__)
+        raise HTTPException(503, "Privileged customer Auth lookup is temporarily unavailable") from exc
+    if response.status_code == 404:
+        return {}
+    if response.status_code >= 400:
+        logger.warning("supabase_auth_admin_http_error: status=%s", response.status_code)
+        raise HTTPException(503, "Privileged customer Auth lookup is temporarily unavailable")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(503, "Privileged customer Auth lookup returned invalid data") from exc
+    user = payload.get("user") if isinstance(payload, dict) and isinstance(payload.get("user"), dict) else payload
+    if not isinstance(user, dict) or str(user.get("id") or "") != user_id:
+        raise HTTPException(503, "Privileged customer Auth lookup returned an unverifiable identity")
+    return user
+
+
 async def _supabase_user(access_token: str) -> dict:
     """Fetch the authenticated Supabase user profile using the bearer token."""
     token = str(access_token or "").strip()
@@ -3816,36 +3914,42 @@ def approver_auth(admin_id: str, approver_token: str | None, admin_token: str | 
     return True
 
 
-async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> bool:
-    """Compare a confirmed email against legacy identities after ORM decryption.
+_CUSTOMER_AUTH_PII_CACHE: dict[str, tuple[float, str, str, bool]] = {}
+_CUSTOMER_AUTH_PII_CACHE_TTL_SECONDS = 60.0
 
-    Legacy Auth IDs are not Supabase UUIDs. EncryptedText must be read through the
-    application ORM/keyring; SQL LIKE against ciphertext is never meaningful.
-    """
-    normalized = str(email or "").strip().casefold()
-    if not normalized:
-        return False
-    try:
-        rows = (await db.execute(
-            select(CustomerProfile.auth_user_id, CustomerProfile.email)
-            .where(CustomerProfile.auth_user_id != auth_user_id)
-        )).all()
-    except Exception as exc:
-        logger.exception("legacy_customer_identity_lookup_failed")
-        raise HTTPException(503, "Customer identity verification is temporarily unavailable") from exc
-    for legacy_auth_id, stored_email in rows:
-        try:
-            uuid.UUID(str(legacy_auth_id))
-            continue
-        except (ValueError, TypeError, AttributeError):
-            pass
-        # An unmapped legacy identity with no recoverable email must be treated
-        # as a conflict: absence of stored PII is not proof of a distinct person.
-        if not str(stored_email or "").strip():
-            return True
-        if str(stored_email).strip().casefold() == normalized:
-            return True
-    return False
+
+async def _customer_auth_pii(auth_user_id: str, authorization: str | None):
+    """Return confirmed Auth email and optional name, briefly caching unconfirmed outcomes."""
+    uid = str(auth_user_id or "").strip()
+    cached = _CUSTOMER_AUTH_PII_CACHE.get(uid)
+    now = time.monotonic()
+    if cached:
+        expires_at, email, name, confirmed = cached
+        if expires_at > now:
+            return email, name, confirmed
+        _CUSTOMER_AUTH_PII_CACHE.pop(uid, None)
+
+    user = await _supabase_user(_bearer_token(authorization))
+    if str(user.get("id") or "") != uid:
+        raise HTTPException(401, "Customer Auth identity could not be verified")
+    confirmed = bool(user.get("email_confirmed_at"))
+    email = str(user.get("email") or "").strip().lower()[:320] if confirmed else ""
+    user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
+    name = str(user_metadata.get("full_name") or user_metadata.get("name") or "").strip()[:160]
+
+    if len(_CUSTOMER_AUTH_PII_CACHE) >= 2000:
+        for key, value in list(_CUSTOMER_AUTH_PII_CACHE.items()):
+            if value[0] <= now:
+                _CUSTOMER_AUTH_PII_CACHE.pop(key, None)
+        if len(_CUSTOMER_AUTH_PII_CACHE) >= 2000:
+            _CUSTOMER_AUTH_PII_CACHE.pop(next(iter(_CUSTOMER_AUTH_PII_CACHE)))
+    _CUSTOMER_AUTH_PII_CACHE[uid] = (
+        now + _CUSTOMER_AUTH_PII_CACHE_TTL_SECONDS,
+        email,
+        name,
+        confirmed,
+    )
+    return email, name, confirmed
 
 
 async def get_customer(
@@ -3862,53 +3966,72 @@ async def get_customer(
         select(CustomerProfile).where(CustomerProfile.auth_user_id == uid)
     )).scalar_one_or_none()
 
-    email = str(claims.get("email") or "").strip().lower()[:320]
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
-    name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
+    # Never persist the email claim of an existing profile unless the Auth
+    # record confirms it. Existing encrypted email remains authoritative.
+    email = str(profile.email or "").strip().lower()[:320] if profile is not None else ""
+    name = str(metadata.get("full_name") or metadata.get("name") or (
+        profile.display_name if profile is not None else ""
+    ) or "").strip()[:160]
 
-    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
-    # verified Auth identity here, then let the ORM encrypt values on write.
-    if (profile is not None and (
-        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
-    )) or not email:
-        user = await _supabase_user(_bearer_token(authorization))
-        if str(user.get("id") or "") != uid:
-            raise HTTPException(401, "Customer Auth identity could not be verified")
-        if not user.get("email_confirmed_at"):
+    if profile is None:
+        # A new profile is created only after an authoritative Auth lookup confirms
+        # the subject and email.
+        email, auth_name, confirmed = await _customer_auth_pii(uid, authorization)
+        if not confirmed or not email:
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or email).strip().lower()[:320]
-        user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
-        name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
-    if not email:
-        raise HTTPException(403, "A confirmed email address is required")
+        name = auth_name or name
+    elif not email:
+        # An existing ACTIVE user remains available if Auth is temporarily down or
+        # the latest address is still unconfirmed. Do not persist an unconfirmed
+        # replacement address into the encrypted profile.
+        try:
+            auth_email, auth_name, confirmed = await _customer_auth_pii(uid, authorization)
+            if confirmed:
+                email = auth_email
+            else:
+                logger.info("customer_auth_pii_backfill_unconfirmed auth_user_id=%s", uid)
+            name = auth_name or name
+        except HTTPException as exc:
+            if exc.status_code == 401:
+                raise
+            logger.warning("customer_auth_pii_backfill_unavailable: status=%s", exc.status_code)
 
-    identity_review_required = (
-        profile is not None
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    # The global legacy gate applies to new provisioning, and to existing profiles
+    # already flagged or missing an encrypted email. It must not suspend unrelated
+    # ACTIVE customers whose encrypted identity is already populated.
+    profile_needs_identity_review = (
+        profile is None
+        or (
+            profile is not None
+            and (
+                str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+                or not str(profile.email or "").strip()
+            )
+        )
     )
+    identity_review_required = (
+        await has_unmapped_legacy_customer_identity(db)
+        if profile_needs_identity_review else False
+    )
+    if profile is None and identity_review_required:
+        raise HTTPException(
+            409,
+            "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+        )
+
+    # Older releases persisted PENDING_IDENTITY_REVIEW for the legacy-row
+    # condition. Restore that specific quarantine once the global gate clears.
+    if profile is not None and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW":
+        if not identity_review_required:
+            profile.status = "ACTIVE"
+            await db.flush()
+
     if identity_review_required and not allow_identity_review_summary:
         raise HTTPException(
             409,
-            "This customer identity is pending manual review. Contact support before using the account.",
+            "An unmapped legacy customer identity requires manual review before customer trading or ledger access.",
         )
-
-    # Check legacy non-UUID identities before inserting or activating a new
-    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
-    if profile is None or not str(profile.email or "").strip():
-        if await _legacy_customer_email_conflict(db, uid, email):
-            if profile is None:
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
-            profile.status = "PENDING_IDENTITY_REVIEW"
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                await db.commit()
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -3930,18 +4053,20 @@ async def get_customer(
             )).scalar_one_or_none()
             if not profile:
                 raise
-            if not profile.email:
+            if not profile.email and email:
                 profile.email = email
-            if not profile.display_name:
+            if not profile.display_name and name:
                 profile.display_name = name
             await db.flush()
     else:
-        if not profile.email:
+        if not profile.email and email:
             profile.email = email
-        if not profile.display_name:
+        # Missing optional display metadata never triggers another Auth request.
+        if not profile.display_name and name:
             profile.display_name = name
         await db.flush()
 
+    profile.identity_review_required = identity_review_required
     if profile.status != "ACTIVE" and not (
         allow_identity_review_summary
         and identity_review_required
@@ -5440,7 +5565,7 @@ async def customer_me(authorization: str | None = Header(default=None)):
         await db.commit()
         return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
                 "display_name": profile.display_name, "status": profile.status,
-                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
@@ -7946,6 +8071,206 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
         }
 
 
+_RISK_OUTCOME_SAMPLE_SIZE = 100
+_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250
+# Bound the rows examined before deduplicating trades. This accommodates the full
+# per-trade fill budget (plus its overflow sentinel) for every sampled trade.
+_RISK_OUTCOME_RECENT_CANDIDATE_ROWS = (
+    _RISK_OUTCOME_SAMPLE_SIZE * (_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1)
+)
+
+
+def _aggregate_closed_outcome_fills(outcomes, *, incomplete_trade_ids=None):
+    """Aggregate one complete return per closed trade without double-counting summaries."""
+    incomplete = {int(value) for value in (incomplete_trade_ids or ())}
+    grouped = {}
+    for outcome in outcomes:
+        try:
+            trade_id = int(outcome.trade_id)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if trade_id in incomplete:
+            continue
+        try:
+            metadata = json.loads(str(outcome.metadata_json or "{}"))
+            if not isinstance(metadata, dict):
+                metadata = {}
+        except (TypeError, ValueError):
+            metadata = {}
+        grouped.setdefault(trade_id, []).append((outcome, metadata))
+
+    completed = []
+    for trade_id, entries in grouped.items():
+        entries.sort(
+            key=lambda item: (
+                item[0].created_at is not None,
+                item[0].created_at,
+                int(getattr(item[0], "id", 0) or 0),
+            )
+        )
+        # The final CLOSED row carries the entire trade P&L. Its metadata carries
+        # the whole-position denominator; do not add partial rows a second time.
+        aggregate_entries = [
+            (outcome, metadata)
+            for outcome, metadata in entries
+            if "aggregate_notional_complete" in metadata
+        ]
+        if aggregate_entries:
+            outcome, metadata = aggregate_entries[-1]
+            if metadata.get("aggregate_notional_complete") is not True:
+                continue
+            try:
+                notional = Decimal(str(metadata.get("aggregate_closing_notional") or "0"))
+                net_pnl = Decimal(str(outcome.net_pnl))
+            except (TypeError, ValueError, ArithmeticError):
+                continue
+            closed_at = outcome.created_at
+            # Complete aggregate values must be finite and positive. Reject
+            # NaN/Infinity explicitly; finite values are the ordinary valid case.
+            if (
+                not notional.is_finite()
+                or not net_pnl.is_finite()
+                or notional <= 0
+                or closed_at is None
+            ):
+                continue
+            ratio = net_pnl / notional
+            if not ratio.is_finite():
+                continue
+            ratio_value = float(ratio)
+            if not math.isfinite(ratio_value):
+                continue
+            completed.append((ratio_value, closed_at))
+            continue
+
+        # Historical rows have no aggregate metadata; preserve per-fill reconstruction.
+        state = {"net_pnl": Decimal("0"), "notional": Decimal("0"), "closed_at": None, "valid": True}
+        for outcome, metadata in entries:
+            try:
+                notional = Decimal(str(metadata.get("closing_notional") or "0"))
+            except (TypeError, ValueError, ArithmeticError):
+                notional = Decimal("0")
+            if notional <= 0:
+                try:
+                    realized = Decimal(str(outcome.realized_pnl or "0"))
+                    raw_return_bps = Decimal(str(outcome.return_bps or "0"))
+                    if realized != 0 and raw_return_bps != 0:
+                        notional = abs(realized * Decimal("10000") / raw_return_bps)
+                except (TypeError, ValueError, ArithmeticError):
+                    notional = Decimal("0")
+            if notional <= 0 or not notional.is_finite():
+                state["valid"] = False
+                continue
+            try:
+                fill_net_pnl = Decimal(str(outcome.net_pnl or "0"))
+                if not fill_net_pnl.is_finite():
+                    state["valid"] = False
+                    continue
+                state["net_pnl"] += fill_net_pnl
+                if not state["net_pnl"].is_finite():
+                    state["valid"] = False
+                    continue
+            except (TypeError, ValueError, ArithmeticError):
+                state["valid"] = False
+                continue
+            state["notional"] += notional
+            created_at = outcome.created_at
+            if created_at is None:
+                state["valid"] = False
+            elif state["closed_at"] is None or created_at > state["closed_at"]:
+                state["closed_at"] = created_at
+        if state["valid"] and state["notional"] > 0 and state["closed_at"] is not None:
+            try:
+                ratio = state["net_pnl"] / state["notional"]
+                if not ratio.is_finite():
+                    continue
+                ratio_value = float(ratio)
+            except (ArithmeticError, OverflowError, ValueError):
+                continue
+            if math.isfinite(ratio_value):
+                completed.append((ratio_value, state["closed_at"]))
+    return sorted(completed, key=lambda item: item[1], reverse=True)
+
+
+def _recent_closed_platform_trade_query():
+    """Build a recent-trade query whose source scan is bounded before grouping."""
+    recent_closed_candidates = (
+        select(
+            StrategyOutcome.trade_id.label("trade_id"),
+            StrategyOutcome.created_at.label("closed_at"),
+        )
+        .where(
+            StrategyOutcome.customer_id.is_(None),
+            StrategyOutcome.lifecycle_status == "CLOSED",
+        )
+        # The partial (created_at, id, trade_id) index supplies this ordering.
+        # Crucially, LIMIT is applied before grouping, so older history is not
+        # regrouped on every HTTP poll or WebSocket refresh.
+        .order_by(StrategyOutcome.created_at.desc(), StrategyOutcome.id.desc())
+        .limit(_RISK_OUTCOME_RECENT_CANDIDATE_ROWS)
+        .subquery("recent_closed_candidates")
+    )
+    final_close = func.max(recent_closed_candidates.c.closed_at).label("final_close_at")
+    return (
+        select(recent_closed_candidates.c.trade_id, final_close)
+        .select_from(recent_closed_candidates)
+        .group_by(recent_closed_candidates.c.trade_id)
+        .order_by(final_close.desc(), recent_closed_candidates.c.trade_id.desc())
+        .limit(_RISK_OUTCOME_SAMPLE_SIZE)
+    )
+
+
+async def _recent_closed_platform_trade_returns(db):
+    """Select bounded recent completed trades and bound the fills loaded per trade."""
+    recent_trades = (await db.execute(_recent_closed_platform_trade_query())).all()
+    selected = [row.trade_id for row in recent_trades if row.trade_id is not None]
+    if not selected:
+        return [], 0
+
+    # Fetch at most MAX+1 rows per selected trade. The sentinel row detects a
+    # trade whose history exceeds the budget; its partial data is never used.
+    ranked_fills = (
+        select(
+            StrategyOutcome.id.label("outcome_id"),
+            StrategyOutcome.trade_id.label("trade_id"),
+            func.row_number().over(
+                partition_by=StrategyOutcome.trade_id,
+                order_by=(StrategyOutcome.created_at.asc(), StrategyOutcome.id.asc()),
+            ).label("fill_rank"),
+        )
+        .where(
+            StrategyOutcome.trade_id.in_(selected),
+            StrategyOutcome.customer_id.is_(None),
+            StrategyOutcome.lifecycle_status.in_(("CLOSED", "PARTIAL_CLOSED")),
+        )
+        .subquery()
+    )
+    fill_rows = (await db.execute(
+        select(StrategyOutcome, ranked_fills.c.fill_rank)
+        .join(ranked_fills, StrategyOutcome.id == ranked_fills.c.outcome_id)
+        .where(ranked_fills.c.fill_rank <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE + 1)
+        .order_by(StrategyOutcome.trade_id, ranked_fills.c.fill_rank)
+    )).all()
+
+    incomplete_trade_ids = {
+        int(outcome.trade_id)
+        for outcome, fill_rank in fill_rows
+        if int(fill_rank) > _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE
+    }
+    complete_fills = [
+        outcome for outcome, fill_rank in fill_rows
+        if int(fill_rank) <= _RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE
+        and int(outcome.trade_id) not in incomplete_trade_ids
+    ]
+    return (
+        _aggregate_closed_outcome_fills(
+            complete_fills,
+            incomplete_trade_ids=incomplete_trade_ids,
+        ),
+        len(incomplete_trade_ids),
+    )
+
+
 @app.get("/api/risk-dashboard/metrics")
 async def risk_dashboard_metrics(
     x_admin_token: str | None = Header(default=None),
@@ -7970,35 +8295,12 @@ async def risk_dashboard_metrics(
         kill = bool(s.kill_switch) if s else True
         worker_health = await _worker_health_snapshot(db)
 
-        # Annualise only from the observed cadence of closed strategy outcomes.
-        latest_closed = (
-            select(
-                StrategyOutcome.trade_id.label("trade_id"),
-                func.max(StrategyOutcome.sequence).label("latest_sequence"),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .group_by(StrategyOutcome.trade_id)
-            .subquery()
+        usable, ratio_sample_incomplete_trades = await _recent_closed_platform_trade_returns(db)
+        ratios = performance_ratios(
+            [item[0] for item in usable],
+            [item[1] for item in usable],
+            current_dd,
         )
-        rows = (await db.execute(
-            select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-            .join(
-                latest_closed,
-                (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .order_by(StrategyOutcome.created_at.desc())
-            .limit(100)
-        )).all()
-        usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
-        ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
         sharpe = ratios["sharpe"]
         calmar = ratios["calmar"]
         sortino = ratios["sortino"]
@@ -8018,6 +8320,7 @@ async def risk_dashboard_metrics(
             "sortino_ratio": round(sortino, 2),
             "ratios_annualized": ratios["annualized"],
             "ratio_sample_size": ratios["sample_size"],
+            "ratio_sample_incomplete_trades": ratio_sample_incomplete_trades,
             "deflated_sharpe_ratio": 0.0,
             "edge_decay_z_score": round(edge_decay_z, 2),
             "regime": "UNKNOWN",
@@ -8111,34 +8414,12 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                latest_closed = (
-                    select(
-                        StrategyOutcome.trade_id.label("trade_id"),
-                        func.max(StrategyOutcome.sequence).label("latest_sequence"),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .group_by(StrategyOutcome.trade_id)
-                    .subquery()
+                usable, ratio_sample_incomplete_trades = await _recent_closed_platform_trade_returns(db)
+                ratios = performance_ratios(
+                    [item[0] for item in usable],
+                    [item[1] for item in usable],
+                    current_dd,
                 )
-                rows = (await db.execute(
-                    select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-                    .join(
-                        latest_closed,
-                        (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                        & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .order_by(StrategyOutcome.created_at.desc())
-                    .limit(100)
-                )).all()
-                usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
-                ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
                 sharpe = ratios["sharpe"]
                 calmar = ratios["calmar"]
                 sortino = ratios["sortino"]
@@ -8219,29 +8500,164 @@ async def list_withdrawals(status: str = "PENDING", x_admin_token: str | None = 
     allowed = {"PENDING", "PARTIALLY_APPROVED", "APPROVED", "SUBMITTING", "SUBMITTED", "UNKNOWN", "FAILED", "REJECTED", "RELEASED", "ALL"}
     if status not in allowed:
         raise HTTPException(400, "Invalid withdrawal status")
+
+    # Read the withdrawal rows and encrypted profiles, then release the database
+    # connection before any external Auth request.
     async with SessionLocal() as db:
-        q = select(Withdrawal).order_by(desc(Withdrawal.created_at)).limit(500)
+        query = select(Withdrawal).order_by(desc(Withdrawal.created_at)).limit(500)
         if status != "ALL":
-            q = q.where(Withdrawal.status == status)
-        rows = (await db.execute(q)).scalars().all()
-        customer_ids = {r.customer_id for r in rows if r.customer_id}
+            query = query.where(Withdrawal.status == status)
+        withdrawals = (await db.execute(query)).scalars().all()
+        customer_ids = {row.customer_id for row in withdrawals if row.customer_id}
         profiles = {}
         if customer_ids:
-            profiles = {p.id: p for p in (await db.execute(select(CustomerProfile).where(CustomerProfile.id.in_(customer_ids)))).scalars().all()}
-        return [{
-            "id": r.id, "request_id": r.request_id, "customer_id": r.customer_id,
-            "customer_email": profiles.get(r.customer_id).email if r.customer_id in profiles else "",
-            "account_ref": r.account_ref,
-            "amount": r.amount, "currency": r.currency, "destination_masked": r.destination_masked,
-            "status": r.status, "risk_score": r.risk_score,
-            "risk_flags": json_loads(r.risk_flags), "required_approvals": r.required_approvals,
-            "approval_count": r.approval_count, "first_approved_by": r.first_approved_by,
-            "provider": r.provider, "provider_id": r.provider_id, "provider_status": r.provider_status,
-            "execution_status": r.status, "proposal_digest": r.proposal_digest, "execution_operator": r.execution_operator,
-            "second_approved_by": r.second_approved_by, "rejected_by": r.rejected_by,
-            "rejection_reason": r.rejection_reason, "created_at": r.created_at.isoformat(),
-            "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-        } for r in rows]
+            profiles = {
+                profile.id: profile
+                for profile in (
+                    await db.execute(
+                        select(CustomerProfile).where(CustomerProfile.id.in_(customer_ids))
+                    )
+                ).scalars().all()
+            }
+        snapshot = []
+        for row in withdrawals:
+            profile = profiles.get(row.customer_id)
+            snapshot.append({
+                "id": row.id,
+                "request_id": row.request_id,
+                "customer_id": row.customer_id,
+                "profile_email": str(profile.email or "").strip() if profile is not None else "",
+                "auth_user_id": str(profile.auth_user_id or "") if profile is not None else "",
+                "account_ref": row.account_ref,
+                "amount": row.amount,
+                "currency": row.currency,
+                "destination_masked": row.destination_masked,
+                "status": row.status,
+                "risk_score": row.risk_score,
+                "risk_flags": json_loads(row.risk_flags),
+                "required_approvals": row.required_approvals,
+                "approval_count": row.approval_count,
+                "first_approved_by": row.first_approved_by,
+                "provider": row.provider,
+                "provider_id": row.provider_id,
+                "provider_status": row.provider_status,
+                "execution_status": row.status,
+                "proposal_digest": row.proposal_digest,
+                "execution_operator": row.execution_operator,
+                "second_approved_by": row.second_approved_by,
+                "rejected_by": row.rejected_by,
+                "rejection_reason": row.rejection_reason,
+                "created_at": row.created_at.isoformat(),
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+            })
+
+    missing_auth_ids = {
+        row["auth_user_id"]
+        for row in snapshot
+        if not row["profile_email"] and row["auth_user_id"]
+    }
+    auth_email_results: dict[str, tuple[str, str]] = {}
+    legacy_ids: set[str] = set()
+    canonical_auth_ids: dict[str, str] = {}
+    lookup_candidates: list[str] = []
+
+    for auth_id in sorted(missing_auth_ids):
+        try:
+            normalized_id = str(uuid.UUID(auth_id))
+        except (ValueError, TypeError, AttributeError):
+            legacy_ids.add(auth_id)
+            auth_email_results[auth_id] = ("", "LEGACY_IDENTITY_UNMAPPED")
+            continue
+        canonical_auth_ids[auth_id] = normalized_id
+        cached = _cached_withdrawal_auth_email(normalized_id)
+        if cached is not None:
+            auth_email_results[auth_id] = cached
+        else:
+            lookup_candidates.append(normalized_id)
+
+    # Bound both outbound concurrency and per-request work. Uncached records after
+    # the cap are clearly marked for a later page/request instead of causing hundreds
+    # of repeated Auth Admin calls.
+    deferred_ids = set(lookup_candidates[_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST:])
+    pending_ids = lookup_candidates[:_WITHDRAWAL_AUTH_LOOKUP_MAX_PER_REQUEST]
+    failed_ids: set[str] = set()
+    if pending_ids and settings.supabase_auth_admin_key:
+        semaphore = asyncio.Semaphore(8)
+
+        async def lookup_one(auth_id: str):
+            async with semaphore:
+                return auth_id, await _resolve_withdrawal_auth_email(auth_id)
+
+        try:
+            completed = await asyncio.wait_for(
+                asyncio.gather(*(lookup_one(auth_id) for auth_id in pending_ids)),
+                timeout=_WITHDRAWAL_AUTH_LOOKUP_DEADLINE_SECONDS,
+            )
+            auth_email_results.update({auth_id: result for auth_id, result in completed})
+            failed_ids.update(
+                auth_id for auth_id, (_email, result_status) in completed
+                if result_status == "AUTH_LOOKUP_UNAVAILABLE"
+            )
+        except asyncio.TimeoutError:
+            failed_ids.update(pending_ids)
+
+    # Supabase UUIDs are canonicalized before lookup/cache. Preserve the original
+    # stored reference as a result key so upper-case UUID rows still resolve.
+    for original_id, normalized_id in canonical_auth_ids.items():
+        if normalized_id in auth_email_results:
+            auth_email_results[original_id] = auth_email_results[normalized_id]
+        if normalized_id in deferred_ids:
+            deferred_ids.add(original_id)
+        if normalized_id in failed_ids:
+            failed_ids.add(original_id)
+
+    result = []
+    for row in snapshot:
+        profile_email = row["profile_email"]
+        auth_id = row["auth_user_id"]
+        auth_email, auth_status = auth_email_results.get(auth_id, ("", "AUTH_EMAIL_UNAVAILABLE"))
+        customer_email = profile_email or auth_email
+        if profile_email:
+            email_status = "PROFILE_ENCRYPTED"
+        elif auth_id in legacy_ids:
+            email_status = "LEGACY_IDENTITY_UNMAPPED"
+        elif not settings.supabase_auth_admin_key:
+            email_status = "AUTH_LOOKUP_NOT_CONFIGURED"
+        elif auth_id in deferred_ids:
+            email_status = "AUTH_LOOKUP_DEFERRED"
+        elif auth_id in failed_ids or auth_status == "AUTH_LOOKUP_UNAVAILABLE":
+            email_status = "AUTH_LOOKUP_UNAVAILABLE"
+        else:
+            email_status = auth_status
+        result.append({
+            "id": row["id"],
+            "request_id": row["request_id"],
+            "customer_id": row["customer_id"],
+            "customer_email": customer_email,
+            "customer_email_status": email_status,
+            "account_ref": row["account_ref"],
+            "amount": row["amount"],
+            "currency": row["currency"],
+            "destination_masked": row["destination_masked"],
+            "status": row["status"],
+            "risk_score": row["risk_score"],
+            "risk_flags": row["risk_flags"],
+            "required_approvals": row["required_approvals"],
+            "approval_count": row["approval_count"],
+            "first_approved_by": row["first_approved_by"],
+            "provider": row["provider"],
+            "provider_id": row["provider_id"],
+            "provider_status": row["provider_status"],
+            "execution_status": row["execution_status"],
+            "proposal_digest": row["proposal_digest"],
+            "execution_operator": row["execution_operator"],
+            "second_approved_by": row["second_approved_by"],
+            "rejected_by": row["rejected_by"],
+            "rejection_reason": row["rejection_reason"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        })
+    return result
 
 
 @app.post("/api/admin/withdrawals")
