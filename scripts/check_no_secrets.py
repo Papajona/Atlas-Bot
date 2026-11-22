@@ -11,7 +11,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", "dist", "build", ".pytest_cache"}
-TEXT_SUFFIXES = {".py",".sh",".bash",".env",".example",".yml",".yaml",".json",".toml",".ini",".gradle",".kts"}
+# Include source, documentation, Android resources, deployment/configuration files and
+# common text-based key/certificate containers. An allowlist that omits Markdown or
+# PEM/key extensions lets credentials bypass the same scanner CI uses as a release gate.
+TEXT_SUFFIXES = {
+    ".py", ".sh", ".bash", ".env", ".example", ".yml", ".yaml", ".json",
+    ".toml", ".ini", ".gradle", ".kts", ".md", ".txt", ".xml", ".properties",
+    ".java", ".kt", ".js", ".html", ".css", ".sql", ".pem", ".key", ".crt",
+    ".conf", ".cfg", ".lock", ".patch",
+}
 ASSIGNMENT = re.compile(r"(?i)\b(?:api[_-]?key|api[_-]?secret|secret[_-]?key|password|token|mnemonic|seed[_-]?phrase)\s*[:=]\s*['\"]?([A-Za-z0-9_+/=.-]{20,})")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"(?i)\b(?:mnemonic|seed[_-]?phrase|private[_-]?key)\s*[:=]")
