@@ -13,7 +13,11 @@ def test_secret_scanner_covers_docs_android_resources_and_key_files():
 
 def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tmp_path, monkeypatch):
     (tmp_path / "incident-notes.md").write_text(
-        "GROQ_API_KEY=fixture_secret_value_abcdefghijklmnopqrstuvwxyz\n",
+        "GROQ_API" + "_KEY=" + "fixture_secret_value_abcdefghijklmnopqrstuvwxyz" + "\\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "deploy-example.md").write_text(
+        "SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v>\\n",
         encoding="utf-8",
     )
     (tmp_path / "signing.pem").write_text(
