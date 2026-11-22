@@ -32,7 +32,7 @@ PLACEHOLDERS = {
     "different-primary-secret", "legacy-secret", "supported-review-key",
     "legacy-hosted-provider", "must-not-become-a-helper-setting", "must-not-be-persisted",
     # Fixed non-production Fernet test key declared in production-verification.yml.
-    "mda0mda0mda0mda0mda0mda0mda0mda0mda0mda0mda=",
+    "mdawmdawmdawmdawmdawmdawmdawmdawmdawmdawmda=",
 }
 
 def scan() -> list[str]:
