@@ -27,8 +27,10 @@ TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phras
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
     "test-password", "verification-password", "verification", "atlas-ci", "fake-key",
-    "generate_a_fernet_key_and_store_in_secret_manager", "fixture", "ci-only",
+    "generate_a_fernet_key_and_store_in_secret_manager", "fixture", "ci-only", "test_",
     "must-not-", "legacy-", "supported-", "distinct-", "different-",
+    # Fixed non-production Fernet test key declared in production-verification.yml.
+    "mda0mda0mda0mda0mda0mda0mda0mda0mda0mda0mda=",
 }
 
 def scan() -> list[str]:
