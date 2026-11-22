@@ -20,6 +20,14 @@ def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tm
         "SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v>\\n",
         encoding="utf-8",
     )
+    (tmp_path / "derived-token.py").write_text(
+        "expected_token = make_readiness_token(database_url)\\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ci-fixture.yml").write_text(
+        "RELEASE_STORE_PASSWORD=ci-only-keystore-password\\n",
+        encoding="utf-8",
+    )
     (tmp_path / "signing.pem").write_text(
         "-----BEGIN PRIVATE KEY-----\n",
         encoding="utf-8",
@@ -36,3 +44,5 @@ def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tm
     assert any("signing.pem" in item and "private-key" in item for item in findings)
     assert any("android.xml" in item for item in findings)
     assert not any("deploy-example.md" in item for item in findings)
+    assert not any("derived-token.py" in item for item in findings)
+    assert not any("ci-fixture.yml" in item for item in findings)
