@@ -35,3 +35,4 @@ def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tm
     assert any("incident-notes.md" in item for item in findings)
     assert any("signing.pem" in item and "private-key" in item for item in findings)
     assert any("android.xml" in item for item in findings)
+    assert not any("deploy-example.md" in item for item in findings)
