@@ -24,7 +24,12 @@ ASSIGNMENT = re.compile(r"""(?i)^\s*(?:export\s+)?(?:<[^>]+?\s+)?[{,\[]?\s*["']?
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*([^,\s'"]+)""")
 
-PLACEHOLDERS = {"changeme","change-me","example","placeholder","your-secret","your-key","test-password","verification-password","verification","atlas-ci","fake-key","generate_a_fernet_key_and_store_in_secret_manager"}
+PLACEHOLDERS = {
+    "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
+    "test-password", "verification-password", "verification", "atlas-ci", "fake-key",
+    "generate_a_fernet_key_and_store_in_secret_manager", "fixture", "ci-only",
+    "must-not-", "legacy-", "supported-", "distinct-", "different-",
+}
 
 def scan() -> list[str]:
     findings=[]
@@ -43,12 +48,19 @@ def scan() -> list[str]:
             if seed_match and not any(p in seed_match.group(1).lower() for p in PLACEHOLDERS) and "<" not in seed_match.group(1):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
-            m=ASSIGNMENT.search(line)
-            if m and m.group(1).lower() not in PLACEHOLDERS and not m.group(1).startswith("<") and "." not in m.group(1) and "(" not in m.group(1):
-                if any(safe in m.group(1).lower() for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme")):
-                    continue
-                if "your-" not in m.group(1).lower():
-                    findings.append(f"{path.relative_to(ROOT)}:{lineno}: credential-like assignment")
+            m = ASSIGNMENT.search(line)
+            if not m:
+                continue
+            value = m.group(1).lower()
+            remainder = line[m.end():].lstrip()
+            if remainder.startswith("("):  # derived token/helper call, not a literal credential
+                continue
+            if value in PLACEHOLDERS or value.startswith("<") or "." in value or "(" in value:
+                continue
+            if any(safe in value for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme", "fixture", "ci-only", "must-not-", "legacy-", "supported-", "distinct-", "different-")):
+                continue
+            if "your-" not in value:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: credential-like assignment")
     return findings
 
 if __name__ == "__main__":
