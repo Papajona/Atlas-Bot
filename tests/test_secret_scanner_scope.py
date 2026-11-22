@@ -26,6 +26,10 @@ def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tm
         "RELEASE_STORE_PASSWORD=ci-only-keystore-password\\n",
         encoding="utf-8",
     )
+    (tmp_path / "verification-fixture.yml").write_text(
+        "APP_ENCRYPTION_KEY=MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=\\n",
+        encoding="utf-8",
+    )
     (tmp_path / "signing.pem").write_text(
         "-----BEGIN PRIVATE KEY-----\n",
         encoding="utf-8",
@@ -44,3 +48,4 @@ def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tm
     assert not any("deploy-example.md" in item for item in findings)
     assert not any("derived-token.py" in item for item in findings)
     assert not any("ci-fixture.yml" in item for item in findings)
+    assert not any("verification-fixture.yml" in item for item in findings)
