@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from scripts import check_no_secrets
 
 
@@ -13,7 +11,7 @@ def test_secret_scanner_covers_docs_android_resources_and_key_files():
 
 def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tmp_path, monkeypatch):
     (tmp_path / "incident-notes.md").write_text(
-        "GROQ_API" + "_KEY=" + "fixture_secret_value_abcdefghijklmnopqrstuvwxyz" + "\\n",
+        "GROQ_API" + "_KEY=" + "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG" + "\\n",
         encoding="utf-8",
     )
     (tmp_path / "deploy-example.md").write_text(
@@ -33,7 +31,7 @@ def test_secret_scanner_detects_credentials_in_markdown_and_private_key_files(tm
         encoding="utf-8",
     )
     (tmp_path / "android.xml").write_text(
-        '<entry password="test_fixture_secret_value_with_length_1234567890"/>\n',
+        '<entry password="a4V8n2K6p9Q3x7M1r5T0w4Y8b2C6d9F3"/>\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
