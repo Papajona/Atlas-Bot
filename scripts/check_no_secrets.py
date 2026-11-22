@@ -20,9 +20,9 @@ TEXT_SUFFIXES = {
     ".java", ".kt", ".js", ".html", ".css", ".sql", ".pem", ".key", ".crt",
     ".conf", ".cfg", ".lock", ".patch",
 }
-ASSIGNMENT = re.compile(r"(?i)\b(?:api[_-]?key|api[_-]?secret|secret[_-]?key|password|token|mnemonic|seed[_-]?phrase)\s*[:=]\s*['\"]?([A-Za-z0-9_+/=.-]{20,})")
+ASSIGNMENT = re.compile(r"(?i)(?<![a-z])(?:[a-z0-9]+[_-])*(?:api[_-]?key|api[_-]?secret|secret[_-]?key|password|token|mnemonic|seed[_-]?phrase)\s*[:=]\s*['\"]?([A-Za-z0-9_+/=.-]{20,})")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
-TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*([^,\s'"]+)""")
+TRON_SEED = re.compile(r"(?i)\b(?:mnemonic|seed[_-]?phrase|private[_-]?key)\s*[:=]")
 
 PLACEHOLDERS = {"changeme","change-me","example","placeholder","your-secret","your-key","test-password","verification-password","verification","atlas-ci","fake-key","generate_a_fernet_key_and_store_in_secret_manager"}
 
@@ -39,8 +39,7 @@ def scan() -> list[str]:
             if PRIVATE_KEY.search(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
-            seed_match = TRON_SEED.search(line)
-            if seed_match and not any(p in seed_match.group(1).lower() for p in PLACEHOLDERS) and "<" not in seed_match.group(1):
+            if "re.compile" not in line and TRON_SEED.search(line) and not any(p in line.lower() for p in PLACEHOLDERS):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             m=ASSIGNMENT.search(line)
