@@ -27,8 +27,10 @@ TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phras
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
     "test-password", "verification-password", "verification", "atlas-ci", "fake-key",
-    "generate_a_fernet_key_and_store_in_secret_manager", "fixture", "ci-only", "test_",
-    "must-not-", "legacy-", "supported-", "distinct-", "different-",
+    "generate_a_fernet_key_and_store_in_secret_manager", "fixture", "ci-only",
+    "paper_test_password", "test_password", "distinct-paper-secret",
+    "different-primary-secret", "legacy-secret", "supported-review-key",
+    "legacy-hosted-provider", "must-not-become-a-helper-setting", "must-not-be-persisted",
     # Fixed non-production Fernet test key declared in production-verification.yml.
     "mda0mda0mda0mda0mda0mda0mda0mda0mda0mda0mda=",
 }
@@ -59,7 +61,7 @@ def scan() -> list[str]:
                 continue
             if value in PLACEHOLDERS or value.startswith("<") or "." in value or "(" in value:
                 continue
-            if any(safe in value for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme", "fixture", "ci-only", "must-not-", "legacy-", "supported-", "distinct-", "different-")):
+            if any(safe in value for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme", "fixture", "ci-only", "must-not-become-a-helper-setting", "must-not-be-persisted", "legacy-secret", "supported-review-key", "distinct-paper-secret", "different-primary-secret", "legacy-hosted-provider")):
                 continue
             if "your-" not in value:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: credential-like assignment")
