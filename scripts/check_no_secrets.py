@@ -20,7 +20,7 @@ TEXT_SUFFIXES = {
     ".java", ".kt", ".js", ".html", ".css", ".sql", ".pem", ".key", ".crt",
     ".conf", ".cfg", ".lock", ".patch",
 }
-ASSIGNMENT = re.compile(r"(?i)\b(?:api[_-]?key|api[_-]?secret|secret[_-]?key|password|token|mnemonic|seed[_-]?phrase)\s*[:=]\s*['\"]?([A-Za-z0-9_+/=.-]{20,})")
+ASSIGNMENT = re.compile(r"""(?i)^\s*(?:export\s+)?[{,\[]?\s*["']?[A-Za-z_][A-Za-z0-9_]*(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|password|token|mnemonic|seed[_-]?phrase)["']?\s*[:=]\s*['"]?([A-Za-z0-9_+/=.-]{20,})""")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*([^,\s'"]+)""")
 
