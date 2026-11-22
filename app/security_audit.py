@@ -6,7 +6,23 @@ from .config import settings
 
 _log = logging.getLogger("atlas.security_audit")
 
-_SENSITIVE_KEY_PARTS = ("token", "secret", "password", "api_key", "api_secret", "authorization", "private_key", "seed", "mnemonic", "ciphertext")
+_SENSITIVE_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "api_key",
+    "api_secret",
+    "authorization",
+    "private_key",
+    "signing_key",
+    "encryption_key",
+    "service_role",
+    "seed",
+    "mnemonic",
+    "ciphertext",
+    "cookie",
+    "jwt",
+)
 
 def _redact(value):
     if isinstance(value, dict):
