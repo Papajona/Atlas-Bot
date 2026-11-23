@@ -94,6 +94,9 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     # backup restore may never target the active production database.
     assert 'if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then' in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' in workflow
+    assert "STAGING_SUPABASE_PROJECT_REF: ${{ vars.ATLAS_STAGING_RESTORE_SUPABASE_PROJECT_REF }}" in workflow
+    assert "Missing ATLAS_STAGING_RESTORE_SUPABASE_PROJECT_REF" in workflow
+    assert "vars.ATLAS_STAGING_SUPABASE_PROJECT_REF" not in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
     assert "restore audit target" in runbook
