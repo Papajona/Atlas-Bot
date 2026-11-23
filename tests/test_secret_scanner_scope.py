@@ -268,3 +268,25 @@ def test_secret_scanner_detects_private_key_literal_in_computed_source_assignmen
         for item in findings
     )
 
+
+def test_secret_scanner_flags_recovery_phrase_split_across_source_variables(
+    tmp_path, monkeypatch
+):
+    first = "abandon abandon abandon abandon abandon abandon"
+    second = "abandon abandon abandon abandon abandon about"
+    mnemonic_key = "mne" + "monic"
+    source = (
+        "first = '" + first + "'\n"
+        + "second = '" + second + "'\n"
+        + mnemonic_key + " = first + second\n"
+    )
+    (tmp_path / "split-wallet.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "split-wallet.py:3: seed/private-key assignment" in item
+        for item in findings
+    )
+
