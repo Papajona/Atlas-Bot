@@ -32,6 +32,10 @@ TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:-\s*)?(?:export\s+)?[
 TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
 ) 
+MULTILINE_SEED_KEY = re.compile(
+    r"""(?i)^\s*(?:-\s*)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
+)
+
 SOURCE_STRING_CONCATENATION = re.compile(
     r"""(?:
         (?:"[^"\r\n]*"|'[^'\r\n]*')\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*
@@ -154,6 +158,63 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
     ) is not None
 
 
+def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool:
+    """Detect recovery material placed in the indented value of a YAML seed key."""
+    normalized_lines = []
+    for line in value_lines:
+        value = line.split("#", 1)[0].strip()
+        value = re.sub(r"^-\s*", "", value)
+        value = re.sub(r"^[|>][+-]?\s*", "", value)
+        value = value.strip().strip("'\"").strip()
+        if value:
+            normalized_lines.append(value)
+
+    if not normalized_lines:
+        return False
+
+    candidate = " ".join(normalized_lines).strip().lower()
+    if candidate in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+        return False
+
+    normalized_key = key.lower().replace("_", "").replace("-", "")
+    if normalized_key in {"mnemonic", "seedphrase"}:
+        # YAML can wrap one phrase across several indented lines or list items.
+        words = [
+            token.strip(".,;:()[]{}<>\"'").lower()
+            for token in candidate.split()
+        ]
+        return len(words) >= 10 and all(
+            re.fullmatch(r"[a-z]{2,12}", word) for word in words
+        )
+
+    compact = re.sub(r"\s+", "", candidate)
+    return (
+        len(compact) >= 20
+        and re.fullmatch(r"[A-Za-z0-9_+/=.-]+", compact) is not None
+    )
+
+
+def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
+    """Return 1-based key lines whose indented YAML values contain seed material."""
+    findings: dict[int, str] = {}
+    for index, line in enumerate(lines):
+        match = MULTILINE_SEED_KEY.fullmatch(line)
+        if match is None:
+            continue
+        key_indent = len(line) - len(line.lstrip(" \t"))
+        value_lines: list[str] = []
+        for following in lines[index + 1 :]:
+            if not following.strip():
+                continue
+            indent = len(following) - len(following.lstrip(" \t"))
+            if indent <= key_indent:
+                break
+            value_lines.append(following)
+        if _multiline_seed_material_is_secret(match.group("key"), value_lines):
+            findings[index + 1] = match.group("key")
+    return findings
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -171,7 +232,19 @@ def scan() -> list[str]:
             continue
         try: text=path.read_text(errors="ignore")
         except OSError: continue
-        for lineno,line in enumerate(text.splitlines(),1):
+        lines = text.splitlines()
+        multiline_seed_findings = (
+            _find_multiline_seed_assignments(lines)
+            if path.suffix.lower() in {
+                ".yaml", ".yml", ".env", ".toml", ".ini", ".conf", ".cfg", ".json"
+            }
+            else {}
+        )
+        for lineno,line in enumerate(lines,1):
+            multiline_seed_key = multiline_seed_findings.get(lineno)
+            if multiline_seed_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
             if PRIVATE_KEY.search(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
