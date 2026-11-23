@@ -210,6 +210,10 @@ def reconcile_rows(
 ) -> tuple[int, int, list[str]]:
     """Compare provider payout rows to DB withdrawals and their terminal ledger journals."""
     failures: list[str] = []
+    if not statement_rows:
+        failures.append(
+            "zero activity cannot be independently verified without provider-authenticated evidence"
+        )
     provider_rows = {row["provider_id"]: row for row in statement_rows}
     if not statement_rows:
         failures.append(
