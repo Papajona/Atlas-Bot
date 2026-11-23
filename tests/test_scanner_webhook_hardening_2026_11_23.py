@@ -31,8 +31,8 @@ def test_normalize_symbols_drops_oversized_empty_and_control_character_values():
     assert ms.normalize_symbols("X" * (ms.MAX_SYMBOL_LENGTH + 1) + ",ETH/USDT") == [
         "ETH/USDT"
     ]
-    assert ms.normalize_symbols("BTC/USDT\\r\\nFORGED,ETH/USDT") == ["ETH/USDT"]
-    assert ms.normalize_symbols("BTC/USDT\\u2028FORGED,ETH/USDT") == ["ETH/USDT"]
+    assert ms.normalize_symbols("BTC/USDT" + chr(13) + chr(10) + "FORGED,ETH/USDT") == ["ETH/USDT"]
+    assert ms.normalize_symbols("BTC/USDT" + chr(0x2028) + "FORGED,ETH/USDT") == ["ETH/USDT"]
 
 
 def test_scan_symbols_never_exceeds_concurrency_bound():
@@ -252,7 +252,7 @@ def test_webhook_streaming_reader_stops_on_first_oversized_chunk():
 
 def test_webhook_streaming_reader_rejects_declared_oversize_without_reading():
     request = _FakeStreamRequest([b"ignored"], content_length="65")
-    with pytest.raises(Exception) as error:
+    with pytest.raises(HTTPException) as error:
         asyncio.run(read_limited_body(request, 64))
     assert getattr(error.value, "status_code", None) == 413
     assert request.consumed == 0
