@@ -231,3 +231,20 @@ def test_secret_scanner_detects_seed_literal_in_concatenated_source_assignment(
         for item in findings
     )
 
+
+def test_secret_scanner_ignores_computed_seed_label_without_literal_material(
+    tmp_path, monkeypatch
+):
+    mnemonic_key = "mne" + "monic"
+    source = (
+        "prefix = ''\n"
+        "suffix = ''\n"
+        + mnemonic_key + ' = prefix + "note" + suffix + ""\n'
+    )
+    (tmp_path / "computed-config.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("computed-config.py" in item for item in findings)
+
