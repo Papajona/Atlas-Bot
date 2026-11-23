@@ -1127,6 +1127,33 @@ class StrategyCandidate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class BenchmarkPromptCapture(Base):
+    """Consent-based, encrypted strategy prompt and Native AI output for evaluation."""
+
+    __tablename__ = "customer_benchmark_captures"
+    __table_args__ = (
+        Index("ix_benchmark_capture_customer_created", "customer_id", "created_at"),
+        Index("ix_benchmark_capture_expires_at", "expires_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    prompt_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    native_output_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    asset: Mapped[str] = mapped_column(String(20), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
+    native_ai_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+
 class TradeExecutor(Base):
     __tablename__ = "trade_executors"
     __table_args__ = (
