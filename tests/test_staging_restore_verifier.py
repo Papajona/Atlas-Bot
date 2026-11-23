@@ -81,7 +81,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     provider_verifier = Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
-    expected = "0059_research_integrity_controls"
+    expected = "0060_webhook_events_created_at_index"
 
     assert f"--expected-revision {expected}" in workflow
     assert f"--expected-revision {expected}" in reconciliation_workflow
