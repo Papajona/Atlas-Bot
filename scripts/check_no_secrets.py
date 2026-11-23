@@ -127,6 +127,7 @@ def scan() -> list[str]:
                 # a credential-like label with a variable, not store a credential literal.
                 constructed_source_value = (
                     source_code
+                    and _inside_quoted_literal(line, seed_match.start("key"))
                     and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
                 )
                 if not constructed_source_value:
