@@ -13,6 +13,7 @@ from pathlib import Path
 
 import yaml
 from bip_utils import Bip39MnemonicValidator
+from bip_utils.utils.mnemonic.mnemonic_ex import MnemonicChecksumError
 from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -144,16 +145,8 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
 
     normalized_key = key.lower().replace("_", "").replace("-", "")
     if normalized_key in {"mnemonic", "seedphrase"}:
-        # BIP-39-style recovery phrases are sequences of alphabetic words. Join
-        # adjacent literal pieces with whitespace so split phrases are still found.
         candidates = components + [" ".join(components)]
-        for candidate in candidates:
-            words = candidate.lower().split()
-            if len(words) >= 10 and all(
-                re.fullmatch(r"[a-z]{2,12}", word) for word in words
-            ):
-                return True
-        return False
+        return any(_is_bip39_wordlist_phrase(candidate) for candidate in candidates)
 
     # Private keys may be split across adjacent quoted components. Join them
     # without separators before checking for a long key-like token.
@@ -176,13 +169,21 @@ YAML_CREDENTIAL_KEY = re.compile(
 )
 
 
-def _is_valid_bip39_mnemonic(value: str) -> bool:
-    """Accept only complete, checksum-valid BIP-39 phrases from supported wordlists."""
+def _is_bip39_wordlist_phrase(value: str) -> bool:
+    """Detect full-length phrases from supported BIP-39 wordlists, even with a bad checksum."""
     candidate = unicodedata.normalize("NFKD", value).replace("\u3000", " ")
     words = candidate.split()
     if len(words) not in BIP39_WORD_COUNTS:
         return False
-    return BIP39_VALIDATOR.IsValid(" ".join(words))
+    try:
+        BIP39_VALIDATOR.Validate(" ".join(words))
+    except MnemonicChecksumError:
+        # All words belong to a supported list and the phrase length is valid;
+        # a bad checksum can still be a mistyped checked-in recovery phrase.
+        return True
+    except ValueError:
+        return False
+    return True
 
 
 def _yaml_scalar_values(node):
@@ -257,8 +258,9 @@ def _yaml_node_has_private_material(node) -> bool:
             return _structured_private_object_has_material(structured)
         if PRIVATE_KEY.search(candidate):
             return True
-        compact = re.sub(r"\s+", "", candidate)
-        return bool(re.fullmatch(r"[A-Za-z0-9_+/=.-]{20,}", compact))
+        return bool(
+            re.search(r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])", candidate)
+        )
     if isinstance(node, MappingNode):
         for key_node, value_node in node.value:
             if not isinstance(key_node, ScalarNode):
@@ -282,7 +284,7 @@ def _yaml_node_has_private_material(node) -> bool:
 def _yaml_value_is_sensitive(key: str, value_node) -> bool:
     normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
     if normalized_key in {"mnemonic", "seedphrase"}:
-        return _is_valid_bip39_mnemonic(" ".join(_yaml_scalar_values(value_node)))
+        return _is_bip39_wordlist_phrase(" ".join(_yaml_scalar_values(value_node)))
     if normalized_key == "privatekey":
         return _yaml_node_has_private_material(value_node)
     if not YAML_CREDENTIAL_KEY.fullmatch(key):
@@ -336,11 +338,13 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
         return False
     normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
     if normalized_key in {"mnemonic", "seedphrase"}:
-        return _is_valid_bip39_mnemonic(candidate)
+        return _is_bip39_wordlist_phrase(candidate)
     if normalized_key == "privatekey":
         return _yaml_node_has_private_material(ScalarNode("tag:yaml.org,2002:str", candidate))
-    compact = re.sub(r"\s+", "", candidate)
-    return len(compact) >= 20 and re.fullmatch(r"[A-Za-z0-9_+/=.-]+", compact) is not None
+    return re.search(
+        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+        candidate,
+    ) is not None
 
 
 def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
