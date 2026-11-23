@@ -6,9 +6,42 @@ import hmac
 import json
 import os
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 
 from .config import settings
+
+
+
+@contextmanager
+def model_artifact_lock(model_path: str | Path):
+    """Serialize model pointer reads and mutations with inter-process locking."""
+    model_file = Path(model_path)
+    lock_path = model_file.parent / ".model-artifacts.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def sha256_file(path: str | Path) -> str:
@@ -100,11 +133,12 @@ def verify_model_file(
     if not model_file.is_file() or not expected_sha256:
         return False
     try:
-        manifest = read_model_manifest(model_file)
-        artifact_file = resolve_model_artifact(model_file, manifest)
-        if not artifact_file.is_file():
-            return False
-        digest = sha256_file(artifact_file).lower()
+        with model_artifact_lock(model_file):
+            manifest = read_model_manifest(model_file)
+            artifact_file = resolve_model_artifact(model_file, manifest)
+            if not artifact_file.is_file():
+                return False
+            digest = sha256_file(artifact_file).lower()
         if digest != str(expected_sha256).lower():
             return False
         required = str(expected_signature or manifest.get("manifest_signature") or "")
@@ -120,30 +154,32 @@ def verify_model_file(
 
 def backup_champion(model_path: str | Path) -> Path | None:
     p = Path(model_path)
-    if not p.exists():
-        return None
-    backup = p.with_name(p.name + ".previous")
-    shutil.copy2(p, backup)
-    meta = p.with_suffix(p.suffix + ".meta.json")
-    if meta.exists():
-        shutil.copy2(meta, Path(str(backup) + ".meta.json"))
-    return backup
+    with model_artifact_lock(p):
+        if not p.exists():
+            return None
+        backup = p.with_name(p.name + ".previous")
+        shutil.copy2(p, backup)
+        meta = p.with_suffix(p.suffix + ".meta.json")
+        if meta.exists():
+            shutil.copy2(meta, Path(str(backup) + ".meta.json"))
+        return backup
 
 
 def rollback_champion(model_path: str | Path) -> bool:
     p = Path(model_path)
-    backup = p.with_name(p.name + ".previous")
-    if not backup.exists():
-        return False
-    # For versioned models this single rename switches the complete model/manifest pointer.
-    os.replace(backup, p)
-    backup_meta = Path(str(backup) + ".meta.json")
-    meta = p.with_suffix(p.suffix + ".meta.json")
-    if backup_meta.exists():
-        os.replace(backup_meta, meta)
-    else:
-        meta.unlink(missing_ok=True)
-    return True
+    with model_artifact_lock(p):
+        backup = p.with_name(p.name + ".previous")
+        if not backup.exists():
+            return False
+        # For versioned models this single rename switches the complete model/manifest pointer.
+        os.replace(backup, p)
+        backup_meta = Path(str(backup) + ".meta.json")
+        meta = p.with_suffix(p.suffix + ".meta.json")
+        if backup_meta.exists():
+            os.replace(backup_meta, meta)
+        else:
+            meta.unlink(missing_ok=True)
+        return True
 
 
 def verify_artifact_signature(digest: str, signature: str) -> bool:
