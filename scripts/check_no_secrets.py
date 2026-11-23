@@ -24,7 +24,7 @@ ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-
 SOURCE_CODE_SUFFIXES = {".py", ".js", ".java", ".kt", ".sh", ".bash"}
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
-TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*([^,\s'"]+)""")
+TRON_SEED = re.compile(r"""(?i)^\s*(?:-\s*)?(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
@@ -110,7 +110,7 @@ def scan() -> list[str]:
                 continue
             seed_match = TRON_SEED.search(line)
             if seed_match and "re.compile" not in line:
-                seed_value = seed_match.group(1).strip().lower()
+                seed_value = seed_match.group("value").strip().strip("\\\"'").strip().lower()
                 if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
                     findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                     continue
