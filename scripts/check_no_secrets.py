@@ -24,7 +24,7 @@ ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-
 SOURCE_CODE_SUFFIXES = {".py", ".js", ".java", ".kt", ".sh", ".bash"}
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
-TRON_SEED = re.compile(r"""(?i)^\s*(?:-\s*)?(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
+TRON_SEED = re.compile(r"""(?i)^\s*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
@@ -115,7 +115,7 @@ def scan() -> list[str]:
                 # .env/YAML file is scanned separately as configuration text.
                 seed_key_is_string_content = (
                     path.suffix.lower() in SOURCE_CODE_SUFFIXES
-                    and _inside_quoted_literal(line, seed_match.start())
+                    and _inside_quoted_literal(line, seed_match.start("key"))
                 )
                 if not seed_key_is_string_content:
                     seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
