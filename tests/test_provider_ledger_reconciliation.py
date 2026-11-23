@@ -152,7 +152,7 @@ def test_zero_activity_window_passes_only_with_empty_provider_and_database_journ
 def test_header_only_provider_export_is_a_valid_empty_statement(tmp_path):
     path = tmp_path / "provider-empty.csv"
     path.write_text(
-        "provider_id,amount,currency,status,event_time_utc\\n",
+        "provider_id,amount,currency,status,event_time_utc\n",
         encoding="utf-8",
     )
     assert load_provider_statement(path) == []
