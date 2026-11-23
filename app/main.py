@@ -4390,7 +4390,8 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
 
 
 def _require_strategy_market_data_quality(df, req) -> None:
-    passed, reasons = _market_data_quality(df, req.timeframe, req.asset)
+    # Freshness is measured from the completed candle's close so slow-timeframe closes are not rejected.
+    passed, reasons = _customer_paper_market_data_quality(df, req.timeframe, req.asset)
     if not passed:
         raise HTTPException(
             status_code=422,
