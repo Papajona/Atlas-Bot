@@ -166,6 +166,10 @@ def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
         "- " + yaml_key + ": " + phrase + "\n",
         encoding="utf-8",
     )
+    (tmp_path / "nested-wallet.yml").write_text(
+        'wallet: {mnemonic: "' + phrase + '"}\n',
+        encoding="utf-8",
+    )
     (tmp_path / "ordinary-notes.yml").write_text(
         "description: mnemonic: " + phrase + "\n",
         encoding="utf-8",
@@ -176,6 +180,7 @@ def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
 
     assert any("quoted-recovery.env:1: seed/private-key assignment" in item for item in findings)
     assert any("yaml-recovery.yml:1: seed/private-key assignment" in item for item in findings)
+    assert any("nested-wallet.yml:1: seed/private-key assignment" in item for item in findings)
     assert not any("ordinary-notes.yml" in item for item in findings)
 
 

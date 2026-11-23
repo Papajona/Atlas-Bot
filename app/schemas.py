@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from app.config import settings
+
 
 class MarketRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
@@ -27,6 +29,16 @@ class CustomerPaperMarketRequest(MarketRequest):
 
 
 class ResearchMarketRequest(MarketRequest):
+    min_train: int = Field(
+        default_factory=lambda: settings.research_min_train,
+        ge=200,
+        le=5000,
+    )
+    folds: int = Field(
+        default_factory=lambda: settings.research_folds,
+        ge=2,
+        le=10,
+    )
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
     point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)

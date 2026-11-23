@@ -551,6 +551,17 @@ def upgrade() -> None:
         WHERE id = :id
     """)
 
+    def _execute_outcome_update(values: dict[str, object]) -> None:
+        # SQLAlchemy's untyped text binds pass Decimal directly to sqlite3,
+        # which rejects it. SQLite is used only for migration tests/local
+        # validation; preserve Decimal values unchanged on PostgreSQL.
+        if bind.dialect.name == "sqlite":
+            values = {
+                key: float(value) if isinstance(value, Decimal) else value
+                for key, value in values.items()
+            }
+        bind.execute(update_outcome, values)
+
     # Keyset through a bounded number of distinct entry-trade IDs. Each entry's
     # fills stay together for aggregation; no whole-table history is held in RAM.
     last_trade_id = 0
@@ -824,7 +835,7 @@ def upgrade() -> None:
                             row["net_return_bps"],
                             fee_basis_complete=fee_basis_complete,
                         )
-                        bind.execute(update_outcome, {
+                        _execute_outcome_update({
                             "id": row_id,
                             "closing_quantity": row_quantities.get(row_id, Decimal("0")) if complete else Decimal("0"),
                             "closing_notional": row_notionals.get(row_id, Decimal("0")) if complete else Decimal("0"),
@@ -861,7 +872,7 @@ def upgrade() -> None:
                         row["net_return_bps"],
                         fee_basis_complete=fee_basis_complete,
                     )
-                    bind.execute(update_outcome, {
+                    _execute_outcome_update({
                         "id": int(row["id"]),
                         "closing_quantity": row_quantities.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
                         "closing_notional": row_notionals.get(int(row["id"]), Decimal("0")) if complete else Decimal("0"),
@@ -878,7 +889,7 @@ def upgrade() -> None:
                     net_return_bps,
                     fee_basis_complete=fee_basis_complete,
                 )
-                bind.execute(update_outcome, {
+                _execute_outcome_update({
                     "id": int(final["id"]),
                     "closing_quantity": valid_quantity,
                     "closing_notional": valid_notional,

@@ -199,10 +199,12 @@ def test_webhook_retention_is_external_privileged_dry_run_by_default():
 
 
 def test_webhook_retention_index_is_created_and_matches_prune_order():
-    migration = (ROOT / "alembic" / "versions" / "0060_webhook_events_created_at_index.py").read_text(encoding="utf-8")
+    # The integrated migration graph assigns the webhook index revision 0063,
+    # after the customer benchmark-capture revision 0062.
+    migration = (ROOT / "alembic" / "versions" / "0063_webhook_events_created_at_index.py").read_text(encoding="utf-8")
     db_source = (ROOT / "app" / "db.py").read_text(encoding="utf-8")
-    assert 'revision = "0060_webhook_events_created_at_index"' in migration
-    assert 'down_revision = "0059_research_integrity_controls"' in migration
+    assert 'revision = "0063_webhook_events_created_at_index"' in migration
+    assert 'down_revision = "0062_customer_benchmark_capture"' in migration
     assert 'op.create_index(' in migration
     assert '["created_at", "id"]' in migration
     assert "with op.get_context().autocommit_block()" in migration
