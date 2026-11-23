@@ -24,6 +24,7 @@ class BodySizeLimitMiddleware:
         *,
         body_idle_timeout_seconds: float = 2.0,
         body_total_timeout_seconds: float = 10.0,
+        path_prefix_limits: dict[str, int] | None = None,
     ) -> None:
         idle_timeout = float(body_idle_timeout_seconds)
         total_timeout = float(body_total_timeout_seconds)
@@ -38,9 +39,30 @@ class BodySizeLimitMiddleware:
         self.max_bytes = int(max_bytes)
         self.body_idle_timeout_seconds = max(0.01, idle_timeout)
         self.body_total_timeout_seconds = total_timeout
+        self.path_prefix_limits = {
+            str(prefix): int(limit)
+            for prefix, limit in (path_prefix_limits or {}).items()
+        }
+        if any(not prefix or limit <= 0 for prefix, limit in self.path_prefix_limits.items()):
+            raise ValueError("path-specific body limits require a non-empty prefix and positive limit")
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or self.max_bytes <= 0:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = str(scope.get("path") or "")
+        matching_limits = [
+            (prefix, limit)
+            for prefix, limit in self.path_prefix_limits.items()
+            if path.startswith(prefix)
+        ]
+        effective_max_bytes = (
+            max(matching_limits, key=lambda item: len(item[0]))[1]
+            if matching_limits
+            else self.max_bytes
+        )
+        if effective_max_bytes <= 0:
             await self.app(scope, receive, send)
             return
 
@@ -64,7 +86,7 @@ class BodySizeLimitMiddleware:
                 await self._reject(send, close_connection=close_connection, status=400, detail="Invalid Content-Length")
                 return
             declared_lengths.append(declared)
-            if declared > self.max_bytes:
+            if declared > effective_max_bytes:
                 await self._reject(send, close_connection=close_connection)
                 return
 
@@ -140,7 +162,7 @@ class BodySizeLimitMiddleware:
 
             saw_request = True
             chunk = message.get("body") or b""
-            if len(buffered) + len(chunk) > self.max_bytes:
+            if len(buffered) + len(chunk) > effective_max_bytes:
                 await self._reject(send, close_connection=close_connection)
                 return
             buffered.extend(chunk)
