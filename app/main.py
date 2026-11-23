@@ -1446,12 +1446,19 @@ async def app_lifespan(app: FastAPI):
         await shutdown()
 
 
+_CUSTOMER_WEBHOOK_MAX_BODY_BYTES = 64 * 1024
+
+
 app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url, lifespan=app_lifespan)
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
 # Keep telemetry outside the body limiter so 413 responses receive the normal security headers.
-app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=settings.max_request_body_bytes,
+    path_prefix_limits={"/api/webhooks/": _CUSTOMER_WEBHOOK_MAX_BODY_BYTES},
+)
 app.add_middleware(TelemetryMiddleware)
 
 _instance_id = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:12]
@@ -7257,9 +7264,6 @@ async def list_customer_webhooks(authorization:str|None=Header(default=None)):
         await _require_feature(db,profile.id,"webhooks")
         rows=(await db.execute(select(WebhookEndpoint).where(WebhookEndpoint.customer_id==profile.id).order_by(desc(WebhookEndpoint.created_at)))).scalars().all()
         return [{"id":r.id,"name":r.name,"status":r.status,"created_at":r.created_at.isoformat(),"last_used_at":r.last_used_at.isoformat() if r.last_used_at else None,"url":f"/api/webhooks/{r.id}"} for r in rows]
-
-
-_CUSTOMER_WEBHOOK_MAX_BODY_BYTES = 64 * 1024
 
 
 @app.post("/api/webhooks/{endpoint_id}")
