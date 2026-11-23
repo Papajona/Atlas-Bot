@@ -35,6 +35,12 @@ TRON_SEED_IN_SOURCE = re.compile(
 MULTILINE_SEED_KEY = re.compile(
     r"""(?i)^\s*(?:-\s*)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
 )
+MULTILINE_SEED_EXPLICIT_KEY = re.compile(
+    r"""(?i)^\s*\?\s*["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*(?:#.*)?$"""
+)
+YAML_EXPLICIT_VALUE = re.compile(
+    r"""^\s*:\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
+)
 
 SOURCE_STRING_CONCATENATION = re.compile(
     r"""(?:
@@ -159,10 +165,12 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
 
 
 def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool:
-    """Detect recovery material placed in the indented value of a YAML seed key."""
+    """Detect recovery material in a YAML block, including Unicode and structured keys."""
     normalized_lines = []
     for line in value_lines:
-        value = line.split("#", 1)[0].strip()
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
         value = re.sub(r"^-\s*", "", value)
         value = re.sub(r"^[|>][+-]?\s*", "", value)
         value = value.strip().strip("'\"").strip()
@@ -178,15 +186,20 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
 
     normalized_key = key.lower().replace("_", "").replace("-", "")
     if normalized_key in {"mnemonic", "seedphrase"}:
-        # YAML can wrap one phrase across several indented lines or list items.
+        # BIP-39 word lists exist in non-English languages too. Do not restrict
+        # block values to ASCII: Unicode alphabetic words must be classified.
         words = [
-            token.strip(".,;:()[]{}<>\"'").lower()
+            token.strip(".,;:()[]{}<>\"'")
             for token in candidate.split()
         ]
-        return len(words) >= 10 and all(
-            re.fullmatch(r"[a-z]{2,12}", word) for word in words
-        )
+        return len(words) >= 10 and all(word.isalpha() for word in words)
 
+    # A private-key block can contain serialized JWK/JSON objects rather than
+    # one uninterrupted base64/PEM token. The sensitive parent key makes any
+    # non-empty structured object high-signal; retain the existing long-token
+    # test for plain encoded values.
+    if candidate.startswith(("{", "[")):
+        return True
     compact = re.sub(r"\s+", "", candidate)
     return (
         len(compact) >= 20
@@ -195,19 +208,35 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
 
 
 def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
-    """Return 1-based key lines whose indented YAML values contain seed material."""
+    """Return 1-based sensitive YAML key lines whose indented values contain key material."""
     findings: dict[int, str] = {}
     for index, line in enumerate(lines):
         match = MULTILINE_SEED_KEY.fullmatch(line)
+        value_start = index + 1
+        base_indent = len(line) - len(line.lstrip(" \t"))
+
         if match is None:
-            continue
-        key_indent = len(line) - len(line.lstrip(" \t"))
+            # YAML explicit mapping keys split the sensitive key and value:
+            #   ? mnemonic
+            #   : |
+            explicit_match = MULTILINE_SEED_EXPLICIT_KEY.fullmatch(line)
+            if explicit_match is None or index + 1 >= len(lines):
+                continue
+            explicit_value_line = lines[index + 1]
+            if YAML_EXPLICIT_VALUE.fullmatch(explicit_value_line) is None:
+                continue
+            match = explicit_match
+            base_indent = len(explicit_value_line) - len(
+                explicit_value_line.lstrip(" \t")
+            )
+            value_start = index + 2
+
         value_lines: list[str] = []
-        for following in lines[index + 1 :]:
+        for following in lines[value_start:]:
             if not following.strip():
                 continue
             indent = len(following) - len(following.lstrip(" \t"))
-            if indent <= key_indent:
+            if indent <= base_indent:
                 break
             value_lines.append(following)
         if _multiline_seed_material_is_secret(match.group("key"), value_lines):
