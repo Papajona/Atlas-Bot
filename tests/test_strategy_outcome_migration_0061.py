@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+from decimal import Decimal
 from pathlib import Path
 
 from alembic.operations import Operations
@@ -170,3 +171,34 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert float(completed["return_bps"]) == 500.0
     finally:
         engine.dispose()
+
+
+
+def test_reconstruct_notional_skips_non_finite_historical_return_evidence():
+    migration_path = (
+        ROOT / "alembic" / "versions" / "0061_strategy_outcome_fill_aggregation.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "migration_0061_non_finite_evidence_test", migration_path
+    )
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    net_nan = {
+        "closing_notional": float("nan"),
+        "net_return_bps": float("nan"),
+        "net_pnl": 10,
+        "return_bps": 50,
+        "realized_pnl": 100,
+    }
+    assert migration._reconstruct_notional(net_nan) == Decimal("20000")
+
+    gross_nan = {
+        "closing_notional": 0,
+        "net_return_bps": 0,
+        "net_pnl": 0,
+        "return_bps": float("nan"),
+        "realized_pnl": 100,
+    }
+    assert migration._reconstruct_notional(gross_nan) == Decimal("0")

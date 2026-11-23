@@ -116,6 +116,38 @@ def test_benchmark_consent_is_reset_after_each_request_and_on_prompt_edits():
 
 
 
+
+def test_strategy_builder_alias_returns_the_benchmark_capture_outcome(monkeypatch):
+    from app import main as main_module
+
+    async def verified_customer(_authorization, *, require_aal2=True):
+        assert require_aal2 is True
+        return {"sub": "customer-auth-id"}
+
+    async def create_candidate(request, _authorization):
+        assert request.benchmark_opt_in is True
+        return {
+            "id": 17,
+            "spec": {"ai_provider": "native"},
+            "status": "DRAFT",
+            "benchmark_capture": {"status": "STORED"},
+        }
+
+    monkeypatch.setattr(main_module, "customer_claims", verified_customer)
+    monkeypatch.setattr(main_module, "create_strategy_candidate", create_candidate)
+    request = main_module.StrategyBuilderRequest(
+        name="Benchmark test",
+        prompt="Research a bullish breakout with clear risk rules.",
+        benchmark_opt_in=True,
+    )
+
+    response = asyncio.run(
+        main_module.strategy_builder(request, authorization="Bearer test-token")
+    )
+
+    assert response["benchmark_capture"] == {"status": "STORED"}
+
+
 def test_benchmark_capture_runtime_role_has_only_required_table_access():
     migration = (ROOT / "alembic/versions/0062_customer_benchmark_capture.py").read_text(encoding="utf-8")
     provision = (ROOT / "scripts/provision_atlas_api_runtime.sql").read_text(encoding="utf-8")

@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated server-side production API login. Run only after verified backup/restore
--- and Alembic head 0062. Set its password separately with psql's hidden \password
+-- and Alembic head 0064_strategy_outcome_recent_index. Set its password separately with psql's hidden \password
 -- prompt; never store passwords in this file or place them in chat.
 BEGIN;
 

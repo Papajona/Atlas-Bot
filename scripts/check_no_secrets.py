@@ -17,11 +17,15 @@ SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", "dist", "build", ".
 TEXT_SUFFIXES = {
     ".py", ".sh", ".bash", ".env", ".example", ".yml", ".yaml", ".json",
     ".toml", ".ini", ".gradle", ".kts", ".md", ".txt", ".xml", ".properties",
-    ".java", ".kt", ".js", ".html", ".css", ".sql", ".pem", ".key", ".crt",
-    ".conf", ".cfg", ".lock", ".patch",
+    ".java", ".kt", ".js", ".ts", ".tsx", ".mjs", ".cjs",
+    ".html", ".css", ".sql", ".pem", ".key", ".crt", ".tf", ".tfvars",
+    ".dockerignore", ".conf", ".cfg", ".lock", ".patch",
 }
+SCANNED_TEXT_FILENAMES = {".dockerignore", "Makefile", "Procfile"}
 ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase))["']?\s*[:=]\s*["']?(?P<value>[A-Za-z0-9_+/=.-]{20,})""")
-SOURCE_CODE_SUFFIXES = {".py", ".js", ".java", ".kt", ".sh", ".bash"}
+SOURCE_CODE_SUFFIXES = {
+    ".py", ".js", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".kt", ".sh", ".bash"
+}
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)^\s*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
@@ -49,6 +53,9 @@ PLACEHOLDERS = {
     "different-primary-secret", "legacy-secret", "supported-review-key",
     "legacy-hosted-provider", "must-not-become-a-helper-setting", "must-not-be-persisted",
     # Exact values used only by repository verification fixtures.
+    "fixture_service_role_value_abcdefghijklmnopqrstuvwxyz",
+    "fixture_signing_value_abcdefghijklmnopqrstuvwxyz",
+    "fixture_encryption_value_abcdefghijklmnopqrstuvwxyz",
     "ci-only-keystore-password",
     "ci-only-key-password",
     "test-key-not-a-real-secret",
@@ -146,8 +153,16 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
-        if not path.is_file() or (path.suffix.lower() not in TEXT_SUFFIXES and not path.name.lower().startswith(".env")):
-            continue  # ".env" has an empty suffix, so match dotenv files by name too
+        name = path.name
+        name_is_scannable = (
+            name in SCANNED_TEXT_FILENAMES or name.lower().startswith("dockerfile")
+        )
+        if not path.is_file() or (
+            path.suffix.lower() not in TEXT_SUFFIXES
+            and not name.lower().startswith(".env")
+            and not name_is_scannable
+        ):
+            continue  # dotenv files and extensionless build entrypoints need name checks too
         if any(part in SKIP_DIRS for part in path.parts):
             continue
         try: text=path.read_text(errors="ignore")
@@ -197,7 +212,7 @@ def scan() -> list[str]:
                 # Helper calls can also appear in embedded workflow scripts or
                 # source snippets inside test strings. A long literal followed
                 # by a note such as (rotation-note) is not a valid call suffix.
-                if _is_helper_call(value, remainder):
+                if source_code and _is_helper_call(value, remainder):
                     continue
                 # Fixture exemptions are exact values, never substring markers.
                 if value in PLACEHOLDERS:

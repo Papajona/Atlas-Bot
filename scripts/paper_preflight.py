@@ -103,7 +103,7 @@ def check_settings(settings: Any, *, encryption_check=None, calibration_check=No
     if signer_ok:
         out.append((PASS, "custody_signer_configured", "satisfied"))
     else:
-        out.append((WARN, "custody_signer_configured",
+        out.append((FAIL, "custody_signer_configured",
                     "not configured, so main-app /readyz reports false (HTTP 503 in staging/production while READYZ_FAIL_WHEN_NOT_READY is on). "
                     "Paper-only drills may set EXTERNAL_CUSTODY_SIGNER_REQUIRED=false while every money path is off"))
     if env == "production":

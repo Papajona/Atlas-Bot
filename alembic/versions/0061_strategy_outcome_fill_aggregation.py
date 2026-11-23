@@ -47,22 +47,31 @@ def _reconcile_closing_order_fill_evidence(
     )
 
 
+def _finite_decimal(value) -> Decimal:
+    """Return finite historical numeric evidence; treat invalid values as unavailable."""
+    try:
+        number = Decimal(str(value if value is not None else 0))
+    except (ArithmeticError, TypeError, ValueError):
+        return Decimal("0")
+    return number if number.is_finite() else Decimal("0")
+
+
 def _reconstruct_notional(row) -> Decimal:
     """Use exact stored notional, then net and gross ratio evidence in that order."""
-    current = Decimal(str(row["closing_notional"] or 0))
+    current = _finite_decimal(row["closing_notional"])
     if current > 0:
         return current
-    net_bps = Decimal(str(row["net_return_bps"] or 0))
-    net_pnl = Decimal(str(row["net_pnl"] or 0))
+    net_bps = _finite_decimal(row["net_return_bps"])
+    net_pnl = _finite_decimal(row["net_pnl"])
     if net_bps != 0:
         recovered = abs(net_pnl * Decimal("10000") / net_bps)
-        if recovered > 0:
+        if recovered.is_finite() and recovered > 0:
             return recovered
-    gross_bps = Decimal(str(row["return_bps"] or 0))
-    gross_pnl = Decimal(str(row["realized_pnl"] or 0))
+    gross_bps = _finite_decimal(row["return_bps"])
+    gross_pnl = _finite_decimal(row["realized_pnl"])
     if gross_bps != 0:
         recovered = abs(gross_pnl * Decimal("10000") / gross_bps)
-        if recovered > 0:
+        if recovered.is_finite() and recovered > 0:
             return recovered
     return Decimal("0")
 
@@ -840,11 +849,11 @@ def upgrade() -> None:
                 valid_quantity = total_quantity if total_quantity > 0 else Decimal("0")
                 gross_return_bps = (
                     float(total_realized / total_notional * Decimal("10000"))
-                    if valid_notional > 0 else 0.0
+                    if valid_notional > 0 else None
                 )
                 net_return_bps = (
                     float(total_net / total_notional * Decimal("10000"))
-                    if valid_notional > 0 and fee_basis_complete else 0.0
+                    if valid_notional > 0 and fee_basis_complete else None
                 )
                 for row in rows[:-1]:
                     row_net_pnl, row_net_return_bps = _verified_net_values(

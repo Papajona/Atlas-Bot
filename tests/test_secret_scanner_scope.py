@@ -4,6 +4,7 @@ from scripts import check_no_secrets
 def test_secret_scanner_covers_docs_android_resources_and_key_files():
     expected = {
         ".md", ".txt", ".xml", ".properties", ".java", ".kt", ".js",
+        ".ts", ".tsx", ".mjs", ".cjs", ".tf", ".tfvars", ".dockerignore",
         ".html", ".css", ".sql", ".pem", ".key", ".crt",
     }
     assert expected <= check_no_secrets.TEXT_SUFFIXES
@@ -80,9 +81,9 @@ def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
     tmp_path, monkeypatch
 ):
     token_key = "ADMIN_" + "TOKEN"
-    secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    secret = "abcdefghijklmnopqrst"
     (tmp_path / "rotation.yml").write_text(
-        token_key + ": " + secret + "(rotation-note)\n", encoding="utf-8"
+        token_key + ": " + secret + "(rotation)\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
@@ -290,3 +291,29 @@ def test_secret_scanner_flags_recovery_phrase_split_across_source_variables(
         for item in findings
     )
 
+
+
+
+def test_secret_scanner_covers_typescript_dockerfiles_and_extensionless_build_files(
+    tmp_path, monkeypatch
+):
+    credential = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    fixtures = {
+        "supabase-index.ts": 'const config = { SUPABASE_SERVICE_ROLE_KEY: "' + credential + '" };',
+        "dashboard.tsx": 'const config = { API_TOKEN: "' + credential + '" };',
+        "Dockerfile": "ARG API_TOKEN=" + credential,
+        "Dockerfile.verify": "ENV ENCRYPTION_KEY=" + credential,
+        ".dockerignore": "API_TOKEN=" + credential,
+        "main.tf": 'service_role_key = "' + credential + '"',
+        "environment.tfvars": 'signing_key = "' + credential + '"',
+        "Makefile": "export API_TOKEN=" + credential,
+        "Procfile": "web: API_TOKEN=" + credential,
+    }
+    for name, content in fixtures.items():
+        (tmp_path / name).write_text(content + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+
+    for name in fixtures:
+        assert any(name in item for item in findings), name

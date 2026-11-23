@@ -4046,16 +4046,16 @@ async def get_customer(
         name = name or str(profile.display_name or "").strip()[:160]
 
     # Keyless Edge provisioning leaves encrypted PII empty. Verify Auth and
-    # backfill the email when the existing profile has no encrypted email; do
-    # not let a missing display name trigger a network call. Existing ACTIVE
-    # users are not newly required to reconfirm an email; new profiles are.
+    # backfill the email when the existing profile has no encrypted email.
+    # Every Auth-backed identity lookup or email backfill requires a confirmed
+    # Auth email; active profiles with an already-persisted email avoid this call.
     needs_auth_identity = profile is None or not str(profile.email or "").strip()
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
         auth_email = str(user.get("email") or "").strip().lower()[:320]
-        if profile is None and (not auth_email or not user.get("email_confirmed_at")):
+        if not auth_email or not user.get("email_confirmed_at"):
             raise HTTPException(403, "A confirmed email address is required")
         email = auth_email or email
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
@@ -7920,6 +7920,7 @@ async def strategy_builder(req: StrategyBuilderRequest, authorization: str | Non
         "strategy": spec,
         "ai": spec.get("ai_provider"),
         "status": created["status"],
+        "benchmark_capture": created.get("benchmark_capture", {"status": "NOT_REQUESTED"}),
         "next_step": "POST /api/customer/strategy-lab/candidates/{id}/validate to backtest and walk-forward validate this strategy.".replace("{id}", str(created["id"])),
     }
 

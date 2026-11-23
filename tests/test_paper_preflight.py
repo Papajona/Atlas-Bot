@@ -67,9 +67,9 @@ def test_encryption_failure_is_reported_without_echoing_the_message():
     assert "abc123" not in detail
 
 
-def test_unconfigured_custody_signer_warns_but_does_not_fail():
+def test_unconfigured_required_custody_signer_fails_readiness_preflight():
     results = _run(_settings(external_custody_signer_required=True))
-    assert _status(results, "custody_signer_configured") == [pf.WARN]
+    assert _status(results, "custody_signer_configured") == [pf.FAIL]
     ok = _run(_settings(external_custody_signer_required=True, external_custody_signer_url="https://s", external_custody_signer_hmac_secret="x"))
     assert _status(ok, "custody_signer_configured") == [pf.PASS]
 
