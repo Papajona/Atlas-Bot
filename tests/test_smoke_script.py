@@ -8,6 +8,9 @@ def test_smoke_check_accepts_https_and_loopback_http():
     assert validate_base_url("http://127.0.0.1:8000/") == "http://127.0.0.1:8000"
     assert validate_base_url("http://localhost:8000") == "http://localhost:8000"
 
+def test_smoke_check_trims_whitespace_before_validating_and_returning_url():
+    assert validate_base_url("  https://api.example.test/path/  ") == "https://api.example.test/path"
+
 
 @pytest.mark.parametrize(
     "value",
