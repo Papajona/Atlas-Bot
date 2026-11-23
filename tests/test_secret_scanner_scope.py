@@ -212,6 +212,14 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
         "wallet:\n  " + phrase_key + ":\n    <YOUR_SEED_PHRASE>\n",
         encoding="utf-8",
     )
+    (tmp_path / "empty-block-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ": |-\n  label: example\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "placeholder-block-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ": >-\n    <YOUR_SEED_PHRASE>\n",
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
     findings = check_no_secrets.scan()
@@ -226,6 +234,8 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
     )
     assert not any("empty-recovery.yml" in item for item in findings)
     assert not any("placeholder-recovery.yml" in item for item in findings)
+    assert not any("empty-block-recovery.yml" in item for item in findings)
+    assert not any("placeholder-block-recovery.yml" in item for item in findings)
 
 
 def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strings(
