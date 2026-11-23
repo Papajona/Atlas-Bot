@@ -136,9 +136,10 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
     tmp_path, monkeypatch
 ):
     bracketed_key = "<0123456789abcdef0123456789abcdef>"
+    placeholder_key = "<YOUR_PRIVATE_KEY>"
     (tmp_path / "wallet.env").write_text(
         "private_key=" + bracketed_key + "\n"
-        "private_key=<YOUR_PRIVATE_KEY>\n",
+        "private_key=" + placeholder_key + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
