@@ -135,6 +135,16 @@ def test_unmatched_statement_and_database_transactions_fail_closed():
     assert any("missing from provider statement" in f for f in failures)
 
 
+def test_zero_activity_without_provider_attestation_fails_closed():
+    matched, unresolved, failures = reconcile_rows([], [], "sandbox-payout")
+    assert matched == 0
+    assert unresolved == 0
+    assert any(
+        "zero activity cannot be independently verified" in failure
+        for failure in failures
+    )
+
+
 def test_unattributed_withdrawal_journals_block_reconciliation_even_with_provider_rows():
     matched, unresolved, failures = reconcile_rows(
         [provider_row()],
