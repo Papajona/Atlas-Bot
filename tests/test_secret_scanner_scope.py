@@ -155,7 +155,7 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
 def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
     tmp_path, monkeypatch
 ):
-    phrase = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     dotenv_key = "MNE" + "MONIC"
     yaml_key = "mne" + "monic"
     (tmp_path / "quoted-recovery.env").write_text(
@@ -190,7 +190,7 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
 ):
     phrase_key = "mne" + "monic"
     block_key = "seed" + "_phrase"
-    single_line_value = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    single_line_value = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     first_block_line = "abandon abandon abandon abandon abandon abandon"
     second_block_line = "abandon abandon abandon abandon abandon about"
 
@@ -239,15 +239,26 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
 
 
 
-def test_secret_scanner_detects_non_english_mnemonics_and_structured_private_keys_in_yaml_blocks(
+def test_secret_scanner_detects_real_japanese_mnemonic_but_ignores_japanese_notes_and_public_keys(
     tmp_path, monkeypatch
 ):
+    from bip_utils import Bip39Languages, Bip39MnemonicGenerator
+
     mnemonic_key = "mne" + "monic"
     key_field = "private" + "_key"
-    japanese_words = "あいこくしん あいさつ あいだ あおぞら あかちゃん あきる あけがた あける あこがれる あさい あさひ あしあと"
+    japanese_phrase = Bip39MnemonicGenerator(
+        Bip39Languages.JAPANESE
+    ).FromEntropy(bytes(16)).ToStr()
+    japanese_notes = "これは 普通 の 日本語 の 運用 メモ です 今日 の 作業 内容 を 記録 します"
     (tmp_path / "japanese-wallet.yml").write_text(
         "wallet:\n  " + mnemonic_key + ": |\n"
-        + "".join("    " + word + " " for word in japanese_words.split())
+        + "".join("    " + word + " " for word in japanese_phrase.split())
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "japanese-notes.yml").write_text(
+        "wallet:\n  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + " " for word in japanese_notes.split())
         + "\n",
         encoding="utf-8",
     )
@@ -260,12 +271,62 @@ def test_secret_scanner_detects_non_english_mnemonics_and_structured_private_key
         '    }\n',
         encoding="utf-8",
     )
+    (tmp_path / "public-only-wallet.yml").write_text(
+        "wallet:\n  " + key_field + ": |\n"
+        '    {"kty":"RSA","n":"abcdef0123456789abcdef0123456789","e":"AQAB"}\n',
+        encoding="utf-8",
+    )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
     findings = check_no_secrets.scan()
 
     assert any("japanese-wallet.yml:2: seed/private-key assignment" in item for item in findings)
     assert any("json-private-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+    assert not any("japanese-notes.yml" in item for item in findings)
+    assert not any("public-only-wallet.yml" in item for item in findings)
+
+
+def test_secret_scanner_ignores_empty_private_key_objects_and_arrays(tmp_path, monkeypatch):
+    private_key_field = "private" + "_key"
+    (tmp_path / "empty-object.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n    {}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "empty-array.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n    []\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "public-object.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        '    {"kty":"EC","crv":"P-256","x":"public-x","y":"public-y"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("empty-object.yml" in item for item in findings)
+    assert not any("empty-array.yml" in item for item in findings)
+    assert not any("public-object.yml" in item for item in findings)
+
+
+def test_secret_scanner_ignores_explicit_mapping_examples_inside_yaml_block_scalars(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    (tmp_path / "yaml-doc-example.yml").write_text(
+        "description: |\n"
+        "  Example only; this is documentation, not a mapping:\n"
+        "  ? mnemonic\n"
+        "  : |\n"
+        + "".join("    " + word + "\n" for word in phrase.split()),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("yaml-doc-example.yml" in item for item in findings)
 
 
 def test_secret_scanner_detects_yaml_explicit_sensitive_keys_with_block_values(
