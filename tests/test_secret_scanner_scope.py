@@ -4,6 +4,7 @@ from scripts import check_no_secrets
 def test_secret_scanner_covers_docs_android_resources_and_key_files():
     expected = {
         ".md", ".txt", ".xml", ".properties", ".java", ".kt", ".js",
+        ".ts", ".tsx", ".mjs", ".cjs", ".tf", ".tfvars", ".dockerignore",
         ".html", ".css", ".sql", ".pem", ".key", ".crt",
     }
     assert expected <= check_no_secrets.TEXT_SUFFIXES
@@ -80,9 +81,9 @@ def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
     tmp_path, monkeypatch
 ):
     token_key = "ADMIN_" + "TOKEN"
-    secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    secret = "abcdefghijklmnopqrst"
     (tmp_path / "rotation.yml").write_text(
-        token_key + ": " + secret + "(rotation-note)\n", encoding="utf-8"
+        token_key + ": " + secret + "(rotation)\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
@@ -165,6 +166,10 @@ def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
         "- " + yaml_key + ": " + phrase + "\n",
         encoding="utf-8",
     )
+    (tmp_path / "nested-wallet.yml").write_text(
+        'wallet: {mnemonic: "' + phrase + '"}\n',
+        encoding="utf-8",
+    )
     (tmp_path / "ordinary-notes.yml").write_text(
         "description: mnemonic: " + phrase + "\n",
         encoding="utf-8",
@@ -175,8 +180,52 @@ def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
 
     assert any("quoted-recovery.env:1: seed/private-key assignment" in item for item in findings)
     assert any("yaml-recovery.yml:1: seed/private-key assignment" in item for item in findings)
+    assert any("nested-wallet.yml:1: seed/private-key assignment" in item for item in findings)
     assert not any("ordinary-notes.yml" in item for item in findings)
 
+
+
+def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty_or_placeholder(
+    tmp_path, monkeypatch
+):
+    phrase_key = "mne" + "monic"
+    block_key = "seed" + "_phrase"
+    single_line_value = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    first_block_line = "abandon abandon abandon abandon abandon abandon"
+    second_block_line = "abandon abandon abandon abandon abandon about"
+
+    (tmp_path / "multiline-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ":\n    " + single_line_value + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "block-recovery.yml").write_text(
+        "wallet:\n  " + block_key + ": |-\n"
+        + "    " + first_block_line + "\n"
+        + "    " + second_block_line + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "empty-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ":\n  label: example\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "placeholder-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ":\n    <YOUR_SEED_PHRASE>\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "multiline-recovery.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "block-recovery.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("empty-recovery.yml" in item for item in findings)
+    assert not any("placeholder-recovery.yml" in item for item in findings)
 
 
 def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strings(
@@ -290,3 +339,29 @@ def test_secret_scanner_flags_recovery_phrase_split_across_source_variables(
         for item in findings
     )
 
+
+
+
+def test_secret_scanner_covers_typescript_dockerfiles_and_extensionless_build_files(
+    tmp_path, monkeypatch
+):
+    credential = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    fixtures = {
+        "supabase-index.ts": 'const config = { SUPABASE_SERVICE_ROLE_KEY: "' + credential + '" };',
+        "dashboard.tsx": 'const config = { API_TOKEN: "' + credential + '" };',
+        "Dockerfile": "ARG API_TOKEN=" + credential,
+        "Dockerfile.verify": "ENV ENCRYPTION_KEY=" + credential,
+        ".dockerignore": "API_TOKEN=" + credential,
+        "main.tf": 'service_role_key = "' + credential + '"',
+        "environment.tfvars": 'signing_key = "' + credential + '"',
+        "Makefile": "export API_TOKEN=" + credential,
+        "Procfile": "web: API_TOKEN=" + credential,
+    }
+    for name, content in fixtures.items():
+        (tmp_path / name).write_text(content + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+
+    for name in fixtures:
+        assert any(name in item for item in findings), name
