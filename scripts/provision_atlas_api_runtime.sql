@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the production API login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0059_research_integrity_controls') THEN
-        RAISE EXCEPTION 'database must be at 0059_research_integrity_controls before API role provisioning';
+                   WHERE version_num = '0060_webhook_events_created_at_index') THEN
+        RAISE EXCEPTION 'database must be at 0060_webhook_events_created_at_index before API role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)
