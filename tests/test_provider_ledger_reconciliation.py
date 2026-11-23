@@ -135,16 +135,17 @@ def test_unmatched_statement_and_database_transactions_fail_closed():
     assert any("missing from provider statement" in f for f in failures)
 
 
-def test_unattributed_withdrawal_journals_block_empty_reconciliation_inputs():
+def test_unattributed_withdrawal_journals_block_reconciliation_even_with_provider_rows():
     matched, unresolved, failures = reconcile_rows(
-        [],
-        [],
+        [provider_row()],
+        [db_row()],
         "sandbox-payout",
         withdrawal_journal_count=1,
+        unattributed_withdrawal_journal_count=1,
     )
-    assert matched == 0
+    assert matched == 1
     assert unresolved == 0
-    assert any("withdrawal journals exist" in failure for failure in failures)
+    assert any("without an attributable withdrawal record" in failure for failure in failures)
 
 
 def test_header_only_provider_export_is_rejected_without_provider_attestation(tmp_path):
@@ -192,8 +193,9 @@ def test_provider_reconciliation_query_uses_read_only_audit_acl_contract():
     assert "'public_sequences_with_privileges'" in query
     assert "'public_functions_with_execute'" in query
     assert "'withdrawal_journal_count'" in query
-    assert "EXISTS (\n              SELECT 1 FROM matching_withdrawals w" in query
-    assert "OR NOT EXISTS (\n              SELECT 1 FROM public.withdrawals w" in query
+    assert "EXISTS (\n            SELECT 1 FROM matching_withdrawals w" in query
+    assert "NOT EXISTS (\n            SELECT 1 FROM public.withdrawals w" in query
+    assert "'unattributed_withdrawal_journal_count'" in query
     assert "j.reference_id IN (w.request_id, w.request_id || ':release')" in query
     assert "tables_missing_dml" not in query
     assert "public_tables_missing_dml" not in query
