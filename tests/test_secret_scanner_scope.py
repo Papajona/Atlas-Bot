@@ -137,9 +137,10 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
 ):
     bracketed_key = "<0123456789abcdef0123456789abcdef>"
     placeholder_key = "<YOUR_PRIVATE_KEY>"
+    private_key_assignment = "private" + "_key="
     (tmp_path / "wallet.env").write_text(
-        "private_key=" + bracketed_key + "\n"
-        "private_key=" + placeholder_key + "\n",
+        private_key_assignment + bracketed_key + "\n"
+        private_key_assignment + placeholder_key + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -175,3 +176,25 @@ def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
     assert any("quoted-recovery.env:1: seed/private-key assignment" in item for item in findings)
     assert any("yaml-recovery.yml:1: seed/private-key assignment" in item for item in findings)
     assert not any("ordinary-notes.yml" in item for item in findings)
+
+
+
+def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strings(
+    tmp_path, monkeypatch
+):
+    phrase = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    mapping_key = "mnemo" + "nic"
+    source_assignment_key = "mne" + "monic"
+    source = (
+        "recovery = {\n"
+        + '    "' + mapping_key + '": "' + phrase + '"\n'
+        + "}\n"
+        + 'runtime_config = "' + source_assignment_key + "=" + phrase + '"\n'
+    )
+    (tmp_path / "recovery-config.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("recovery-config.py:2: seed/private-key assignment" in item for item in findings)
+    assert any("recovery-config.py:4: seed/private-key assignment" in item for item in findings)
