@@ -27,7 +27,11 @@ PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----
 TRON_SEED = re.compile(r"""(?i)^\s*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
+) 
+SOURCE_STRING_CONCATENATION = re.compile(
+    r"""(?:"|')\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*(?:"|')"""
 )
+
 
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
@@ -118,10 +122,18 @@ def scan() -> list[str]:
                 else TRON_SEED.search(line)
             )
             if seed_match and "re.compile" not in line:
-                seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
-                if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
-                    findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                    continue
+                raw_seed_value = seed_match.group("value").strip()
+                # Source code may construct an ordinary note string by concatenating
+                # a credential-like label with a variable, not store a credential literal.
+                constructed_source_value = (
+                    source_code
+                    and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
+                )
+                if not constructed_source_value:
+                    seed_value = raw_seed_value.strip('"').strip("'").strip().lower()
+                    if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
+                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                        continue
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
