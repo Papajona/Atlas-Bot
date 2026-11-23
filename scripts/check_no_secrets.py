@@ -110,10 +110,18 @@ def scan() -> list[str]:
                 continue
             seed_match = TRON_SEED.search(line)
             if seed_match and "re.compile" not in line:
-                seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
-                if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
-                    findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                    continue
+                # Ignore key-like text that is itself inside a source string
+                # (for example a test constructing an .env file). The target
+                # .env/YAML file is scanned separately as configuration text.
+                seed_key_is_string_content = (
+                    path.suffix.lower() in SOURCE_CODE_SUFFIXES
+                    and _inside_quoted_literal(line, seed_match.start())
+                )
+                if not seed_key_is_string_content:
+                    seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
+                    if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
+                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                        continue
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
