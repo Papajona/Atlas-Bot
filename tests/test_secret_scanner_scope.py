@@ -140,7 +140,7 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
     private_key_assignment = "private" + "_key="
     (tmp_path / "wallet.env").write_text(
         private_key_assignment + bracketed_key + "\n"
-        private_key_assignment + placeholder_key + "\n",
+        + private_key_assignment + placeholder_key + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -198,3 +198,15 @@ def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strin
 
     assert any("recovery-config.py:2: seed/private-key assignment" in item for item in findings)
     assert any("recovery-config.py:4: seed/private-key assignment" in item for item in findings)
+
+
+def test_repository_secret_scan_ignores_ordinary_notes_string_construction():
+    findings = check_no_secrets.scan()
+
+    # This file contains a constructed ordinary-notes fixture with the word
+    # "mnemonic" followed by a variable, not a literal recovery phrase.
+    assert not any(
+        item.startswith("tests/test_secret_scanner_scope.py:")
+        for item in findings
+    )
+
