@@ -449,9 +449,9 @@ def test_secret_scanner_handles_recursive_private_key_aliases_and_scans_followin
 ):
     secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
     content = (
-        "wallet:\\n"
-        "  private_key: &key {self: *key}\\n"
-        "  api_token: " + secret + "\\n"
+        "wallet:\n"
+        "  private_key: &key {self: *key}\n"
+        "  api_token: " + secret + "\n"
     )
     (tmp_path / "recursive-private-key.yml").write_text(content, encoding="utf-8")
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -470,9 +470,9 @@ def test_secret_scanner_handles_recursive_mnemonic_aliases_and_scans_following_k
 ):
     secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
     content = (
-        "wallet:\\n"
-        "  mnemonic: &phrase [*phrase]\\n"
-        "  api_token: " + secret + "\\n"
+        "wallet:\n"
+        "  mnemonic: &phrase [*phrase]\n"
+        "  api_token: " + secret + "\n"
     )
     (tmp_path / "recursive-mnemonic.yml").write_text(content, encoding="utf-8")
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
