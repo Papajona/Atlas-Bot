@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import subprocess
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -584,27 +585,12 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
 
 
 def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
-    ruby = r"""
-require "yaml"
-deploy = YAML.load_file(ARGV.fetch(0))
-preflight = YAML.load_file(ARGV.fetch(1))
-acceptance = YAML.load_file(ARGV.fetch(2))
-abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
-abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
-abort("customer paper acceptance job missing") unless acceptance.fetch("jobs").key?("customer-paper-acceptance")
-"""
-    result = subprocess.run(
-        [
-            "ruby", "-e", ruby,
-            str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
-            str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
-            str(ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml"),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr or result.stdout
+    deploy = yaml.safe_load((ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8"))
+    preflight = yaml.safe_load((ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8"))
+    acceptance = yaml.safe_load((ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml").read_text(encoding="utf-8"))
+    assert "deploy-paper-staging" in deploy.get("jobs", {})
+    assert "verify-staging-identity" in preflight.get("jobs", {})
+    assert "customer-paper-acceptance" in acceptance.get("jobs", {})
 
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
@@ -691,23 +677,16 @@ def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: P
 
 def test_production_deploy_workflow_is_valid_yaml_with_unique_named_steps():
     workflow_path = ROOT / ".github" / "workflows" / "production-deploy.yml"
-    ruby = r"""
-require "yaml"
-workflow = YAML.load_file(ARGV.fetch(0))
-steps = workflow.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
-names = steps.map { |step| step["name"] }.compact
-duplicates = names.group_by(&:itself).select { |_, occurrences| occurrences.length > 1 }.keys
-abort("duplicate production deployment step names: #{duplicates.join(', ')}") unless duplicates.empty?
-abort("exact staging identity job gate missing") unless names.include?("Require all release CI gates on this exact commit")
-"""
-    result = subprocess.run(
-        ["ruby", "-e", ruby, str(workflow_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr or result.stdout
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = [
+        step
+        for job in workflow.get("jobs", {}).values()
+        for step in job.get("steps", [])
+    ]
+    names = [step["name"] for step in steps if isinstance(step, dict) and step.get("name")]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    assert not duplicates, f"duplicate production deployment step names: {duplicates}"
+    assert "Require all release CI gates on this exact commit" in names
 
 
 
