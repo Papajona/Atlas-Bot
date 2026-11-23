@@ -89,7 +89,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert f'default="{expected}"' in provider_verifier
     assert f"verifies revision `{expected}`" in runbook
     assert "app.paper_staging:app" in identity_workflow
-    assert "no second project or paid branch is required" in runbook
+    assert "no additional project or paid branch is required for the staging service" in runbook
     # Same-project staging and read-only reconciliation are allowed, but a full
     # backup restore may never target the active production database.
     assert 'if [[ "$RESTORE_TARGET_KIND" == "supabase" ]]; then' in workflow
@@ -102,8 +102,16 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "restore audit target" in runbook
     assert "Supabase Free projects do not receive automatic scheduled database backups" in runbook
     assert "restore-to-new-project flow requires a paid plan" in runbook
-    assert "Do not treat the existing manual SQL import as a provider restore operation" in runbook
-    assert "The current Free single-project setup has no verified separate restore target" in runbook
+    assert "### Recovery targets and restore certification" in runbook
+    assert runbook.count("### Webhook-event retention policy and safe execution") == 1
+    assert runbook.index("### Recovery targets and restore certification") < runbook.index("Once the bucket retention policy is locked")
+    assert "The separate Free-tier project `atlas-recovery-temp` (`jhnrfcapvoloybevujzi`) now exists" in runbook
+    assert "not a verified restore target" in runbook
+    assert "provider-generated restore-operation evidence" in runbook
+    assert "manual SQL import or the project" in runbook
+    assert "Do not treat a manual SQL import as a provider restore operation" in runbook
+    assert "Do not treat the existing manual SQL import as a provider restore operation" not in runbook
+    assert "The current Free single-project setup has no verified separate restore target" not in runbook
     assert "full restore certification" in runbook
     assert "SOURCE_SUPABASE_PROJECT_REF: ${{ inputs.source_supabase_project_ref }}" in workflow
     assert "verify_cloud_sql_supabase_source_provenance.py" in workflow
