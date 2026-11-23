@@ -14,6 +14,7 @@
 --       -f scripts/prune_webhook_events.sql
 --
 -- The 30-day default is a placeholder. Set retention_days to the approved policy.
+-- Accepted retention range is 1..36,500 days (100 years); batch size is 1..999,999 rows.
 -- If row-level security is enabled, the maintenance identity must own the table or bypass RLS.
 -- Requires psql 13+.
 
@@ -30,16 +31,24 @@
 \set apply 0
 \endif
 
--- Validate psql variables before interpolating them into interval/limit expressions.
--- Retention must be 1..999,999,999 days; batch size must be 1..999,999 rows.
+-- Validate both psql variables before the count or deletion cutoff is evaluated.
+-- CASE prevents attempting integer casts on non-numeric input.
 SELECT
-    (:'retention_days' ~ '^[1-9][0-9]{0,8}$') AS retention_days_valid,
-    (:'batch_size' ~ '^[1-9][0-9]{0,5}$') AS batch_size_valid
+    CASE
+        WHEN :'retention_days' ~ '^[0-9]{1,5}$'
+        THEN :'retention_days'::integer BETWEEN 1 AND 36500
+        ELSE FALSE
+    END AS retention_days_valid,
+    CASE
+        WHEN :'batch_size' ~ '^[0-9]{1,6}$'
+        THEN :'batch_size'::integer BETWEEN 1 AND 999999
+        ELSE FALSE
+    END AS batch_size_valid
 \gset
 
 \if :retention_days_valid
 \else
-\echo 'ERROR: retention_days must be a positive integer.'
+\echo 'ERROR: retention_days must be an integer from 1 through 36500.'
 \quit 1
 \endif
 \if :batch_size_valid
