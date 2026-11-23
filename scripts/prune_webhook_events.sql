@@ -33,47 +33,10 @@
 -- Validate psql variables before interpolating them into interval/limit expressions.
 -- Retention must be 1..999,999,999 days; batch size must be 1..999,999 rows.
 SELECT
-    (:'retention_days' ~ '^[1-9][0-9]{0,8}
-FROM public.webhook_events
-WHERE created_at < now() - make_interval(days => :'retention_days'::integer);
-
-\if :apply
-BEGIN;
-WITH doomed AS (
-    SELECT id
-    FROM public.webhook_events
-    WHERE created_at < now() - make_interval(days => :'retention_days'::integer)
-    ORDER BY created_at, id
-    LIMIT :'batch_size'::integer
-    FOR UPDATE SKIP LOCKED
-)
-DELETE FROM public.webhook_events AS w
-USING doomed AS d
-WHERE w.id = d.id;
-COMMIT;
-\endif
-) AS retention_days_valid,
-    (:'batch_size' ~ '^[1-9][0-9]{0,5}
-FROM public.webhook_events
-WHERE created_at < now() - make_interval(days => :'retention_days'::integer);
-
-\if :apply
-BEGIN;
-WITH doomed AS (
-    SELECT id
-    FROM public.webhook_events
-    WHERE created_at < now() - make_interval(days => :'retention_days'::integer)
-    ORDER BY id
-    LIMIT :'batch_size'::integer
-    FOR UPDATE SKIP LOCKED
-)
-DELETE FROM public.webhook_events AS w
-USING doomed AS d
-WHERE w.id = d.id;
-COMMIT;
-\endif
-) AS batch_size_valid
+    (:'retention_days' ~ '^[1-9][0-9]{0,8}$') AS retention_days_valid,
+    (:'batch_size' ~ '^[1-9][0-9]{0,5}$') AS batch_size_valid
 \gset
+
 \if :retention_days_valid
 \else
 \echo 'ERROR: retention_days must be a positive integer.'
@@ -95,7 +58,7 @@ WITH doomed AS (
     SELECT id
     FROM public.webhook_events
     WHERE created_at < now() - make_interval(days => :'retention_days'::integer)
-    ORDER BY id
+    ORDER BY created_at, id
     LIMIT :'batch_size'::integer
     FOR UPDATE SKIP LOCKED
 )
