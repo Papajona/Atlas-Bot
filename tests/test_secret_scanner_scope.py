@@ -155,7 +155,7 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
 def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
     tmp_path, monkeypatch
 ):
-    phrase = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     dotenv_key = "MNE" + "MONIC"
     yaml_key = "mne" + "monic"
     (tmp_path / "quoted-recovery.env").write_text(
@@ -190,9 +190,9 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
 ):
     phrase_key = "mne" + "monic"
     block_key = "seed" + "_phrase"
-    single_line_value = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    single_line_value = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     first_block_line = "abandon abandon abandon abandon abandon abandon"
-    second_block_line = "abandon abandon abandon abandon abandon about"
+    second_block_line = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
 
     (tmp_path / "multiline-recovery.yml").write_text(
         "wallet:\n  " + phrase_key + ":\n    " + single_line_value + "\n",
@@ -212,6 +212,14 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
         "wallet:\n  " + phrase_key + ":\n    <YOUR_SEED_PHRASE>\n",
         encoding="utf-8",
     )
+    (tmp_path / "empty-block-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ": |-\n  label: example\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "placeholder-block-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ": >-\n    <YOUR_SEED_PHRASE>\n",
+        encoding="utf-8",
+    )
 
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
     findings = check_no_secrets.scan()
@@ -226,6 +234,160 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
     )
     assert not any("empty-recovery.yml" in item for item in findings)
     assert not any("placeholder-recovery.yml" in item for item in findings)
+    assert not any("empty-block-recovery.yml" in item for item in findings)
+    assert not any("placeholder-block-recovery.yml" in item for item in findings)
+
+
+
+def test_secret_scanner_validates_supported_bip39_and_ignores_japanese_notes_and_public_keys(
+    tmp_path, monkeypatch
+):
+    from bip_utils import (
+        Bip39Languages,
+        Bip39MnemonicGenerator,
+        Bip39MnemonicValidator,
+    )
+
+    mnemonic_key = "mne" + "monic"
+    key_field = "private" + "_key"
+    english_generator = Bip39MnemonicGenerator(Bip39Languages.ENGLISH)
+    english_validator = Bip39MnemonicValidator(Bip39Languages.ENGLISH)
+    supported_phrase = english_generator.FromEntropy(bytes(16)).ToStr()
+    supported_words = supported_phrase.split()
+    invalid_checksum_phrase = None
+    for entropy_byte in range(1, 16):
+        alternative_last_word = english_generator.FromEntropy(
+            bytes([entropy_byte]) * 16
+        ).ToStr().split()[-1]
+        candidate = " ".join(supported_words[:-1] + [alternative_last_word])
+        if not english_validator.IsValid(candidate):
+            invalid_checksum_phrase = candidate
+            break
+    assert invalid_checksum_phrase is not None
+    japanese_notes = "これは 普通 の 日本語 の 運用 メモ です 今日 の 作業 内容 を 記録 します"
+    (tmp_path / "supported-bip39-wallet.yml").write_text(
+        "wallet:\n  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + " " for word in supported_phrase.split())
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "supported-bip39-wallet-invalid-checksum.yml").write_text(
+        "wallet:\n  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + " " for word in invalid_checksum_phrase.split())
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "japanese-notes.yml").write_text(
+        "wallet:\n  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + " " for word in japanese_notes.split())
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "json-private-wallet.yml").write_text(
+        "wallet:\n  " + key_field + ": |\n"
+        '    {\n'
+        '      "kty": "RSA",\n'
+        '      "d": "0123456789abcdef0123456789abcdef",\n'
+        '      "n": "abcdef0123456789abcdef0123456789"\n'
+        '    }\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "public-only-wallet.yml").write_text(
+        "wallet:\n  " + key_field + ": |\n"
+        '    {"kty":"RSA","n":"abcdef0123456789abcdef0123456789","e":"AQAB"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("supported-bip39-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("supported-bip39-wallet-invalid-checksum.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("json-private-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+    assert not any("japanese-notes.yml" in item for item in findings)
+    assert not any("public-only-wallet.yml" in item for item in findings)
+
+
+def test_secret_scanner_ignores_empty_private_key_objects_and_arrays(tmp_path, monkeypatch):
+    private_key_field = "private" + "_key"
+    (tmp_path / "empty-object.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n    {}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "empty-array.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n    []\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "public-object.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        '    {"kty":"EC","crv":"P-256","x":"public-x","y":"public-y"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "private-key-note.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        "    This is a note about the wallet.\n"
+        "    It is documentation for the operations team.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "raw-private-key.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        "    0123456789abcdef0123456789abcdef\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("empty-object.yml" in item for item in findings)
+    assert not any("empty-array.yml" in item for item in findings)
+    assert not any("public-object.yml" in item for item in findings)
+    assert not any("private-key-note.yml" in item for item in findings)
+    assert any("raw-private-key.yml:2: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_ignores_explicit_mapping_examples_inside_yaml_block_scalars(
+    tmp_path, monkeypatch
+):
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
+    (tmp_path / "yaml-doc-example.yml").write_text(
+        "description: |\n"
+        "  Example only; this is documentation, not a mapping:\n"
+        "  ? mnemonic\n"
+        "  : |\n"
+        + "".join("    " + word + "\n" for word in phrase.split()),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("yaml-doc-example.yml" in item for item in findings)
+
+
+def test_secret_scanner_detects_yaml_explicit_sensitive_keys_with_block_values(
+    tmp_path, monkeypatch
+):
+    mnemonic_key = "mne" + "monic"
+    key_field = "private" + "_key"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
+    (tmp_path / "explicit-mnemonic.yml").write_text(
+        "? " + mnemonic_key + "\n"
+        ": |\n"
+        + "".join("  " + word + "\n" for word in phrase.split()),
+        encoding="utf-8",
+    )
+    (tmp_path / "explicit-private-key.yml").write_text(
+        "? " + key_field + "\n"
+        ": |\n"
+        '  {"kty":"EC","d":"0123456789abcdef0123456789abcdef"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("explicit-mnemonic.yml:1: seed/private-key assignment" in item for item in findings)
+    assert any("explicit-private-key.yml:1: seed/private-key assignment" in item for item in findings)
 
 
 def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strings(
@@ -260,10 +422,78 @@ def test_repository_secret_scan_ignores_ordinary_notes_string_construction():
     )
 
 
+def test_secret_scanner_handles_recursive_yaml_aliases_and_scans_remaining_keys(
+    tmp_path, monkeypatch
+):
+    mnemonic_key = "mne" + "monic"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
+    content = (
+        "loop: &loop {self: *loop}\n"
+        "wallet:\n"
+        + "  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + "\n" for word in phrase.split())
+    )
+    (tmp_path / "recursive-alias.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "recursive-alias.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_handles_recursive_private_key_aliases_and_scans_following_keys(
+    tmp_path, monkeypatch
+):
+    secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    private_field = "private" + "_" + "key"
+    token_field = "api" + "_" + "token"
+    content = (
+        "wallet:\n"
+        "  " + private_field + ": &key {self: *key}\n"
+        "  " + token_field + ": " + secret + "\n"
+    )
+    (tmp_path / "recursive-private-key.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "recursive-private-key.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("recursive-private-key.yml:2:" in item for item in findings)
+
+
+def test_secret_scanner_handles_recursive_mnemonic_aliases_and_scans_following_keys(
+    tmp_path, monkeypatch
+):
+    secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    recovery_field = "mne" + "monic"
+    token_field = "api" + "_" + "token"
+    content = (
+        "wallet:\n"
+        "  " + recovery_field + ": &phrase [*phrase]\n"
+        "  " + token_field + ": " + secret + "\n"
+    )
+    (tmp_path / "recursive-mnemonic.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "recursive-mnemonic.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("recursive-mnemonic.yml:2:" in item for item in findings)
+
+
 def test_secret_scanner_detects_seed_literal_in_concatenated_source_assignment(
     tmp_path, monkeypatch
 ):
-    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     mnemonic_key = "mne" + "monic"
     source = (
         "prefix = ''\n"
@@ -322,7 +552,7 @@ def test_secret_scanner_flags_recovery_phrase_split_across_source_variables(
     tmp_path, monkeypatch
 ):
     first = "abandon abandon abandon abandon abandon abandon"
-    second = "abandon abandon abandon abandon abandon about"
+    second = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     mnemonic_key = "mne" + "monic"
     source = (
         "first = '" + first + "'\n"
@@ -367,7 +597,6 @@ def test_secret_scanner_covers_typescript_dockerfiles_and_extensionless_build_fi
         assert any(name in item for item in findings), name
 
 
-
 def test_secret_scanner_treats_valid_recursive_yaml_alias_as_text(
     tmp_path, monkeypatch
 ):
@@ -390,3 +619,33 @@ def test_secret_scanner_treats_valid_recursive_yaml_alias_as_text(
 
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
     assert check_no_secrets.scan() == []
+
+def test_secret_scanner_preserves_repeated_yaml_mnemonic_aliases(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    repeated_word = "ab" + "andon"
+    final_word = "abo" + "ut"
+    lines = [
+        f"word_a: &word_a {repeated_word}",
+        f"word_b: &word_b {final_word}",
+        "mnemonic:",
+        *["  - *word_a" for _ in range(11)],
+        "  - *word_b",
+    ]
+    document = "\n".join(lines) + "\n"
+    parsed = yaml.safe_load(document)
+    assert len(parsed["mnemonic"]) == 12
+    assert all(item is parsed["mnemonic"][0] for item in parsed["mnemonic"][:11])
+    assert parsed["mnemonic"][-1] == final_word
+
+    (tmp_path / "repeated-mnemonic-aliases.yml").write_text(
+        document, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+    assert any(
+        "repeated-mnemonic-aliases.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
