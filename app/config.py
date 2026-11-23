@@ -191,6 +191,9 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # Customer paper is spot-only; keep its default fee separate from derivatives research.
+    # This is an unverified assumption, not a venue-specific calibration.
+    customer_paper_spot_taker_bps: float = 10.0
     # Optional immediate-fill cost model inputs are retained for the standalone
     # estimator/tests; the active executor remains bar-driven and does not use them.
     paper_impact_max_participation_rate: float | None = None
