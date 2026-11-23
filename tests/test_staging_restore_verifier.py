@@ -100,6 +100,9 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
     assert "restore audit target" in runbook
+    assert "Supabase Free projects do not receive automatic scheduled database backups" in runbook
+    assert "restore-to-new-project flow requires a paid plan" in runbook
+    assert "Do not treat the existing manual SQL import as a provider restore operation" in runbook
     assert "The current Free single-project setup has no verified separate restore target" in runbook
     assert "full restore certification" in runbook
     assert "SOURCE_SUPABASE_PROJECT_REF: ${{ inputs.source_supabase_project_ref }}" in workflow
