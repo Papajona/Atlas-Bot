@@ -8,6 +8,8 @@ helpers preserve the response shape while limiting symbol count and concurrency.
 from __future__ import annotations
 
 import asyncio
+import json
+import unicodedata
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -24,6 +26,14 @@ def normalize_symbols(raw: str | Iterable[str], limit: int = MAX_SYMBOLS) -> lis
     out: list[str] = []
     for part in parts:
         symbol = str(part).strip()
+        # Reject control/format characters, including CR/LF and Unicode line separators,
+        # before a customer value can reach a log message or an exchange adapter.
+        if any(
+            unicodedata.category(char).startswith("C")
+            or unicodedata.category(char) in {"Zl", "Zp"}
+            for char in symbol
+        ):
+            continue
         if not symbol or len(symbol) > MAX_SYMBOL_LENGTH or symbol in seen:
             continue
         seen.add(symbol)
@@ -54,9 +64,11 @@ async def scan_symbols(
             return {"symbol": symbol, **metrics(frame)}
         except Exception:
             if logger is not None:
+                # JSON escaping prevents log-line injection even if this helper is
+                # called directly with a value that bypassed normalize_symbols().
                 logger.warning(
                     "market_scanner_symbol_failed symbol=%s",
-                    symbol,
+                    json.dumps(symbol, ensure_ascii=True),
                     exc_info=True,
                 )
             return {
