@@ -9,7 +9,8 @@ from urllib.parse import urlsplit
 
 
 def validate_base_url(value: str) -> str:
-    parsed = urlsplit(str(value or "").strip())
+    normalized = str(value or "").strip()
+    parsed = urlsplit(normalized)
     if not parsed.hostname or parsed.username is not None or parsed.password is not None:
         raise ValueError("base URL must contain a host and must not contain credentials")
     if parsed.query or parsed.fragment:
@@ -19,14 +20,14 @@ def validate_base_url(value: str) -> str:
     except ValueError as exc:
         raise ValueError("base URL contains an invalid port") from exc
     if parsed.scheme == "https":
-        return value.rstrip("/")
+        return normalized.rstrip("/")
     if parsed.scheme == "http":
         try:
             loopback = ipaddress.ip_address(parsed.hostname).is_loopback
         except ValueError:
             loopback = parsed.hostname.lower() == "localhost"
         if loopback:
-            return value.rstrip("/")
+            return normalized.rstrip("/")
     raise ValueError("base URL must use HTTPS, or HTTP on loopback only")
 
 
