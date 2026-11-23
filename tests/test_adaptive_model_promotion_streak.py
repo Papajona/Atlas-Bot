@@ -3,6 +3,7 @@ first time its walk-forward gate passed -- one good daily cycle was enough. Thes
 cover the new consecutive-pass requirement: a challenger must clear the same gate on
 `policy.consecutive_passes_required` consecutive evaluation cycles (tracked in a streak
 file, reset by any failure) before it is actually promoted."""
+import hashlib
 import json
 
 import numpy as np
@@ -53,12 +54,14 @@ def mocked_training(monkeypatch, tmp_path):
     """Avoid real model training/sklearn work -- these tests are about the promotion
     bookkeeping, not the training pipeline (covered elsewhere)."""
     def fake_train_model(df, model_path, min_train=800, folds=5, asset="crypto"):
+        model_bytes = b"fake-model-bytes"
         with open(model_path, "wb") as fh:
-            fh.write(b"fake-model-bytes")
+            fh.write(model_bytes)
+        digest = hashlib.sha256(model_bytes).hexdigest()
         meta_path = str(model_path) + ".meta.json"
-        with open(meta_path, "w") as fh:
-            json.dump({"ok": True}, fh)
-        return {"model_sha256": "deadbeef", "features": 12}
+        with open(meta_path, "w", encoding="utf-8") as fh:
+            json.dump({"model_sha256": digest, "manifest_signature": ""}, fh)
+        return {"model_sha256": digest, "features": 12}
 
     monkeypatch.setattr(adaptive_bot, "train_model", fake_train_model)
     monkeypatch.setattr(adaptive_bot, "verify_model_file", lambda *a, **k: True)
@@ -97,6 +100,9 @@ def test_two_consecutive_passes_promotes_with_default_policy(mocked_training):
         assert second["status"] == "CHAMPION_PROMOTED"
         assert second["consecutive_passes"] == 2
         assert model_path.exists()
+        pointer = json.loads(model_path.read_text())
+        assert pointer["artifact_pointer_schema"] == 1
+        assert (model_path.parent / pointer["artifact_file"]).read_bytes() == b"fake-model-bytes"
     finally:
         ab.ai_walk_forward_backtest = orig
 
