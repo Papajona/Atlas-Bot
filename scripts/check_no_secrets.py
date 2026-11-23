@@ -202,6 +202,8 @@ def _nonempty_private_scalar(value: str) -> bool:
     if not candidate:
         return False
     normalized = candidate.lower()
+    if normalized in {"null", "none", "~"}:
+        return False
     if normalized in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
         return False
     return True
@@ -237,7 +239,7 @@ def _yaml_node_has_private_material(node) -> bool:
     """Classify private-key YAML values, including JSON JWKs and native YAML mappings."""
     if isinstance(node, ScalarNode):
         candidate = node.value.strip()
-        if not candidate:
+        if not candidate or candidate.lower() in {"null", "none", "~"}:
             return False
         if candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
             return False
@@ -300,7 +302,7 @@ def _yaml_value_is_sensitive(key: str, value_node) -> bool:
 def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
     """Parse YAML mappings so quoted block-scalar examples are never treated as keys."""
     try:
-        root = yaml.compose(text, Loader=yaml.SafeLoader)
+        roots = list(yaml.compose_all(text, Loader=yaml.SafeLoader))
     except yaml.YAMLError:
         return None
     findings: dict[int, str] = {}
@@ -317,8 +319,9 @@ def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
             for child in node.value:
                 visit(child)
 
-    if root is not None:
-        visit(root)
+    for root in roots:
+        if root is not None:
+            visit(root)
     return findings
 
 
