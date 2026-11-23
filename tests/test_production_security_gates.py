@@ -806,6 +806,9 @@ def test_audit_reader_provisioning_is_strictly_read_only_and_separate_from_paper
     assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_audit_reader" in sql
     assert "ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on" in sql
     assert "GRANT SELECT (created_at, request_id, provider_id, provider, amount, currency, status, provider_status)" in sql
+    assert "GRANT SELECT (id, entry_type, idempotency_key, reference_type, reference_id, created_at)" in sql
+    verifier = (ROOT / "scripts" / "verify_staging_restore.py").read_text(encoding="utf-8")
+    assert '"ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id", "created_at")' in verifier
     assert "GRANT SELECT ON TABLE" not in sql
     for forbidden in ("GRANT INSERT", "GRANT UPDATE", "GRANT DELETE", "GRANT TRUNCATE", "GRANT EXECUTE"):
         assert forbidden not in sql
