@@ -204,6 +204,10 @@ def reconcile_rows(
     """Compare provider payout rows to DB withdrawals and their terminal ledger journals."""
     failures: list[str] = []
     provider_rows = {row["provider_id"]: row for row in statement_rows}
+    if not statement_rows:
+        failures.append(
+            "provider statement contains no payout rows; zero activity cannot be independently verified"
+        )
     if not database_rows and withdrawal_journal_count:
         failures.append("withdrawal journals exist in the specified window without matching withdrawal rows")
     db_by_id: dict[str, dict[str, Any]] = {}
