@@ -110,3 +110,23 @@ def test_secret_scanner_finds_embedded_and_following_assignments(tmp_path, monke
     assert any("embedded.py" in item for item in findings)
     assert any("after-statement.js" in item for item in findings)
     assert not any("unrelated.yml" in item for item in findings)
+
+
+
+def test_secret_scanner_ignores_source_attribute_wiring_not_quoted_credentials(
+    tmp_path, monkeypatch
+):
+    source = (
+        "api_key = settings.exchange_api_key\\n"
+        "api_secret = settings.exchange_api_secret\\n"
+        "password = config.customer_password\\n"
+        "token = secrets.token_urlsafe(24)\\n"
+        'payload = "password=qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"\\n'
+    )
+    (tmp_path / "source.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("source.py" in item for item in findings)
+    assert len([item for item in findings if "source.py" in item]) == 1
