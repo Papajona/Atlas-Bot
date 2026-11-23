@@ -26,13 +26,13 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .paper_execution_model import configured_paper_execution_settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, BenchmarkPromptCapture, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -1613,6 +1613,38 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
+async def _benchmark_capture_retention_loop() -> None:
+    """Delete expired consent captures hourly, even when pg_cron is unavailable."""
+    from .benchmark_capture import (
+        benchmark_capture_permissions,
+        purge_expired_benchmark_captures,
+    )
+
+    while True:
+        try:
+            async with SessionLocal() as db:
+                permissions = await benchmark_capture_permissions(db)
+                if permissions["can_delete"]:
+                    deleted = await purge_expired_benchmark_captures(db)
+                    await db.commit()
+                    _mark_worker_loop_success("benchmark-capture-retention")
+                else:
+                    state = _worker_loop_health.setdefault(
+                        "benchmark-capture-retention", {"restart_count": 0}
+                    )
+                    state["status"] = "DISABLED"
+                    state["reason"] = "database_role_has_no_benchmark_capture_delete"
+                    deleted = 0
+            if deleted:
+                logger.info("benchmark_capture_retention_deleted count=%s", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _mark_worker_loop_failure("benchmark-capture-retention", exc)
+            logger.exception("benchmark_capture_retention_cleanup_failed")
+        await asyncio.sleep(60 * 60)
+
+
 async def startup():
     global _background_task, _usdt_task
     assert_multidict_safe_backend()
@@ -1701,6 +1733,16 @@ async def startup():
             _track_worker_task(_supervise_worker_loop(_executor_controller_loop, "executor-controller"))
     elif process_role == "job":
         _track_worker_task(_heartbeat_loop())
+
+
+    # Keep consented captures on the same bounded application-side expiry path
+    # on plans where pg_cron is unavailable. Read-only runtimes self-disable.
+    _track_worker_task(
+        _supervise_worker_loop(
+            _benchmark_capture_retention_loop,
+            "benchmark-capture-retention",
+        )
+    )
 
 
 async def shutdown():
@@ -7526,6 +7568,62 @@ async def list_alerts(authorization: str | None = Header(default=None)):
         return [{"id":r.id,"type":r.alert_type,"symbol":r.symbol,"threshold":r.threshold,"condition":r.condition,"channel":r.channel,"status":r.status,"message":r.message,"triggered_at":r.triggered_at.isoformat() if r.triggered_at else None} for r in rows]
 
 
+_BENCHMARK_CAPTURE_RETENTION_DAYS = 90
+
+
+@app.get("/api/customer/benchmark-captures")
+async def customer_benchmark_capture_status(authorization: str | None = Header(default=None)):
+    """Return only the signed-in customer's count of unexpired opted-in captures."""
+    async with SessionLocal() as db:
+        profile, _claims = await get_customer(authorization, db, require_aal2=False)
+        from .benchmark_capture import benchmark_capture_permissions, purge_expired_benchmark_captures
+        permissions = await benchmark_capture_permissions(db)
+        if not permissions["can_select"] or not permissions["can_delete"]:
+            return {
+                "status": "UNAVAILABLE",
+                "count": None,
+                "retention_days": _BENCHMARK_CAPTURE_RETENTION_DAYS,
+                "consent_version": "atlas-strategy-benchmark-v1",
+                "reason": "benchmark capture storage is unavailable to this read-only runtime",
+            }
+        # Never expose platform-wide expiry-deletion totals in a customer response.
+        await purge_expired_benchmark_captures(db)
+        now = datetime.now(timezone.utc)
+        count = int((await db.execute(
+            select(func.count(BenchmarkPromptCapture.id)).where(
+                BenchmarkPromptCapture.customer_id == profile.id,
+                BenchmarkPromptCapture.expires_at > now,
+            )
+        )).scalar_one() or 0)
+        await db.commit()
+        return {
+            "status": "AVAILABLE", "count": count,
+            "retention_days": _BENCHMARK_CAPTURE_RETENTION_DAYS,
+            "consent_version": "atlas-strategy-benchmark-v1",
+        }
+
+
+@app.delete("/api/customer/benchmark-captures")
+async def customer_delete_benchmark_captures(authorization: str | None = Header(default=None)):
+    """Delete every benchmark submission owned by the authenticated customer."""
+    async with SessionLocal() as db:
+        profile, _claims = await get_customer(authorization, db, require_aal2=True)
+        from .benchmark_capture import benchmark_capture_permissions
+        permissions = await benchmark_capture_permissions(db)
+        if not permissions["can_delete"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Benchmark submissions are unavailable in this read-only runtime",
+            )
+        result = await db.execute(
+            delete(BenchmarkPromptCapture).where(
+                BenchmarkPromptCapture.customer_id == profile.id
+            )
+        )
+        await db.commit()
+        return {"deleted": int(result.rowcount or 0), "remaining": 0}
+
+
 @app.post("/api/customer/strategy-lab/candidates")
 async def create_strategy_candidate(req: StrategyLabRequest, authorization: str | None = Header(default=None)):
     _assert_established_noncrypto(MarketRequest(asset=req.asset, symbol=req.symbol, exchange=req.exchange, timeframe=req.timeframe or "1h", days=req.days))
@@ -7567,9 +7665,22 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
         }
         spec["live_authority"] = False
         spec["ai_provider"] = generated["ai"]
+        benchmark_capture = {"status": "NOT_REQUESTED"}
+        if req.benchmark_opt_in:
+            from .benchmark_capture import capture_strategy_prompt
+            benchmark_capture = await capture_strategy_prompt(
+                db,
+                customer_id=int(profile.id),
+                prompt=req.prompt,
+                native_output={"strategy": spec, "ai": generated["ai"]},
+                asset=req.asset,
+                symbol=req.symbol,
+                exchange=req.exchange,
+                timeframe=candidate_timeframe,
+            )
         row=StrategyCandidate(customer_id=profile.id,name=req.name,asset=req.asset,symbol=req.symbol,exchange=req.exchange,timeframe=candidate_timeframe,spec_json=json.dumps(spec,separators=(",",":")))
         db.add(row); await db.commit(); await db.refresh(row)
-        return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST"}
+        return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST", "benchmark_capture": benchmark_capture}
 
 def _candidate_backtest_config(spec: dict[str, Any]) -> StrategyConfig:
     """Build the backtest config from the candidate's actual supported stop/target parameters."""
@@ -7798,7 +7909,8 @@ async def strategy_builder(req: StrategyBuilderRequest, authorization: str | Non
     # relying on create_strategy_candidate() as an implicit security side effect.
     await customer_claims(authorization, require_aal2=True)
     lab_req = StrategyLabRequest(name=req.name, prompt=req.prompt, asset=req.asset, symbol=req.symbol,
-                                 exchange=req.exchange, timeframe=req.timeframe)
+                                 exchange=req.exchange, timeframe=req.timeframe,
+                                  benchmark_opt_in=req.benchmark_opt_in)
     created = await create_strategy_candidate(lab_req, authorization)
     spec = created["spec"]
     return {
