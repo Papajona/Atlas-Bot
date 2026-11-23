@@ -45,6 +45,12 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
         encoding="utf-8",
     )
 
+    seed_marker_value = "ci-only-" + "rotated-seed-material-123456789"
+    (tmp_path / "wallet.env").write_text(
+        "private" + "_key=" + seed_marker_value + "\\n",
+        encoding="utf-8",
+    )
+
     (tmp_path / "signing.pem").write_text(
         "-----BEGIN PRIVATE KEY-----\n", encoding="utf-8"
     )
@@ -63,6 +69,7 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
     assert any("signing.pem" in item and "private-key" in item for item in findings)
     assert any("android.xml" in item for item in findings)
     assert any("fixture-marker.yml" in item for item in findings)
+    assert any("wallet.env" in item for item in findings)
     assert not any("deploy-example.md" in item for item in findings)
     assert not any("derived-token.py" in item for item in findings)
     assert not any("ci-fixture.yml" in item for item in findings)
