@@ -94,9 +94,14 @@ def load_provider_statement(path: Path) -> list[dict[str, str]]:
                 raise ValueError(f"Unrecognized provider status at CSV line {line_no}")
             parse_utc(row["event_time_utc"], f"event_time_utc line {line_no}")
             rows.append(row)
-    # A header-only provider export is valid evidence of zero payout activity.
-    # The audit later accepts it only when the database has no matching
-    # withdrawals AND no withdrawal journals in the same time window.
+    if not rows:
+        # A caller can manufacture a header-only CSV. Without an independent,
+        # verifiable provider-signed zero-activity attestation, it is not evidence
+        # that no payout transactions occurred in the selected window.
+        raise ValueError(
+            "Provider statement contains no payout records; zero-activity exports "
+            "require independent provider-authenticated evidence and cannot pass this workflow"
+        )
     return rows
 
 
@@ -141,6 +146,19 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
             upper(coalesce(j.reference_type, '')) = 'WITHDRAWAL'
             OR upper(coalesce(j.entry_type, '')) IN (
               'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
+            )
+          )
+          AND (
+            -- Count journals tied to the selected provider's withdrawals.
+            EXISTS (
+              SELECT 1 FROM matching_withdrawals w
+              WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
+            )
+            -- Unlinked/ambiguous withdrawal journals cannot be attributed safely
+            -- to another provider; retain them as blockers rather than ignore them.
+            OR NOT EXISTS (
+              SELECT 1 FROM public.withdrawals w
+              WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
             )
           )
       ),
