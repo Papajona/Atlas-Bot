@@ -110,7 +110,7 @@ def scan() -> list[str]:
                 continue
             seed_match = TRON_SEED.search(line)
             if seed_match and "re.compile" not in line:
-                seed_value = seed_match.group("value").strip().strip("\\\"'").strip().lower()
+                seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
                 if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
                     findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                     continue
