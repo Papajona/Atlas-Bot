@@ -64,6 +64,7 @@ from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, 
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
 from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay, verify_customer_ledger_balances_match_journals
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
+from .market_scanner import MAX_CONCURRENT_FETCHES as _SCANNER_MAX_CONCURRENT_FETCHES, normalize_symbols as _scanner_normalize_symbols, scan_symbols as _scanner_scan_symbols
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
@@ -7257,9 +7258,15 @@ async def list_customer_webhooks(authorization:str|None=Header(default=None)):
         return [{"id":r.id,"name":r.name,"status":r.status,"created_at":r.created_at.isoformat(),"last_used_at":r.last_used_at.isoformat() if r.last_used_at else None,"url":f"/api/webhooks/{r.id}"} for r in rows]
 
 
+_CUSTOMER_WEBHOOK_MAX_BODY_BYTES = 64 * 1024
+
+
 @app.post("/api/webhooks/{endpoint_id}")
 async def receive_customer_webhook(endpoint_id:int, request:Request, x_atlas_webhook_token: str | None = Header(default=None), x_atlas_event_id:str|None=Header(default=None)):
     raw=await request.body()
+    # Events are persisted verbatim; bound each one well below the global request cap.
+    if len(raw) > _CUSTOMER_WEBHOOK_MAX_BODY_BYTES:
+        raise HTTPException(413,"Webhook payload too large")
     async with SessionLocal() as db:
         endpoint=(await db.execute(select(WebhookEndpoint).where(WebhookEndpoint.id==endpoint_id,WebhookEndpoint.status=="ACTIVE"))).scalar_one_or_none()
         if not endpoint: raise HTTPException(404,"Webhook endpoint not found")
@@ -7307,19 +7314,26 @@ def _scanner_metrics(df):
     return {"price":last,"rsi":rsi,"ema20":float(ema20),"ema50":float(ema50),"atr":float(atr),"volume_ratio":vol_ratio,"score":float(score),"signal":"LONG" if score>=0.35 else "SHORT" if score<=-0.35 else "WATCH"}
 
 
+# Process-wide bound on concurrent scanner fetch threads (each builds its own CCXT client).
+_SCANNER_SEMAPHORE = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT_FETCHES)
+
+
 @app.get("/api/customer/market-scanner")
 async def customer_market_scanner(exchange: str="binance", symbols: str="BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT", authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
         profile,_=await get_customer(authorization,db,require_aal2=False)
         await _require_feature(db,profile.id,"market_scanner")
-    requested=[x.strip() for x in symbols.split(",") if x.strip()][:20]
-    async def one(sym):
-        try:
-            df=await asyncio.to_thread(fetch_crypto,sym,exchange,"15m",30,True)
-            return {"symbol":sym,**_scanner_metrics(df)}
-        except Exception as exc:
-            return {"symbol":sym,"signal":"ERROR","error":str(exc)[:180]}
-    results=await asyncio.gather(*(one(s) for s in requested))
+    import ccxt
+    if exchange not in ccxt.exchanges:
+        raise HTTPException(422,"Unsupported exchange")
+    requested=_scanner_normalize_symbols(symbols)
+    results=await _scanner_scan_symbols(
+        requested,
+        fetch=lambda sym: fetch_crypto(sym,exchange,"15m",30,True),
+        metrics=_scanner_metrics,
+        semaphore=_SCANNER_SEMAPHORE,
+        logger=logging.getLogger(__name__),
+    )
     return {"exchange":exchange,"timeframe":"15m","results":sorted(results,key=lambda x: abs(float(x.get("score",0))),reverse=True)}
 
 
