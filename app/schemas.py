@@ -27,6 +27,9 @@ class CustomerPaperMarketRequest(MarketRequest):
 
 
 class ResearchMarketRequest(MarketRequest):
+    # Controls consumed by research_review, bounded to avoid unbounded caller work.
+    folds: int = Field(default=5, ge=2, le=10)
+    min_train: int = Field(default=800, ge=100, le=50000)
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
     point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)
