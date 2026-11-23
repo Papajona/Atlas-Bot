@@ -169,12 +169,11 @@ Once the bucket retention policy is locked, the dedicated Cloud SQL target/datab
   # not terminate an operator's interactive Cloud Shell session.
   set -euo pipefail
 
-
   # Installs the pinned PostgreSQL 17 client packages in this Cloud Shell environment.
   bash scripts/install_pinned_postgresql_client.sh
 
   # The installer exports PATH only within its own process, so select and verify
-  # PostgreSQL 17.12 explicitly in this shell before preparing the custom archive.
+  # PostgreSQL 17.12 explicitly within this procedure before preparing the custom archive.
   export PATH="/usr/lib/postgresql/17/bin:$PATH"
   test "$(command -v pg_restore)" = "/usr/lib/postgresql/17/bin/pg_restore"
   pg_restore --version
@@ -187,10 +186,11 @@ Once the bucket retention policy is locked, the dedicated Cloud SQL target/datab
     --output /secure/path/to/source-prepared-postgresql-17.sql
   PYTHONPATH=. python scripts/compare_cloud_sql_import_dumps.py \
     --fingerprint /secure/path/to/source-prepared-postgresql-17.sql
-  ```
 )
+```
 
-The installer changes only the Cloud Shell VM's local package/repository configuration; it does not create or modify Google Cloud resources. It checks the signed PGDG main suite first and, if 17.12 has been rotated out, adds the signed PGDG archive suite using the same keyring and checks again. It remains fail-closed if neither signed suite provides the exact 17.12 client package or compatible dependencies. The preparation helper calls pg_restore by its PATH name, so the explicit PATH export is required in a separate Cloud Shell session.
+
+The installer changes only the Cloud Shell VM's local package/repository configuration; it does not create or modify Google Cloud resources. It checks the signed PGDG main suite first and, if 17.12 has been rotated out, adds the signed PGDG archive suite using the same keyring and checks again. It remains fail-closed if neither signed suite provides the exact 17.12 client package or compatible dependencies. Run the entire fenced procedure in one Cloud Shell session. The explicit PATH export is scoped to its subshell, which keeps the required PostgreSQL 17.12 binaries available to both preparation commands without altering the operator's parent shell; later interactive pg_restore/pg_dump commands need their own PATH export.
 
 The second command reports both the raw prepared-file SHA-256 and the canonical SHA-256. Record the **canonical** value only after independently checking the source object's exact generation, size/checksum and PostgreSQL 17 conversion evidence. The value must match the code-reviewed `APPROVED_SOURCE_PREPARED_CANONICAL_SHA256` constant in the verifier; changing the GitHub variable alone cannot change the approved source. Set the protected staging environment variable to that same value as an additional configuration check; never derive the expected value from the import job's own output or substitute the sanitized candidate hash. The fingerprint command is read-only and does not upload the source SQL, contact a database, or set the GitHub variable. Keep the original source reference, source-conversion fingerprint and candidate reference as separate evidence.
 
