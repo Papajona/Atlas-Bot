@@ -308,8 +308,18 @@ def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
     except yaml.YAMLError:
         return None
     findings: dict[int, str] = {}
+    visited_nodes: set[int] = set()
 
     def visit(node) -> None:
+        if node is None:
+            return
+        node_identity = id(node)
+        if node_identity in visited_nodes:
+            return
+        # YAML aliases can point back to an ancestor node. Mark before walking
+        # children so recursive aliases terminate without skipping other keys.
+        visited_nodes.add(node_identity)
+
         if isinstance(node, MappingNode):
             for key_node, value_node in node.value:
                 if isinstance(key_node, ScalarNode):
