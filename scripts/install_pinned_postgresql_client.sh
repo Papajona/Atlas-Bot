@@ -88,15 +88,14 @@ if [[ -z "$package_version" ]]; then
 fi
 
 echo "Installing PostgreSQL $POSTGRES_CLIENT_RELEASE client package version $package_version."
-# Keep apt's default no-downgrade policy. If a newer major-17 client is already
-# installed, fail closed instead of granting a global downgrade permission that
-# could also downgrade unrelated packages while resolving dependencies.
+# Keep apt's default no-downgrade policy. If the pinned major-17 client is
+# older than the installed client package, fail closed rather than downgrading it.
 client_package="postgresql-client-${POSTGRES_CLIENT_MAJOR}"
 installed_package_status="$(dpkg-query -W -f='${db:Status-Status}' "$client_package" 2>/dev/null || true)"
 if [[ "$installed_package_status" == "installed" ]]; then
   installed_package_version="$(dpkg-query -W -f='${Version}' "$client_package")"
   if dpkg --compare-versions "$installed_package_version" gt "$package_version"; then
-    echo "BLOCKED: installed $client_package version $installed_package_version is newer than pinned $package_version; refusing package downgrades." >&2
+    echo "BLOCKED: installed $client_package version $installed_package_version is newer than pinned $package_version; refusing to downgrade this client package." >&2
     exit 1
   fi
 fi
