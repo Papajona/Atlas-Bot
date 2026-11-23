@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import importlib.util
 from decimal import Decimal
+
+import pytest
 from pathlib import Path
 
 from alembic.operations import Operations
@@ -101,7 +103,7 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
                     id, filled_quantity, average_fill_price, notional, fee,
                     mode, customer_id, side, exchange, symbol, created_at, updated_at
                 ) VALUES
-                    (100, 1, 100, 100, 0, 'PAPER', 42, 'buy', 'binance',
+                    (100, 1, 100, 100, 0.4, 'PAPER', 42, 'buy', 'binance',
                      'BTC/USDT', '2026-01-01 08:55:00', '2026-01-01 08:55:00'),
                     (200, 1, 100, 100, 0, 'PAPER', 42, 'sell', 'binance',
                      'BTC/USDT', '2026-01-01 09:54:00', '2026-01-01 10:00:00'),
@@ -109,6 +111,12 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
                     -- after exit into a new position: must not be attributed.
                     (201, 1, 101, 101, 0, 'PAPER', 42, 'sell', 'binance',
                      'BTC/USDT', '2026-01-01 09:59:00', '2026-01-01 10:01:00')
+            """))
+            # A still-open paper position exercises the later entry-fee update.
+            # Its 1-unit remainder fully reconciles to the 1-unit entry order.
+            connection.execute(text("""
+                INSERT INTO positions (id, entry_trade_id, quantity)
+                VALUES (1, 100, 1)
             """))
             connection.execute(text("""
                 INSERT INTO trade_learning_episodes (
@@ -169,6 +177,14 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert float(completed["net_pnl"]) == 5.0
             assert float(completed["net_return_bps"]) == 500.0
             assert float(completed["return_bps"]) == 500.0
+
+            remaining_position = connection.execute(text("""
+                SELECT entry_fee, entry_fee_basis_known
+                FROM positions
+                WHERE id = 1
+            """)).mappings().one()
+            assert float(remaining_position["entry_fee"]) == pytest.approx(0.4)
+            assert remaining_position["entry_fee_basis_known"] in (True, 1)
     finally:
         engine.dispose()
 

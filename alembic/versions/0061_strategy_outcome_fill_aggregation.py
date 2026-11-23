@@ -958,6 +958,17 @@ def upgrade() -> None:
             entry_fee_basis_known = :known
         WHERE id = :id
     """)
+
+    def _execute_position_update(values: dict[str, object]) -> None:
+        # Match the outcome-update compatibility path: sqlite3 cannot bind
+        # Decimal values through untyped text() parameters. Keep exact Decimal
+        # arithmetic and bind types unchanged for PostgreSQL.
+        if bind.dialect.name == "sqlite":
+            values = {
+                key: float(value) if isinstance(value, Decimal) else value
+                for key, value in values.items()
+            }
+        bind.execute(update_position, values)
     last_position_id = 0
     while True:
         position_rows = [
@@ -990,7 +1001,7 @@ def upgrade() -> None:
                 entry_trades.get(entry_id), remaining_quantity, closed_quantity
             )
             known = remaining_fee is not None
-            bind.execute(update_position, {
+            _execute_position_update({
                 "id": int(position["id"]),
                 "entry_fee": remaining_fee if known else Decimal("0"),
                 "known": known,
