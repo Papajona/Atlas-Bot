@@ -450,6 +450,13 @@ def upgrade() -> None:
                     existing_nullable=False,
                     nullable=True,
                 )
+            if "return_bps" in outcome_columns:
+                batch_op.alter_column(
+                    "return_bps",
+                    existing_type=sa.Float(),
+                    existing_nullable=False,
+                    nullable=True,
+                )
             if "net_return_bps" in outcome_columns:
                 batch_op.alter_column(
                     "net_return_bps",
@@ -463,6 +470,14 @@ def upgrade() -> None:
                 "strategy_outcomes",
                 "net_pnl",
                 existing_type=sa.Numeric(38, 18),
+                existing_nullable=False,
+                nullable=True,
+            )
+        if "return_bps" in outcome_columns:
+            op.alter_column(
+                "strategy_outcomes",
+                "return_bps",
+                existing_type=sa.Float(),
                 existing_nullable=False,
                 nullable=True,
             )
