@@ -52,7 +52,7 @@ def scan() -> list[str]:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
             seed_match = TRON_SEED.search(line)
-            if seed_match and "re.compile" not in line and not any(p in seed_match.group(1).lower() for p in PLACEHOLDERS) and "<" not in seed_match.group(1):
+            if seed_match and "re.compile" not in line and seed_match.group(1).lower() not in PLACEHOLDERS and "<" not in seed_match.group(1):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             for match in ASSIGNMENT.finditer(line):
