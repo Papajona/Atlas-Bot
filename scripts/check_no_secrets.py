@@ -92,7 +92,7 @@ def _is_helper_call(value: str, remainder: str) -> bool:
     if identifier:
         suffix = arguments[identifier.end():].lstrip()
         return suffix.startswith((",", ")", ".", "[", "="))
-    return bool(re.match(r"\\d+\\s*[,)\\]]", arguments))
+    return bool(re.match(r"\d+\s*[,\)\]]", arguments))
 
 
 def scan() -> list[str]:
