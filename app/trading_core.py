@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 import hashlib
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 import numpy as np
@@ -17,7 +18,13 @@ from .research_validation import (
     deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits,
     newey_west_mean_inference, oos_benchmark_comparison,
 )
-from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
+from .model_registry import (
+    sha256_file,
+    artifact_signature,
+    verify_artifact_signature,
+    read_model_manifest,
+    resolve_model_artifact,
+)
 from .execution_aware_research import simulate_execution_aware_strategy
 
 
@@ -423,6 +430,75 @@ def _model_paths(model_path: str):
     return p, p.with_suffix(p.suffix + ".meta.json")
 
 
+def _model_versions_directory(model_file: Path) -> Path:
+    return model_file.with_name(model_file.name + ".versions")
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory sync after publishing an immutable file or pointer."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        # Some local/test filesystems do not support directory fsync.
+        pass
+
+
+def _publish_versioned_model_pointer(
+    model_file: Path,
+    meta_file: Path,
+    staged_model: Path,
+    metadata: dict,
+    model_hash: str,
+) -> Path:
+    """Publish immutable model bytes, then atomically replace the single live pointer.
+
+    Readers first open model_file (the JSON pointer) and then read the immutable artifact
+    named in that same document. Old version files are intentionally retained so readers
+    that already captured an earlier pointer, and rollback backups, remain valid.
+    """
+    versions_dir = _model_versions_directory(model_file)
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    artifact_name = f"{model_hash}.{uuid.uuid4().hex}{model_file.suffix or '.joblib'}"
+    artifact_file = versions_dir / artifact_name
+
+    os.replace(staged_model, artifact_file)
+    _fsync_directory(versions_dir)
+
+    pointer = dict(metadata)
+    pointer.update({
+        "artifact_pointer_schema": 1,
+        "artifact_file": f"{versions_dir.name}/{artifact_name}",
+        "model_sha256": model_hash,
+    })
+    staged_pointer = model_file.with_name(
+        f"{model_file.name}.{uuid.uuid4().hex}.pointer"
+    )
+    try:
+        with staged_pointer.open("x", encoding="utf-8") as handle:
+            json.dump(pointer, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # This is the only live publication point: the complete bundle switches at once.
+        os.replace(staged_pointer, model_file)
+        _fsync_directory(model_file.parent)
+    finally:
+        staged_pointer.unlink(missing_ok=True)
+
+    # New readers use the manifest embedded in model_file. Remove any legacy sidecar only
+    # after the pointer is committed; failure to clean it does not affect the active bundle.
+    try:
+        meta_file.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return artifact_file
+
+
 def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float:
     """Score encoded {-1, 0, 1} labels even when a chronological train fold omits a class."""
     y = np.asarray(y_true, dtype=int)
@@ -516,11 +592,12 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     final_model.fit(X, encoded.to_numpy(dtype=int))
     model_file, meta_file = _model_paths(model_path)
     model_file.parent.mkdir(parents=True, exist_ok=True)
+    versions_dir = _model_versions_directory(model_file)
+    versions_dir.mkdir(parents=True, exist_ok=True)
     import joblib
-    staged_model = model_file.with_name(f"{model_file.name}.{uuid.uuid4().hex}.training")
-    staged_meta = meta_file.with_name(f"{meta_file.name}.{uuid.uuid4().hex}.training")
+    staged_model = versions_dir / f".{model_file.name}.{uuid.uuid4().hex}.training"
     try:
-        joblib.dump(final_model, staged_model)
+        joblib.dump(final_model, staged_model, compress=3)
         model_hash = sha256_file(staged_model)
         manifest_signature = _model_manifest_signature(model_hash)
         meta = {
@@ -537,26 +614,99 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
             "asset": asset,
             "max_hold": profile.max_hold,
         }
-        staged_meta.write_text(json.dumps(meta, indent=2))
-        # Do not replace the published model until signing and manifest serialization succeed.
-        # A process crash between the two renames is fail-closed: load_model rejects the mismatch.
-        staged_model.replace(model_file)
-        staged_meta.replace(meta_file)
+        _publish_versioned_model_pointer(
+            model_file, meta_file, staged_model, meta, model_hash
+        )
     finally:
         staged_model.unlink(missing_ok=True)
-        staged_meta.unlink(missing_ok=True)
     return {"samples": len(X), "features": len(FEATURE_COLUMNS), "folds": len(scores), "validation": scores, "model_sha256": model_hash}
+
+
+def promote_model_artifact(source_model_path: str, target_model_path: str) -> str:
+    """Copy a validated candidate into a new immutable bundle and atomically switch target."""
+    source_file, _source_meta_file = _model_paths(source_model_path)
+    if not source_file.is_file():
+        raise FileNotFoundError(source_file)
+    source_manifest = read_model_manifest(source_file)
+    if not source_manifest:
+        raise RuntimeError("Candidate model manifest is missing or invalid")
+    source_artifact = resolve_model_artifact(source_file, source_manifest)
+    if not source_artifact.is_file():
+        raise FileNotFoundError(source_artifact)
+    model_bytes = source_artifact.read_bytes()
+    model_hash = hashlib.sha256(model_bytes).hexdigest()
+    expected_hash = str(source_manifest.get("model_sha256") or "")
+    if expected_hash and expected_hash != model_hash:
+        raise RuntimeError("Candidate model artifact hash mismatch")
+    signature = str(source_manifest.get("manifest_signature") or "")
+    if settings.environment in {"staging", "production"}:
+        if not (settings.model_signing_public_key or settings.model_signing_key) or not signature:
+            raise RuntimeError("Candidate model artifact signature is required in staging/production")
+        if not verify_artifact_signature(model_hash, signature):
+            raise RuntimeError("Candidate model artifact signature mismatch")
+
+    target_file, target_meta_file = _model_paths(target_model_path)
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    versions_dir = _model_versions_directory(target_file)
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    staged_model = versions_dir / f".{target_file.name}.{uuid.uuid4().hex}.promotion"
+    try:
+        with staged_model.open("xb") as handle:
+            handle.write(model_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _publish_versioned_model_pointer(
+            target_file,
+            target_meta_file,
+            staged_model,
+            source_manifest,
+            model_hash,
+        )
+        return model_hash
+    finally:
+        staged_model.unlink(missing_ok=True)
 
 
 def load_model(model_path: str):
     import joblib
     model_file, meta_file = _model_paths(model_path)
-    if not model_file.exists() or not meta_file.exists():
+    if not model_file.is_file():
         raise FileNotFoundError(model_file)
-    meta = json.loads(meta_file.read_text())
-    # Read the artifact ONCE: hash, verify and deserialize the same bytes so the file cannot be
-    # swapped between verification and joblib.load (joblib is pickle -> code execution on load).
-    model_bytes = model_file.read_bytes()
+
+    # New model files are small JSON pointers to immutable versioned artifacts. Legacy
+    # releases stored the joblib bytes at model_file with a .meta.json sidecar; both formats
+    # remain readable during migration.
+    pointer_bytes = model_file.read_bytes()
+    try:
+        pointer_value = (
+            json.loads(pointer_bytes.decode("utf-8"))
+            if pointer_bytes.startswith(b"{") else None
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        pointer_value = None
+
+    is_atomic_pointer = (
+        isinstance(pointer_value, dict)
+        and pointer_value.get("artifact_pointer_schema") == 1
+    )
+    if is_atomic_pointer:
+        meta = pointer_value
+        try:
+            artifact_file = resolve_model_artifact(model_file, meta)
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("Invalid model artifact pointer") from exc
+        model_bytes = artifact_file.read_bytes()
+    else:
+        if not meta_file.is_file():
+            raise FileNotFoundError(meta_file)
+        meta = read_model_manifest(model_file)
+        try:
+            artifact_file = resolve_model_artifact(model_file, meta)
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError("Invalid model artifact pointer") from exc
+        # Read once: hash, verify and deserialize the same immutable bytes.
+        model_bytes = pointer_bytes if artifact_file == model_file else artifact_file.read_bytes()
+
     digest = hashlib.sha256(model_bytes).hexdigest()
     if digest != meta.get("model_sha256"):
         raise RuntimeError("Model artifact hash mismatch")

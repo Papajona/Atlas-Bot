@@ -66,7 +66,74 @@ def test_failed_model_signing_preserves_existing_model_and_manifest(tmp_path, mo
 
     assert model_file.read_bytes() == previous_model
     assert meta_file.read_bytes() == previous_meta
-    assert list(tmp_path.glob("*.training")) == []
+    assert list(tmp_path.rglob("*.training")) == []
+
+def test_model_bundle_switches_with_one_atomic_pointer_and_keeps_old_version_readable(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import json
+    import joblib
+    from pathlib import Path
+    from app import trading_core
+    from app.model_registry import verify_model_file
+
+    monkeypatch.setattr(trading_core.settings, "environment", "development")
+    champion = tmp_path / "champion.joblib"
+
+    # Seed an already-published immutable champion bundle.
+    champion_versions = champion.with_name(champion.name + ".versions")
+    champion_versions.mkdir()
+    old_artifact = champion_versions / "old-version.joblib"
+    joblib.dump({"generation": "old"}, old_artifact)
+    old_hash = hashlib.sha256(old_artifact.read_bytes()).hexdigest()
+    champion.write_text(
+        json.dumps({
+            "artifact_pointer_schema": 1,
+            "artifact_file": f"{champion_versions.name}/{old_artifact.name}",
+            "model_sha256": old_hash,
+            "manifest_signature": "",
+        }),
+        encoding="utf-8",
+    )
+
+    # A legacy-format candidate is accepted and re-published in the new versioned format.
+    candidate = tmp_path / "candidate.joblib"
+    joblib.dump({"generation": "new"}, candidate)
+    candidate_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    candidate.with_suffix(candidate.suffix + ".meta.json").write_text(
+        json.dumps({"model_sha256": candidate_hash, "manifest_signature": ""}),
+        encoding="utf-8",
+    )
+    champion_pointer = champion.read_bytes()
+    real_replace = trading_core.os.replace
+
+    def interrupt_pointer_replace(source, destination):
+        if Path(destination) == champion:
+            raise OSError("simulated atomic pointer publication failure")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(trading_core.os, "replace", interrupt_pointer_replace)
+    with pytest.raises(OSError, match="atomic pointer publication failure"):
+        trading_core.promote_model_artifact(str(candidate), str(champion))
+
+    # A failed pointer commit leaves the previously published champion selectable.
+    assert champion.read_bytes() == champion_pointer
+    old_model, old_meta = trading_core.load_model(str(champion))
+    assert old_model == {"generation": "old"}
+    assert old_meta["model_sha256"] == old_hash
+    assert old_artifact.is_file()
+
+    monkeypatch.setattr(trading_core.os, "replace", real_replace)
+    promoted_hash = trading_core.promote_model_artifact(str(candidate), str(champion))
+    new_model, new_meta = trading_core.load_model(str(champion))
+    assert promoted_hash == candidate_hash
+    assert new_model == {"generation": "new"}
+    assert new_meta["model_sha256"] == candidate_hash
+    assert new_meta["artifact_pointer_schema"] == 1
+    assert verify_model_file(champion, candidate_hash)
+    # Old immutable versions are not pruned while a reader or rollback may reference them.
+    assert old_artifact.is_file()
 
 
 def test_features_are_nonempty_and_finite():

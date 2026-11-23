@@ -1,15 +1,23 @@
 from __future__ import annotations
+
 import base64
-import hashlib, hmac, os, shutil
+import hashlib
+import hmac
+import json
+import os
+import shutil
 from pathlib import Path
+
 from .config import settings
 
+
 def sha256_file(path: str | Path) -> str:
-    h=hashlib.sha256()
-    with open(path,"rb") as fh:
-        for chunk in iter(lambda: fh.read(1024*1024), b""):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
 
 def artifact_signature(digest: str) -> str:
     """Sign a model digest with Ed25519; legacy HMAC is migration-only."""
@@ -18,6 +26,7 @@ def artifact_signature(digest: str) -> str:
         try:
             from cryptography.hazmat.primitives.serialization import load_pem_private_key
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
             key = load_pem_private_key(private_pem.encode(), password=None)
             if not isinstance(key, Ed25519PrivateKey):
                 return ""
@@ -29,48 +38,111 @@ def artifact_signature(digest: str) -> str:
         return ""
     return hmac.new(key.encode(), digest.encode(), hashlib.sha256).hexdigest()
 
-def verify_model_file(model_path: str | Path, expected_sha256: str, expected_signature: str = "") -> bool:
-    p=Path(model_path)
-    if not p.exists() or not expected_sha256:
+
+def read_model_manifest(model_path: str | Path) -> dict:
+    """Read the atomic model pointer, or the legacy .meta.json sidecar."""
+    model_file = Path(model_path)
+    try:
+        with model_file.open("rb") as handle:
+            looks_like_pointer = handle.read(1) == b"{"
+        pointer = (
+            json.loads(model_file.read_text(encoding="utf-8"))
+            if looks_like_pointer else None
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pointer = None
+    if isinstance(pointer, dict) and pointer.get("artifact_pointer_schema") == 1:
+        return pointer
+
+    sidecar = model_file.with_suffix(model_file.suffix + ".meta.json")
+    if not sidecar.is_file():
+        return {}
+    try:
+        value = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def resolve_model_artifact(model_path: str | Path, manifest: dict) -> Path:
+    """Resolve a versioned artifact pointer without allowing paths outside its bundle dir."""
+    model_file = Path(model_path)
+    artifact_ref = manifest.get("artifact_file")
+    if not artifact_ref:
+        return model_file
+
+    relative = Path(str(artifact_ref))
+    expected_directory = f"{model_file.name}.versions"
+    if (
+        relative.is_absolute()
+        or len(relative.parts) != 2
+        or relative.parts[0] != expected_directory
+        or relative.parts[1] in {"", ".", ".."}
+    ):
+        raise ValueError("model manifest contains an invalid artifact pointer")
+
+    versions_dir = model_file.parent / expected_directory
+    resolved_versions_dir = versions_dir.resolve()
+    if resolved_versions_dir.parent != model_file.parent.resolve():
+        raise ValueError("model version directory escapes the model directory")
+    artifact = versions_dir / relative.parts[1]
+    if artifact.resolve().parent != resolved_versions_dir:
+        raise ValueError("model artifact pointer escapes its version directory")
+    return artifact
+
+
+def verify_model_file(
+    model_path: str | Path,
+    expected_sha256: str,
+    expected_signature: str = "",
+) -> bool:
+    model_file = Path(model_path)
+    if not model_file.is_file() or not expected_sha256:
         return False
     try:
-        digest = sha256_file(p).lower()
+        manifest = read_model_manifest(model_file)
+        artifact_file = resolve_model_artifact(model_file, manifest)
+        if not artifact_file.is_file():
+            return False
+        digest = sha256_file(artifact_file).lower()
         if digest != str(expected_sha256).lower():
             return False
-        required = str(expected_signature or "")
-        if not required:
-            meta = p.with_suffix(p.suffix + ".meta.json")
-            if meta.exists():
-                import json
-                try:
-                    payload = json.loads(meta.read_text())
-                    required = str(payload.get("manifest_signature") or "")
-                except Exception:
-                    required = ""
+        required = str(expected_signature or manifest.get("manifest_signature") or "")
         if required:
             return verify_artifact_signature(digest, required)
         # Production live models require an independent manifest signature.
         if settings.environment in {"staging", "production"}:
             return False
         return True
-    except OSError: return False
+    except (OSError, TypeError, ValueError):
+        return False
+
 
 def backup_champion(model_path: str | Path) -> Path | None:
-    p=Path(model_path)
-    if not p.exists(): return None
-    backup=p.with_name(p.name+".previous")
+    p = Path(model_path)
+    if not p.exists():
+        return None
+    backup = p.with_name(p.name + ".previous")
     shutil.copy2(p, backup)
-    meta=p.with_suffix(p.suffix+".meta.json")
-    if meta.exists(): shutil.copy2(meta, Path(str(backup)+".meta.json"))
+    meta = p.with_suffix(p.suffix + ".meta.json")
+    if meta.exists():
+        shutil.copy2(meta, Path(str(backup) + ".meta.json"))
     return backup
 
+
 def rollback_champion(model_path: str | Path) -> bool:
-    p=Path(model_path); backup=p.with_name(p.name+".previous")
-    if not backup.exists(): return False
-    os.replace(backup,p)
-    backup_meta=Path(str(backup)+".meta.json")
-    meta=p.with_suffix(p.suffix+".meta.json")
-    if backup_meta.exists(): os.replace(backup_meta,meta)
+    p = Path(model_path)
+    backup = p.with_name(p.name + ".previous")
+    if not backup.exists():
+        return False
+    # For versioned models this single rename switches the complete model/manifest pointer.
+    os.replace(backup, p)
+    backup_meta = Path(str(backup) + ".meta.json")
+    meta = p.with_suffix(p.suffix + ".meta.json")
+    if backup_meta.exists():
+        os.replace(backup_meta, meta)
+    else:
+        meta.unlink(missing_ok=True)
     return True
 
 
@@ -81,6 +153,7 @@ def verify_artifact_signature(digest: str, signature: str) -> bool:
         try:
             from cryptography.hazmat.primitives.serialization import load_pem_public_key
             from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
             key = load_pem_public_key(public_pem.encode())
             if not isinstance(key, Ed25519PublicKey):
                 return False

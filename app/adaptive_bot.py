@@ -8,9 +8,15 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from .trading_core import train_model, ai_walk_forward_backtest, build_features, FEATURE_COLUMNS
+from .trading_core import (
+    train_model,
+    ai_walk_forward_backtest,
+    build_features,
+    FEATURE_COLUMNS,
+    promote_model_artifact,
+)
 from .config import settings
-from .model_registry import backup_champion, verify_model_file
+from .model_registry import backup_champion, verify_model_file, read_model_manifest
 from .research_validation import oos_promotion_gate
 
 import numpy as np
@@ -444,19 +450,17 @@ def ensure_adaptive_model(
     try:
         result = train_model(df, str(candidate), min_train=min_train, folds=folds, asset=asset)
         candidate_meta_path = candidate.with_suffix(candidate.suffix + ".meta.json")
-        # Preserve the integrity metadata produced by train_model(), including its
-        # manifest signature, when creating the champion metadata.
-        candidate_meta = json.loads(candidate_meta_path.read_text())
+        # Read either the new atomic pointer or a legacy candidate sidecar.
+        candidate_meta = read_model_manifest(candidate)
+        if not candidate_meta:
+            raise RuntimeError("Candidate model manifest is missing or invalid")
         manifest_signature = str(candidate_meta.get("manifest_signature") or "")
         if model_path.parent:
             model_path.parent.mkdir(parents=True, exist_ok=True)
         backup_champion(model_path)
-        tmp_model = model_path.with_name(model_path.name + ".promoting")
-        tmp_integrity = model_path.with_suffix(model_path.suffix + ".meta.json.promoting")
-        shutil.copy2(candidate, tmp_model)
-        shutil.copy2(candidate_meta_path, tmp_integrity)
-        os.replace(tmp_model, model_path)
-        os.replace(tmp_integrity, model_path.with_suffix(model_path.suffix + ".meta.json"))
+        promoted_hash = promote_model_artifact(str(candidate), str(model_path))
+        if promoted_hash != str(result.get("model_sha256") or ""):
+            raise RuntimeError("Promoted model hash differs from the trained candidate")
         try:
             feature_baseline = _feature_baseline(build_features(df))
         except Exception:
@@ -512,6 +516,7 @@ def ensure_adaptive_model(
                 path.unlink()
             except FileNotFoundError:
                 pass
+        shutil.rmtree(candidate.with_name(candidate.name + ".versions"), ignore_errors=True)
 
 
 def adaptive_model_status(model_path: str | Path, policy: AdaptiveModelPolicy | None = None) -> dict:

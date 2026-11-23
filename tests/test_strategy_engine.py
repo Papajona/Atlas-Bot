@@ -343,7 +343,7 @@ def test_adaptive_champion_promotion_keeps_model_integrity(tmp_path, monkeypatch
     out = adaptive_bot.ensure_adaptive_model(object(), str(model_path), asset="forex", policy=adaptive_bot.AdaptiveModelPolicy(min_trades=1))
     assert out["status"] == "CHAMPION_PROMOTED"
     assert model_path.exists()
-    assert json.loads(pathlib.Path(str(model_path)+".meta.json").read_text())["model_sha256"] == hashlib.sha256(b"model-bytes").hexdigest()
+    assert model_registry.read_model_manifest(model_path)["model_sha256"] == hashlib.sha256(b"model-bytes").hexdigest()
     assert json.loads(pathlib.Path(str(model_path)+".adaptive.json").read_text())["status"] == "CHAMPION"
 
 def test_strategy_backtest_reports_next_open_execution_model():
