@@ -1022,6 +1022,38 @@ def test_customer_paper_router_uses_the_same_spot_fee_assumption_as_fills(monkey
     ) == 5.5
 
 
+@pytest.mark.parametrize("timeframe", ["4h", "1d"])
+@pytest.mark.parametrize(
+    ("bar_state", "expected_reason"),
+    [("incomplete", "incomplete_latest_bar"), ("stale", "stale_market_data")],
+)
+def test_strategy_quality_gate_rejects_incomplete_and_stale_slow_timeframe_bars(
+    monkeypatch, timeframe, bar_state, expected_reason
+):
+    from app import main
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "min_bars", 250)
+    monkeypatch.setattr(app_settings, "stale_data_minutes", 180)
+    interval = pd.Timedelta(timeframe)
+    now = pd.Timestamp.now(tz="UTC")
+    current_boundary = now.floor(timeframe)
+    if bar_state == "incomplete":
+        latest_open = current_boundary
+    else:
+        # The candle closed two full intervals ago, beyond the permitted freshness window.
+        latest_open = current_boundary - 3 * interval
+    index = pd.date_range(end=latest_open, periods=250, freq=interval)
+    frame = sample_df(250)
+    frame.index = index
+
+    passed, reasons = main._market_data_quality(
+        frame, timeframe, asset="forex", completed_bar_close=True
+    )
+    assert passed is False
+    assert expected_reason in reasons
+
+
 @pytest.mark.parametrize(
     ("endpoint_name", "request_name"),
     [
