@@ -144,6 +144,23 @@ The repository's main branch has previously been reported as lacking branch prot
 
 ## Backup restoration and ledger/provider reconciliation drill
 
+### Webhook-event retention policy and safe execution
+
+There is no approved webhook-event retention duration recorded in this runbook. The 30-day value in
+`scripts/prune_webhook_events.sql` is a dry-run preview default only; it is not authorization to
+delete customer webhook payloads. The dry-run counts rows older than that provisional cutoff and
+does not delete anything.
+
+Before any apply run, the data-retention owner must approve and record the retention duration,
+legal/business basis, and effective date. Run the script first in dry-run mode against the staging
+database using the dedicated maintenance identity, inspect the candidate count and sample metadata,
+and obtain an operator review. Only then may an operator invoke apply mode with an explicit
+`-v retention_days=<approved_days>` and a bounded batch size. Apply mode refuses to run if the
+retention value is omitted or invalid. Repeat only after reviewing each batch result. Never grant
+DELETE to `atlas_api_runtime`, never use a production credential for rehearsal, and preserve the
+approved policy and before/after counts in the restricted evidence archive. This procedure has not
+yet been executed against a database and does not constitute an active retention schedule.
+
 The running staging service and paper-trading schema must use the existing free Supabase project; do not create a separate project or paid branch. Set both protected project-ref variables to the current project's ref. The customer-paper schema is the rehearsal boundary for simulated orders, positions, and balances. It shares compute, availability, and backup/restore scope with the public application schema, so it is not a separate database failure domain.
 
 A full-project restore is a separate recovery exercise. Never restore a backup over the only active database just to make a workflow pass. There are two supported restore targets:
