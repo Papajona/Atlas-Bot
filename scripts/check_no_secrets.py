@@ -68,6 +68,10 @@ def _inside_quoted_literal(line: str, position: int) -> bool:
 
 
 CODE_ATTRIBUTE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
+ANGLE_PLACEHOLDER = re.compile(
+    r"(?i)^<(?:your(?:[-_ ][a-z0-9_-]+)?|placeholder|example|redacted|unset|"
+    r"not[-_ ]set|secret|private[-_ ]key|api[-_ ]key|token|value|version|ref|v)>$"
+)
 
 
 def scan() -> list[str]:
@@ -84,9 +88,11 @@ def scan() -> list[str]:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
             seed_match = TRON_SEED.search(line)
-            if seed_match and "re.compile" not in line and seed_match.group(1).lower() not in PLACEHOLDERS and "<" not in seed_match.group(1):
-                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                continue
+            if seed_match and "re.compile" not in line:
+                seed_value = seed_match.group(1).strip().lower()
+                if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
+                    findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                    continue
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
