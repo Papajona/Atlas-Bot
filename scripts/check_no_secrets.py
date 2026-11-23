@@ -245,6 +245,12 @@ def _yaml_node_has_private_material(node) -> bool:
         candidate = node.value.strip()
         if not candidate:
             return False
+        if candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+            return False
+        if candidate.startswith("<") and candidate.endswith(">"):
+            bracketed_value = candidate[1:-1]
+            if re.fullmatch(r"[A-Za-z0-9_+/=.-]{20,}", bracketed_value):
+                return True
         if candidate.startswith(("{", "[")):
             try:
                 structured = json.loads(candidate)
@@ -267,7 +273,9 @@ def _yaml_node_has_private_material(node) -> bool:
             if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
                 if any(_nonempty_private_scalar(value) for value in _yaml_scalar_values(value_node)):
                     return True
-            if _yaml_node_has_private_material(value_node):
+            # Public JWK fields (n/e/x/y/crv/kty) are never considered private
+            # material merely because their values are long.
+            if isinstance(value_node, (MappingNode, SequenceNode)) and _yaml_node_has_private_material(value_node):
                 return True
         return False
     if isinstance(node, SequenceNode):
@@ -300,7 +308,7 @@ def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
     try:
         root = yaml.compose(text, Loader=yaml.SafeLoader)
     except yaml.YAMLError:
-        return {}
+        return None
     findings: dict[int, str] = {}
 
     def visit(node) -> None:
@@ -378,8 +386,12 @@ def scan() -> list[str]:
         except OSError: continue
         lines = text.splitlines()
         suffix = path.suffix.lower()
+        yaml_parsed = False
         if suffix in {".yaml", ".yml"}:
             multiline_seed_findings = _find_yaml_sensitive_assignments(text)
+            yaml_parsed = multiline_seed_findings is not None
+            if not yaml_parsed:
+                multiline_seed_findings = _find_multiline_seed_assignments(lines)
         elif suffix in {".env", ".toml", ".ini", ".conf", ".cfg", ".json"}:
             multiline_seed_findings = _find_multiline_seed_assignments(lines)
         else:
@@ -397,7 +409,7 @@ def scan() -> list[str]:
             seed_match = (
                 TRON_SEED_IN_SOURCE.search(line)
                 if source_code
-                else None if is_yaml else TRON_SEED.search(line)
+                else TRON_SEED.search(line) if not is_yaml or not yaml_parsed else None
             )
             if seed_match and "re.compile" not in line:
                 raw_seed_value = seed_match.group("value").strip()
@@ -426,7 +438,7 @@ def scan() -> list[str]:
                     if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
-            if path.suffix.lower() in {".yaml", ".yml"}:
+            if is_yaml and yaml_parsed:
                 continue
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
