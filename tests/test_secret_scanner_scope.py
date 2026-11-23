@@ -242,17 +242,38 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
 def test_secret_scanner_detects_real_japanese_mnemonic_but_ignores_japanese_notes_and_public_keys(
     tmp_path, monkeypatch
 ):
-    from bip_utils import Bip39Languages, Bip39MnemonicGenerator
+    from bip_utils import (
+        Bip39Languages,
+        Bip39MnemonicGenerator,
+        Bip39MnemonicValidator,
+    )
 
     mnemonic_key = "mne" + "monic"
     key_field = "private" + "_key"
-    japanese_phrase = Bip39MnemonicGenerator(
-        Bip39Languages.JAPANESE
-    ).FromEntropy(bytes(16)).ToStr()
+    japanese_generator = Bip39MnemonicGenerator(Bip39Languages.JAPANESE)
+    japanese_validator = Bip39MnemonicValidator(Bip39Languages.JAPANESE)
+    japanese_phrase = japanese_generator.FromEntropy(bytes(16)).ToStr()
+    japanese_words = japanese_phrase.split()
+    invalid_checksum_phrase = None
+    for entropy_byte in range(1, 16):
+        alternative_last_word = japanese_generator.FromEntropy(
+            bytes([entropy_byte]) * 16
+        ).ToStr().split()[-1]
+        candidate = " ".join(japanese_words[:-1] + [alternative_last_word])
+        if not japanese_validator.IsValid(candidate):
+            invalid_checksum_phrase = candidate
+            break
+    assert invalid_checksum_phrase is not None
     japanese_notes = "これは 普通 の 日本語 の 運用 メモ です 今日 の 作業 内容 を 記録 します"
     (tmp_path / "japanese-wallet.yml").write_text(
         "wallet:\n  " + mnemonic_key + ": |\n"
         + "".join("    " + word + " " for word in japanese_phrase.split())
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "japanese-wallet-invalid-checksum.yml").write_text(
+        "wallet:\n  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + " " for word in invalid_checksum_phrase.split())
         + "\n",
         encoding="utf-8",
     )
@@ -281,6 +302,7 @@ def test_secret_scanner_detects_real_japanese_mnemonic_but_ignores_japanese_note
     findings = check_no_secrets.scan()
 
     assert any("japanese-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("japanese-wallet-invalid-checksum.yml:2: seed/private-key assignment" in item for item in findings)
     assert any("json-private-wallet.yml:2: seed/private-key assignment" in item for item in findings)
     assert not any("japanese-notes.yml" in item for item in findings)
     assert not any("public-only-wallet.yml" in item for item in findings)
@@ -301,6 +323,17 @@ def test_secret_scanner_ignores_empty_private_key_objects_and_arrays(tmp_path, m
         '    {"kty":"EC","crv":"P-256","x":"public-x","y":"public-y"}\n',
         encoding="utf-8",
     )
+    (tmp_path / "private-key-note.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        "    This is a note about the wallet.\n"
+        "    It is documentation for the operations team.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "raw-private-key.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        "    0123456789abcdef0123456789abcdef\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
     findings = check_no_secrets.scan()
@@ -308,6 +341,8 @@ def test_secret_scanner_ignores_empty_private_key_objects_and_arrays(tmp_path, m
     assert not any("empty-object.yml" in item for item in findings)
     assert not any("empty-array.yml" in item for item in findings)
     assert not any("public-object.yml" in item for item in findings)
+    assert not any("private-key-note.yml" in item for item in findings)
+    assert any("raw-private-key.yml:2: seed/private-key assignment" in item for item in findings)
 
 
 def test_secret_scanner_ignores_explicit_mapping_examples_inside_yaml_block_scalars(
