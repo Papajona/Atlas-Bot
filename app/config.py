@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     # Customer authentication and funding. Supabase Auth is authoritative for customer identity.
     supabase_url: str = ""
     supabase_anon_key: str = ""
+    # Optional server-only Auth Admin API key for encrypted-profile email lookups.
+    supabase_auth_admin_key: str = ""
     supabase_jwks_url: str = ""
     supabase_auth_audience: str = "authenticated"
     funding_webhook_secret: str = ""
