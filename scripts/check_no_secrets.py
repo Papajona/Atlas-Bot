@@ -256,6 +256,14 @@ def scan() -> list[str]:
             )
             if seed_match and "re.compile" not in line:
                 raw_seed_value = seed_match.group("value").strip()
+                yaml_block_scalar = (
+                    path.suffix.lower() in {".yaml", ".yml"}
+                    and raw_seed_value in {"|", "|-", "|+", ">", ">-", ">+"}
+                )
+                if yaml_block_scalar:
+                    # The indented block was already scanned as a whole above;
+                    # the YAML marker itself is not credential material.
+                    continue
                 computed_source_value = (
                     source_code
                     and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
