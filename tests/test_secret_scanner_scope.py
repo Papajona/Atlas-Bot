@@ -117,11 +117,11 @@ def test_secret_scanner_ignores_source_attribute_wiring_not_quoted_credentials(
     tmp_path, monkeypatch
 ):
     source = (
-        "api_key = settings.exchange_api_key\\n"
-        "api_secret = settings.exchange_api_secret\\n"
-        "password = config.customer_password\\n"
-        "token = secrets.token_urlsafe(24)\\n"
-        'payload = "password=qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"\\n'
+        "api_key = settings.exchange_api_key\n"
+        "api_secret = settings.exchange_api_secret\n"
+        "password = config.customer_password\n"
+        "token = secrets.token_urlsafe(24)\n"
+        'payload = "password=qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"\n'
     )
     (tmp_path / "source.py").write_text(source, encoding="utf-8")
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -137,8 +137,8 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
 ):
     bracketed_key = "<0123456789abcdef0123456789abcdef>"
     (tmp_path / "wallet.env").write_text(
-        "private_key=" + bracketed_key + "\\n"
-        "private_key=<YOUR_PRIVATE_KEY>\\n",
+        "private_key=" + bracketed_key + "\n"
+        "private_key=<YOUR_PRIVATE_KEY>\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
