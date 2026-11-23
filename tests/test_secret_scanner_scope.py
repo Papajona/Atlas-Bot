@@ -210,3 +210,24 @@ def test_repository_secret_scan_ignores_ordinary_notes_string_construction():
         for item in findings
     )
 
+
+def test_secret_scanner_detects_seed_literal_in_concatenated_source_assignment(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    mnemonic_key = "mne" + "monic"
+    source = (
+        "prefix = ''\n"
+        "suffix = ''\n"
+        + mnemonic_key + " = prefix + \"" + phrase + "\" + suffix + \"\"\n"
+    )
+    (tmp_path / "wallet-config.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet-config.py:3: seed/private-key assignment" in item
+        for item in findings
+    )
+
