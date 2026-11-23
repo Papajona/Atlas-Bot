@@ -35,8 +35,40 @@ PLACEHOLDERS = {
     "legacy-hosted-provider", "must-not-become-a-helper-setting", "must-not-be-persisted",
     # Exact values used only by repository verification fixtures.
     "ci-only-keystore-password",
+    "ci-only-key-password",
+    "test-key-not-a-real-secret",
+    "test-admin-token-for-ci",
+    "ci-paper-smoke-placeholder",
+    "verification_password",
+    "atlas-ci-production-verification-secret-32-bytes",
+    "verification-model-private-key",
+    "production-verification-only",
+    "server-refresh-token",
+    "atlas-gemini-api-key",
+    "atlas-cerebras-api-key",
     "mdawmdawmdawmdawmdawmdawmdawmdawmdawmdawmda=",
 }
+
+def _inside_quoted_literal(line: str, position: int) -> bool:
+    """Return whether position is inside a single-, double-, or backtick string."""
+    quote = None
+    escaped = False
+    for char in line[:position]:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\\\":
+            escaped = True
+        elif quote is not None:
+            if char == quote:
+                quote = None
+        elif char in {"'", '"', "`"}:
+            quote = char
+    return quote is not None
+
+
+CODE_ATTRIBUTE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+$")
+
 
 def scan() -> list[str]:
     findings=[]
@@ -58,15 +90,19 @@ def scan() -> list[str]:
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
-                # Only a bare function call in source code is a derived value.
-                # Config scalars such as TOKEN: long-value(rotation-note) remain
-                # credentials and must not be exempted by the same syntax.
-                if (
-                    path.suffix.lower() in SOURCE_CODE_SUFFIXES
-                    and HELPER_IDENTIFIER.fullmatch(value)
-                    and remainder.startswith("(")
-                ):
-                    continue
+                source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
+                quoted_literal = source_code and _inside_quoted_literal(
+                    line, match.start("value")
+                )
+                # In source code, a bare attribute reference or helper call is
+                # configuration wiring, not a credential literal. Keep scanning
+                # quoted strings (including embedded password= fragments) and
+                # all YAML/dotenv/config assignments.
+                if source_code and not quoted_literal:
+                    if CODE_ATTRIBUTE.fullmatch(value):
+                        continue
+                    if HELPER_IDENTIFIER.fullmatch(value) and remainder.startswith("("):
+                        continue
                 # Fixture exemptions are exact values, never substring markers.
                 if value in PLACEHOLDERS:
                     continue
