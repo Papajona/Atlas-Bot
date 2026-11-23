@@ -22,7 +22,7 @@ AUDIT_REQUIRED_SELECT_COLUMNS = {
     "alembic_version": ("version_num",),
     "customer_ledger_accounts": ("available", "trading_reserved", "withdrawal_reserved"),
     "ledger_entries": ("debit", "credit", "amount"),
-    "ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id"),
+    "ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id", "created_at"),
     "ledger_journal_lines": ("id", "journal_id", "debit", "credit"),
     "research_trial_archive": ("ledger_sequence", "ledger_entry_sha256"),
     "research_trial_ledger_head": ("id", "last_sequence", "last_entry_sha256"),
