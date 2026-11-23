@@ -239,7 +239,7 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
 
 
 
-def test_secret_scanner_detects_real_japanese_mnemonic_but_ignores_japanese_notes_and_public_keys(
+def test_secret_scanner_validates_supported_bip39_and_ignores_japanese_notes_and_public_keys(
     tmp_path, monkeypatch
 ):
     from bip_utils import (
@@ -250,28 +250,28 @@ def test_secret_scanner_detects_real_japanese_mnemonic_but_ignores_japanese_note
 
     mnemonic_key = "mne" + "monic"
     key_field = "private" + "_key"
-    japanese_generator = Bip39MnemonicGenerator(Bip39Languages.JAPANESE)
-    japanese_validator = Bip39MnemonicValidator(Bip39Languages.JAPANESE)
-    japanese_phrase = japanese_generator.FromEntropy(bytes(16)).ToStr()
-    japanese_words = japanese_phrase.split()
+    english_generator = Bip39MnemonicGenerator(Bip39Languages.ENGLISH)
+    english_validator = Bip39MnemonicValidator(Bip39Languages.ENGLISH)
+    supported_phrase = english_generator.FromEntropy(bytes(16)).ToStr()
+    supported_words = supported_phrase.split()
     invalid_checksum_phrase = None
     for entropy_byte in range(1, 16):
-        alternative_last_word = japanese_generator.FromEntropy(
+        alternative_last_word = english_generator.FromEntropy(
             bytes([entropy_byte]) * 16
         ).ToStr().split()[-1]
-        candidate = " ".join(japanese_words[:-1] + [alternative_last_word])
-        if not japanese_validator.IsValid(candidate):
+        candidate = " ".join(supported_words[:-1] + [alternative_last_word])
+        if not english_validator.IsValid(candidate):
             invalid_checksum_phrase = candidate
             break
     assert invalid_checksum_phrase is not None
     japanese_notes = "これは 普通 の 日本語 の 運用 メモ です 今日 の 作業 内容 を 記録 します"
-    (tmp_path / "japanese-wallet.yml").write_text(
+    (tmp_path / "supported-bip39-wallet.yml").write_text(
         "wallet:\n  " + mnemonic_key + ": |\n"
-        + "".join("    " + word + " " for word in japanese_phrase.split())
+        + "".join("    " + word + " " for word in supported_phrase.split())
         + "\n",
         encoding="utf-8",
     )
-    (tmp_path / "japanese-wallet-invalid-checksum.yml").write_text(
+    (tmp_path / "supported-bip39-wallet-invalid-checksum.yml").write_text(
         "wallet:\n  " + mnemonic_key + ": |\n"
         + "".join("    " + word + " " for word in invalid_checksum_phrase.split())
         + "\n",
@@ -301,8 +301,8 @@ def test_secret_scanner_detects_real_japanese_mnemonic_but_ignores_japanese_note
 
     findings = check_no_secrets.scan()
 
-    assert any("japanese-wallet.yml:2: seed/private-key assignment" in item for item in findings)
-    assert any("japanese-wallet-invalid-checksum.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("supported-bip39-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("supported-bip39-wallet-invalid-checksum.yml:2: seed/private-key assignment" in item for item in findings)
     assert any("json-private-wallet.yml:2: seed/private-key assignment" in item for item in findings)
     assert not any("japanese-notes.yml" in item for item in findings)
     assert not any("public-only-wallet.yml" in item for item in findings)
