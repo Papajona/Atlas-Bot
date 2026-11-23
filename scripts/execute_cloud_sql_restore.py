@@ -339,6 +339,7 @@ def execute_restore(
     target_database: str,
     backup_reference: str,
     sanitized_backup_reference: str,
+    expected_source_prepared_canonical_sha256: str,
     output_path: str,
     source_supabase_project_ref: str = "",
     production_instance: str | None = None,
@@ -466,6 +467,7 @@ def execute_restore(
         candidate_evidence = verify_sanitized_artifacts(
             source_backup_reference=backup_reference,
             source_prepared_sql_path=prepared_source_sql_path,
+            expected_source_prepared_canonical_sha256=expected_source_prepared_canonical_sha256,
             sanitized_backup_reference=sanitized_backup_reference,
             sanitized_sql_path=sanitized_import_path,
         )
@@ -531,6 +533,7 @@ def execute_restore(
         verify_sanitized_artifacts(
             source_backup_reference=backup_reference,
             source_prepared_sql_path=prepared_source_sql_path,
+            expected_source_prepared_canonical_sha256=expected_source_prepared_canonical_sha256,
             sanitized_backup_reference=sanitized_backup_reference,
             sanitized_sql_path=sanitized_import_path,
             imported_sql_path=verified_import_path,
@@ -604,6 +607,8 @@ def execute_restore(
         "source_supabase_project_ref": source_supabase_project_ref,
         "source_provenance": source_provenance,
         "source_prepared_sql_sha256": candidate_evidence["source_prepared_sql_sha256"],
+        "source_prepared_sql_canonical_sha256": candidate_evidence["source_prepared_sql_canonical_sha256"],
+        "expected_source_prepared_sql_canonical_sha256": candidate_evidence["expected_source_prepared_sql_canonical_sha256"],
         "sanitized_backup_reference": sanitized_backup_reference,
         "sanitized_import_sha256": candidate_evidence["sanitized_import_sha256"],
         "sanitization_profile": candidate_evidence["sanitization_profile"],
@@ -630,6 +635,7 @@ def main() -> int:
     parser.add_argument("--target-database", required=True)
     parser.add_argument("--backup-reference", required=True)
     parser.add_argument("--sanitized-backup-reference", required=True)
+    parser.add_argument("--expected-source-prepared-canonical-sha256", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--timeout-seconds", type=int, default=14400)
     parser.add_argument("--poll-interval-seconds", type=int, default=15)
@@ -644,6 +650,7 @@ def main() -> int:
             target_database=args.target_database,
             backup_reference=args.backup_reference,
             sanitized_backup_reference=args.sanitized_backup_reference,
+            expected_source_prepared_canonical_sha256=args.expected_source_prepared_canonical_sha256,
             source_supabase_project_ref=args.source_supabase_project_ref,
             output_path=args.output,
             timeout_seconds=args.timeout_seconds,
@@ -661,6 +668,8 @@ def main() -> int:
             "import_object_reference": result["import_object_reference"],
             "source_backup_sha256": result["source_backup_sha256"],
             "source_prepared_sql_sha256": result["source_prepared_sql_sha256"],
+            "source_prepared_sql_canonical_sha256": result["source_prepared_sql_canonical_sha256"],
+            "expected_source_prepared_sql_canonical_sha256": result["expected_source_prepared_sql_canonical_sha256"],
             "sanitized_backup_reference": result["sanitized_backup_reference"],
             "sanitized_import_sha256": result["sanitized_import_sha256"],
             "sanitization_profile": result["sanitization_profile"],
