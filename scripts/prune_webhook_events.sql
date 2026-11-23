@@ -10,10 +10,11 @@
 --   psql "$MAINTENANCE_DATABASE_URL" -f scripts/prune_webhook_events.sql
 --
 -- Delete one bounded batch; rerun until expired_events is zero:
---   psql "$MAINTENANCE_DATABASE_URL" -v apply=1 -v retention_days=30 -v batch_size=5000 \
+--   psql "$MAINTENANCE_DATABASE_URL" -v apply=1 -v retention_days=<approved_days> -v batch_size=5000 \
 --       -f scripts/prune_webhook_events.sql
 --
--- The 30-day default is a placeholder. Set retention_days to the approved policy.
+-- The 30-day default is a placeholder for DRY RUN only. Apply mode requires an
+-- explicitly supplied retention_days value approved by the data-retention owner.
 -- Accepted retention range is 1..36,500 days (100 years); batch size is 1..999,999 rows.
 -- If row-level security is enabled, the maintenance identity must own the table or bypass RLS.
 -- Requires psql 13+.
@@ -36,7 +37,7 @@
 \set batch_size 5000
 \endif
 
--- Validate both psql variables before the count or deletion cutoff is evaluated.
+-- Validate all psql variables before the count or deletion cutoff is evaluated.
 -- CASE prevents attempting integer casts on non-numeric input.
 SELECT
     CASE
@@ -45,7 +46,14 @@ SELECT
         ELSE FALSE
     END AS retention_days_valid,
     CASE
-        WHEN :'batch_size' ~ '^[0-9]{1,6}
+        WHEN :'batch_size' ~ '^[0-9]{1,6}$'
+        THEN :'batch_size'::integer BETWEEN 1 AND 999999
+        ELSE FALSE
+    END AS batch_size_valid,
+    CASE
+        WHEN :'apply' IN ('0', '1') THEN TRUE
+        ELSE FALSE
+    END AS apply_valid
 \gset
 
 \if :retention_days_valid
@@ -61,43 +69,6 @@ SELECT
 \if :apply_valid
 \else
 \echo 'ERROR: apply must be exactly 0 (dry-run) or 1 (delete one batch).'
-\quit 1
-\endif
-
-SELECT count(*) AS expired_events
-FROM public.webhook_events
-WHERE created_at < now() - make_interval(days => :'retention_days'::integer);
-
-\if :apply
-BEGIN;
-WITH doomed AS (
-    SELECT id
-    FROM public.webhook_events
-    WHERE created_at < now() - make_interval(days => :'retention_days'::integer)
-    ORDER BY created_at, id
-    LIMIT :'batch_size'::integer
-    FOR UPDATE SKIP LOCKED
-)
-DELETE FROM public.webhook_events AS w
-USING doomed AS d
-WHERE w.id = d.id;
-COMMIT;
-\endif
-
-        THEN :'batch_size'::integer BETWEEN 1 AND 999999
-        ELSE FALSE
-    END AS batch_size_valid,
-    :'apply' IN ('0', '1') AS apply_valid
-\gset
-
-\if :retention_days_valid
-\else
-\echo 'ERROR: retention_days must be an integer from 1 through 36500.'
-\quit 1
-\endif
-\if :batch_size_valid
-\else
-\echo 'ERROR: batch_size must be a positive integer no greater than 999999.'
 \quit 1
 \endif
 
