@@ -350,9 +350,6 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "statement_records": len(rows),
         "staging_withdrawal_records": len(db_rows),
         "staging_withdrawal_journal_records": withdrawal_journal_count,
-        "zero_activity_window_confirmed": (
-            len(rows) == 0 and len(db_rows) == 0 and withdrawal_journal_count == 0
-        ),
         "matched_records": matched,
         "unresolved_without_provider_id": unresolved_no_id,
         "failures": failures,
