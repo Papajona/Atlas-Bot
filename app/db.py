@@ -1292,7 +1292,7 @@ class StrategyOutcome(Base):
     side: Mapped[str] = mapped_column(String(10), default="")
     realized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     fee: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
-    return_bps: Mapped[float] = mapped_column(Float, default=0.0)
+    return_bps: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     net_pnl: Mapped[float | None] = mapped_column(FinancialNumeric, nullable=True, default=None)
     net_return_bps: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     # Exact closed quantity/notional support complete, weighted trade returns.
