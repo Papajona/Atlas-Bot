@@ -148,18 +148,24 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
               'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
             )
           )
+          AND EXISTS (
+            SELECT 1 FROM matching_withdrawals w
+            WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
+          )
+      ),
+      'unattributed_withdrawal_journal_count', (
+        SELECT count(*) FROM public.ledger_journals j
+        WHERE j.created_at >= TIMESTAMPTZ '{start}'
+          AND j.created_at < TIMESTAMPTZ '{end}'
           AND (
-            -- Count journals tied to the selected provider's withdrawals.
-            EXISTS (
-              SELECT 1 FROM matching_withdrawals w
-              WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
+            upper(coalesce(j.reference_type, '')) = 'WITHDRAWAL'
+            OR upper(coalesce(j.entry_type, '')) IN (
+              'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
             )
-            -- Unlinked/ambiguous withdrawal journals cannot be attributed safely
-            -- to another provider; retain them as blockers rather than ignore them.
-            OR NOT EXISTS (
-              SELECT 1 FROM public.withdrawals w
-              WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
-            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM public.withdrawals w
+            WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
           )
       ),
       'withdrawals', coalesce((
@@ -200,6 +206,7 @@ def reconcile_rows(
     database_rows: list[dict[str, Any]],
     provider: str,
     withdrawal_journal_count: int = 0,
+    unattributed_withdrawal_journal_count: int = 0,
 ) -> tuple[int, int, list[str]]:
     """Compare provider payout rows to DB withdrawals and their terminal ledger journals."""
     failures: list[str] = []
@@ -208,6 +215,8 @@ def reconcile_rows(
         failures.append(
             "provider statement contains no payout rows; zero activity cannot be independently verified"
         )
+    if unattributed_withdrawal_journal_count:
+        failures.append("withdrawal journals exist in the specified window without an attributable withdrawal record")
     if not database_rows and withdrawal_journal_count:
         failures.append("withdrawal journals exist in the specified window without matching withdrawal rows")
     db_by_id: dict[str, dict[str, Any]] = {}
@@ -326,13 +335,21 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     db_rows = db.get("withdrawals") or []
     try:
         withdrawal_journal_count = int(db.get("withdrawal_journal_count") or 0)
-        if withdrawal_journal_count < 0:
+        unattributed_withdrawal_journal_count = int(
+            db.get("unattributed_withdrawal_journal_count") or 0
+        )
+        if withdrawal_journal_count < 0 or unattributed_withdrawal_journal_count < 0:
             raise ValueError("negative withdrawal journal count")
     except (TypeError, ValueError):
         withdrawal_journal_count = -1
+        unattributed_withdrawal_journal_count = -1
         failures.append("invalid withdrawal journal count in database evidence")
     matched, unresolved_no_id, reconciliation_failures = reconcile_rows(
-        rows, db_rows, provider, withdrawal_journal_count=withdrawal_journal_count
+        rows,
+        db_rows,
+        provider,
+        withdrawal_journal_count=withdrawal_journal_count,
+        unattributed_withdrawal_journal_count=unattributed_withdrawal_journal_count,
     )
     failures.extend(reconciliation_failures)
 
@@ -354,6 +371,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "statement_records": len(rows),
         "staging_withdrawal_records": len(db_rows),
         "staging_withdrawal_journal_records": withdrawal_journal_count,
+        "unattributed_withdrawal_journal_records": unattributed_withdrawal_journal_count,
         "matched_records": matched,
         "unresolved_without_provider_id": unresolved_no_id,
         "failures": failures,
