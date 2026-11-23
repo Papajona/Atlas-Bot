@@ -248,3 +248,23 @@ def test_secret_scanner_ignores_computed_seed_label_without_literal_material(
 
     assert not any("computed-config.py" in item for item in findings)
 
+
+def test_secret_scanner_detects_private_key_literal_in_computed_source_assignment(
+    tmp_path, monkeypatch
+):
+    key_name = "private" + "_key"
+    key_material = "0123456789abcdef0123456789abcdef"
+    source = (
+        "prefix = ''\n"
+        + key_name + ' = prefix + "' + key_material + '"\n'
+    )
+    (tmp_path / "computed-wallet.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "computed-wallet.py:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
