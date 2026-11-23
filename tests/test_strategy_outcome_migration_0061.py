@@ -166,7 +166,7 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             # fill/update timestamp, not submission time, for attribution.
             completed = connection.execute(text("""
                 SELECT closing_quantity, closing_notional, lifecycle_status,
-                       fee_basis_complete, net_pnl, net_return_bps
+                       fee_basis_complete, return_bps, net_pnl, net_return_bps
                 FROM strategy_outcomes
                 WHERE id = 1
             """)).mappings().one()
