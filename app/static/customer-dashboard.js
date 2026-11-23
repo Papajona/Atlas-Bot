@@ -32,7 +32,39 @@ async function createDcaBot(){try{const d=await api('/api/customer/dca-bots',{me
 function fmtPct(x){return (typeof x==='number'&&isFinite(x))?(x*100).toFixed(1)+'%':'n/a';}
 function fmtNum(x){return (typeof x==='number'&&isFinite(x))?x.toFixed(2):'n/a';}
 function summarizeValidation(d){const g=d.gate||{};const lines=[`Result: ${d.status}${d.attempt?` (attempt ${d.attempt})`:''}`,`Strategy family tested: ${g.strategy_family||'n/a'} -> Atlas component "${g.validated_component||'n/a'}"`,`Sharpe ${fmtNum(g.sharpe)} | Max drawdown ${fmtPct(g.max_drawdown)} | Trades ${g.trades??'n/a'} | Return ${fmtPct(g.total_return)}`,`Out-of-sample return ${fmtPct(g.oos_total_return)} | Positive folds ${fmtPct(g.oos_positive_fold_ratio)}`];if(d.validation_scope)lines.push('Scope: '+d.validation_scope);lines.push('Live trading still requires your explicit approval.');return lines.join('\n');}
-async function buildStrategy(){const out=document.getElementById('strategyOut');try{out.textContent='Generating strategy...';const c=await api('/api/customer/strategy-builder',{method:'POST',body:JSON.stringify({name:'Atlas Strategy Draft',prompt:document.getElementById('strategyPrompt').value})});out.textContent='Strategy created (candidate #'+c.candidate_id+'). Validating...';const v=await api(`/api/customer/strategy-lab/candidates/${c.candidate_id}/validate`,{method:'POST'});out.textContent=summarizeValidation(v);await loadCandidates();}catch(e){out.textContent=e.message;}}
+async function buildStrategy(){
+  const out=document.getElementById('strategyOut');
+  const consent=document.getElementById('strategyBenchmarkOptIn');
+  const benchmarkOptIn=!!consent?.checked;
+  if(consent)consent.checked=false;
+  try{
+    out.textContent='Generating strategy...';
+    const c=await api('/api/customer/strategy-builder',{
+      method:'POST',
+      body:JSON.stringify({
+        name:'Atlas Strategy Draft',
+        prompt:document.getElementById('strategyPrompt').value,
+        benchmark_opt_in:benchmarkOptIn
+      })
+    });
+    const capture=c.benchmark_capture?.status==='STORED'
+      ?' Opted-in prompt and Native AI output were encrypted for up to 90 days.'
+      :c.benchmark_capture?.status&&c.benchmark_capture.status!=='NOT_REQUESTED'
+        ?' Benchmark capture was not stored ('+c.benchmark_capture.status+').':'';
+    out.textContent='Strategy created (candidate #'+c.candidate_id+').'+capture+' Validating...';
+    const v=await api('/api/customer/strategy-lab/candidates/'+c.candidate_id+'/validate',{method:'POST'});
+    out.textContent=summarizeValidation(v)+capture;
+    await loadCandidates();
+    await loadBenchmarkCaptureStatus();
+  }catch(e){
+    out.textContent=e.message;
+  }
+}
+document.getElementById('strategyPrompt')?.addEventListener('input',()=>{
+  const consent=document.getElementById('strategyBenchmarkOptIn');
+  if(consent)consent.checked=false;
+});
+
 async function loadDeposit(){try{const d=await api('/api/customer/usdt/deposit');const box=document.getElementById('depositBox');box.replaceChildren();const card=document.createElement('div');card.className='card';for(const [label,value] of [['USDT NETWORK','TRON (TRC-20)'],['Deposit address',d.deposit_address]]){const small=document.createElement('small');small.textContent=label;card.appendChild(small);if(label==='Deposit address'){const addr=document.createElement('div');addr.style='word-break:break-all;font-family:monospace';addr.textContent=d.deposit_address;card.appendChild(addr);}}const btn=document.createElement('button');btn.className='secondary';btn.textContent='Copy address';btn.addEventListener('click',()=>navigator.clipboard.writeText(String(d.deposit_address||'')));card.appendChild(btn);box.appendChild(card);}catch(e){document.getElementById('depositBox').textContent=e.message;}}
 async function sendWithdrawalOtp(){try{const email=document.getElementById('otpEmail').value.trim(),amount=Number(document.getElementById('wdAmount').value),destination=document.getElementById('wdDestination').value.trim();if(!amount||!destination){document.getElementById('otpOut').textContent='Enter the withdrawal amount and TRON destination before requesting OTP.';return}const d=await api('/api/auth/otp/send',{method:'POST',body:JSON.stringify({email,create_user:false,purpose:'withdrawal',amount,destination,network:'TRON'})});sessionStorage.setItem('atlas_withdrawal_otp_intent',d.otp_intent);document.getElementById('otpOut').textContent='OTP sent. Verify the code for this exact withdrawal request.';}catch(e){document.getElementById('otpOut').textContent=e.message;}}
 async function verifyWithdrawalOtp(){try{const email=document.getElementById('otpEmail').value.trim(),token=document.getElementById('withdrawalOtp').value.trim(),amount=Number(document.getElementById('wdAmount').value),destination=document.getElementById('wdDestination').value.trim(),intent=sessionStorage.getItem('atlas_withdrawal_otp_intent')||'';if(!amount||!destination||!intent){document.getElementById('otpOut').textContent='Request a fresh OTP for the exact withdrawal details first.';return}const d=await api('/api/auth/otp/verify',{method:'POST',body:JSON.stringify({email,token,purpose:'withdrawal',amount,destination,network:'TRON',otp_intent_token:intent})});sessionStorage.setItem('atlas_withdrawal_step_up',d.step_up_token);sessionStorage.removeItem('atlas_withdrawal_otp_intent');document.getElementById('otpOut').textContent='Withdrawal verification active for '+Math.round(d.expires_in/60)+' minutes.';}catch(e){document.getElementById('otpOut').textContent=e.message;}}
@@ -117,7 +149,47 @@ loadProductWorkspace=async function(){
 const _loadDeposit=loadDeposit;
 loadDeposit=async function(){await _loadDeposit();document.getElementById('depositBox')?.classList.add('loaded');};
 
-async function createLabCandidate(){try{const d=await api('/api/customer/strategy-lab/candidates',{method:'POST',body:JSON.stringify({name:document.getElementById('labName').value,prompt:document.getElementById('labPrompt').value,asset:document.getElementById('labAsset').value,symbol:document.getElementById('labSymbol').value,exchange:document.getElementById('labAsset').value==='crypto'?'binance':'oanda',timeframe:document.getElementById('labTf').value||null,days:365})});document.getElementById('labOut').textContent='Candidate #'+d.id+' created. Validating...';await validateCandidate(d.id);}catch(e){document.getElementById('labOut').textContent=e.message;}}
+async function createLabCandidate(){
+  const consent=document.getElementById('labBenchmarkOptIn');
+  const benchmarkOptIn=!!consent?.checked;
+  if(consent)consent.checked=false;
+  try{
+    const d=await api('/api/customer/strategy-lab/candidates',{
+      method:'POST',
+      body:JSON.stringify({
+        name:document.getElementById('labName').value,
+        prompt:document.getElementById('labPrompt').value,
+        asset:document.getElementById('labAsset').value,
+        symbol:document.getElementById('labSymbol').value,
+        exchange:document.getElementById('labAsset').value==='crypto'?'binance':'oanda',
+        timeframe:document.getElementById('labTf').value||null,
+        days:365,
+        benchmark_opt_in:benchmarkOptIn
+      })
+    });
+    const capture=d.benchmark_capture?.status==='STORED'
+      ?'This submission was encrypted and stored for up to 90 days.'
+      :d.benchmark_capture?.status&&d.benchmark_capture.status!=='NOT_REQUESTED'
+        ?'This submission was not stored ('+d.benchmark_capture.status+').'
+        :'Benchmark capture was not requested for this submission.';
+    const captureResult=document.getElementById('labBenchmarkCaptureResult');
+    if(captureResult)captureResult.textContent=capture;
+    document.getElementById('labOut').textContent='Candidate #'+d.id+' created. Validating...';
+    await validateCandidate(d.id);
+    await loadBenchmarkCaptureStatus();
+  }catch(e){
+    const captureResult=document.getElementById('labBenchmarkCaptureResult');
+    if(captureResult&&benchmarkOptIn)captureResult.textContent='Capture status could not be confirmed for this submission.';
+    document.getElementById('labOut').textContent=e.message;
+  }
+}
+document.getElementById('labPrompt')?.addEventListener('input',()=>{
+  const consent=document.getElementById('labBenchmarkOptIn');
+  if(consent)consent.checked=false;
+});
+
+async function loadBenchmarkCaptureStatus(){const el=document.getElementById('benchmarkCaptureStatus');if(!el)return;try{const d=await api('/api/customer/benchmark-captures');if(d.status!=='AVAILABLE'){el.textContent='Benchmark submission status is unavailable in this read-only runtime.';return;}el.textContent=d.count+' saved benchmark submission(s); each expires after '+d.retention_days+' days.';}catch(e){el.textContent='Benchmark submission status unavailable.';}}
+async function deleteBenchmarkCaptures(){const out=document.getElementById('benchmarkCaptureStatus');if(!window.confirm('Permanently delete all of your saved benchmark submissions? This cannot be undone.'))return;try{const d=await api('/api/customer/benchmark-captures',{method:'DELETE'});if(out)out.textContent='Deleted '+d.deleted+' benchmark submission(s).';}catch(e){if(out)out.textContent=e.message;}}
 async function validateCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/validate`,{method:'POST'});document.getElementById('labOut').textContent=summarizeValidation(d);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
 async function approveCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/approve-live`,{method:'POST'});document.getElementById('labOut').textContent=JSON.stringify(d,null,2);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
 async function showCandidateHistory(id){const out=document.getElementById('labOut');try{const rows=await api(`/api/customer/strategy-lab/candidates/${id}/runs`);if(!rows.length){out.textContent='No validation attempts recorded yet.';return;}out.textContent=rows.map(r=>{const g=r.gate||{};const dl=r.delta_vs_previous;const delta=dl?` | vs previous: Sharpe ${dl.sharpe>=0?'+':''}${fmtNum(dl.sharpe)}, return ${dl.total_return>=0?'+':''}${fmtPct(dl.total_return)}`:'';return `Attempt ${r.attempt} (${r.created_at.slice(0,16).replace('T',' ')}): ${r.passed?'PASSED':'REJECTED'} | Sharpe ${fmtNum(g.sharpe)} | DD ${fmtPct(g.max_drawdown)} | Return ${fmtPct(g.total_return)}${delta}`;}).join('\n');}catch(e){out.textContent=e.message;}}
@@ -249,7 +321,7 @@ document.addEventListener('click',event=>{
     'load-product-workspace':loadProductWorkspace,'create-smart-trade':createSmartTrade,'start-bot':startBot,
     'refresh-bot-status':refreshBotStatus,'stop-autonomous-bot':stopAutonomousBot,'connect-oanda':connectOanda,
     'connect-deriv':connectDeriv,'preflight-deriv':preflightDeriv,'create-dca-bot':createDcaBot,'build-strategy':buildStrategy,
-    'load-candidates':loadCandidates,'create-lab-candidate':createLabCandidate,'create-paper-executor':()=>createExecutor('PAPER'),
+    'load-candidates':loadCandidates,'create-lab-candidate':createLabCandidate,'delete-benchmark-captures':deleteBenchmarkCaptures,'refresh-benchmark-capture-status':loadBenchmarkCaptureStatus,'create-paper-executor':()=>createExecutor('PAPER'),
     'request-live-executor':requestLiveExecutor,'load-account':loadAccount,'load-deposit':loadDeposit,'load-withdrawals':loadWithdrawals,
     'send-withdrawal-otp':sendWithdrawalOtp,'verify-withdrawal-otp':verifyWithdrawalOtp,'request-withdrawal':requestWithdrawal,
     'load-billing':loadBilling,'claim-referral':claimReferral,'create-referral-code':createReferralCode,'logout':logout
