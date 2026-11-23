@@ -117,8 +117,9 @@ def test_model_bundle_switches_with_one_atomic_pointer_and_keeps_old_version_rea
     with pytest.raises(OSError, match="atomic pointer publication failure"):
         trading_core.promote_model_artifact(str(candidate), str(champion))
 
-    # A failed pointer commit leaves the previously published champion selectable.
+    # A failed pointer commit leaves the old champion and removes the unpublished orphan.
     assert champion.read_bytes() == champion_pointer
+    assert list(champion_versions.iterdir()) == [old_artifact]
     old_model, old_meta = trading_core.load_model(str(champion))
     assert old_model == {"generation": "old"}
     assert old_meta["model_sha256"] == old_hash
@@ -134,6 +135,58 @@ def test_model_bundle_switches_with_one_atomic_pointer_and_keeps_old_version_rea
     assert verify_model_file(champion, candidate_hash)
     # Old immutable versions are not pruned while a reader or rollback may reference them.
     assert old_artifact.is_file()
+
+
+
+def test_model_version_retention_preserves_live_rollback_and_recent_versions(tmp_path):
+    import json
+    import os
+    from datetime import datetime, timedelta, timezone
+    from app import trading_core
+
+    model_file = tmp_path / "retained.joblib"
+    versions_dir = model_file.with_name(model_file.name + ".versions")
+    versions_dir.mkdir()
+    now = datetime.now(timezone.utc)
+
+    def add_artifact(digest, nonce, hours_old):
+        artifact = versions_dir / (digest + "." + nonce + ".joblib")
+        artifact.write_bytes((digest + nonce).encode("ascii"))
+        stamp = (now - timedelta(hours=hours_old)).timestamp()
+        os.utime(artifact, (stamp, stamp))
+        return artifact
+
+    live = add_artifact("a" * 64, "1" * 32, 120)
+    rollback = add_artifact("b" * 64, "2" * 32, 120)
+    keep_extra = add_artifact("c" * 64, "3" * 32, 121)
+    remove_one = add_artifact("d" * 64, "4" * 32, 122)
+    remove_two = add_artifact("e" * 64, "5" * 32, 123)
+
+    def pointer(artifact, digest):
+        return {
+            "artifact_pointer_schema": 1,
+            "artifact_file": versions_dir.name + "/" + artifact.name,
+            "model_sha256": digest,
+        }
+
+    model_file.write_text(json.dumps(pointer(live, "a" * 64)), encoding="utf-8")
+    model_file.with_name(model_file.name + ".previous").write_text(
+        json.dumps(pointer(rollback, "b" * 64)), encoding="utf-8"
+    )
+
+    removed = trading_core.prune_model_versions(
+        model_file,
+        now=now,
+        grace_period=timedelta(hours=24),
+        retain_unreferenced=1,
+    )
+
+    assert removed == 2
+    assert live.is_file()
+    assert rollback.is_file()
+    assert keep_extra.is_file()
+    assert not remove_one.exists()
+    assert not remove_two.exists()
 
 
 def test_features_are_nonempty_and_finite():
