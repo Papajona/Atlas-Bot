@@ -185,6 +185,49 @@ def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
 
 
 
+def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty_or_placeholder(
+    tmp_path, monkeypatch
+):
+    phrase_key = "mne" + "monic"
+    block_key = "seed" + "_phrase"
+    single_line_value = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    first_block_line = "abandon abandon abandon abandon abandon abandon"
+    second_block_line = "abandon abandon abandon abandon abandon about"
+
+    (tmp_path / "multiline-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ":\n    " + single_line_value + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "block-recovery.yml").write_text(
+        "wallet:\n  " + block_key + ": |-\n"
+        + "    " + first_block_line + "\n"
+        + "    " + second_block_line + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "empty-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ":\n  label: example\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "placeholder-recovery.yml").write_text(
+        "wallet:\n  " + phrase_key + ":\n    <YOUR_SEED_PHRASE>\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "multiline-recovery.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "block-recovery.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("empty-recovery.yml" in item for item in findings)
+    assert not any("placeholder-recovery.yml" in item for item in findings)
+
+
 def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strings(
     tmp_path, monkeypatch
 ):
