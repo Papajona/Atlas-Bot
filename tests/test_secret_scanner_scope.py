@@ -377,7 +377,7 @@ def test_secret_scanner_treats_valid_recursive_yaml_alias_as_text(
     # anchored mapping. Confirm that the fixture is valid and self-referential
     # before checking that the line-based secret scanner does not parse or
     # recursively traverse YAML documents.
-    alias_text = "loop: &loop\\n  self: *loop\\n"
+    alias_text = "loop: &loop\n  self: *loop\n"
     alias_path = tmp_path / "cyclic-alias.yml"
     alias_path.write_text(alias_text, encoding="utf-8")
     assert alias_path.read_text(encoding="utf-8").splitlines() == [
