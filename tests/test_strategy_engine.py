@@ -938,6 +938,90 @@ def test_strategy_signal_rejects_invalid_latest_completed_bar_instead_of_using_s
         strategy_signal(frame)
 
 
+def test_strategy_signal_rejects_duplicate_timestamps_even_when_final_row_is_invalid():
+    frame = sample_df()
+    previous_timestamp = frame.index[-2]
+    frame.index = frame.index[:-1].append(pd.DatetimeIndex([previous_timestamp]))
+    frame.iloc[-1, frame.columns.get_loc("high")] = np.nan
+    with pytest.raises(RuntimeError, match="Duplicate timestamps"):
+        strategy_signal(frame)
+
+
+@pytest.mark.parametrize(
+    ("endpoint_name", "request_name"),
+    [
+        ("strategy_signal_api", "MarketRequest"),
+        ("research_review", "ResearchMarketRequest"),
+    ],
+)
+@pytest.mark.parametrize("timeframe", ["4h", "1d"])
+def test_strategy_routes_accept_fresh_completed_slow_timeframe_candles(
+    monkeypatch, endpoint_name, request_name, timeframe
+):
+    from app import main
+    from app.config import settings as app_settings
+    from app.schemas import MarketRequest, ResearchMarketRequest
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    async def fake_archive(*_args, **_kwargs):
+        return {"status": "NOT_WRITTEN"}
+
+    monkeypatch.setattr(main, "auth", fake_auth)
+    monkeypatch.setattr(app_settings, "strategy_engine_enabled", True)
+    monkeypatch.setattr(app_settings, "min_bars", 250)
+    monkeypatch.setattr(app_settings, "stale_data_minutes", 180)
+    monkeypatch.setattr(app_settings, "adaptive_require_established_crypto", False)
+
+    interval = pd.Timedelta(timeframe)
+    now = pd.Timestamp.now(tz="UTC")
+    last_completed_open = now.floor(timeframe) - interval
+    index = pd.date_range(end=last_completed_open, periods=250, freq=interval)
+    frame = sample_df(250)
+    frame.index = index
+    monkeypatch.setattr(main, "market_data", lambda _req: frame.copy())
+    monkeypatch.setattr(
+        main,
+        "strategy_signal",
+        lambda *_args, **_kwargs: {"side": "flat", "signal_timestamp": index[-1].isoformat()},
+    )
+    if endpoint_name == "research_review":
+        monkeypatch.setattr(main, "_attach_research_evidence", lambda df, _req: df)
+        monkeypatch.setattr(main, "backtest_all_strategies", lambda *_args, **_kwargs: {"strategies": []})
+        monkeypatch.setattr(main, "archive_research_trials", fake_archive)
+        monkeypatch.setattr(main, "ai_market_review", lambda *_args, **_kwargs: {"status": "REVIEW_READY"})
+
+    request_type = {
+        "MarketRequest": MarketRequest,
+        "ResearchMarketRequest": ResearchMarketRequest,
+    }[request_name]
+    request = request_type(asset="forex", timeframe=timeframe)
+    result = asyncio.run(getattr(main, endpoint_name)(request, None, None))
+    assert result["timeframe"] == timeframe
+    if endpoint_name == "strategy_signal_api":
+        assert result["side"] == "flat"
+    else:
+        assert result["status"] == "REVIEW_READY"
+
+
+def test_customer_paper_router_uses_the_same_spot_fee_assumption_as_fills(monkeypatch):
+    from app import main
+    from app.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "customer_paper_spot_taker_bps", 13.0)
+    monkeypatch.setattr(app_settings, "research_taker_bps", 5.5)
+    assert main._customer_paper_router_taker_bps(
+        needs_customer_paper=True, asset="crypto"
+    ) == 13.0
+    assert main._customer_paper_router_taker_bps(
+        needs_customer_paper=False, asset="crypto"
+    ) == 5.5
+    assert main._customer_paper_router_taker_bps(
+        needs_customer_paper=True, asset="forex"
+    ) == 5.5
+
+
 @pytest.mark.parametrize(
     ("endpoint_name", "request_name"),
     [

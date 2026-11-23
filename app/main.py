@@ -4349,7 +4349,13 @@ def _strategy_router_validation_gate(
     }
 
 
-def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
+def _market_data_quality(
+    df,
+    timeframe: str,
+    asset: str = "crypto",
+    *,
+    completed_bar_close: bool = False,
+) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if df is None or len(df) < settings.min_bars:
         reasons.append("insufficient_bars")
@@ -4378,24 +4384,51 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
         reasons.append("duplicate_timestamps")
     last = df.index[-1]
     try:
-        age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
-        tf = pd.Timedelta(timeframe).total_seconds()
-        # Completed-bar data is expected to be no older than 3 bars or the configured hard ceiling.
-        allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf * 3.5))
-        if age > allowed:
-            reasons.append("stale_market_data")
+        timeframe_delta = pd.Timedelta(timeframe)
+        tf_seconds = timeframe_delta.total_seconds()
+        if not math.isfinite(tf_seconds) or tf_seconds <= 0:
+            raise ValueError("invalid timeframe")
+        if completed_bar_close:
+            # OHLCV indices label candle opens. Use the completed close boundary so
+            # fresh 4-hour and daily candles are not rejected because their open is old.
+            last_open = pd.Timestamp(last)
+            if last_open.tzinfo is None:
+                raise ValueError("naive market timestamp")
+            last_close = last_open + timeframe_delta
+            close_age = (pd.Timestamp(datetime.now(timezone.utc)) - last_close).total_seconds()
+            if close_age < 0:
+                reasons.append("incomplete_latest_bar")
+            elif close_age > _customer_paper_max_bar_age_seconds(tf_seconds):
+                reasons.append("stale_market_data")
+        else:
+            age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
+            # Preserve the legacy open-time freshness rule for other consumers.
+            allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf_seconds * 3.5))
+            if age > allowed:
+                reasons.append("stale_market_data")
     except Exception:
         reasons.append("invalid_market_timestamp")
     return not reasons, reasons
 
 
 def _require_strategy_market_data_quality(df, req) -> None:
-    passed, reasons = _market_data_quality(df, req.timeframe, req.asset)
+    passed, reasons = _market_data_quality(
+        df, req.timeframe, req.asset, completed_bar_close=True
+    )
     if not passed:
         raise HTTPException(
             status_code=422,
             detail={"message": "Market data failed the strategy quality gate", "reasons": reasons},
         )
+
+
+def _customer_paper_router_taker_bps(
+    *, needs_customer_paper: bool, asset: str
+) -> float:
+    """Keep customer-paper crypto-spot routing cost assumptions aligned with fills."""
+    if needs_customer_paper and str(asset or "").strip().lower() == "crypto":
+        return float(settings.customer_paper_spot_taker_bps)
+    return float(settings.research_taker_bps)
 
 
 def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
@@ -6281,7 +6314,9 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 build_research_execution_cost_context,
                 df,
                 settings=settings,
-                taker_bps=float(settings.research_taker_bps),
+                taker_bps=_customer_paper_router_taker_bps(
+                    needs_customer_paper=needs_customer_paper, asset=req.asset
+                ),
                 base_slippage_bps=float(settings.research_slippage_bps),
                 cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
                 asset=req.asset,

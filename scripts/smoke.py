@@ -32,14 +32,16 @@ def validate_base_url(value: str) -> str:
 
 
 def _connection(parsed):
+    default_port = 443 if parsed.scheme == "https" else 80
+    port = parsed.port if parsed.port is not None else default_port
     if parsed.scheme == "https":
         return http.client.HTTPSConnection(
             parsed.hostname,
-            port=parsed.port,
+            port=port,
             timeout=5,
             context=ssl.create_default_context(),
         )
-    return http.client.HTTPConnection(parsed.hostname, port=parsed.port, timeout=5)
+    return http.client.HTTPConnection(parsed.hostname, port=port, timeout=5)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -179,6 +179,9 @@ def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asse
     if df is None or len(df) < cfg.trend_slow:
         # EMA(trend_slow) is seeded from the first bar and has no warm-up mask.
         raise RuntimeError("Insufficient market history for strategy ensemble")
+    if df.index.has_duplicates:
+        # Equal labels do not prove the surviving signal belongs to the final input row.
+        raise RuntimeError("Duplicate timestamps are not allowed for strategy signals")
     sig = strategy_signals(df, cfg, asset=asset).dropna(subset=["ensemble", "atr", "realized_vol"])
     if sig.empty:
         raise RuntimeError("Insufficient market history for strategy ensemble")
