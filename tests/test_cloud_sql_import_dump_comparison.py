@@ -191,10 +191,15 @@ def test_fingerprint_cli_prints_machine_readable_source_fingerprint(tmp_path):
     source = tmp_path / "source.sql"
     _write(source, "independent-source-key-0123456789")
 
+    script_path = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "compare_cloud_sql_import_dumps.py"
+    )
     completed = subprocess.run(
         [
             sys.executable,
-            "scripts/compare_cloud_sql_import_dumps.py",
+            str(script_path),
             "--fingerprint",
             str(source),
         ],
