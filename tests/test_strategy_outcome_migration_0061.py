@@ -174,9 +174,11 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert float(completed["closing_notional"]) == 100.0
             assert completed["lifecycle_status"] == "CLOSED"
             assert completed["fee_basis_complete"] in (True, 1)
-            assert float(completed["net_pnl"]) == 5.0
-            assert float(completed["net_return_bps"]) == 500.0
-            assert float(completed["return_bps"]) == 500.0
+            # Gross realized PnL is 5.0; the verified 0.4 entry fee makes
+            # the reconstructed net PnL 4.6 (460 bps on 100 notional).
+            assert float(completed["net_pnl"]) == pytest.approx(4.6)
+            assert float(completed["net_return_bps"]) == pytest.approx(460.0)
+            assert float(completed["return_bps"]) == pytest.approx(500.0)
 
             remaining_position = connection.execute(text("""
                 SELECT entry_fee, entry_fee_basis_known
