@@ -104,6 +104,10 @@ def test_withdrawal_review_resolves_empty_encrypted_email_from_auth_admin():
 
 def test_risk_dashboard_uses_bounded_recent_trade_candidates_in_both_transports():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    query = source[
+        source.index("def _recent_closed_platform_trade_query"):
+        source.index("async def _recent_closed_platform_trade_returns")
+    ]
     helper = source[
         source.index("async def _recent_closed_platform_trade_returns"):
         source.index('@app.get("/api/risk-dashboard/metrics")')
@@ -112,11 +116,13 @@ def test_risk_dashboard_uses_bounded_recent_trade_candidates_in_both_transports(
     assert "latest_closed = (" not in source
     assert "_RISK_OUTCOME_SAMPLE_SIZE = 100" in source
     assert "_RISK_OUTCOME_MAX_FILL_ROWS_PER_TRADE = 250" in source
-    assert "_RISK_OUTCOME_RECENT_CANDIDATE_ROWS" in helper
-    assert "recent_closed_candidates = (" in helper
-    assert ".order_by(StrategyOutcome.created_at.desc(), StrategyOutcome.id.desc())" in helper
-    assert ".limit(_RISK_OUTCOME_RECENT_CANDIDATE_ROWS)" in helper
-    assert ".group_by(recent_closed_candidates.c.trade_id)" in helper
+    # The source-candidate query is a separate function; keep its assertions
+    # on that slice rather than accidentally excluding the code under test.
+    assert "_RISK_OUTCOME_RECENT_CANDIDATE_ROWS" in query
+    assert "recent_closed_candidates = (" in query
+    assert ".order_by(StrategyOutcome.created_at.desc(), StrategyOutcome.id.desc())" in query
+    assert ".limit(_RISK_OUTCOME_RECENT_CANDIDATE_ROWS)" in query
+    assert ".group_by(recent_closed_candidates.c.trade_id)" in query
     # Assert the candidate scan's LIMIT is inside the subquery, before outer GROUP BY.
     compiled = str(main._recent_closed_platform_trade_query().compile(compile_kwargs={"literal_binds": True}))
     assert "LIMIT 25100" in compiled
