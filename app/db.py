@@ -989,7 +989,11 @@ class WebhookEndpoint(Base):
 
 class WebhookEvent(Base):
     __tablename__ = "webhook_events"
-    __table_args__ = (UniqueConstraint("endpoint_id", "event_id", name="uq_webhook_endpoint_event"), Index("ix_webhook_event_endpoint_created", "endpoint_id", "created_at"))
+    __table_args__ = (
+        UniqueConstraint("endpoint_id", "event_id", name="uq_webhook_endpoint_event"),
+        Index("ix_webhook_event_endpoint_created", "endpoint_id", "created_at"),
+        Index("ix_webhook_events_created_at_id", "created_at", "id"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     endpoint_id: Mapped[int] = mapped_column(Integer, nullable=False)
     event_id: Mapped[str] = mapped_column(String(160), nullable=False)
