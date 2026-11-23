@@ -41,12 +41,6 @@ TRON_SEED_IN_SOURCE = re.compile(
 MULTILINE_SEED_KEY = re.compile(
     r"""(?i)^\s*(?:-\s*)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
 )
-MULTILINE_SEED_EXPLICIT_KEY = re.compile(
-    r"""(?i)^\s*\?\s*["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*(?:#.*)?$"""
-)
-YAML_EXPLICIT_VALUE = re.compile(
-    r"""^\s*:\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
-)
 
 SOURCE_STRING_CONCATENATION = re.compile(
     r"""(?:
@@ -438,9 +432,13 @@ def scan() -> list[str]:
                     if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
-            if is_yaml and yaml_parsed:
-                continue
             for match in ASSIGNMENT.finditer(line):
+                if is_yaml and yaml_parsed:
+                    yaml_key = re.sub(r"[^a-z0-9]", "", match.group("key").lower())
+                    if yaml_key in {"mnemonic", "seedphrase", "privatekey"}:
+                        # These keys are validated against YAML mapping structure above.
+                        # Do not reinterpret the same words inside block-scalar prose.
+                        continue
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
                 source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
