@@ -5,10 +5,15 @@ This is intentionally conservative: it reports high-signal credential assignment
 private-key/seed material while allowing placeholders and public-key material.
 """
 from __future__ import annotations
+import json
 import re
 import sys
 import unicodedata
 from pathlib import Path
+
+import yaml
+from bip_utils import Bip39MnemonicValidator
+from yaml.nodes import MappingNode, ScalarNode, SequenceNode
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".venv", "__pycache__", "node_modules", "dist", "build", ".pytest_cache"}
@@ -165,81 +170,188 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
     ) is not None
 
 
-def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool:
-    """Detect recovery material in a YAML block, including Unicode and structured keys."""
-    normalized_lines = []
-    for line in value_lines:
-        value = line.strip()
-        if not value or value.startswith("#"):
-            continue
-        value = re.sub(r"^-\s*", "", value)
-        value = re.sub(r"^[|>][+-]?\s*", "", value)
-        value = value.strip().strip("'\"").strip()
-        if value:
-            normalized_lines.append(value)
+BIP39_VALIDATOR = Bip39MnemonicValidator()
+BIP39_WORD_COUNTS = {12, 15, 18, 21, 24}
+PRIVATE_JWK_MATERIAL_FIELDS = {
+    "d", "p", "q", "dp", "dq", "qi", "oth", "k",
+    "private", "privatekey", "privatekeypem", "privkey",
+    "secret", "secretkey", "seed", "keymaterial", "pem",
+}
+YAML_CREDENTIAL_KEY = re.compile(
+    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)$"""
+)
 
-    if not normalized_lines:
+
+def _is_valid_bip39_mnemonic(value: str) -> bool:
+    """Accept only complete, checksum-valid BIP-39 phrases from supported wordlists."""
+    candidate = unicodedata.normalize("NFKD", value).replace("\u3000", " ")
+    words = candidate.split()
+    if len(words) not in BIP39_WORD_COUNTS:
         return False
+    return BIP39_VALIDATOR.IsValid(" ".join(words))
 
-    candidate = " ".join(normalized_lines).strip().lower()
-    if candidate in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+
+def _yaml_scalar_values(node):
+    """Yield scalar values from a YAML node without treating scalar text as YAML syntax."""
+    if isinstance(node, ScalarNode):
+        yield node.value
+    elif isinstance(node, SequenceNode):
+        for child in node.value:
+            yield from _yaml_scalar_values(child)
+    elif isinstance(node, MappingNode):
+        for _, value_node in node.value:
+            yield from _yaml_scalar_values(value_node)
+
+
+def _nonempty_private_scalar(value: str) -> bool:
+    candidate = value.strip().strip('"').strip("'").strip()
+    if not candidate:
         return False
+    normalized = candidate.lower()
+    if normalized in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+        return False
+    return True
 
-    normalized_key = key.lower().replace("_", "").replace("-", "")
-    if normalized_key in {"mnemonic", "seedphrase"}:
-        # BIP-39 word lists exist in non-English languages too. Do not restrict
-        # block values to ASCII: Unicode alphabetic words must be classified.
-        words = [
-            token.strip(".,;:()[]{}<>\"'")
-            for token in candidate.split()
-        ]
-        return len(words) >= 10 and all(
-            unicodedata.normalize("NFC", word).isalpha() for word in words
+
+def _structured_private_object_has_material(value) -> bool:
+    """Detect private JWK components while allowing empty and public-only key objects."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
+                if isinstance(item, str) and _nonempty_private_scalar(item):
+                    return True
+                if isinstance(item, (dict, list)) and _structured_private_object_has_material(item):
+                    return True
+                if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    return True
+        return any(
+            _structured_private_object_has_material(item)
+            for item in value.values()
+            if isinstance(item, (dict, list))
         )
+    if isinstance(value, list):
+        return any(
+            _structured_private_object_has_material(item)
+            for item in value
+            if isinstance(item, (dict, list))
+        )
+    return False
 
-    # A private-key block can contain serialized JWK/JSON objects rather than
-    # one uninterrupted base64/PEM token. The sensitive parent key makes any
-    # non-empty structured object high-signal; retain the existing long-token
-    # test for plain encoded values.
-    if candidate.startswith(("{", "[")):
-        return True
+
+def _yaml_node_has_private_material(node) -> bool:
+    """Classify private-key YAML values, including JSON JWKs and native YAML mappings."""
+    if isinstance(node, ScalarNode):
+        candidate = node.value.strip()
+        if not candidate:
+            return False
+        if candidate.startswith(("{", "[")):
+            try:
+                structured = json.loads(candidate)
+            except json.JSONDecodeError:
+                # Malformed non-empty key objects are suspicious; valid empty or
+                # public-only objects are handled structurally below.
+                return candidate not in {"{}", "[]"}
+            return _structured_private_object_has_material(structured)
+        if PRIVATE_KEY.search(candidate):
+            return True
+        compact = re.sub(r"\s+", "", candidate)
+        return bool(re.fullmatch(r"[A-Za-z0-9_+/=.-]{20,}", compact))
+    if isinstance(node, MappingNode):
+        for key_node, value_node in node.value:
+            if not isinstance(key_node, ScalarNode):
+                continue
+            normalized_key = re.sub(
+                r"[^a-z0-9]", "", key_node.value.lower()
+            )
+            if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
+                if any(_nonempty_private_scalar(value) for value in _yaml_scalar_values(value_node)):
+                    return True
+            if _yaml_node_has_private_material(value_node):
+                return True
+        return False
+    if isinstance(node, SequenceNode):
+        return any(_yaml_node_has_private_material(child) for child in node.value)
+    return False
+
+
+def _yaml_value_is_sensitive(key: str, value_node) -> bool:
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized_key in {"mnemonic", "seedphrase"}:
+        return _is_valid_bip39_mnemonic(" ".join(_yaml_scalar_values(value_node)))
+    if normalized_key == "privatekey":
+        return _yaml_node_has_private_material(value_node)
+    if not YAML_CREDENTIAL_KEY.fullmatch(key):
+        return False
+
+    for value in _yaml_scalar_values(value_node):
+        candidate = value.strip().strip('"').strip("'").strip()
+        if not candidate:
+            continue
+        if candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+            continue
+        if re.fullmatch(r"[A-Za-z0-9_+/=.-]{20,}", candidate):
+            return True
+    return False
+
+
+def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
+    """Parse YAML mappings so quoted block-scalar examples are never treated as keys."""
+    try:
+        root = yaml.compose(text, Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return {}
+    findings: dict[int, str] = {}
+
+    def visit(node) -> None:
+        if isinstance(node, MappingNode):
+            for key_node, value_node in node.value:
+                if isinstance(key_node, ScalarNode):
+                    key = key_node.value
+                    if YAML_CREDENTIAL_KEY.fullmatch(key) and _yaml_value_is_sensitive(key, value_node):
+                        findings[key_node.start_mark.line + 1] = key
+                visit(value_node)
+        elif isinstance(node, SequenceNode):
+            for child in node.value:
+                visit(child)
+
+    if root is not None:
+        visit(root)
+    return findings
+
+
+def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool:
+    """Retain multiline detection for non-YAML configuration formats."""
+    candidate = " ".join(
+        line.strip().strip("'\"").strip()
+        for line in value_lines
+        if line.strip() and not line.lstrip().startswith("#")
+    ).strip()
+    if not candidate or candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+        return False
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+    if normalized_key in {"mnemonic", "seedphrase"}:
+        return _is_valid_bip39_mnemonic(candidate)
+    if normalized_key == "privatekey":
+        return _yaml_node_has_private_material(ScalarNode("tag:yaml.org,2002:str", candidate))
     compact = re.sub(r"\s+", "", candidate)
-    return (
-        len(compact) >= 20
-        and re.fullmatch(r"[A-Za-z0-9_+/=.-]+", compact) is not None
-    )
+    return len(compact) >= 20 and re.fullmatch(r"[A-Za-z0-9_+/=.-]+", compact) is not None
 
 
 def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
-    """Return 1-based sensitive YAML key lines whose indented values contain key material."""
+    """Line-oriented multiline check for dotenv/TOML/INI-style files."""
     findings: dict[int, str] = {}
     for index, line in enumerate(lines):
         match = MULTILINE_SEED_KEY.fullmatch(line)
-        value_start = index + 1
-        base_indent = len(line) - len(line.lstrip(" \t"))
-
         if match is None:
-            # YAML explicit mapping keys split the sensitive key and value:
-            #   ? mnemonic
-            #   : |
-            explicit_match = MULTILINE_SEED_EXPLICIT_KEY.fullmatch(line)
-            if explicit_match is None or index + 1 >= len(lines):
-                continue
-            explicit_value_line = lines[index + 1]
-            if YAML_EXPLICIT_VALUE.fullmatch(explicit_value_line) is None:
-                continue
-            match = explicit_match
-            base_indent = len(explicit_value_line) - len(
-                explicit_value_line.lstrip(" \t")
-            )
-            value_start = index + 2
-
+            continue
+        key_indent = len(line) - len(line.lstrip(" \t"))
         value_lines: list[str] = []
-        for following in lines[value_start:]:
+        for following in lines[index + 1 :]:
             if not following.strip():
                 continue
             indent = len(following) - len(following.lstrip(" \t"))
-            if indent <= base_indent:
+            if indent <= key_indent:
                 break
             value_lines.append(following)
         if _multiline_seed_material_is_secret(match.group("key"), value_lines):
@@ -265,13 +377,13 @@ def scan() -> list[str]:
         try: text=path.read_text(errors="ignore")
         except OSError: continue
         lines = text.splitlines()
-        multiline_seed_findings = (
-            _find_multiline_seed_assignments(lines)
-            if path.suffix.lower() in {
-                ".yaml", ".yml", ".env", ".toml", ".ini", ".conf", ".cfg", ".json"
-            }
-            else {}
-        )
+        suffix = path.suffix.lower()
+        if suffix in {".yaml", ".yml"}:
+            multiline_seed_findings = _find_yaml_sensitive_assignments(text)
+        elif suffix in {".env", ".toml", ".ini", ".conf", ".cfg", ".json"}:
+            multiline_seed_findings = _find_multiline_seed_assignments(lines)
+        else:
+            multiline_seed_findings = {}
         for lineno,line in enumerate(lines,1):
             multiline_seed_key = multiline_seed_findings.get(lineno)
             if multiline_seed_key:
@@ -281,10 +393,11 @@ def scan() -> list[str]:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
             source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
+            is_yaml = path.suffix.lower() in {".yaml", ".yml"}
             seed_match = (
                 TRON_SEED_IN_SOURCE.search(line)
                 if source_code
-                else TRON_SEED.search(line)
+                else None if is_yaml else TRON_SEED.search(line)
             )
             if seed_match and "re.compile" not in line:
                 raw_seed_value = seed_match.group("value").strip()
@@ -313,6 +426,8 @@ def scan() -> list[str]:
                     if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
+            if path.suffix.lower() in {".yaml", ".yml"}:
+                continue
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
