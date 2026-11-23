@@ -238,6 +238,62 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
     assert not any("placeholder-block-recovery.yml" in item for item in findings)
 
 
+
+def test_secret_scanner_detects_non_english_mnemonics_and_structured_private_keys_in_yaml_blocks(
+    tmp_path, monkeypatch
+):
+    mnemonic_key = "mne" + "monic"
+    private_key = "private" + "_key"
+    japanese_words = "あいこくしん あいさつ あいだ あおぞら あかちゃん あきる あけがた あける あこがれる あさい あさひ あしあと"
+    (tmp_path / "japanese-wallet.yml").write_text(
+        "wallet:\n  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + " " for word in japanese_words.split())
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "json-private-wallet.yml").write_text(
+        "wallet:\n  " + private_key + ": |\n"
+        '    {\n'
+        '      "kty": "RSA",\n'
+        '      "d": "0123456789abcdef0123456789abcdef",\n'
+        '      "n": "abcdef0123456789abcdef0123456789"\n'
+        '    }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("japanese-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("json-private-wallet.yml:2: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_detects_yaml_explicit_sensitive_keys_with_block_values(
+    tmp_path, monkeypatch
+):
+    mnemonic_key = "mne" + "monic"
+    private_key = "private" + "_key"
+    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    (tmp_path / "explicit-mnemonic.yml").write_text(
+        "? " + mnemonic_key + "\n"
+        ": |\n"
+        + "".join("  " + word + "\n" for word in phrase.split()),
+        encoding="utf-8",
+    )
+    (tmp_path / "explicit-private-key.yml").write_text(
+        "? " + private_key + "\n"
+        ": |\n"
+        '  {"kty":"EC","d":"0123456789abcdef0123456789abcdef"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("explicit-mnemonic.yml:1: seed/private-key assignment" in item for item in findings)
+    assert any("explicit-private-key.yml:1: seed/private-key assignment" in item for item in findings)
+
+
 def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strings(
     tmp_path, monkeypatch
 ):
