@@ -14,6 +14,7 @@ from .trading_core import (
     build_features,
     FEATURE_COLUMNS,
     promote_model_artifact,
+    prune_model_versions,
 )
 from .config import settings
 from .model_registry import backup_champion, verify_model_file, read_model_manifest
@@ -263,6 +264,7 @@ def ensure_adaptive_model(
     """
     policy = policy or AdaptiveModelPolicy()
     model_path = Path(model_path)
+    prune_model_versions(model_path)
     existing = _read_meta(model_path)
     if model_is_fresh(model_path, policy):
         return {
