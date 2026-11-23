@@ -374,7 +374,7 @@ def test_secret_scanner_handles_recursive_yaml_alias_without_recursion_error(
     # The scanner inspects bounded text lines; it must not recursively traverse
     # YAML aliases or fail on a valid self-referential YAML mapping.
     (tmp_path / "cyclic-alias.yml").write_text(
-        "loop: &loop {self: *loop}\\n", encoding="utf-8"
+        "loop: &loop {self: *loop}\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
