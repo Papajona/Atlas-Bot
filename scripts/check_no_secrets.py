@@ -29,9 +29,16 @@ TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
 ) 
 SOURCE_STRING_CONCATENATION = re.compile(
-    r"""(?:"|')\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*(?:"|')"""
+    r"""(?:
+        (?:"[^"\r\n]*"|'[^'\r\n]*')\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*
+        |[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*(?:"[^"\r\n]*"|'[^'\r\n]*')
+        |["']\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*["']
+        |[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*
+    )"""
 )
-
+SOURCE_STRING_LITERAL = re.compile(
+    r"""(?P<quote>["'])(?P<value>(?:\\.|[^\\])*?)\1"""
+)
 
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
@@ -102,6 +109,37 @@ def _is_helper_call(value: str, remainder: str) -> bool:
     return bool(re.match(r"\d+\s*[,\)\]]", arguments))
 
 
+def _has_sensitive_source_literal(key: str, expression: str) -> bool:
+    """Detect seed/private-key material in quoted pieces of a source concatenation."""
+    components = [
+        match.group("value")
+        for match in SOURCE_STRING_LITERAL.finditer(expression)
+    ]
+    if not components:
+        return False
+
+    normalized_key = key.lower().replace("_", "").replace("-", "")
+    if normalized_key in {"mnemonic", "seedphrase"}:
+        # BIP-39-style recovery phrases are sequences of alphabetic words. Join
+        # adjacent literal pieces with whitespace so split phrases are still found.
+        candidates = components + [" ".join(components)]
+        for candidate in candidates:
+            words = candidate.lower().split()
+            if len(words) >= 10 and all(
+                re.fullmatch(r"[a-z]{2,12}", word) for word in words
+            ):
+                return True
+        return False
+
+    # Private keys may be split across adjacent quoted components. Join them
+    # without separators before checking for a long key-like token.
+    combined = "".join(components)
+    return re.search(
+        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=-]{20,}(?![A-Za-z0-9])",
+        combined,
+    ) is not None
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -123,14 +161,19 @@ def scan() -> list[str]:
             )
             if seed_match and "re.compile" not in line:
                 raw_seed_value = seed_match.group("value").strip()
-                # Source code may construct an ordinary note string by concatenating
-                # a credential-like label with a variable, not store a credential literal.
-                constructed_source_value = (
+                computed_source_value = (
                     source_code
-                    and _inside_quoted_literal(line, seed_match.start("key"))
                     and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
                 )
-                if not constructed_source_value:
+                if computed_source_value:
+                    # Ignore harmless computed labels, but never suppress a literal
+                    # recovery phrase or long private-key token in a quoted component.
+                    if _has_sensitive_source_literal(
+                        seed_match.group("key"), raw_seed_value
+                    ):
+                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                        continue
+                else:
                     seed_value = raw_seed_value.strip('"').strip("'").strip().lower()
                     if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
