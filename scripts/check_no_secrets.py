@@ -186,16 +186,27 @@ def _is_bip39_wordlist_phrase(value: str) -> bool:
     return True
 
 
-def _yaml_scalar_values(node):
-    """Yield scalar values from a YAML node without treating scalar text as YAML syntax."""
+def _yaml_scalar_values(node, visited_nodes: set[int] | None = None):
+    """Yield scalar values from a YAML node without looping on recursive aliases."""
+    if node is None:
+        return
+    if visited_nodes is None:
+        visited_nodes = set()
+    node_identity = id(node)
+    if node_identity in visited_nodes:
+        return
+    # YAML aliases can form cycles. Mark each node before descending so every
+    # reachable scalar is considered at most once.
+    visited_nodes.add(node_identity)
+
     if isinstance(node, ScalarNode):
         yield node.value
     elif isinstance(node, SequenceNode):
         for child in node.value:
-            yield from _yaml_scalar_values(child)
+            yield from _yaml_scalar_values(child, visited_nodes)
     elif isinstance(node, MappingNode):
         for _, value_node in node.value:
-            yield from _yaml_scalar_values(value_node)
+            yield from _yaml_scalar_values(value_node, visited_nodes)
 
 
 def _nonempty_private_scalar(value: str) -> bool:
@@ -236,8 +247,21 @@ def _structured_private_object_has_material(value) -> bool:
     return False
 
 
-def _yaml_node_has_private_material(node) -> bool:
-    """Classify private-key YAML values, including JSON JWKs and native YAML mappings."""
+def _yaml_node_has_private_material(
+    node, visited_nodes: set[int] | None = None
+) -> bool:
+    """Classify private-key YAML values without looping on recursive aliases."""
+    if node is None:
+        return False
+    if visited_nodes is None:
+        visited_nodes = set()
+    node_identity = id(node)
+    if node_identity in visited_nodes:
+        return False
+    # YAML aliases can point back to an ancestor (or share a subtree). Treat
+    # each node once; a repeated reference contains no additional key material.
+    visited_nodes.add(node_identity)
+
     if isinstance(node, ScalarNode):
         candidate = node.value.strip()
         if not candidate or candidate.lower() in {"null", "none", "~"}:
@@ -273,11 +297,11 @@ def _yaml_node_has_private_material(node) -> bool:
                     return True
             # Public JWK fields (n/e/x/y/crv/kty) are never considered private
             # material merely because their values are long.
-            if isinstance(value_node, (MappingNode, SequenceNode)) and _yaml_node_has_private_material(value_node):
+            if isinstance(value_node, (MappingNode, SequenceNode)) and _yaml_node_has_private_material(value_node, visited_nodes):
                 return True
         return False
     if isinstance(node, SequenceNode):
-        return any(_yaml_node_has_private_material(child) for child in node.value)
+        return any(_yaml_node_has_private_material(child, visited_nodes) for child in node.value)
     return False
 
 
