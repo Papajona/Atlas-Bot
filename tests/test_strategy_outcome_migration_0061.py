@@ -90,7 +90,7 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
                     lifecycle_status, metadata_json, created_at
                 ) VALUES (
                     1, 100, 200, 1, 42,
-                    5, 0, 5, 500, 500,
+                    5, 0, 5, 123, 500,
                     'CLOSED', '{"fill_price":"100"}', '2026-01-01 10:00:00'
                 ), (
                     2, 90001, NULL, 1, 42,
@@ -135,6 +135,10 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert before["net_pnl"]["nullable"] is False
             assert before["net_return_bps"]["nullable"] is False
             assert before["return_bps"]["nullable"] is False
+            seeded_gross_return_bps = connection.execute(text("""
+                SELECT return_bps FROM strategy_outcomes WHERE id = 1
+            """)).scalar_one()
+            assert float(seeded_gross_return_bps) == pytest.approx(123.0)
 
             monkeypatch.setattr(
                 migration.context, "is_offline_mode", lambda: False
@@ -179,6 +183,7 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert float(completed["net_pnl"]) == pytest.approx(4.6)
             assert float(completed["net_return_bps"]) == pytest.approx(460.0)
             assert float(completed["return_bps"]) == pytest.approx(500.0)
+            assert float(completed["return_bps"]) != float(seeded_gross_return_bps)
 
             remaining_position = connection.execute(text("""
                 SELECT entry_fee, entry_fee_basis_known
