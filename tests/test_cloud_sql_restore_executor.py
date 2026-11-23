@@ -55,6 +55,8 @@ def test_restore_inputs_accept_only_explicit_staging_target_and_immutable_backup
         ({"backup_reference": "gs://atlas-staging-510915-db-backups/restore-imports/abc.sql#1750000000000000"}, "import-staging object"),
     ],
 )
+
+
 def test_restore_inputs_fail_closed(overrides, message):
     values = {
         "project_id": "atlas-staging-510915",
@@ -96,6 +98,8 @@ def test_backup_metadata_requires_exact_generation_checksum_and_locked_retention
         ({"retentionExpirationTime": "2026-11-16T00:00:00+00:00"}, {}, "already expired"),
     ],
 )
+
+
 def test_backup_metadata_rejects_unpinned_or_unretained_source(object_change, bucket_change, message):
     now = datetime(2026, 11, 17, tzinfo=timezone.utc)
     object_metadata = {
@@ -126,6 +130,8 @@ def test_backup_metadata_rejects_unpinned_or_unretained_source(object_change, bu
         ({"retain_until_time": "2030-01-01T00:00:00Z"}, "2030-01-01T00:00:00Z"),
     ],
 )
+
+
 def test_provider_metadata_alias_picker_supports_snake_case_and_camel_case(document, expected):
     assert _pick(document, "md5_hash", "md5Hash", "crc32c_hash", "crc32c", "retain_until_time", "retainUntilTime") == expected
 
@@ -261,7 +267,6 @@ def test_wait_for_operation_rejects_provider_error_and_wrong_target_database():
         )
 
 
-
 def test_pinned_generation_must_be_the_live_object_before_import():
     instant = datetime(2026, 11, 17, 12, tzinfo=timezone.utc)
     versions = {
@@ -344,6 +349,11 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
     assert "find_pinned_package_version" in installer
     assert "both signed PGDG main and archive suites" in installer
     assert '"postgresql-client-${POSTGRES_CLIENT_MAJOR}=${package_version}"' in installer
+    assert "dpkg-query -W" in installer
+    assert "dpkg --compare-versions" in installer
+    assert "--no-remove" in installer
+    assert "--allow-downgrades" not in installer
+    assert "refusing package downgrades" in installer
     verifier = Path("scripts/verify_cloud_sql_sanitized_artifacts.py").read_text(encoding="utf-8")
     assert "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256" in verifier
     assert "does not match the code-reviewed approved fingerprint" in verifier
@@ -399,8 +409,6 @@ def test_execute_restore_retains_import_safety_generation_and_operation_evidence
     assert import_request < wait_for_completion < backup_binding < operation_evidence
 
 
-
-
 def test_restore_inputs_accept_verified_supabase_pg_dump_source_without_production_cloud_sql_instance():
     assert validate_restore_inputs(
         project_id="atlas-staging-510915",
@@ -448,6 +456,8 @@ def test_sanitized_backup_reference_accepts_only_generation_pinned_sql_under_san
     "gs://wrong-bucket/sanitized-imports/public-staging-scrubbed.sql#1792683068959305",
     "gs://atlas-staging-510915-db-backups/sanitized-imports/raw.dump#1792683068959305",
 ])
+
+
 def test_sanitized_backup_reference_rejects_unpinned_or_unapproved_objects(reference):
     with pytest.raises(ValueError):
         validate_sanitized_backup_reference(reference)
@@ -520,6 +530,8 @@ def test_sanitized_import_verifier_rejects_changed_source_prepared_sql(tmp_path,
 
 
 @pytest.mark.parametrize("fingerprint", ["", "not-a-hash", "A" * 64, "0" * 63, None, 123])
+
+
 def test_sanitized_import_verifier_rejects_missing_or_malformed_source_fingerprint(
     tmp_path, monkeypatch, fingerprint
 ):
@@ -579,8 +591,6 @@ def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_pat
         )
 
 
-
-
 def test_sanitized_import_verifier_rejects_mutated_expected_fingerprint_even_when_source_matches(tmp_path, monkeypatch):
     from scripts import verify_cloud_sql_sanitized_artifacts as verifier
 
@@ -637,6 +647,7 @@ def test_sanitized_import_verifier_rejects_source_pin_equal_to_candidate_fingerp
             sanitized_sql_path=candidate,
         )
 
+
 def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
     bootstrap = Path("scripts/bootstrap_cloud_sql_restore_iam.sh").read_text(encoding="utf-8")
     assert "atlas-staging-restore-executor" in bootstrap
@@ -659,6 +670,7 @@ def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
     assert "ATLAS_PRODUCTION_SUPABASE_PROJECT_REF" in bootstrap
     assert "wauaelzyugjuepmrewaw" in bootstrap
     assert "ATLAS_PRODUCTION_CLOUD_SQL_INSTANCE_CONNECTION_NAME" not in bootstrap
+
 
 def test_recovery_preflight_accepts_retained_noncurrent_source_backup_generation():
     # GCS reports timeDeleted for an archived object generation. Its presence in

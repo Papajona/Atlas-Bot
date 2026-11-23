@@ -88,11 +88,23 @@ if [[ -z "$package_version" ]]; then
 fi
 
 echo "Installing PostgreSQL $POSTGRES_CLIENT_RELEASE client package version $package_version."
-# apt resolves and enforces the selected package's declared libpq/common
-# dependency constraints; if compatible signed dependencies are unavailable,
-# installation fails rather than substituting a different client minor.
-apt_with_retries install --yes --no-install-recommends --allow-downgrades \
-  "postgresql-client-${POSTGRES_CLIENT_MAJOR}=${package_version}"
+# Keep apt's default no-downgrade policy. If a newer major-17 client is already
+# installed, fail closed instead of granting a global downgrade permission that
+# could also downgrade unrelated packages while resolving dependencies.
+client_package="postgresql-client-${POSTGRES_CLIENT_MAJOR}"
+installed_package_status="$(dpkg-query -W -f='${db:Status-Status}' "$client_package" 2>/dev/null || true)"
+if [[ "$installed_package_status" == "installed" ]]; then
+  installed_package_version="$(dpkg-query -W -f='${Version}' "$client_package")"
+  if dpkg --compare-versions "$installed_package_version" gt "$package_version"; then
+    echo "BLOCKED: installed $client_package version $installed_package_version is newer than pinned $package_version; refusing package downgrades." >&2
+    exit 1
+  fi
+fi
+# --no-remove prevents apt from solving conflicts by removing unrelated packages.
+# Exact-version installation and the pg_dump/pg_restore checks below still
+# enforce the PostgreSQL 17.12 tooling contract.
+apt_with_retries install --yes --no-install-recommends --no-remove \
+  "$client_package=${package_version}"
 
 test -x "$POSTGRES_BIN_DIR/pg_restore"
 test -x "$POSTGRES_BIN_DIR/pg_dump"

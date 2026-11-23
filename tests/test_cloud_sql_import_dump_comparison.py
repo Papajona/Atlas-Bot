@@ -107,6 +107,7 @@ def test_unwrapped_sql_is_compared_byte_for_byte(tmp_path):
     with pytest.raises(ValueError, match="differs from the canonicalized conversion"):
         compare_dumps(source, uploaded)
 
+
 def test_guard_like_lines_inside_dollar_quoted_function_are_hashed_verbatim(tmp_path):
     source = tmp_path / "source.sql"
     uploaded = tmp_path / "uploaded.sql"
@@ -171,6 +172,7 @@ def test_plain_sql_with_paired_guard_text_inside_function_is_not_treated_as_wrap
     result = compare_dumps(source, uploaded)
     assert result["status"] == "PASS"
     assert result["pg_dump_guard_keys_normalized"] is False
+
 
 def test_fingerprint_report_preserves_raw_hash_and_normalizes_only_outer_guard_keys(tmp_path):
     source = tmp_path / "source.sql"
