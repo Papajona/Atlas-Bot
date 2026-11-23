@@ -21,6 +21,9 @@ EXPECTED_SANITIZED_IMPORT_SHA256 = (
     "fa3b14ec305a9d87313c19a57a441879a4b9977f0e43cd8a349476398d59dfa4"
 )
 EXPECTED_SANITIZED_IMPORT_BYTES = 195036
+APPROVED_SOURCE_PREPARED_CANONICAL_SHA256 = (
+    "b7bd2a440bc4279d727c73f701bf57e1d0c398d2fbf4015ca269ca90f0ebbd86"
+)
 _SANITIZED_REFERENCE_RE = re.compile(
     rf"^gs://{re.escape(BACKUP_BUCKET)}/sanitized-imports/[^#]+\.sql#([1-9][0-9]*)$"
 )
@@ -61,6 +64,12 @@ def verify_sanitized_artifacts(
         raise ValueError(
             "expected source prepared SQL canonical SHA-256 must be a lowercase 64-character hex fingerprint"
         )
+    if expected_source_prepared_canonical_sha256 == EXPECTED_SANITIZED_IMPORT_SHA256:
+        raise ValueError("source prepared SQL fingerprint must not equal the sanitized candidate fingerprint")
+    if expected_source_prepared_canonical_sha256 != APPROVED_SOURCE_PREPARED_CANONICAL_SHA256:
+        raise ValueError(
+            "expected source prepared SQL canonical SHA-256 does not match the code-reviewed approved fingerprint"
+        )
 
     source_prepared_sha256 = sha256_file(source_prepared_sql_path)
     source_prepared_canonical_sha256, source_has_guard = canonical_dump_sha256(
@@ -91,6 +100,7 @@ def verify_sanitized_artifacts(
         "source_prepared_sql_sha256": source_prepared_sha256,
         "source_prepared_sql_canonical_sha256": source_prepared_canonical_sha256,
         "expected_source_prepared_sql_canonical_sha256": expected_source_prepared_canonical_sha256,
+        "approved_source_prepared_sql_canonical_sha256": APPROVED_SOURCE_PREPARED_CANONICAL_SHA256,
         "source_prepared_sql_has_outer_guard": source_has_guard,
         "sanitized_backup_reference": sanitized_backup_reference,
         "sanitized_import_sha256": sanitized_sha256,

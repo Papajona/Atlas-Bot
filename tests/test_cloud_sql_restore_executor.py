@@ -339,7 +339,15 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
     assert "POSTGRES_CLIENT_MAJOR=17" in installer
     assert "POSTGRES_CLIENT_RELEASE=17.12" in installer
     assert "apt-cache madison" in installer
+    assert "apt-archive.postgresql.org/pub/repos/apt" in installer
+    assert "postgresql-pgdg-archive.list" in installer
+    assert "find_pinned_package_version" in installer
+    assert "both signed PGDG main and archive suites" in installer
     assert '"postgresql-client-${POSTGRES_CLIENT_MAJOR}=${package_version}"' in installer
+    verifier = Path("scripts/verify_cloud_sql_sanitized_artifacts.py").read_text(encoding="utf-8")
+    assert "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256" in verifier
+    assert "does not match the code-reviewed approved fingerprint" in verifier
+    assert "must not equal the sanitized candidate fingerprint" in verifier
     assert r"\(PostgreSQL\) 17\.12([[:space:]]|$)" in installer
     ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "Verify a real PostgreSQL 17 custom archive conversion" in ci
@@ -459,6 +467,7 @@ def test_sanitized_import_verifier_binds_candidate_and_import_to_pinned_source_s
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source_canonical_sha, _ = verifier.canonical_dump_sha256(source)
     candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    monkeypatch.setattr(verifier, "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256", source_canonical_sha)
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
     monkeypatch.setattr(
@@ -492,6 +501,7 @@ def test_sanitized_import_verifier_rejects_changed_source_prepared_sql(tmp_path,
 
     import hashlib
     candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    monkeypatch.setattr(verifier, "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256", "0" * 64)
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
     monkeypatch.setattr(
@@ -550,6 +560,8 @@ def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_pat
     candidate.write_bytes(b"scrubbed candidate SQL")
     imported.write_bytes(b"original unsanitized source SQL")
 
+    source_canonical_sha, _ = verifier.canonical_dump_sha256(source)
+    monkeypatch.setattr(verifier, "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256", source_canonical_sha)
     monkeypatch.setattr(verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
         "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304")
     monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256",
@@ -566,6 +578,64 @@ def test_sanitized_import_verifier_rejects_raw_source_or_modified_import(tmp_pat
             imported_sql_path=imported,
         )
 
+
+
+
+def test_sanitized_import_verifier_rejects_mutated_expected_fingerprint_even_when_source_matches(tmp_path, monkeypatch):
+    from scripts import verify_cloud_sql_sanitized_artifacts as verifier
+
+    source = tmp_path / "source-prepared.sql"
+    candidate = tmp_path / "candidate.sql"
+    source.write_bytes(b"reviewed source prepared SQL")
+    candidate.write_bytes(b"scrubbed candidate SQL")
+    source_canonical_sha, _ = verifier.canonical_dump_sha256(source)
+
+    import hashlib
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    monkeypatch.setattr(verifier, "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256", "a" * 64)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
+    monkeypatch.setattr(
+        verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
+        "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+    )
+
+    with pytest.raises(ValueError, match="does not match the code-reviewed approved fingerprint"):
+        verifier.verify_sanitized_artifacts(
+            source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+            source_prepared_sql_path=source,
+            expected_source_prepared_canonical_sha256=source_canonical_sha,
+            sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
+            sanitized_sql_path=candidate,
+        )
+
+
+def test_sanitized_import_verifier_rejects_source_pin_equal_to_candidate_fingerprint(tmp_path, monkeypatch):
+    from scripts import verify_cloud_sql_sanitized_artifacts as verifier
+
+    source = tmp_path / "source-prepared.sql"
+    candidate = tmp_path / "candidate.sql"
+    source.write_bytes(b"reviewed source prepared SQL")
+    candidate.write_bytes(b"scrubbed candidate SQL")
+
+    import hashlib
+    candidate_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    monkeypatch.setattr(verifier, "APPROVED_SOURCE_PREPARED_CANONICAL_SHA256", candidate_sha)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_SHA256", candidate_sha)
+    monkeypatch.setattr(verifier, "EXPECTED_SANITIZED_IMPORT_BYTES", candidate.stat().st_size)
+    monkeypatch.setattr(
+        verifier, "EXPECTED_SOURCE_BACKUP_REFERENCE",
+        "gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+    )
+
+    with pytest.raises(ValueError, match="must not equal the sanitized candidate fingerprint"):
+        verifier.verify_sanitized_artifacts(
+            source_backup_reference="gs://atlas-staging-510915-db-backups/source.dump#1792683068959304",
+            source_prepared_sql_path=source,
+            expected_source_prepared_canonical_sha256=candidate_sha,
+            sanitized_backup_reference="gs://atlas-staging-510915-db-backups/sanitized-imports/candidate.sql#1792683068959305",
+            sanitized_sql_path=candidate,
+        )
 
 def test_cloud_sql_restore_iam_bootstrap_is_separate_and_least_privilege():
     bootstrap = Path("scripts/bootstrap_cloud_sql_restore_iam.sh").read_text(encoding="utf-8")
