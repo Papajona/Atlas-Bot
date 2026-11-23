@@ -65,6 +65,7 @@ from .custody_locations import create_custody_transfer, transition_custody_trans
 from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay, verify_customer_ledger_balances_match_journals
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
 from .market_scanner import MAX_CONCURRENT_FETCHES as _SCANNER_MAX_CONCURRENT_FETCHES, normalize_symbols as _scanner_normalize_symbols, scan_symbols as _scanner_scan_symbols
+from .request_limits import read_limited_body
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
@@ -7263,10 +7264,9 @@ _CUSTOMER_WEBHOOK_MAX_BODY_BYTES = 64 * 1024
 
 @app.post("/api/webhooks/{endpoint_id}")
 async def receive_customer_webhook(endpoint_id:int, request:Request, x_atlas_webhook_token: str | None = Header(default=None), x_atlas_event_id:str|None=Header(default=None)):
-    raw=await request.body()
-    # Events are persisted verbatim; bound each one well below the global request cap.
-    if len(raw) > _CUSTOMER_WEBHOOK_MAX_BODY_BYTES:
-        raise HTTPException(413,"Webhook payload too large")
+    # Stream the payload and stop at the route-specific limit; never buffer an
+    # oversized webhook body before rejecting it.
+    raw = await read_limited_body(request, _CUSTOMER_WEBHOOK_MAX_BODY_BYTES)
     async with SessionLocal() as db:
         endpoint=(await db.execute(select(WebhookEndpoint).where(WebhookEndpoint.id==endpoint_id,WebhookEndpoint.status=="ACTIVE"))).scalar_one_or_none()
         if not endpoint: raise HTTPException(404,"Webhook endpoint not found")
