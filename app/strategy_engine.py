@@ -176,9 +176,15 @@ def target_positions(signal: pd.Series, realized_vol: pd.Series,
 
 def strategy_signal(df: pd.DataFrame, config: StrategyConfig | None = None, asset: str = "crypto") -> dict:
     cfg = config or StrategyConfig()
+    if df is None or len(df) < cfg.trend_slow:
+        # EMA(trend_slow) is seeded from the first bar and has no warm-up mask.
+        raise RuntimeError("Insufficient market history for strategy ensemble")
     sig = strategy_signals(df, cfg, asset=asset).dropna(subset=["ensemble", "atr", "realized_vol"])
     if sig.empty:
         raise RuntimeError("Insufficient market history for strategy ensemble")
+    if sig.index[-1] != df.index[-1]:
+        # Never pair a stale signal/ATR with the latest market price.
+        raise RuntimeError("Latest completed bar has no valid strategy signal")
     row = sig.iloc[-1]
     raw = float(row["ensemble"])
     position = target_position(raw, float(row["realized_vol"]), cfg)
