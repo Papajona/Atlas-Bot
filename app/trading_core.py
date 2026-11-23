@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 import hashlib
 import json
+import uuid
 from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
@@ -35,6 +36,18 @@ PROFILES = {
     "crypto": Profile(8760, 5.5, 2.0, 0.125, 12, 0.30, 3.0),
     "forex": Profile(6240, 0.5, 0.5, 0.0, 24, 0.10, 10.0),
 }
+
+
+def _model_manifest_signature(digest: str) -> str:
+    """Return a configured model signature or fail before publishing an unsigned artifact."""
+    configured = bool(settings.model_signing_private_key or settings.model_signing_key)
+    signature = artifact_signature(digest) if configured else ""
+    if configured and not signature:
+        raise RuntimeError(
+            "Model signing is configured but the artifact signature could not be produced; "
+            "check MODEL_SIGNING_PRIVATE_KEY (Ed25519 PEM)"
+        )
+    return signature
 
 FEATURE_COLUMNS = [
     "ret_1", "ret_4", "ret_12", "ret_24", "ret_72",
@@ -504,24 +517,34 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     model_file, meta_file = _model_paths(model_path)
     model_file.parent.mkdir(parents=True, exist_ok=True)
     import joblib
-    joblib.dump(final_model, model_file)
-    model_hash = sha256_file(model_file)
-    manifest_signature = artifact_signature(model_hash) if (settings.model_signing_private_key or settings.model_signing_key) else ""
-    meta = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "samples": int(len(X)),
-        "features": FEATURE_COLUMNS,
-        "classes": [int(cls) for cls in final_model.classes_],
-        "class_mapping": {"0": -1, "1": 0, "2": 1},
-        "validation": scores,
-        "model_sha256": model_hash,
-        "manifest_signature": manifest_signature,
-        "training_start": X.index.min().isoformat(),
-        "training_end": X.index.max().isoformat(),
-        "asset": asset,
-        "max_hold": profile.max_hold,
-    }
-    meta_file.write_text(json.dumps(meta, indent=2))
+    staged_model = model_file.with_name(f"{model_file.name}.{uuid.uuid4().hex}.training")
+    staged_meta = meta_file.with_name(f"{meta_file.name}.{uuid.uuid4().hex}.training")
+    try:
+        joblib.dump(final_model, staged_model)
+        model_hash = sha256_file(staged_model)
+        manifest_signature = _model_manifest_signature(model_hash)
+        meta = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "samples": int(len(X)),
+            "features": FEATURE_COLUMNS,
+            "classes": [int(cls) for cls in final_model.classes_],
+            "class_mapping": {"0": -1, "1": 0, "2": 1},
+            "validation": scores,
+            "model_sha256": model_hash,
+            "manifest_signature": manifest_signature,
+            "training_start": X.index.min().isoformat(),
+            "training_end": X.index.max().isoformat(),
+            "asset": asset,
+            "max_hold": profile.max_hold,
+        }
+        staged_meta.write_text(json.dumps(meta, indent=2))
+        # Do not replace the published model until signing and manifest serialization succeed.
+        # A process crash between the two renames is fail-closed: load_model rejects the mismatch.
+        staged_model.replace(model_file)
+        staged_meta.replace(meta_file)
+    finally:
+        staged_model.unlink(missing_ok=True)
+        staged_meta.unlink(missing_ok=True)
     return {"samples": len(X), "features": len(FEATURE_COLUMNS), "folds": len(scores), "validation": scores, "model_sha256": model_hash}
 
 
