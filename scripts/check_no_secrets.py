@@ -56,6 +56,8 @@ PLACEHOLDERS = {
     "fixture_service_role_value_abcdefghijklmnopqrstuvwxyz",
     "fixture_signing_value_abcdefghijklmnopqrstuvwxyz",
     "fixture_encryption_value_abcdefghijklmnopqrstuvwxyz",
+    "upgraded-test-refresh",
+    "mock-customer-aal1-token",
     "ci-only-keystore-password",
     "ci-only-key-password",
     "test-key-not-a-real-secret",
