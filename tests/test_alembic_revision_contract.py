@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0061_strategy_outcome_fill_aggregation"
+        "0064_strategy_outcome_recent_index"
     }
 
 
@@ -53,12 +53,28 @@ def test_alembic_revision_contract_rejects_cycles(tmp_path):
 
 
 
-def test_strategy_outcome_aggregation_revision_is_direct_successor_and_single_repository_head():
+def test_integrated_alembic_chain_has_the_expected_single_head():
     migration = (
-        ROOT / "alembic" / "versions" / "0061_strategy_outcome_fill_aggregation.py"
+        ROOT / "alembic" / "versions" / "0064_strategy_outcome_recent_index.py"
     ).read_text(encoding="utf-8")
-    assert 'revision = "0061_strategy_outcome_fill_aggregation"' in migration
-    assert 'down_revision = "0060_customer_identity_unmapped_index"' in migration
+    assert 'revision = "0064_strategy_outcome_recent_index"' in migration
+    assert 'down_revision = "0063_webhook_events_created_at_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0061_strategy_outcome_fill_aggregation"
+        "0064_strategy_outcome_recent_index"
     }
+
+
+def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
+    versions = ROOT / "alembic" / "versions"
+    expected = {
+        "0060_customer_identity_unmapped_index": "0059_research_integrity_controls",
+        "0061_strategy_outcome_fill_aggregation": "0060_customer_identity_unmapped_index",
+        "0062_customer_benchmark_capture": "0061_strategy_outcome_fill_aggregation",
+        "0063_webhook_events_created_at_index": "0062_customer_benchmark_capture",
+        "0064_strategy_outcome_recent_index": "0063_webhook_events_created_at_index",
+    }
+    for revision, parent in expected.items():
+        migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
+        assert f'revision = "{revision}"' in migration
+        assert f'down_revision = "{parent}"' in migration
+    assert expected_alembic_heads(versions) == {"0064_strategy_outcome_recent_index"}
