@@ -30,8 +30,8 @@ class CustomerPaperMarketRequest(MarketRequest):
 
 class ResearchMarketRequest(MarketRequest):
     # Use deployment research settings unless a caller explicitly supplies bounded overrides.
-    folds: int = Field(default_factory=lambda: settings.research_folds, ge=2, le=10)
-    min_train: int = Field(default_factory=lambda: settings.research_min_train, ge=100, le=50000)
+    folds: int = Field(default_factory=lambda: settings.research_folds, ge=2, le=10, validate_default=True)
+    min_train: int = Field(default_factory=lambda: settings.research_min_train, ge=100, le=50000, validate_default=True)
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
     point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)
