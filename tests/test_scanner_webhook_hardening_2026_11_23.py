@@ -108,7 +108,7 @@ def test_scan_symbols_json_escapes_untrusted_symbol_in_logs():
 
     async def run():
         return await ms.scan_symbols(
-            ["BTC/USDT\\nFORGED"],
+            ["BTC/USDT" + chr(10) + "FORGED"],
             fetch=lambda _symbol: (_ for _ in ()).throw(RuntimeError("upstream failed")),
             metrics=lambda _frame: {},
             semaphore=asyncio.Semaphore(1),
