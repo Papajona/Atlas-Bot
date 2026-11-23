@@ -365,3 +365,19 @@ def test_secret_scanner_covers_typescript_dockerfiles_and_extensionless_build_fi
 
     for name in fixtures:
         assert any(name in item for item in findings), name
+
+
+
+def test_secret_scanner_handles_recursive_yaml_alias_without_recursion_error(
+    tmp_path, monkeypatch
+):
+    # The scanner inspects bounded text lines; it must not recursively traverse
+    # YAML aliases or fail on a valid self-referential YAML mapping.
+    (tmp_path / "cyclic-alias.yml").write_text(
+        "loop: &loop {self: *loop}\\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert findings == []
