@@ -25,6 +25,9 @@ SOURCE_CODE_SUFFIXES = {".py", ".js", ".java", ".kt", ".sh", ".bash"}
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)^\s*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
+TRON_SEED_IN_SOURCE = re.compile(
+    r"""(?i)(?<![A-Za-z0-9_])[\"']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)[\"']?\s*[:=]\s*(?P<value>\"[^\"\\r\\n]*\"|'[^'\\r\\n]*'|[^#\\r\\n]+)"""
+)
 
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
@@ -108,20 +111,17 @@ def scan() -> list[str]:
             if PRIVATE_KEY.search(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
-            seed_match = TRON_SEED.search(line)
+            source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
+            seed_match = (
+                TRON_SEED_IN_SOURCE.search(line)
+                if source_code
+                else TRON_SEED.search(line)
+            )
             if seed_match and "re.compile" not in line:
-                # Ignore key-like text that is itself inside a source string
-                # (for example a test constructing an .env file). The target
-                # .env/YAML file is scanned separately as configuration text.
-                seed_key_is_string_content = (
-                    path.suffix.lower() in SOURCE_CODE_SUFFIXES
-                    and _inside_quoted_literal(line, seed_match.start("key"))
-                )
-                if not seed_key_is_string_content:
-                    seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
-                    if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
-                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                        continue
+                seed_value = seed_match.group("value").strip().strip('"').strip("'").strip().lower()
+                if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
+                    findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                    continue
             for match in ASSIGNMENT.finditer(line):
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
