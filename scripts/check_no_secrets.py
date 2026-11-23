@@ -34,7 +34,8 @@ SOURCE_STRING_CONCATENATION = re.compile(
         |[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*(?:"[^"\r\n]*"|'[^'\r\n]*')
         |["']\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*["']
         |[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*\s*\+\s*[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*
-    )"""
+    )""",
+    re.VERBOSE,
 )
 SOURCE_STRING_LITERAL = re.compile(
     r"""(?P<quote>["'])(?P<value>(?:\\.|[^\\])*?)\1"""
