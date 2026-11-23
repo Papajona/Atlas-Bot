@@ -189,7 +189,7 @@ def test_webhook_retention_is_external_privileged_dry_run_by_default():
     assert "BETWEEN 1 AND 36500" in script
     assert "^[0-9]{1,5}$" in script
     assert "CASE" in script
-    assert r"\\if :{?retention_days}" in script
+    assert r"\if :{?retention_days}" in script
     assert "apply=1 requires an explicitly supplied, approved retention_days value" in script
     assert "30-day default is a placeholder for DRY RUN only" in script
     assert "apply_valid" in script
