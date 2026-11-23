@@ -130,3 +130,20 @@ def test_secret_scanner_ignores_source_attribute_wiring_not_quoted_credentials(
 
     assert any("source.py" in item for item in findings)
     assert len([item for item in findings if "source.py" in item]) == 1
+
+
+def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeholder(
+    tmp_path, monkeypatch
+):
+    bracketed_key = "<0123456789abcdef0123456789abcdef>"
+    (tmp_path / "wallet.env").write_text(
+        "private_key=" + bracketed_key + "\\n"
+        "private_key=<YOUR_PRIVATE_KEY>\\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("wallet.env:1: seed/private-key assignment" in item for item in findings)
+    assert not any("wallet.env:2:" in item for item in findings)
