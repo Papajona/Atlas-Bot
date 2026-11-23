@@ -117,7 +117,9 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
         for match in SOURCE_STRING_LITERAL.finditer(expression)
     ]
     if not components:
-        return False
+        # An identifier-only mnemonic/private-key expression cannot be proven
+        # harmless from this line; fail closed rather than trusting unknown values.
+        return True
 
     normalized_key = key.lower().replace("_", "").replace("-", "")
     if normalized_key in {"mnemonic", "seedphrase"}:
