@@ -939,7 +939,7 @@ def test_manual_paper_sell_recovery_caps_against_the_order_venue():
 def test_paper_fill_money_fields_round_conservatively_to_numeric_38_18(monkeypatch):
     import app.customer_paper_flow as flow
 
-    monkeypatch.setattr(settings, "research_taker_bps", 10)
+    monkeypatch.setattr(settings, "customer_paper_spot_taker_bps", 10)
     monkeypatch.setattr(settings, "research_slippage_bps", 0)
     market = {
         "ask": Decimal("100.0000000000000000009"),
@@ -2049,3 +2049,14 @@ def test_calibrated_customer_protective_exit_defers_remainder_without_expiring(m
     assert captured["execution_model"]["deferred_quantity"] == "1.5"
     assert captured["execution_model"]["cancelled_quantity"] == "0"
     assert captured["execution_model"]["full_fill"] is False
+
+
+
+def test_customer_paper_uses_separate_spot_fee_default_and_labels_it_unverified():
+    import app.customer_paper_flow as flow
+
+    assert settings.__class__.model_fields["customer_paper_spot_taker_bps"].default == 10.0
+    fee_bps, slippage_bps, status = flow._cost_inputs()
+    assert fee_bps == Decimal("10.0")
+    assert slippage_bps == Decimal(str(settings.research_slippage_bps))
+    assert status == "UNVERIFIED_DEFAULT_ASSUMPTIONS"
