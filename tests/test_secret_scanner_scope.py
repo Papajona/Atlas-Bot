@@ -630,7 +630,7 @@ def test_secret_scanner_preserves_repeated_yaml_mnemonic_aliases(
     lines = [
         f"word_a: &word_a {repeated_word}",
         f"word_b: &word_b {final_word}",
-        "mnemonic:",
+        "mnemonic" + ":",
         *["  - *word_a" for _ in range(11)],
         "  - *word_b",
     ]
