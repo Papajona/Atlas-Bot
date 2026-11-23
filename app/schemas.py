@@ -33,11 +33,13 @@ class ResearchMarketRequest(MarketRequest):
         default_factory=lambda: settings.research_min_train,
         ge=200,
         le=5000,
+        validate_default=True,
     )
     folds: int = Field(
         default_factory=lambda: settings.research_folds,
         ge=2,
         le=10,
+        validate_default=True,
     )
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
