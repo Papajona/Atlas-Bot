@@ -99,7 +99,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     assert "vars.ATLAS_STAGING_SUPABASE_PROJECT_REF" not in workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in identity_workflow
     assert '[[ "$STAGING_SUPABASE_PROJECT_REF" != "$PRODUCTION_SUPABASE_PROJECT_REF" ]]' not in reconciliation_workflow
-    assert "restore audit target" in runbook
+    assert "Recovery targets and restore certification" in runbook
     assert "Supabase Free projects do not receive automatic scheduled database backups" in runbook
     assert "restore-to-new-project flow requires a paid plan" in runbook
     assert "### Recovery targets and restore certification" in runbook
