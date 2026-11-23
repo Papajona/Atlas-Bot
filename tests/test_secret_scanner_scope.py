@@ -243,7 +243,7 @@ def test_secret_scanner_detects_non_english_mnemonics_and_structured_private_key
     tmp_path, monkeypatch
 ):
     mnemonic_key = "mne" + "monic"
-    private_key = "private" + "_key"
+    key_field = "private" + "_key"
     japanese_words = "あいこくしん あいさつ あいだ あおぞら あかちゃん あきる あけがた あける あこがれる あさい あさひ あしあと"
     (tmp_path / "japanese-wallet.yml").write_text(
         "wallet:\n  " + mnemonic_key + ": |\n"
@@ -252,7 +252,7 @@ def test_secret_scanner_detects_non_english_mnemonics_and_structured_private_key
         encoding="utf-8",
     )
     (tmp_path / "json-private-wallet.yml").write_text(
-        "wallet:\n  " + private_key + ": |\n"
+        "wallet:\n  " + key_field + ": |\n"
         '    {\n'
         '      "kty": "RSA",\n'
         '      "d": "0123456789abcdef0123456789abcdef",\n'
@@ -272,7 +272,7 @@ def test_secret_scanner_detects_yaml_explicit_sensitive_keys_with_block_values(
     tmp_path, monkeypatch
 ):
     mnemonic_key = "mne" + "monic"
-    private_key = "private" + "_key"
+    key_field = "private" + "_key"
     phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
     (tmp_path / "explicit-mnemonic.yml").write_text(
         "? " + mnemonic_key + "\n"
@@ -281,7 +281,7 @@ def test_secret_scanner_detects_yaml_explicit_sensitive_keys_with_block_values(
         encoding="utf-8",
     )
     (tmp_path / "explicit-private-key.yml").write_text(
-        "? " + private_key + "\n"
+        "? " + key_field + "\n"
         ": |\n"
         '  {"kty":"EC","d":"0123456789abcdef0123456789abcdef"}\n',
         encoding="utf-8",
