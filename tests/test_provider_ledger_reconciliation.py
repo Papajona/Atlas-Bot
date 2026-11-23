@@ -149,13 +149,14 @@ def test_zero_activity_window_passes_only_with_empty_provider_and_database_journ
     assert any("withdrawal journals exist" in failure for failure in failures)
 
 
-def test_header_only_provider_export_is_a_valid_empty_statement(tmp_path):
+def test_header_only_provider_export_is_rejected_without_provider_attestation(tmp_path):
     path = tmp_path / "provider-empty.csv"
     path.write_text(
         "provider_id,amount,currency,status,event_time_utc\n",
         encoding="utf-8",
     )
-    assert load_provider_statement(path) == []
+    with pytest.raises(ValueError, match="zero-activity exports require independent provider-authenticated evidence"):
+        load_provider_statement(path)
 
 
 def test_statement_parser_rejects_duplicate_ids_and_invalid_status(tmp_path):
@@ -193,11 +194,24 @@ def test_provider_reconciliation_query_uses_read_only_audit_acl_contract():
     assert "'public_sequences_with_privileges'" in query
     assert "'public_functions_with_execute'" in query
     assert "'withdrawal_journal_count'" in query
+    assert "FROM matching_withdrawals w" in query
+    assert "NOT EXISTS (" in query
+    assert "FROM public.withdrawals w" in query
+    assert "j.reference_id IN (w.request_id, w.request_id || ':release')" in query
     assert "tables_missing_dml" not in query
     assert "public_tables_missing_dml" not in query
     assert "audit_role_failures(" in Path(
         "scripts/verify_provider_ledger_reconciliation.py"
     ).read_text(encoding="utf-8")
+
+def test_provider_audit_reader_allowlist_includes_journal_timestamp_column():
+    from scripts.verify_staging_restore import AUDIT_REQUIRED_SELECT_COLUMNS
+
+    assert "created_at" in AUDIT_REQUIRED_SELECT_COLUMNS["ledger_journals"]
+    provisioner = Path("scripts/provision_atlas_audit_reader.sql").read_text(encoding="utf-8")
+    assert "reference_id, created_at)" in provisioner
+    assert "('ledger_journals','created_at')" in provisioner
+
 
 def test_query_window_requires_timezone_and_provider_is_restricted():
     start = parse_utc("2026-10-14T00:00:00Z", "start")
