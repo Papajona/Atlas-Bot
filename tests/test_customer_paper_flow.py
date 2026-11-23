@@ -967,7 +967,7 @@ def test_fractional_paper_fill_at_supported_quantity_uses_rounded_money_values(m
     """Regression for a realistic 18-place quantity paired with a non-round quote."""
     import app.customer_paper_flow as flow
 
-    monkeypatch.setattr(settings, "research_taker_bps", 10)
+    monkeypatch.setattr(settings, "customer_paper_spot_taker_bps", 10)
     monkeypatch.setattr(settings, "research_slippage_bps", 0)
     market = {
         "ask": Decimal("123.4567891234567891234"),
@@ -1145,7 +1145,7 @@ def test_conservative_buy_sizing_price_matches_actual_paper_fill_price(monkeypat
     import app.customer_paper_flow as flow
 
     monkeypatch.setattr(settings, "research_slippage_bps", 37)
-    monkeypatch.setattr(settings, "research_taker_bps", 10)
+    monkeypatch.setattr(settings, "customer_paper_spot_taker_bps", 10)
     context = {
         "ask": "120.123456789012345678",
         "bid": "120.0",
@@ -1183,7 +1183,7 @@ def test_customer_paper_buy_fill_enforces_shared_group_cap_at_actual_price(monke
     monkeypatch.setattr(settings, "paper_max_bar_volume_participation", 0.01)
     monkeypatch.setattr(settings, "correlation_group_cap_usd", 50.0)
     monkeypatch.setattr(settings, "research_slippage_bps", 0)
-    monkeypatch.setattr(settings, "research_taker_bps", 0)
+    monkeypatch.setattr(settings, "customer_paper_spot_taker_bps", 0)
     # This test isolates the fill-time exposure gate; same-day entry discipline is
     # exercised by separate tests and should not block the two pending intents here.
     monkeypatch.setattr(settings, "discipline_enabled", False)
