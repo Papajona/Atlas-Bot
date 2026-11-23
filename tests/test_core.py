@@ -12,6 +12,17 @@ def frame(n=500):
     return pd.DataFrame({"open": close, "high": close * 1.01, "low": close * .99, "close": close, "volume": 100}, index=idx)
 
 
+def test_training_model_signature_fails_closed_when_configured_signer_cannot_sign(monkeypatch):
+    from app import trading_core
+
+    monkeypatch.setattr(trading_core.settings, "model_signing_private_key", "not-an-ed25519-key")
+    monkeypatch.setattr(trading_core.settings, "model_signing_key", "")
+    monkeypatch.setattr(trading_core, "artifact_signature", lambda _digest: "")
+
+    with pytest.raises(RuntimeError, match="Model signing is configured"):
+        trading_core._model_manifest_signature("a" * 64)
+
+
 def test_features_are_nonempty_and_finite():
     f = build_features(frame())
     assert len(f) > 0
