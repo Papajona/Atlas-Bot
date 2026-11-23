@@ -23,22 +23,25 @@ def test_training_model_signature_fails_closed_when_configured_signer_cannot_sig
         trading_core._model_manifest_signature("a" * 64)
 
 
+class _DeterministicSigningFailureModel:
+    """Top-level so joblib can serialize it before the configured signer rejects the artifact."""
+
+    def __init__(self, **_kwargs):
+        self.classes_ = np.array([0, 1, 2], dtype=int)
+
+    def fit(self, features, labels):
+        assert len(features) == len(labels)
+        return self
+
+    def predict(self, features):
+        return np.zeros(len(features), dtype=int)
+
+    def predict_proba(self, features):
+        return np.tile(np.array([[0.30, 0.30, 0.40]]), (len(features), 1))
+
+
 def test_failed_model_signing_preserves_existing_model_and_manifest(tmp_path, monkeypatch):
     from app import trading_core
-
-    class DeterministicModel:
-        def __init__(self, **_kwargs):
-            self.classes_ = np.array([0, 1, 2], dtype=int)
-
-        def fit(self, features, labels):
-            assert len(features) == len(labels)
-            return self
-
-        def predict(self, features):
-            return np.zeros(len(features), dtype=int)
-
-        def predict_proba(self, features):
-            return np.tile(np.array([[0.30, 0.30, 0.40]]), (len(features), 1))
 
     model_path = tmp_path / "preserved.joblib"
     model_file, meta_file = trading_core._model_paths(str(model_path))
@@ -47,7 +50,7 @@ def test_failed_model_signing_preserves_existing_model_and_manifest(tmp_path, mo
     previous_model = model_file.read_bytes()
     previous_meta = meta_file.read_bytes()
 
-    monkeypatch.setattr(trading_core, "LGBMClassifier", DeterministicModel)
+    monkeypatch.setattr(trading_core, "LGBMClassifier", _DeterministicSigningFailureModel)
     monkeypatch.setattr(trading_core.settings, "model_signing_private_key", "invalid-key")
     monkeypatch.setattr(trading_core.settings, "model_signing_key", "")
     monkeypatch.setattr(trading_core, "artifact_signature", lambda _digest: "")
