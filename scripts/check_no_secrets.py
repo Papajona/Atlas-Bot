@@ -7,6 +7,7 @@ private-key/seed material while allowing placeholders and public-key material.
 from __future__ import annotations
 import re
 import sys
+import unicodedata
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -192,7 +193,9 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
             token.strip(".,;:()[]{}<>\"'")
             for token in candidate.split()
         ]
-        return len(words) >= 10 and all(word.isalpha() for word in words)
+        return len(words) >= 10 and all(
+            unicodedata.normalize("NFC", word).isalpha() for word in words
+        )
 
     # A private-key block can contain serialized JWK/JSON objects rather than
     # one uninterrupted base64/PEM token. The sensitive parent key makes any
