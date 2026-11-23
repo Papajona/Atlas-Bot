@@ -368,16 +368,25 @@ def test_secret_scanner_covers_typescript_dockerfiles_and_extensionless_build_fi
 
 
 
-def test_secret_scanner_handles_recursive_yaml_alias_without_recursion_error(
+def test_secret_scanner_treats_valid_recursive_yaml_alias_as_text(
     tmp_path, monkeypatch
 ):
-    # The scanner inspects bounded text lines; it must not recursively traverse
-    # YAML aliases or fail on a valid self-referential YAML mapping.
-    (tmp_path / "cyclic-alias.yml").write_text(
-        "loop: &loop {self: *loop}\n", encoding="utf-8"
-    )
+    import yaml
+
+    # This is a real two-line YAML document whose alias points back to its
+    # anchored mapping. Confirm that the fixture is valid and self-referential
+    # before checking that the line-based secret scanner does not parse or
+    # recursively traverse YAML documents.
+    alias_text = "loop: &loop\\n  self: *loop\\n"
+    alias_path = tmp_path / "cyclic-alias.yml"
+    alias_path.write_text(alias_text, encoding="utf-8")
+    assert alias_path.read_text(encoding="utf-8").splitlines() == [
+        "loop: &loop",
+        "  self: *loop",
+    ]
+
+    parsed = yaml.safe_load(alias_text)
+    assert parsed["loop"]["self"] is parsed["loop"]
+
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
-
-    findings = check_no_secrets.scan()
-
-    assert findings == []
+    assert check_no_secrets.scan() == []
