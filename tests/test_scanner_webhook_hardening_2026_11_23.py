@@ -186,6 +186,9 @@ def test_webhook_retention_is_external_privileged_dry_run_by_default():
     assert "batch_size_valid" in script
     assert "\\quit 1" in script
     assert "ORDER BY created_at, id" in script
+    assert "BETWEEN 1 AND 36500" in script
+    assert "^[0-9]{1,5}$" in script
+    assert "CASE" in script
     assert "DELETE" in provision
     assert "unexpected_delete_privileges" in provision
 
@@ -197,6 +200,10 @@ def test_webhook_retention_index_is_created_and_matches_prune_order():
     assert 'down_revision = "0059_research_integrity_controls"' in migration
     assert 'op.create_index(' in migration
     assert '["created_at", "id"]' in migration
+    assert "with op.get_context().autocommit_block()" in migration
+    assert migration.count("postgresql_concurrently=True") == 3
+    assert "indisvalid" in migration
+    assert "if valid is False" in migration
     assert 'Index("ix_webhook_events_created_at_id", "created_at", "id")' in db_source
 
 
