@@ -148,3 +148,30 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
 
     assert any("wallet.env:1: seed/private-key assignment" in item for item in findings)
     assert not any("wallet.env:2:" in item for item in findings)
+
+
+def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
+    tmp_path, monkeypatch
+):
+    phrase = "amber birch cobalt dahlia elm fuchsia garden harbor ivory juniper"
+    dotenv_key = "MNE" + "MONIC"
+    yaml_key = "mne" + "monic"
+    (tmp_path / "quoted-recovery.env").write_text(
+        dotenv_key + '="' + phrase + '"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "yaml-recovery.yml").write_text(
+        "- " + yaml_key + ": " + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "ordinary-notes.yml").write_text(
+        "description: mnemonic: " + phrase + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("quoted-recovery.env:1: seed/private-key assignment" in item for item in findings)
+    assert any("yaml-recovery.yml:1: seed/private-key assignment" in item for item in findings)
+    assert not any("ordinary-notes.yml" in item for item in findings)
