@@ -449,7 +449,6 @@ def ensure_adaptive_model(
     candidate = model_path.with_name(model_path.stem + f".candidate-{stamp}" + model_path.suffix)
     try:
         result = train_model(df, str(candidate), min_train=min_train, folds=folds, asset=asset)
-        candidate_meta_path = candidate.with_suffix(candidate.suffix + ".meta.json")
         # Read either the new atomic pointer or a legacy candidate sidecar.
         candidate_meta = read_model_manifest(candidate)
         if not candidate_meta:
