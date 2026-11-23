@@ -59,8 +59,6 @@ PLACEHOLDERS = {
     "verification-model-private-key",
     "production-verification-only",
     "server-refresh-token",
-    "atlas-gemini-api-key",
-    "atlas-cerebras-api-key",
     "atlas-app-encryption-key",
     "atlas-trongrid-api-key",
     "subprocess.check_output",
