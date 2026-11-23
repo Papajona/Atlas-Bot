@@ -923,11 +923,43 @@ def upgrade() -> None:
     
     # Server defaults are used only to make existing rows valid while adding
     # NOT NULL fields; the ORM owns defaults after the migration completes.
-    op.alter_column("strategy_outcomes", "closing_quantity", server_default=None)
-    op.alter_column("strategy_outcomes", "closing_notional", server_default=None)
-    op.alter_column("positions", "entry_fee", server_default=None)
-    op.alter_column("positions", "entry_fee_basis_known", server_default=None)
-    op.alter_column("strategy_outcomes", "fee_basis_complete", server_default=None)
+    # SQLite has no ALTER COLUMN DROP DEFAULT syntax, so use Alembic's batch
+    # table-rebuild strategy there. PostgreSQL keeps the direct, metadata-only
+    # ALTER COLUMN operations.
+    if bind.dialect.name == "sqlite":
+        with op.batch_alter_table("strategy_outcomes") as batch_op:
+            batch_op.alter_column(
+                "closing_quantity",
+                existing_type=financial_type,
+                server_default=None,
+            )
+            batch_op.alter_column(
+                "closing_notional",
+                existing_type=financial_type,
+                server_default=None,
+            )
+            batch_op.alter_column(
+                "fee_basis_complete",
+                existing_type=sa.Boolean(),
+                server_default=None,
+            )
+        with op.batch_alter_table("positions") as batch_op:
+            batch_op.alter_column(
+                "entry_fee",
+                existing_type=financial_type,
+                server_default=None,
+            )
+            batch_op.alter_column(
+                "entry_fee_basis_known",
+                existing_type=sa.Boolean(),
+                server_default=None,
+            )
+    else:
+        op.alter_column("strategy_outcomes", "closing_quantity", server_default=None)
+        op.alter_column("strategy_outcomes", "closing_notional", server_default=None)
+        op.alter_column("positions", "entry_fee", server_default=None)
+        op.alter_column("positions", "entry_fee_basis_known", server_default=None)
+        op.alter_column("strategy_outcomes", "fee_basis_complete", server_default=None)
 
     # Backfill remaining entry fees only where the original entry order and all
     # recorded close quantities exactly reconcile to the still-open position.
