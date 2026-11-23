@@ -18,17 +18,22 @@
 -- If row-level security is enabled, the maintenance identity must own the table or bypass RLS.
 -- Requires psql 13+.
 
+\if :{?apply}
+\else
+\set apply 0
+\endif
 \if :{?retention_days}
 \else
-\set retention_days 30
+  \if :apply
+    \echo 'ERROR: apply=1 requires an explicitly supplied, approved retention_days value.'
+    \quit 1
+  \else
+    \set retention_days 30
+  \endif
 \endif
 \if :{?batch_size}
 \else
 \set batch_size 5000
-\endif
-\if :{?apply}
-\else
-\set apply 0
 \endif
 
 -- Validate both psql variables before the count or deletion cutoff is evaluated.
@@ -40,10 +45,49 @@ SELECT
         ELSE FALSE
     END AS retention_days_valid,
     CASE
-        WHEN :'batch_size' ~ '^[0-9]{1,6}$'
+        WHEN :'batch_size' ~ '^[0-9]{1,6}
+\gset
+
+\if :retention_days_valid
+\else
+\echo 'ERROR: retention_days must be an integer from 1 through 36500.'
+\quit 1
+\endif
+\if :batch_size_valid
+\else
+\echo 'ERROR: batch_size must be a positive integer no greater than 999999.'
+\quit 1
+\endif
+\if :apply_valid
+\else
+\echo 'ERROR: apply must be exactly 0 (dry-run) or 1 (delete one batch).'
+\quit 1
+\endif
+
+SELECT count(*) AS expired_events
+FROM public.webhook_events
+WHERE created_at < now() - make_interval(days => :'retention_days'::integer);
+
+\if :apply
+BEGIN;
+WITH doomed AS (
+    SELECT id
+    FROM public.webhook_events
+    WHERE created_at < now() - make_interval(days => :'retention_days'::integer)
+    ORDER BY created_at, id
+    LIMIT :'batch_size'::integer
+    FOR UPDATE SKIP LOCKED
+)
+DELETE FROM public.webhook_events AS w
+USING doomed AS d
+WHERE w.id = d.id;
+COMMIT;
+\endif
+
         THEN :'batch_size'::integer BETWEEN 1 AND 999999
         ELSE FALSE
-    END AS batch_size_valid
+    END AS batch_size_valid,
+    :'apply' IN ('0', '1') AS apply_valid
 \gset
 
 \if :retention_days_valid
