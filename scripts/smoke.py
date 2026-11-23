@@ -30,23 +30,26 @@ def validate_base_url(value: str) -> str:
     raise ValueError("base URL must use HTTPS, or HTTP on loopback only")
 
 
+def _connection(parsed):
+    if parsed.scheme == "https":
+        return http.client.HTTPSConnection(
+            parsed.hostname,
+            port=parsed.port,
+            timeout=5,
+            context=ssl.create_default_context(),
+        )
+    return http.client.HTTPConnection(parsed.hostname, port=parsed.port, timeout=5)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     base = validate_base_url(args[0] if args else "http://127.0.0.1:8000")
     parsed = urlsplit(base)
-    port = parsed.port
-    if parsed.scheme == "https":
-        connection = http.client.HTTPSConnection(
-            parsed.hostname, port=port, timeout=5,
-            context=ssl.create_default_context(),
-        )
-    else:
-        connection = http.client.HTTPConnection(parsed.hostname, port=port, timeout=5)
     prefix = parsed.path.rstrip("/")
-    try:
-        for path in ("/healthz", "/readyz", "/metrics"):
-            request_path = prefix + path
-            connection.request("GET", request_path)
+    for path in ("/healthz", "/readyz", "/metrics"):
+        connection = _connection(parsed)
+        try:
+            connection.request("GET", prefix + path)
             response = connection.getresponse()
             body = response.read(200).decode(errors="replace")
             if 300 <= response.status < 400:
@@ -56,8 +59,10 @@ def main(argv: list[str] | None = None) -> int:
             if not 200 <= response.status < 300:
                 raise RuntimeError(f"{path} returned HTTP {response.status}")
             print(path, response.status, body)
-    finally:
-        connection.close()
+        finally:
+            # Each response gets its own connection so a bounded read cannot leave unread
+            # response bytes on a keep-alive socket before the next endpoint request.
+            connection.close()
     return 0
 
 
