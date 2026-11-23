@@ -444,6 +444,48 @@ def test_secret_scanner_handles_recursive_yaml_aliases_and_scans_remaining_keys(
     )
 
 
+def test_secret_scanner_handles_recursive_private_key_aliases_and_scans_following_keys(
+    tmp_path, monkeypatch
+):
+    secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    content = (
+        "wallet:\\n"
+        "  private_key: &key {self: *key}\\n"
+        "  api_token: " + secret + "\\n"
+    )
+    (tmp_path / "recursive-private-key.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "recursive-private-key.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("recursive-private-key.yml:2:" in item for item in findings)
+
+
+def test_secret_scanner_handles_recursive_mnemonic_aliases_and_scans_following_keys(
+    tmp_path, monkeypatch
+):
+    secret = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    content = (
+        "wallet:\\n"
+        "  mnemonic: &phrase [*phrase]\\n"
+        "  api_token: " + secret + "\\n"
+    )
+    (tmp_path / "recursive-mnemonic.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "recursive-mnemonic.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("recursive-mnemonic.yml:2:" in item for item in findings)
+
+
 def test_secret_scanner_detects_seed_literal_in_concatenated_source_assignment(
     tmp_path, monkeypatch
 ):
