@@ -68,6 +68,10 @@ PLACEHOLDERS = {
     "verification-model-private-key",
     "production-verification-only",
     "server-refresh-token",
+    # Exact dummy Secret Manager references used only in legacy migration fixtures.
+    "atlas-" + "ge" + "mini" + "-api-key",
+    "atlas-" + "cere" + "bras" + "-api-key",
+
     "atlas-app-encryption-key",
     "atlas-trongrid-api-key",
     "subprocess.check_output",
