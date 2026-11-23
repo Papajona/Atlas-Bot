@@ -5,6 +5,7 @@ import threading
 import time
 
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app import market_scanner as ms
@@ -116,9 +117,8 @@ def test_scan_symbols_json_escapes_untrusted_symbol_in_logs():
 
     asyncio.run(run())
     logged_symbol = logger.calls[0][0][1]
-    assert "\\n" in logged_symbol
+    assert "\n" not in logged_symbol
     assert "\\nFORGED" in logged_symbol
-    assert "\\nFORGED" not in logged_symbol.replace("\\\\n", "")
 
 
 def test_scan_symbols_metrics_failure_is_contained_and_semaphore_released():
@@ -243,7 +243,7 @@ class _FakeStreamRequest:
 def test_webhook_streaming_reader_stops_on_first_oversized_chunk():
     request = _FakeStreamRequest([b"1234", b"56", b"ignored"])
 
-    with pytest.raises(Exception) as error:
+    with pytest.raises(HTTPException) as error:
         asyncio.run(read_limited_body(request, 5))
 
     assert getattr(error.value, "status_code", None) == 413
