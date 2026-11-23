@@ -57,7 +57,7 @@ def _inside_quoted_literal(line: str, position: int) -> bool:
         if escaped:
             escaped = False
             continue
-        if char == "\\\\":
+        if char == "\\":
             escaped = True
         elif quote is not None:
             if char == quote:
@@ -67,7 +67,7 @@ def _inside_quoted_literal(line: str, position: int) -> bool:
     return quote is not None
 
 
-CODE_ATTRIBUTE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+$")
+CODE_ATTRIBUTE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
 
 
 def scan() -> list[str]:
