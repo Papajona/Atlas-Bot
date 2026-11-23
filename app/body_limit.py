@@ -15,7 +15,7 @@ class BodySizeLimitMiddleware:
         path_prefix_limits: dict[str, int] | None = None,
     ) -> None:
         self.app = app
-        effective_max_bytes = int(max_bytes)
+        self.max_bytes = int(max_bytes)
         self.path_prefix_limits = {
             str(prefix): int(limit)
             for prefix, limit in (path_prefix_limits or {}).items()
@@ -37,7 +37,7 @@ class BodySizeLimitMiddleware:
         effective_max_bytes = (
             max(matching_limits, key=lambda item: len(item[0]))[1]
             if matching_limits
-            else effective_max_bytes
+            else self.max_bytes
         )
         if effective_max_bytes <= 0:
             await self.app(scope, receive, send)
