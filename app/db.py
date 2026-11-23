@@ -1229,6 +1229,18 @@ class StrategyOutcome(Base):
         Index("ix_strategy_outcome_lifecycle_created", "lifecycle_status", "created_at"),
         Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at"),
         Index(
+            "ix_strategy_outcome_platform_closed_recent",
+            "created_at",
+            "id",
+            "trade_id",
+            postgresql_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+            sqlite_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+        ),
+        Index(
             "ix_strategy_outcome_platform_closed_trade_time",
             "trade_id",
             "created_at",
