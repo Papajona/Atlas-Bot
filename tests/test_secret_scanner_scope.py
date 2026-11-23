@@ -422,6 +422,28 @@ def test_repository_secret_scan_ignores_ordinary_notes_string_construction():
     )
 
 
+def test_secret_scanner_handles_recursive_yaml_aliases_and_scans_remaining_keys(
+    tmp_path, monkeypatch
+):
+    mnemonic_key = "mne" + "monic"
+    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    content = (
+        "loop: &loop {self: *loop}\n"
+        "wallet:\n"
+        + "  " + mnemonic_key + ": |\n"
+        + "".join("    " + word + "\n" for word in phrase.split())
+    )
+    (tmp_path / "recursive-alias.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "recursive-alias.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_seed_literal_in_concatenated_source_assignment(
     tmp_path, monkeypatch
 ):
