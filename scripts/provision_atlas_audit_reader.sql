@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated read-only identity for restore and provider-ledger audits.
--- Apply only after alembic is at 0061_strategy_outcome_fill_aggregation and after a
+-- Apply only after alembic is at 0064_strategy_outcome_recent_index and after a
 -- recoverable backup has been independently verified. Never reuse an existing role.
 BEGIN;
 
@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the dedicated audit login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0061_strategy_outcome_fill_aggregation') THEN
-        RAISE EXCEPTION 'database must be at 0061_strategy_outcome_fill_aggregation before audit role provisioning';
+                   WHERE version_num = '0064_strategy_outcome_recent_index') THEN
+        RAISE EXCEPTION 'database must be at 0064_strategy_outcome_recent_index before audit role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)
@@ -60,7 +60,7 @@ GRANT SELECT (available, trading_reserved, withdrawal_reserved)
     ON TABLE public.customer_ledger_accounts TO atlas_audit_reader;
 GRANT SELECT (debit, credit, amount)
     ON TABLE public.ledger_entries TO atlas_audit_reader;
-GRANT SELECT (id, entry_type, idempotency_key, reference_type, reference_id)
+GRANT SELECT (id, entry_type, idempotency_key, reference_type, reference_id, created_at)
     ON TABLE public.ledger_journals TO atlas_audit_reader;
 GRANT SELECT (id, journal_id, debit, credit)
     ON TABLE public.ledger_journal_lines TO atlas_audit_reader;
@@ -107,6 +107,7 @@ WITH allowed(table_name, column_name) AS (
       ('ledger_journals','id'),('ledger_journals','entry_type'),
       ('ledger_journals','idempotency_key'),('ledger_journals','reference_type'),
       ('ledger_journals','reference_id'),
+      ('ledger_journals','created_at'),
       ('ledger_journal_lines','id'),('ledger_journal_lines','journal_id'),
       ('ledger_journal_lines','debit'),('ledger_journal_lines','credit'),
       ('research_trial_archive','ledger_sequence'),('research_trial_archive','ledger_entry_sha256'),
