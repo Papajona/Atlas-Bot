@@ -4389,6 +4389,15 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
     return not reasons, reasons
 
 
+def _require_strategy_market_data_quality(df, req) -> None:
+    passed, reasons = _market_data_quality(df, req.timeframe, req.asset)
+    if not passed:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Market data failed the strategy quality gate", "reasons": reasons},
+        )
+
+
 def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
     """Measure candle freshness from its close boundary for isolated paper execution."""
     safe, reasons = _market_data_quality(df, timeframe, asset)
@@ -9190,6 +9199,7 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         raise HTTPException(403, "Strategy engine is disabled")
     try:
         df = await asyncio.to_thread(market_data, req)
+        _require_strategy_market_data_quality(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -9200,6 +9210,8 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         result = await asyncio.to_thread(strategy_signal, df, cfg, req.asset)
         result.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
 
@@ -9314,6 +9326,7 @@ async def research_review(req: ResearchMarketRequest, x_admin_token: str | None 
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        _require_strategy_market_data_quality(df, req)
         df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
@@ -9330,6 +9343,8 @@ async def research_review(req: ResearchMarketRequest, x_admin_token: str | None 
         review.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         review["trial_archive_write"] = trial_archive_write
         return review
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
 
