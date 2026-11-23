@@ -46,6 +46,9 @@ PLACEHOLDERS = {
     "server-refresh-token",
     "atlas-gemini-api-key",
     "atlas-cerebras-api-key",
+    "atlas-app-encryption-key",
+    "atlas-trongrid-api-key",
+    "subprocess.check_output",
     "mdawmdawmdawmdawmdawmdawmdawmdawmdawmdawmda=",
 }
 
@@ -72,6 +75,24 @@ ANGLE_PLACEHOLDER = re.compile(
     r"(?i)^<(?:your(?:[-_ ][a-z0-9_-]+)?|placeholder|example|redacted|unset|"
     r"not[-_ ]set|secret|private[-_ ]key|api[-_ ]key|token|value|version|ref|v)>$"
 )
+
+
+def _is_helper_call(value: str, remainder: str) -> bool:
+    """Recognize a call expression without exempting a literal with a parenthesized note."""
+    if not (HELPER_IDENTIFIER.fullmatch(value) or CODE_ATTRIBUTE.fullmatch(value)):
+        return False
+    if not remainder.startswith("("):
+        return False
+    arguments = remainder[1:].lstrip()
+    if not arguments or arguments.startswith(")"):
+        return True
+    if arguments[0] in {"'", '"', "[", "{"}:
+        return True
+    identifier = re.match(r"[A-Za-z_][A-Za-z0-9_]*", arguments)
+    if identifier:
+        suffix = arguments[identifier.end():].lstrip()
+        return suffix.startswith((",", ")", ".", "[", "="))
+    return bool(re.match(r"\\d+\\s*[,)\\]]", arguments))
 
 
 def scan() -> list[str]:
@@ -104,11 +125,13 @@ def scan() -> list[str]:
                 # configuration wiring, not a credential literal. Keep scanning
                 # quoted strings (including embedded password= fragments) and
                 # all YAML/dotenv/config assignments.
-                if source_code and not quoted_literal:
-                    if CODE_ATTRIBUTE.fullmatch(value):
-                        continue
-                    if HELPER_IDENTIFIER.fullmatch(value) and remainder.startswith("("):
-                        continue
+                if source_code and not quoted_literal and CODE_ATTRIBUTE.fullmatch(value):
+                    continue
+                # Helper calls can also appear in embedded workflow scripts or
+                # source snippets inside test strings. A long literal followed
+                # by a note such as (rotation-note) is not a valid call suffix.
+                if _is_helper_call(value, remainder):
+                    continue
                 # Fixture exemptions are exact values, never substring markers.
                 if value in PLACEHOLDERS:
                     continue
