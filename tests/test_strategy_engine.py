@@ -1,5 +1,7 @@
+import asyncio
 import numpy as np
 import pandas as pd
+import pytest
 from collections.abc import Mapping
 from app.strategy_engine import StrategyConfig, strategy_signals, strategy_signal, strategy_backtest
 
@@ -917,3 +919,59 @@ def test_triple_barrier_timeout_counts_unpriceable_label_once(monkeypatch):
     assert labels.attrs["execution_cost_label_event_pairs_priced"] == 0
     # One rejected label is priced once, not once again for its opposite direction.
     assert len(calls) == 4
+
+
+
+def test_strategy_signal_requires_full_slow_ema_history():
+    with pytest.raises(RuntimeError, match="Insufficient market history"):
+        strategy_signal(sample_df(199))
+    frame = sample_df(200)
+    result = strategy_signal(frame)
+    assert result["signal_timestamp"] == frame.index[-1].isoformat()
+
+
+def test_strategy_signal_rejects_invalid_latest_completed_bar_instead_of_using_stale_row():
+    frame = sample_df()
+    flat_price = float(frame["close"].iloc[-20])
+    frame.loc[frame.index[-20:], ["open", "high", "low", "close"]] = flat_price
+    with pytest.raises(RuntimeError, match="Latest completed bar has no valid strategy signal"):
+        strategy_signal(frame)
+
+
+@pytest.mark.parametrize(
+    ("endpoint_name", "request_name"),
+    [
+        ("strategy_signal_api", "MarketRequest"),
+        ("research_review", "ResearchMarketRequest"),
+    ],
+)
+def test_strategy_signal_api_endpoints_enforce_configured_market_history_gate(
+    monkeypatch, endpoint_name, request_name
+):
+    from fastapi import HTTPException
+    from app import main
+    from app.schemas import MarketRequest, ResearchMarketRequest
+
+    async def fake_auth(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(main, "auth", fake_auth)
+    monkeypatch.setattr(
+        main,
+        "market_data",
+        lambda _req: pd.DataFrame(
+            {"close": np.full(249, 100.0)},
+            index=pd.date_range("2026-01-01", periods=249, freq="h", tz="UTC"),
+        ),
+    )
+    monkeypatch.setattr(main.settings, "strategy_engine_enabled", True)
+    monkeypatch.setattr(main.settings, "min_bars", 250)
+    request_type = {
+        "MarketRequest": MarketRequest,
+        "ResearchMarketRequest": ResearchMarketRequest,
+    }[request_name]
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(getattr(main, endpoint_name)(request_type(), None, None))
+    assert exc.value.status_code == 422
+    assert "insufficient_bars" in str(exc.value.detail)
