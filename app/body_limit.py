@@ -8,12 +8,38 @@ from __future__ import annotations
 
 
 class BodySizeLimitMiddleware:
-    def __init__(self, app, max_bytes: int = 2_097_152) -> None:
+    def __init__(
+        self,
+        app,
+        max_bytes: int = 2_097_152,
+        path_prefix_limits: dict[str, int] | None = None,
+    ) -> None:
         self.app = app
-        self.max_bytes = int(max_bytes)
+        effective_max_bytes = int(max_bytes)
+        self.path_prefix_limits = {
+            str(prefix): int(limit)
+            for prefix, limit in (path_prefix_limits or {}).items()
+        }
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or self.max_bytes <= 0:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        # Route-specific limits are enforced by this outer ASGI layer, before
+        # Starlette/FastAPI can buffer the request body for the route handler.
+        path = str(scope.get("path") or "")
+        matching_limits = [
+            (prefix, limit)
+            for prefix, limit in self.path_prefix_limits.items()
+            if path.startswith(prefix)
+        ]
+        effective_max_bytes = (
+            max(matching_limits, key=lambda item: len(item[0]))[1]
+            if matching_limits
+            else effective_max_bytes
+        )
+        if effective_max_bytes <= 0:
             await self.app(scope, receive, send)
             return
 
@@ -30,7 +56,7 @@ class BodySizeLimitMiddleware:
                 declared = int(value)
             except (TypeError, ValueError):
                 continue
-            if declared > self.max_bytes:
+            if declared > effective_max_bytes:
                 await self._reject(send, close_connection=close_connection)
                 return
 
@@ -55,7 +81,7 @@ class BodySizeLimitMiddleware:
 
             saw_request = True
             chunk = message.get("body") or b""
-            if len(buffered) + len(chunk) > self.max_bytes:
+            if len(buffered) + len(chunk) > effective_max_bytes:
                 await self._reject(send, close_connection=close_connection)
                 return
             buffered.extend(chunk)
