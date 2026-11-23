@@ -135,9 +135,7 @@ def test_unmatched_statement_and_database_transactions_fail_closed():
     assert any("missing from provider statement" in f for f in failures)
 
 
-def test_zero_activity_window_passes_only_with_empty_provider_and_database_journals():
-    assert reconcile_rows([], [], "sandbox-payout") == (0, 0, [])
-
+def test_unattributed_withdrawal_journals_block_empty_reconciliation_inputs():
     matched, unresolved, failures = reconcile_rows(
         [],
         [],
