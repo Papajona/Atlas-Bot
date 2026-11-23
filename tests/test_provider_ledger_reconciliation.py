@@ -135,6 +135,29 @@ def test_unmatched_statement_and_database_transactions_fail_closed():
     assert any("missing from provider statement" in f for f in failures)
 
 
+def test_zero_activity_window_passes_only_with_empty_provider_and_database_journals():
+    assert reconcile_rows([], [], "sandbox-payout") == (0, 0, [])
+
+    matched, unresolved, failures = reconcile_rows(
+        [],
+        [],
+        "sandbox-payout",
+        withdrawal_journal_count=1,
+    )
+    assert matched == 0
+    assert unresolved == 0
+    assert any("withdrawal journals exist" in failure for failure in failures)
+
+
+def test_header_only_provider_export_is_a_valid_empty_statement(tmp_path):
+    path = tmp_path / "provider-empty.csv"
+    path.write_text(
+        "provider_id,amount,currency,status,event_time_utc\\n",
+        encoding="utf-8",
+    )
+    assert load_provider_statement(path) == []
+
+
 def test_statement_parser_rejects_duplicate_ids_and_invalid_status(tmp_path):
     path = tmp_path / "provider.csv"
     with path.open("w", newline="", encoding="utf-8") as stream:
@@ -169,6 +192,7 @@ def test_provider_reconciliation_query_uses_read_only_audit_acl_contract():
     assert "'public_tables_with_write_privileges'" in query
     assert "'public_sequences_with_privileges'" in query
     assert "'public_functions_with_execute'" in query
+    assert "'withdrawal_journal_count'" in query
     assert "tables_missing_dml" not in query
     assert "public_tables_missing_dml" not in query
     assert "audit_role_failures(" in Path(
