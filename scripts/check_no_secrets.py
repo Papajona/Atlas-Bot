@@ -20,7 +20,9 @@ TEXT_SUFFIXES = {
     ".java", ".kt", ".js", ".html", ".css", ".sql", ".pem", ".key", ".crt",
     ".conf", ".cfg", ".lock", ".patch",
 }
-ASSIGNMENT = re.compile(r"""(?i)^\s*(?:export\s+)?(?:<[^>]+?\s+)?[{,\[]?\s*["']?(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)["']?\s*[:=]\s*['"]?([A-Za-z0-9_+/=.-]{20,})""")
+ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase))["']?\s*[:=]\s*["']?(?P<value>[A-Za-z0-9_+/=.-]{20,})""")
+SOURCE_CODE_SUFFIXES = {".py", ".js", ".java", ".kt", ".sh", ".bash"}
+HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)^\s*(?:export\s+)?["']?(?:mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*([^,\s'"]+)""")
 
@@ -31,7 +33,8 @@ PLACEHOLDERS = {
     "paper_test_password", "test_password", "distinct-paper-secret",
     "different-primary-secret", "legacy-secret", "supported-review-key",
     "legacy-hosted-provider", "must-not-become-a-helper-setting", "must-not-be-persisted",
-    # Fixed non-production Fernet test key declared in production-verification.yml.
+    # Exact values used only by repository verification fixtures.
+    "ci-only-keystore-password",
     "mdawmdawmdawmdawmdawmdawmdawmdawmdawmdawmda=",
 }
 
@@ -52,18 +55,21 @@ def scan() -> list[str]:
             if seed_match and "re.compile" not in line and not any(p in seed_match.group(1).lower() for p in PLACEHOLDERS) and "<" not in seed_match.group(1):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
-            m = ASSIGNMENT.search(line)
-            if not m:
-                continue
-            value = m.group(1).lower()
-            remainder = line[m.end():].lstrip()
-            if remainder.startswith("("):  # derived token/helper call, not a literal credential
-                continue
-            if value in PLACEHOLDERS or value.startswith("<") or "." in value or "(" in value:
-                continue
-            if any(safe in value for safe in ("verification", "test-", "fake-", "example", "placeholder", "changeme", "fixture", "ci-only", "must-not-become-a-helper-setting", "must-not-be-persisted", "legacy-secret", "supported-review-key", "distinct-paper-secret", "different-primary-secret", "legacy-hosted-provider")):
-                continue
-            if "your-" not in value:
+            for match in ASSIGNMENT.finditer(line):
+                value = match.group("value").lower()
+                remainder = line[match.end():].lstrip()
+                # Only a bare function call in source code is a derived value.
+                # Config scalars such as TOKEN: long-value(rotation-note) remain
+                # credentials and must not be exempted by the same syntax.
+                if (
+                    path.suffix.lower() in SOURCE_CODE_SUFFIXES
+                    and HELPER_IDENTIFIER.fullmatch(value)
+                    and remainder.startswith("(")
+                ):
+                    continue
+                # Fixture exemptions are exact values, never substring markers.
+                if value in PLACEHOLDERS:
+                    continue
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: credential-like assignment")
     return findings
 
