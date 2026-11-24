@@ -14,11 +14,16 @@ def test_strategy_benchmark_capture_is_opt_in_and_private_by_default():
     main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     migration = (ROOT / "alembic" / "versions" / "0062_customer_benchmark_capture.py").read_text(encoding="utf-8")
     service = (ROOT / "app" / "benchmark_capture.py").read_text(encoding="utf-8")
+    model = (ROOT / "app" / "db.py").read_text(encoding="utf-8")
     customer = (ROOT / "app" / "templates" / "customer.html").read_text(encoding="utf-8")
 
     assert schemas.count("benchmark_opt_in: bool = False") == 2
     assert "if req.benchmark_opt_in:" in main
     assert "prompt_ciphertext" in service and "native_output_ciphertext" in service
+    assert "prompt_sha256" not in service
+    assert "prompt_sha256" not in model
+    assert "prompt_sha256" not in migration
+    assert "hashlib" not in service
     assert 'encrypt_text("atlas-benchmark-prompt-v1:" + prompt)' in service
     assert 'encrypt_text(\n            "atlas-benchmark-output-v1:" + json.dumps(' in service
     assert "RETENTION_DAYS = 90" in service
@@ -322,6 +327,141 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
                 await db.execute(
                     delete(BenchmarkPromptCapture).where(
                         BenchmarkPromptCapture.customer_id == customer_id
+                    )
+                )
+                await db.execute(
+                    delete(CustomerProfile).where(CustomerProfile.id == customer_id)
+                )
+                await db.commit()
+    except BaseException as exc:
+        cleanup_error = exc
+    finally:
+        try:
+            await engine.dispose()
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.getenv("ATLAS_POSTGRES_URL"),
+    reason="requires migrated PostgreSQL (ATLAS_POSTGRES_URL)",
+)
+async def test_optional_capture_query_failure_rolls_back_savepoint_and_keeps_candidate_commit(
+    monkeypatch,
+):
+    """A failed opt-in capture must not poison the strategy-candidate transaction."""
+    from cryptography.fernet import Fernet
+    from sqlalchemy import delete, select, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app import benchmark_capture
+    from app.benchmark_capture import capture_strategy_prompt
+    from app.config import settings
+    from app.db import CustomerProfile, StrategyCandidate
+
+    monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+    monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+
+    async def available_permissions(_db):
+        return {"can_select": True, "can_insert": True, "can_delete": True}
+
+    monkeypatch.setattr(
+        benchmark_capture, "benchmark_capture_permissions", available_permissions
+    )
+
+    engine = create_async_engine(
+        os.environ["ATLAS_POSTGRES_URL"],
+        pool_size=2,
+        max_overflow=0,
+        connect_args={"statement_cache_size": 0},
+    )
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    marker = uuid.uuid4().hex
+    auth_user_id = f"benchmark-storage-error-{marker}"
+    candidate_name = f"capture-error-candidate-{marker}"
+    customer_id = None
+    primary_error = None
+    cleanup_error = None
+    try:
+        async with sessions() as db:
+            customer = CustomerProfile(
+                auth_user_id=auth_user_id,
+                email=f"{marker}@example.invalid",
+                display_name="Benchmark storage failure regression",
+                status="ACTIVE",
+            )
+            db.add(customer)
+            await db.commit()
+            customer_id = customer.id
+
+        async with sessions() as db:
+            original_execute = db.execute
+
+            async def fail_capture_count(statement, *args, **kwargs):
+                sql = str(statement).lower()
+                if (
+                    "customer_benchmark_captures" in sql
+                    and "count(" in sql
+                ):
+                    # PostgreSQL aborts the current transaction on this error.
+                    # The capture service must have isolated it in a savepoint.
+                    return await original_execute(text("SELECT 1 / 0"))
+                return await original_execute(statement, *args, **kwargs)
+
+            monkeypatch.setattr(db, "execute", fail_capture_count)
+            result = await capture_strategy_prompt(
+                db,
+                customer_id=customer_id,
+                prompt="Research BTC trend after a confirmed 1h breakout with a 0.5% risk cap.",
+                native_output={"strategy": {"title": "Storage failure regression"}},
+                asset="crypto",
+                symbol="BTC/USDT",
+                exchange="binance",
+                timeframe="1h",
+            )
+            assert result["status"] == "SKIPPED_STORAGE_ERROR"
+            assert db.is_active is True
+
+            monkeypatch.setattr(db, "execute", original_execute)
+            candidate = StrategyCandidate(
+                customer_id=customer_id,
+                name=candidate_name,
+                asset="crypto",
+                symbol="BTC/USDT",
+                exchange="binance",
+                timeframe="1h",
+                spec_json="{}",
+                status="DRAFT",
+            )
+            db.add(candidate)
+            await db.commit()
+            candidate_id = candidate.id
+            persisted = (await db.execute(
+                select(StrategyCandidate.id).where(
+                    StrategyCandidate.id == candidate_id,
+                    StrategyCandidate.customer_id == customer_id,
+                )
+            )).scalar_one()
+            assert persisted == candidate_id
+    except BaseException as exc:
+        primary_error = exc
+
+    try:
+        if customer_id is not None:
+            async with sessions() as db:
+                await db.execute(
+                    delete(StrategyCandidate).where(
+                        StrategyCandidate.customer_id == customer_id,
+                        StrategyCandidate.name == candidate_name,
                     )
                 )
                 await db.execute(
