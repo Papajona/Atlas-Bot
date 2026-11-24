@@ -400,7 +400,7 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 closing_quantity=0.1, closing_notional=11,
                 fee_basis_complete=True, lifecycle_status="PARTIAL_CLOSED",
                 sequence=1,
-                metadata_json='{"allocated_entry_fee":"0.05","closing_fee":"0","fee_basis_complete":true}',
+                metadata_json='{"allocated_entry_fee":"0.05","closing_fee":"0","entry_fee_order_verified":true,"closing_fee_order_verified":false,"fee_basis_complete":false}',
             )
             final = StrategyOutcome(
                 trade_id=entry.id, closing_trade_id=closing.id,
@@ -413,6 +413,7 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 sequence=2,
                 metadata_json=(
                     '{"allocated_entry_fee":"0.05","closing_fee":"0",'
+                    '"entry_fee_order_verified":true,"closing_fee_order_verified":false,'
                     '"aggregate_fill_count":2,"final_fill_closing_quantity":"0.1",'
                     '"final_fill_closing_notional":"12","total_closing_notional":"23"}'
                 ),
