@@ -188,7 +188,7 @@ async def check_database(settings: Any) -> list[Result]:
             from alembic.config import Config
             from alembic.script import ScriptDirectory
             head = ScriptDirectory.from_config(Config(str(ROOT / "alembic.ini"))).get_current_head()
-            engine = create_async_engine(url)
+            engine = create_async_engine(_async_engine_url(url))
             try:
                 async with engine.connect() as conn:
                     current = (await conn.execute(text("SELECT version_num FROM alembic_version"))).scalar()
@@ -203,7 +203,7 @@ async def check_database(settings: Any) -> list[Result]:
 
     # Mirrors /readyz execution_fencing: the single live_execution_lease row must exist.
     try:
-        engine = create_async_engine(url)
+        engine = create_async_engine(_async_engine_url(url))
         try:
             async with engine.connect() as conn:
                 lease = (await conn.execute(text("SELECT 1 FROM live_execution_lease WHERE id = 1"))).scalar()
