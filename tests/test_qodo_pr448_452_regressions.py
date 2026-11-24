@@ -780,11 +780,23 @@ async def test_identity_quarantine_completes_when_all_request_pool_connections_a
         pool_timeout=10,
         connect_args=connect_args,
     )
+    # Cleanup must not depend on successfully returning every request-pool
+    # connection: a failed session close must never strand the seeded profile.
+    cleanup_engine = create_async_engine(
+        database_url,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=10,
+        connect_args=connect_args,
+    )
     request_sessions = async_sessionmaker(
         request_engine, expire_on_commit=False
     )
     quarantine_sessions = async_sessionmaker(
         quarantine_engine, expire_on_commit=False
+    )
+    cleanup_sessions = async_sessionmaker(
+        cleanup_engine, expire_on_commit=False
     )
     monkeypatch.setattr(main_module, "SessionLocal", request_sessions)
     monkeypatch.setattr(
@@ -828,21 +840,31 @@ async def test_identity_quarantine_completes_when_all_request_pool_connections_a
         primary_error = exc
     finally:
         try:
-            await asyncio.gather(
+            close_results = await asyncio.gather(
                 *(db.close() for db in held_sessions),
-                return_exceptions=False,
+                return_exceptions=True,
             )
+            # Keep cleanup independent from the request pool. If any close
+            # failed, the row deletion must still run on its own connection.
             if profile_id is not None:
-                async with request_sessions() as db:
+                async with cleanup_sessions() as db:
                     await db.execute(
                         delete(CustomerProfile).where(
                             CustomerProfile.id == profile_id
                         )
                     )
                     await db.commit()
+            close_failures = [
+                result for result in close_results
+                if isinstance(result, BaseException)
+            ]
+            if close_failures and cleanup_error is None:
+                cleanup_error = RuntimeError(
+                    f"{len(close_failures)} held request session(s) failed to close"
+                )
         except BaseException as exc:
             cleanup_error = exc
-        for engine in (quarantine_engine, request_engine):
+        for engine in (cleanup_engine, quarantine_engine, request_engine):
             try:
                 await engine.dispose()
             except BaseException as exc:
@@ -1063,3 +1085,38 @@ def test_pending_identity_status_is_denied_by_both_protected_customer_gates():
     assert "raise HTTPException(403, \"Customer account is not active\")" in customer_gate
     assert "if identity_review_required and not allow_identity_review_summary" in staging_gate
     assert 'str(getattr(profile, "status", "")).upper() != "ACTIVE"' in staging_gate
+
+@pytest.mark.asyncio
+async def test_paper_staging_rejects_pending_identity_even_after_legacy_conflict_clears(monkeypatch):
+    from fastapi import HTTPException
+    from types import SimpleNamespace
+    from app import paper_staging as paper_staging_module
+
+    row = SimpleNamespace(
+        id=91,
+        auth_user_id="pending-staging-customer",
+        status="PENDING_IDENTITY_REVIEW",
+        has_stored_email=True,
+    )
+
+    class Result:
+        def one_or_none(self):
+            return row
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": row.auth_user_id, "aal": "aal2"}
+
+    monkeypatch.setattr(
+        paper_staging_module, "customer_claims", verified_claims
+    )
+    with pytest.raises(HTTPException) as raised:
+        await paper_staging_module.get_existing_customer(
+            "Bearer test-token", Database()
+        )
+
+    assert raised.value.status_code == 409
+    assert "paused until legacy customer identities" in raised.value.detail
