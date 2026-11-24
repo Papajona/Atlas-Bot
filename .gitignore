@@ -36,3 +36,12 @@ dist/
 .DS_Store
 
 .venv/
+
+# Android signing material and local build config (never commit)
+*.jks
+*.keystore
+*.p12
+*.pfx
+local.properties
+google-services.json
+keystore.properties
