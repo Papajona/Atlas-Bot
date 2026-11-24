@@ -2,6 +2,7 @@
 
 Authored without sqlalchemy/aiosqlite available locally -> run in CI. Uses real async SQLite like the repo's other ledger tests.
 """
+import json
 import asyncio
 from decimal import Decimal
 from pathlib import Path
@@ -1615,7 +1616,8 @@ def test_cumulative_fee_true_up_changes_only_unverified_partial_fill_rows():
             assert rows[0].fee_basis_complete is True
             assert rows[1].fee == Decimal("0.05")
             assert rows[1].fee_basis_complete is True
-            assert rows[2].fee == Decimal("0.05")
+            assert rows[2].fee == Decimal("0.14")
+            assert json.loads(rows[2].metadata_json)["closing_fee"] == "0.02"
             assert rows[2].fee_basis_complete is True
             assert rows[0].metadata_json
             assert json.loads(rows[0].metadata_json)["closing_fee_order_verified"] is True
