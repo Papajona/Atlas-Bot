@@ -1,3 +1,5 @@
+import os
+import pytest
 import asyncio
 import json
 from decimal import Decimal
@@ -740,6 +742,117 @@ def test_conflicted_identity_quarantine_commits_without_committing_caller_writes
             await engine.dispose()
 
     asyncio.run(run())
+
+
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not os.getenv("ATLAS_POSTGRES_URL"),
+    reason="requires PostgreSQL (ATLAS_POSTGRES_URL)",
+)
+async def test_identity_quarantine_completes_when_all_request_pool_connections_are_held(
+    monkeypatch,
+):
+    """A second quarantine connection must not be borrowed from the saturated request pool."""
+    import asyncio
+    import uuid
+    from sqlalchemy import delete, text
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.db import CustomerProfile
+    from app import main as main_module
+
+    database_url = os.environ["ATLAS_POSTGRES_URL"]
+    connect_args = {"statement_cache_size": 0}
+    request_engine = create_async_engine(
+        database_url,
+        pool_size=30,
+        max_overflow=0,
+        pool_timeout=10,
+        connect_args=connect_args,
+    )
+    quarantine_engine = create_async_engine(
+        database_url,
+        pool_size=1,
+        max_overflow=0,
+        pool_timeout=10,
+        connect_args=connect_args,
+    )
+    request_sessions = async_sessionmaker(
+        request_engine, expire_on_commit=False
+    )
+    quarantine_sessions = async_sessionmaker(
+        quarantine_engine, expire_on_commit=False
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", request_sessions)
+    monkeypatch.setattr(
+        main_module, "IdentityQuarantineSessionLocal", quarantine_sessions
+    )
+
+    marker = uuid.uuid4().hex
+    profile_id = None
+    held_sessions = []
+    primary_error = None
+    cleanup_error = None
+    try:
+        async with request_sessions() as db:
+            profile = CustomerProfile(
+                auth_user_id=f"pool-quarantine-{marker}",
+                email=f"{marker}@example.invalid",
+                display_name="Pool exhaustion regression",
+                status="ACTIVE",
+            )
+            db.add(profile)
+            await db.commit()
+            profile_id = int(profile.id)
+
+        held_sessions = [request_sessions() for _ in range(30)]
+        await asyncio.gather(
+            *(db.execute(text("SELECT 1")) for db in held_sessions)
+        )
+        assert request_engine.pool.checkedout() == 30
+
+        quarantined = await asyncio.wait_for(
+            main_module._quarantine_customer_identity_review(profile_id),
+            timeout=10,
+        )
+        assert quarantined is True
+
+        async with quarantine_sessions() as db:
+            persisted = await db.get(CustomerProfile, profile_id)
+            assert persisted is not None
+            assert persisted.status == "PENDING_IDENTITY_REVIEW"
+    except BaseException as exc:
+        primary_error = exc
+    finally:
+        try:
+            await asyncio.gather(
+                *(db.close() for db in held_sessions),
+                return_exceptions=False,
+            )
+            if profile_id is not None:
+                async with request_sessions() as db:
+                    await db.execute(
+                        delete(CustomerProfile).where(
+                            CustomerProfile.id == profile_id
+                        )
+                    )
+                    await db.commit()
+        except BaseException as exc:
+            cleanup_error = exc
+        for engine in (quarantine_engine, request_engine):
+            try:
+                await engine.dispose()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_error.__traceback__)
+    if cleanup_error is not None:
+        raise cleanup_error
 
 
 def test_identity_quarantine_has_reserved_pool_for_postgres_requests():
