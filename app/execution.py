@@ -3637,6 +3637,135 @@ async def _report_snapshot_rejection(trade_id, customer_id, exc: Exception) -> N
         )
 
 
+def _merge_authoritative_trade_history_fee(
+    order: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    expected_order_id: str,
+    stored_filled_quantity: Any = None,
+) -> dict[str, Any] | None:
+    """Build a fee snapshot only from complete, order-matched exchange fills."""
+    order_id = str(order.get("id") or expected_order_id or "").strip()
+    if not order_id or not isinstance(history, list):
+        return None
+    try:
+        raw_filled = order.get("filled")
+        expected_filled = Decimal(str(
+            raw_filled if raw_filled is not None else stored_filled_quantity
+        ))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if not expected_filled.is_finite() or expected_filled <= 0:
+        return None
+
+    matched_quantity = Decimal("0")
+    total_fee = Decimal("0")
+    fee_currency = ""
+    seen_fill_ids: set[str] = set()
+    matched_fills = 0
+    for fill in history:
+        if not isinstance(fill, dict):
+            continue
+        info = fill.get("info") if isinstance(fill.get("info"), dict) else {}
+        fill_order_id = str(
+            fill.get("order")
+            or fill.get("orderId")
+            or info.get("orderId")
+            or ""
+        ).strip()
+        if fill_order_id != order_id:
+            continue
+        fill_id = str(fill.get("id") or "")
+        if fill_id and fill_id in seen_fill_ids:
+            continue
+        if fill_id:
+            seen_fill_ids.add(fill_id)
+        try:
+            raw_amount = fill.get("amount")
+            if raw_amount is None:
+                raw_amount = info.get("qty", info.get("executedQty", info.get("quantity")))
+            amount = Decimal(str(raw_amount))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not amount.is_finite() or amount <= 0:
+            return None
+
+        fee_rows = fill.get("fees")
+        if not isinstance(fee_rows, list) or not fee_rows:
+            fee = fill.get("fee")
+            fee_rows = [fee] if isinstance(fee, dict) else []
+        if not fee_rows and info.get("commission") is not None:
+            fee_rows = [{
+                "cost": info.get("commission"),
+                "currency": info.get("commissionAsset"),
+            }]
+        if not fee_rows:
+            return None
+
+        fill_fee = Decimal("0")
+        fill_currency = ""
+        for fee_row in fee_rows:
+            if not isinstance(fee_row, dict):
+                return None
+            try:
+                cost = Decimal(str(fee_row.get("cost")))
+            except (TypeError, ValueError, ArithmeticError):
+                return None
+            currency = str(fee_row.get("currency") or "").strip().upper()
+            if not cost.is_finite() or not currency:
+                return None
+            if fill_currency and fill_currency != currency:
+                return None
+            fill_currency = currency
+            # Rebates are not customer charges; do not net them against commissions.
+            if cost > 0:
+                fill_fee += cost
+        if fee_currency and fee_currency != fill_currency:
+            return None
+        fee_currency = fill_currency
+        matched_quantity += amount
+        total_fee += fill_fee
+        matched_fills += 1
+
+    if matched_fills == 0 or not fee_currency:
+        return None
+    if abs(matched_quantity - expected_filled) > Decimal("0.000000001"):
+        return None
+    enriched = dict(order)
+    # The fee parser prefers the list form; store the verified sum only once.
+    enriched.pop("fee", None)
+    enriched["fees"] = [{"cost": str(total_fee), "currency": fee_currency}]
+    return enriched
+
+
+async def _order_with_verified_trade_history_fee(
+    broker,
+    order: dict[str, Any],
+    *,
+    symbol: str,
+    expected_order_id: str,
+    stored_filled_quantity: Any = None,
+) -> dict[str, Any]:
+    """Use exchange fill history only when it completely covers this pending order."""
+    if not order:
+        return order
+    fetch_my_trades = getattr(broker, "fetch_my_trades", None)
+    if not callable(fetch_my_trades):
+        return order
+    try:
+        history = await asyncio.to_thread(fetch_my_trades, symbol)
+    except Exception:
+        # No usable history leaves the fee unresolved rather than using an estimate.
+        return order
+    enriched = _merge_authoritative_trade_history_fee(
+        order,
+        history if isinstance(history, list) else [],
+        expected_order_id=expected_order_id,
+        stored_filled_quantity=stored_filled_quantity,
+    )
+    return enriched or order
+
+
 async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
     """Apply one broker snapshot without guessing an execution outcome.
 
