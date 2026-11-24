@@ -160,6 +160,83 @@ def _split_outcome_lifecycles(rows: list[dict]) -> list[list[dict]]:
         lifecycles.append(current)
     return lifecycles
 
+def _legacy_closed_rows_are_one_lifecycle(
+    rows: list[dict],
+    source_trades: dict[int, dict],
+    episodes: dict[int, dict],
+) -> bool:
+    """Reconstruct 0047's blanket CLOSED marker only with matching fill evidence."""
+    if len(rows) < 2 or any(
+        str(row.get("lifecycle_status") or "").upper() != "CLOSED"
+        for row in rows
+    ):
+        return False
+    try:
+        entry_trade_id = int(rows[0]["trade_id"])
+        episode = episodes.get(entry_trade_id)
+        entry_quantity = _episode_position_quantity(episode, lifecycle_closed=True)
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return False
+    if entry_quantity is None:
+        return False
+
+    closing_sequences: dict[int, int] = {}
+    for row in rows:
+        raw_id = row.get("closing_trade_id")
+        if raw_id is None:
+            return False
+        try:
+            closing_id = int(raw_id)
+            sequence = int(row.get("sequence") or 0)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        closing_sequences[closing_id] = min(
+            sequence, closing_sequences.get(closing_id, sequence)
+        )
+    ordered_orders = [
+        source_trades[closing_id]
+        for closing_id in sorted(
+            closing_sequences,
+            key=lambda value: (closing_sequences[value], value),
+        )
+        if closing_id in source_trades
+    ]
+    if len(ordered_orders) != len(closing_sequences):
+        return False
+    allocations = _allocate_lifecycle_closing_quantities(
+        ordered_orders, episode, lifecycle_closed=True
+    )
+    if allocations is None:
+        return False
+    allocated_total = sum(allocations.values(), Decimal("0"))
+    if abs(allocated_total - entry_quantity) > Decimal("0.000001"):
+        return False
+
+    # Permit only a proven reversal leg for any close order whose total fill
+    # exceeds the quantity allocated to the completed entry episode.
+    for order in ordered_orders:
+        try:
+            order_id = int(order["id"])
+            filled = Decimal(str(order.get("filled_quantity") or 0))
+            allocated = allocations[order_id]
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            return False
+        excess = filled - allocated
+        if not excess.is_finite() or excess < -Decimal("0.000001"):
+            return False
+        if excess > Decimal("0.000001"):
+            reversal_episode = episodes.get(order_id)
+            reversal_quantity = _episode_position_quantity(
+                reversal_episode, lifecycle_closed=False
+            )
+            if (
+                reversal_quantity is None
+                or reversal_quantity + Decimal("0.000001") < excess
+            ):
+                return False
+    return True
+
+
 
 def _episode_entry_quantity(
     episode: dict | None,
@@ -647,6 +724,37 @@ def upgrade() -> None:
 
             lifecycle_groups = _split_outcome_lifecycles(rows)
             reused_entry_order = len(lifecycle_groups) > 1
+            if reused_entry_order and all(
+                str(row.get("lifecycle_status") or "").upper() == "CLOSED"
+                for row in rows
+            ):
+                # Revision 0047 marked every row in a completed episode CLOSED.
+                # Join the rows only when source order fills and episode quantities
+                # prove the entire group belongs to one position lifecycle.
+                early_closing_ids = {
+                    int(row["closing_trade_id"])
+                    for row in rows
+                    if row.get("closing_trade_id") is not None
+                }
+                early_trade_ids = sorted({entry_trade_id, *early_closing_ids})
+                early_source_trades = {
+                    int(row["id"]): dict(row)
+                    for row in bind.execute(
+                        trade_lookup, {"trade_ids": early_trade_ids}
+                    ).mappings().all()
+                }
+                early_episode_rows = bind.execute(
+                    episode_lookup, {"trade_ids": early_trade_ids}
+                ).mappings().all()
+                early_episodes = {
+                    int(row["entry_trade_id"]): dict(row)
+                    for row in early_episode_rows
+                }
+                if _legacy_closed_rows_are_one_lifecycle(
+                    rows, early_source_trades, early_episodes
+                ):
+                    lifecycle_groups = [rows]
+                    reused_entry_order = False
             for lifecycle_rows in lifecycle_groups:
                 if not lifecycle_rows:
                     continue
