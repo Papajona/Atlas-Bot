@@ -143,9 +143,13 @@ def _is_helper_call(value: str, remainder: str) -> bool:
     return bool(re.match(r"\d+\s*[,\)\]]", arguments))
 
 
-def _mask_template_interpolations(value: str) -> str:
-    """Remove JavaScript ${...} expressions while retaining template text."""
-    if "${" not in value:
+def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
+    """Ignore dynamic template expressions but retain quoted literal material within them."""
+    if "$" + "{" not in value:
+        return value
+    # Bound nested template parsing. At the limit, leave the source visible so
+    # conservative secret checks fail closed rather than silently hiding it.
+    if _depth >= 64:
         return value
 
     def skip_quoted(position: int, quote: str) -> int:
@@ -159,13 +163,24 @@ def _mask_template_interpolations(value: str) -> str:
                 position += 1
         return len(value)
 
-    def skip_interpolation(position: int) -> int:
-        depth = 1
+    def skip_interpolation(position: int) -> tuple[int, str]:
+        brace_depth = 1
         position += 2
+        literal_parts: list[str] = []
         while position < len(value):
             char = value[position]
-            if char in {"'", '"', "`"}:
+            if char in {"'", '"'}:
+                literal_start = position
                 position = skip_quoted(position, char)
+                literal_parts.append(value[literal_start + 1:position - 1])
+                continue
+            if char == chr(96):
+                literal_start = position
+                position = skip_quoted(position, char)
+                nested_template = value[literal_start + 1:position - 1]
+                literal_parts.append(
+                    _mask_template_interpolations(nested_template, _depth + 1)
+                )
                 continue
             if value.startswith("//", position):
                 newline = value.find("\n", position + 2)
@@ -176,35 +191,38 @@ def _mask_template_interpolations(value: str) -> str:
                 position = len(value) if closing < 0 else closing + 2
                 continue
             if char == "{":
-                depth += 1
-                if depth > 256:
-                    return len(value)
+                brace_depth += 1
+                if brace_depth > 256:
+                    return len(value), "".join(literal_parts)
             elif char == "}":
-                depth -= 1
-                if depth == 0:
-                    return position + 1
+                brace_depth -= 1
+                if brace_depth == 0:
+                    return position + 1, "".join(literal_parts)
+            elif char in {"=", ":"}:
+                # Preserve assignment punctuation between literal pieces, but
+                # discard identifiers and operators from dynamic expressions.
+                literal_parts.append(char)
             position += 1
         # An incomplete interpolation is not trusted as literal key material.
-        return len(value)
+        return len(value), "".join(literal_parts)
 
     pieces: list[str] = []
     segment_start = 0
     position = 0
     while position < len(value):
         if value[position] == "\\":
-            # Escaped \${ is template text, not an interpolation.
+            # Escaped interpolation syntax is ordinary template text.
             position += 2
             continue
-        if value.startswith("${", position):
-            end = skip_interpolation(position)
-            pieces.extend((value[segment_start:position], " "))
+        if value.startswith("$" + "{", position):
+            end, literal_material = skip_interpolation(position)
+            pieces.extend((value[segment_start:position], " ", literal_material, " "))
             position = end
             segment_start = end
             continue
         position += 1
     pieces.append(value[segment_start:])
     return "".join(pieces)
-
 
 def _is_inside_template_literal(line: str, position: int) -> bool:
     """Return whether a source assignment begins inside a backtick literal."""
