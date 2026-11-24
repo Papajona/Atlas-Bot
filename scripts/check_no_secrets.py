@@ -5,6 +5,7 @@ This is intentionally conservative: it reports high-signal credential assignment
 private-key/seed material while allowing placeholders and public-key material.
 """
 from __future__ import annotations
+import ast
 import json
 import re
 import sys
@@ -39,6 +40,9 @@ TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:[A-Za-z_][A-Za-z0-9_]
 TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>[^\r\n]+)"""
 )
+DOCUMENTED_RECOVERY_ASSIGNMENT = re.compile(
+    r"""(?i)(?:[*_]{1,3})?\b(?P<key>mnemonic|seed(?:[_ -]?phrase)?|recovery[_ -]?phrase)(?:[*_]{1,3})?\s*[:=]\s*(?P<value>[^#\r\n]*)"""
+)
 MULTILINE_SEED_KEY = re.compile(
     r"""(?i)^\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
 )
@@ -54,6 +58,12 @@ SOURCE_STRING_CONCATENATION = re.compile(
 )
 SOURCE_STRING_LITERAL = re.compile(
     r"""(?P<quote>["'])(?P<value>(?:\\.|[^\\])*?)\1"""
+)
+
+# Match complete Python-style triple-quoted credential assignments before the
+# line-oriented scanner sees only the opening pair of quotes.
+TRIPLE_QUOTED_SOURCE_ASSIGNMENT = re.compile(
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
 )
 
 PLACEHOLDERS = {
@@ -155,34 +165,6 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
         r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=-]{20,}(?![A-Za-z0-9])",
         combined,
     ) is not None
-
-def _source_literal_contains_sensitive_assignment(line: str) -> bool:
-    """Inspect quoted source settings for embedded credential assignments."""
-    for literal in SOURCE_STRING_LITERAL.finditer(line):
-        embedded = TRON_SEED_IN_SOURCE.search(literal.group("value"))
-        if embedded is None:
-            continue
-        key_kind = _credential_key_kind(embedded.group("key"))
-        candidate = embedded.group("value").strip().strip('"').strip("'").strip()
-        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
-            if _is_likely_recovery_phrase(candidate):
-                return True
-        elif key_kind == "privatekey":
-            if (
-                PRIVATE_KEY.search(candidate)
-                or re.search(
-                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=-]{20,}(?![A-Za-z0-9])",
-                    candidate,
-                )
-            ):
-                return True
-        elif (
-            re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", candidate) is not None
-            and candidate.lower() not in PLACEHOLDERS
-            and not ANGLE_PLACEHOLDER.fullmatch(candidate)
-        ):
-            return True
-    return False
 
 
 BIP39_VALIDATOR = Bip39MnemonicValidator()
@@ -332,14 +314,17 @@ PUBLIC_JWK_METADATA_FIELDS = {
 
 def _structured_private_object_has_material(value) -> bool:
     """Detect nested private JWK material while preserving public metadata exceptions."""
-    stack = [(value, isinstance(value, list))]
-    visited: set[tuple[int, bool]] = set()
+    # A root array under private_key has private scalar entries, but objects
+    # inside that array may be public JWKs. Do not propagate the array's scalar
+    # rule into unknown fields of those objects.
+    stack = [(value, isinstance(value, list), isinstance(value, dict))]
+    visited: set[tuple[int, bool, bool]] = set()
     visits = 0
     while stack:
-        current, scalar_items_are_private = stack.pop()
+        current, scalar_items_are_private, private_context = stack.pop()
         if not isinstance(current, (dict, list)):
             continue
-        identity = (id(current), scalar_items_are_private)
+        identity = (id(current), scalar_items_are_private, private_context)
         if identity in visited:
             continue
         visited.add(identity)
@@ -359,17 +344,22 @@ def _structured_private_object_has_material(value) -> bool:
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
                 if isinstance(item, (dict, list)):
-                    # Keep private context through arbitrarily nested intermediate
-                    # objects/arrays. Explicit public JWK fields override it so
-                    # key_ops:["verify"] and public key components remain harmless.
+                    # Preserve private traversal through containers entered by a
+                    # recognized private field (or within an already-private object).
+                    # Public JWK members always reset that context.
                     child_private = False if field_is_public else (
-                        scalar_items_are_private or field_is_private
+                        private_context or field_is_private
                     )
-                    stack.append((item, child_private))
+                    child_scalar_items_private = child_private and isinstance(item, list)
+                    stack.append((item, child_scalar_items_private, child_private))
         else:
             for item in current:
-                if isinstance(item, (dict, list)):
-                    stack.append((item, scalar_items_are_private))
+                if isinstance(item, dict):
+                    # The containing array makes direct scalar entries sensitive,
+                    # not arbitrary metadata values inside an object element.
+                    stack.append((item, False, private_context))
+                elif isinstance(item, list):
+                    stack.append((item, scalar_items_are_private, private_context))
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
@@ -575,6 +565,103 @@ def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
     return findings
 
 
+def _find_documented_recovery_assignments(lines: list[str]) -> dict[int, str]:
+    """Find inline and indented recovery values in Markdown/text documentation."""
+    findings: dict[int, str] = {}
+    for index, line in enumerate(lines):
+        match = DOCUMENTED_RECOVERY_ASSIGNMENT.search(line)
+        if match is None:
+            continue
+
+        candidate = (
+            match.group("value")
+            .strip()
+            .strip("`")
+            .strip("*_")
+            .strip('"')
+            .strip("'")
+            .strip("`")
+            .strip("*_")
+            .strip()
+        )
+        if not candidate:
+            key_indent = len(line) - len(line.lstrip(" \t"))
+            value_lines: list[str] = []
+            for following in lines[index + 1:]:
+                if not following.strip():
+                    break
+                indent = len(following) - len(following.lstrip(" \t"))
+                if indent <= key_indent:
+                    break
+                value_lines.append(
+                    following.strip().lstrip(">").lstrip("-* ").strip()
+                )
+            candidate = " ".join(value_lines).strip()
+
+        if _is_likely_recovery_phrase(candidate):
+            findings[index + 1] = match.group("key")
+    return findings
+
+
+def _source_literal_contains_sensitive_assignment(line: str) -> bool:
+    """Inspect decoded quoted source snippets for embedded credential assignments."""
+    for literal in SOURCE_STRING_LITERAL.finditer(line):
+        try:
+            # Decode escapes without executing the surrounding source file.
+            # This exposes escaped JSON key/value quotes inside JS/Python strings.
+            literal_value = ast.literal_eval(literal.group(0))
+        except (SyntaxError, ValueError):
+            literal_value = literal.group("value")
+        if not isinstance(literal_value, str):
+            continue
+        for embedded in TRON_SEED_IN_SOURCE.finditer(literal_value):
+            key_kind = _credential_key_kind(embedded.group("key"))
+            candidate = embedded.group("value").strip().strip('"').strip("'").strip()
+            if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                if _is_likely_recovery_phrase(candidate):
+                    return True
+            elif key_kind == "privatekey":
+                if (
+                    PRIVATE_KEY.search(candidate)
+                    or re.search(
+                        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                        candidate,
+                    )
+                ):
+                    return True
+    return False
+
+
+def _find_triple_quoted_source_assignments(source: str) -> set[int]:
+    """Return source line numbers containing sensitive triple-quoted assignments."""
+    findings: set[int] = set()
+    for match in TRIPLE_QUOTED_SOURCE_ASSIGNMENT.finditer(source):
+        key_kind = _credential_key_kind(match.group("key"))
+        value = match.group("value").strip()
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            sensitive = _is_likely_recovery_phrase(value)
+        elif key_kind == "privatekey":
+            if value.startswith(("{", "[")):
+                try:
+                    structured = json.loads(value)
+                    sensitive = _structured_private_object_has_material(structured)
+                except (json.JSONDecodeError, RecursionError, _YamlTraversalLimitExceeded):
+                    sensitive = True
+            else:
+                sensitive = (
+                    PRIVATE_KEY.search(value) is not None
+                    or re.search(
+                        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                        value,
+                    ) is not None
+                )
+        else:
+            sensitive = False
+        if sensitive:
+            findings.add(source.count("\n", 0, match.start()) + 1)
+    return findings
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -604,9 +691,24 @@ def scan() -> list[str]:
             multiline_seed_findings = _find_multiline_seed_assignments(lines)
         else:
             multiline_seed_findings = {}
+        triple_quoted_findings = (
+            _find_triple_quoted_source_assignments(text)
+            if suffix in SOURCE_CODE_SUFFIXES else set()
+        )
+        documented_recovery_findings = (
+            _find_documented_recovery_assignments(lines)
+            if suffix in {".md", ".txt"} else {}
+        )
         for lineno,line in enumerate(lines,1):
+            if lineno in triple_quoted_findings:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
             multiline_seed_key = multiline_seed_findings.get(lineno)
             if multiline_seed_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
+            documented_recovery_key = documented_recovery_findings.get(lineno)
+            if documented_recovery_key:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             if PRIVATE_KEY.search(line):
