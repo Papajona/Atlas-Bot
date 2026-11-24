@@ -565,6 +565,34 @@ def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
     return findings
 
 
+def _find_documented_recovery_assignments(lines: list[str]) -> dict[int, str]:
+    """Find inline and indented recovery values in Markdown/text documentation."""
+    findings: dict[int, str] = {}
+    for index, line in enumerate(lines):
+        match = DOCUMENTED_RECOVERY_ASSIGNMENT.search(line)
+        if match is None:
+            continue
+
+        candidate = match.group("value").strip().strip('"').strip("'").strip()
+        if not candidate:
+            key_indent = len(line) - len(line.lstrip(" \t"))
+            value_lines: list[str] = []
+            for following in lines[index + 1:]:
+                if not following.strip():
+                    break
+                indent = len(following) - len(following.lstrip(" \t"))
+                if indent <= key_indent:
+                    break
+                value_lines.append(
+                    following.strip().lstrip(">").lstrip("-* ").strip()
+                )
+            candidate = " ".join(value_lines).strip()
+
+        if _is_likely_recovery_phrase(candidate):
+            findings[index + 1] = match.group("key")
+    return findings
+
+
 def _source_literal_contains_sensitive_assignment(line: str) -> bool:
     """Inspect decoded quoted source snippets for embedded credential assignments."""
     for literal in SOURCE_STRING_LITERAL.finditer(line):
@@ -576,23 +604,21 @@ def _source_literal_contains_sensitive_assignment(line: str) -> bool:
             literal_value = literal.group("value")
         if not isinstance(literal_value, str):
             continue
-        embedded = TRON_SEED_IN_SOURCE.search(literal_value)
-        if embedded is None:
-            continue
-        key_kind = _credential_key_kind(embedded.group("key"))
-        candidate = embedded.group("value").strip().strip('"').strip("'").strip()
-        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
-            if _is_likely_recovery_phrase(candidate):
-                return True
-        elif key_kind == "privatekey":
-            if (
-                PRIVATE_KEY.search(candidate)
-                or re.search(
-                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
-                    candidate,
-                )
-            ):
-                return True
+        for embedded in TRON_SEED_IN_SOURCE.finditer(literal_value):
+            key_kind = _credential_key_kind(embedded.group("key"))
+            candidate = embedded.group("value").strip().strip('"').strip("'").strip()
+            if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                if _is_likely_recovery_phrase(candidate):
+                    return True
+            elif key_kind == "privatekey":
+                if (
+                    PRIVATE_KEY.search(candidate)
+                    or re.search(
+                        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                        candidate,
+                    )
+                ):
+                    return True
     return False
 
 
@@ -659,6 +685,10 @@ def scan() -> list[str]:
             _find_triple_quoted_source_assignments(text)
             if suffix in SOURCE_CODE_SUFFIXES else set()
         )
+        documented_recovery_findings = (
+            _find_documented_recovery_assignments(lines)
+            if suffix in {".md", ".txt"} else {}
+        )
         for lineno,line in enumerate(lines,1):
             if lineno in triple_quoted_findings:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
@@ -667,23 +697,14 @@ def scan() -> list[str]:
             if multiline_seed_key:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
+            documented_recovery_key = documented_recovery_findings.get(lineno)
+            if documented_recovery_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
             if PRIVATE_KEY.search(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
             source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
-            if not source_code and suffix in {".md", ".txt"}:
-                documented_match = DOCUMENTED_RECOVERY_ASSIGNMENT.search(line)
-                if documented_match:
-                    documented_value = (
-                        documented_match.group("value")
-                        .strip()
-                        .strip('"')
-                        .strip("'")
-                        .strip()
-                    )
-                    if _is_likely_recovery_phrase(documented_value):
-                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                        continue
             if source_code and _source_literal_contains_sensitive_assignment(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
