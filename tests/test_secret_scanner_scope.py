@@ -136,6 +136,27 @@ def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_source_strin
     )
 
 
+
+def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_direct_source_object(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    source = (
+        'const settings = { private_key: "example", mnemonic: "'
+        + phrase
+        + '" };\\n'
+    )
+    (tmp_path / "later-wallet-object.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "later-wallet-object.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_multiline_documented_wallet_phrases(
     tmp_path, monkeypatch
 ):
