@@ -1093,3 +1093,36 @@ def test_secret_scanner_ignores_nonsecret_seed_parameters_and_runtime_calls(
     findings = check_no_secrets.scan()
 
     assert not any("research-seed-defaults.py" in item for item in findings)
+
+def test_secret_scanner_distinguishes_numeric_seed_defaults_from_secret_material(
+    tmp_path, monkeypatch
+):
+    seed_field = "se" + "ed"
+    mnemonic_field = "mne" + "monic"
+    random_defaults = (
+        seed_field + "=17\n"
+        + "wallet." + seed_field + "=42\n"
+    )
+    long_seed = "0123456789abcdef" * 2
+    proprietary_phrase = "amber birch cobalt dahlia elm safe"
+    instructional_text = "Store your recovery phrase offline and never share it"
+    (tmp_path / "random-seed-defaults.env").write_text(
+        random_defaults, encoding="utf-8"
+    )
+    (tmp_path / "literal-seed-material.env").write_text(
+        seed_field + "=" + long_seed + "\n", encoding="utf-8"
+    )
+    (tmp_path / "proprietary-safe-word.env").write_text(
+        mnemonic_field + "=" + proprietary_phrase + "\n", encoding="utf-8"
+    )
+    (tmp_path / "recovery-instructions.env").write_text(
+        mnemonic_field + "=" + instructional_text + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("random-seed-defaults.env" in item for item in findings)
+    assert any("literal-seed-material.env:1: seed/private-key assignment" in item for item in findings)
+    assert any("proprietary-safe-word.env:1: seed/private-key assignment" in item for item in findings)
+    assert not any("recovery-instructions.env" in item for item in findings)
