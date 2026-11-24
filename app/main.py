@@ -2167,7 +2167,7 @@ async def _adaptive_bot_controller_loop():
                             row.last_stage = str(result.get("stage", "execution"))
                             row.last_model_version = str((result.get("ml_signal") or {}).get("model_version", ""))
                             if row.status == "RUNNING":
-                                row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
+                                row.next_run_at = now + timedelta(seconds=max(60, interval_seconds))
                                 row.last_error = ""
                                 row.consecutive_errors = 0
                             elif row.status == "STOPPED":
@@ -2202,7 +2202,7 @@ async def _adaptive_bot_controller_loop():
                                 row.status = "STOPPED"
                                 row.next_run_at = None
                             else:
-                                row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
+                                row.next_run_at = now + timedelta(seconds=max(60, interval_seconds))
                             row.last_decision = "ERROR"
                             row.last_stage = "controller"
                             row.last_error = str(exc)[:2000]
@@ -2823,14 +2823,14 @@ async def _executor_controller_loop():
                             row = await db.get(TradeExecutor, eid, with_for_update=True)
                             if row:
                                 row.last_error = "No live fill confirmed; executor did not advance progress"
-                                row.last_run_at = now; row.next_run_at = now + __import__("datetime").timedelta(seconds=60); await db.commit()
+                                row.last_run_at = now; row.next_run_at = now + timedelta(seconds=60); await db.commit()
                         continue
                     async with SessionLocal() as db:
                         row = await db.get(TradeExecutor, eid, with_for_update=True)
                         if row:
                             row.executed_quantity = min(float(row.target_quantity or 0), float(row.executed_quantity or 0) + actual_filled)
                             row.last_run_at = now
-                            row.next_run_at = now + __import__("datetime").timedelta(seconds=max(1, int(cfg.get("interval_seconds", 60))))
+                            row.next_run_at = now + timedelta(seconds=max(1, int(cfg.get("interval_seconds", 60))))
                             if row.executed_quantity + 1e-12 >= row.target_quantity:
                                 row.status = "COMPLETED"; row.next_run_at = None
                             row.last_error = ""
@@ -2841,7 +2841,7 @@ async def _executor_controller_loop():
                     async with SessionLocal() as db:
                         row = await db.get(TradeExecutor, eid, with_for_update=True)
                         if row:
-                            row.last_error = str(exc)[:2000]; row.last_run_at = now; row.next_run_at = now + __import__("datetime").timedelta(seconds=60); await db.commit()
+                            row.last_error = str(exc)[:2000]; row.last_run_at = now; row.next_run_at = now + timedelta(seconds=60); await db.commit()
                 finally:
                     await release_lock(lock_key)
         except asyncio.CancelledError:
@@ -4717,8 +4717,10 @@ def _current_spread_bps(req: MarketRequest, customer_id: int | None = None) -> f
         # quote retrieval is handled by the autonomous caller before live execution.
         return None
     if settings.oanda_account_id and settings.oanda_api_token:
-        broker = __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaBroker(
-            __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaConfig(
+        from .forex_oanda import OandaBroker, OandaConfig
+
+        broker = OandaBroker(
+            OandaConfig(
                 settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
         try:
             ticker = broker.ticker(_normalize_oanda_instrument(req.symbol))
@@ -5679,7 +5681,7 @@ async def admin_billing_revenue(req: RevenueEventRequest, authorization: str | N
 async def admin_billing_margin(months: int = 1, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "FINANCE")
-    months=max(1,min(months,24)); cutoff=datetime.now(timezone.utc)-__import__('datetime').timedelta(days=31*months)
+    months=max(1,min(months,24)); cutoff=datetime.now(timezone.utc)-timedelta(days=31*months)
     async with SessionLocal() as db:
         revenue=float((await db.execute(select(func.coalesce(func.sum(RevenueLedger.net_amount),0.0)).where(RevenueLedger.created_at>=cutoff))).scalar_one() or 0)
         costs=float((await db.execute(select(func.coalesce(func.sum(CostLedger.amount),0.0)).where(CostLedger.created_at>=cutoff))).scalar_one() or 0)
@@ -7055,7 +7057,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 if row and row.status == "RUNNING":
                     now2 = datetime.now(timezone.utc)
                     row.last_run_at = now2
-                    row.next_run_at = now2 + __import__("datetime").timedelta(seconds=max(60, row.interval_seconds))
+                    row.next_run_at = now2 + timedelta(seconds=max(60, row.interval_seconds))
                     row.last_decision = "TRADE"
                     row.last_stage = "execution"
                     row.last_model_version = str((adaptive or {}).get("model_version", ""))
