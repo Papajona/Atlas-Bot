@@ -1221,3 +1221,26 @@ def test_secret_scanner_allows_public_jwk_metadata_arrays_in_private_key_array(
         "private-jwk-array-component.yml:2: seed/private-key assignment" in item
         for item in findings
     )
+
+
+def test_secret_scanner_detects_prefixed_multiline_triple_quoted_private_keys(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    token = "0123456789abcdef" * 2
+    source = (
+        private_key_field + ' = r"""\n'
+        + "    " + token + "\n"
+        + '"""\n'
+    )
+    (tmp_path / "prefixed-triple-quoted-private-key.py").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "prefixed-triple-quoted-private-key.py:1: seed/private-key assignment" in item
+        for item in findings
+    )
