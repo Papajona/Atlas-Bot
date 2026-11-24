@@ -9,6 +9,7 @@ branch_labels = None
 depends_on = None
 
 _INDEX_NAME = "ix_strategy_outcome_platform_closed_recent"
+_TRADE_INDEX_NAME = "ix_strategy_outcome_platform_closed_trade_time"
 _PREDICATE = sa.text("customer_id IS NULL AND lifecycle_status = 'CLOSED'")
 
 
@@ -21,21 +22,29 @@ def upgrade() -> None:
         item["name"]
         for item in sa.inspect(bind).get_indexes("strategy_outcomes", schema=schema)
     }
-    if _INDEX_NAME in existing:
-        return
     options = (
         {"postgresql_where": _PREDICATE}
         if bind.dialect.name == "postgresql"
         else {"sqlite_where": _PREDICATE}
     )
-    op.create_index(
-        _INDEX_NAME,
-        "strategy_outcomes",
-        ["created_at", "id", "trade_id"],
-        unique=False,
-        schema=schema,
-        **options,
-    )
+    if _INDEX_NAME not in existing:
+        op.create_index(
+            _INDEX_NAME,
+            "strategy_outcomes",
+            ["created_at", "id", "trade_id"],
+            unique=False,
+            schema=schema,
+            **options,
+        )
+    if _TRADE_INDEX_NAME not in existing:
+        op.create_index(
+            _TRADE_INDEX_NAME,
+            "strategy_outcomes",
+            ["trade_id", "created_at", "id"],
+            unique=False,
+            schema=schema,
+            **options,
+        )
 
 
 def downgrade() -> None:
@@ -47,5 +56,7 @@ def downgrade() -> None:
         item["name"]
         for item in sa.inspect(bind).get_indexes("strategy_outcomes", schema=schema)
     }
+    if _TRADE_INDEX_NAME in existing:
+        op.drop_index(_TRADE_INDEX_NAME, table_name="strategy_outcomes", schema=schema)
     if _INDEX_NAME in existing:
         op.drop_index(_INDEX_NAME, table_name="strategy_outcomes", schema=schema)
