@@ -81,6 +81,12 @@ def extract_order_fee_quote_decimal(
             quality = ESTIMATED
             continue
         if cost <= 0:
+            # A zero fee without an asset denomination is not authoritative:
+            # the venue may be omitting fee data from this snapshot. Keep it
+            # quarantined until a later snapshot supplies a currency explicitly.
+            if cost == 0 and not cur:
+                note = "exchange fee currency missing; customer charge withheld pending reconciliation"
+                quality = UNVERIFIED
             # Negative provider values are maker rebates; do not credit them.
             continue
         with localcontext() as context:
