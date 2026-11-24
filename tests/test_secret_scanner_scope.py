@@ -1518,7 +1518,7 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
         + chr(34) + key_field + "=" + private_value + chr(34)
         + "}"
         + chr(96)
-        + ";\\n"
+        + ";\n"
     )
     (tmp_path / "template-interpolated-private-key.js").write_text(
         source, encoding="utf-8"
