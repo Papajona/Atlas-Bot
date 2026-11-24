@@ -344,9 +344,9 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 realized_pnl=1, fee=0.05, return_bps=909.0909,
                 net_pnl=0.95, net_return_bps=863.6363,
                 closing_quantity=0.1, closing_notional=11,
-                fee_basis_complete=True, lifecycle_status="PARTIAL_CLOSED",
+                fee_basis_complete=False, lifecycle_status="PARTIAL_CLOSED",
                 sequence=1,
-                metadata_json='{"allocated_entry_fee":"0.05","closing_fee":"0","fee_basis_complete":true}',
+                metadata_json='{"allocated_entry_fee":"0.05","closing_fee":"0","entry_fee_order_verified":true,"closing_fee_order_verified":false,"fee_basis_complete":false}',
             )
             final = StrategyOutcome(
                 trade_id=entry.id, closing_trade_id=closing.id,
@@ -355,10 +355,10 @@ def test_reconciled_fee_updates_each_partial_fill_and_final_aggregate_once():
                 realized_pnl=3, fee=0.1, return_bps=1304.3478,
                 net_pnl=2.9, net_return_bps=1260.8695,
                 closing_quantity=0.2, closing_notional=23,
-                fee_basis_complete=True, lifecycle_status="CLOSED",
+                fee_basis_complete=False, lifecycle_status="CLOSED",
                 sequence=2,
                 metadata_json=(
-                    '{"allocated_entry_fee":"0.05","closing_fee":"0",'
+                    '{"allocated_entry_fee":"0.05","closing_fee":"0","entry_fee_order_verified":true,"closing_fee_order_verified":false,"fee_basis_complete":false,'
                     '"aggregate_fill_count":2,"final_fill_closing_quantity":"0.1",'
                     '"final_fill_closing_notional":"12","total_closing_notional":"23"}'
                 ),
@@ -440,9 +440,9 @@ def test_reversal_order_fee_true_up_accounts_for_closed_opposite_leg():
                     asset="crypto", symbol="BTC/USDT", side="buy",
                     realized_pnl=0, fee=0, return_bps=0, net_pnl=0,
                     net_return_bps=0, closing_quantity=1,
-                    closing_notional=100, fee_basis_complete=True,
+                    closing_notional=100, fee_basis_complete=False,
                     lifecycle_status="CLOSED", sequence=1,
-                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0"}',
+                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0","entry_fee_order_verified":true,"closing_fee_order_verified":false,"fee_basis_complete":false}',
                 ),
                 StrategyOutcome(
                     trade_id=reversal.id, closing_trade_id=short_close.id,
@@ -451,9 +451,9 @@ def test_reversal_order_fee_true_up_accounts_for_closed_opposite_leg():
                     realized_pnl=2.5, fee=0, return_bps=454.5454,
                     net_pnl=2.5, net_return_bps=454.5454,
                     closing_quantity=0.5, closing_notional=55,
-                    fee_basis_complete=True, lifecycle_status="CLOSED",
+                    fee_basis_complete=False, lifecycle_status="CLOSED",
                     sequence=1,
-                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0"}',
+                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0","entry_fee_order_verified":false,"closing_fee_order_verified":true,"fee_basis_complete":false}',
                 ),
             ])
             await db.commit()
@@ -777,7 +777,7 @@ def test_entry_fee_true_up_does_not_mark_basis_complete_while_add_on_fee_is_pend
                 closing_notional=Decimal("50"), fee_basis_complete=False,
                 lifecycle_status="OPEN", sequence=1,
                 metadata_json=(
-                    '{"allocated_entry_fee":"0","closing_fee":"0",'
+                    '{"allocated_entry_fee":"0","closing_fee":"0","entry_fee_order_verified":false,"closing_fee_order_verified":true,'
                     '"fee_basis_complete":false}'
                 ),
             )
@@ -862,7 +862,7 @@ def test_reconciled_partial_close_restores_remaining_entry_fee_basis_for_later_c
                 closing_quantity=Decimal("0.25"), closing_notional=Decimal("25"),
                 fee_basis_complete=False, lifecycle_status="OPEN", sequence=1,
                 metadata_json=(
-                    '{"allocated_entry_fee":"0","closing_fee":"0",'
+                    '{"allocated_entry_fee":"0","closing_fee":"0","entry_fee_order_verified":true,"closing_fee_order_verified":false,'
                     '"fee_basis_complete":false}'
                 ),
             )
@@ -951,10 +951,10 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
                 realized_pnl=Decimal("10"), fee=Decimal("0.02"),
                 return_bps=1000.0, net_pnl=Decimal("9.98"),
                 net_return_bps=998.0, closing_quantity=Decimal("1"),
-                closing_notional=Decimal("100"), fee_basis_complete=True,
+                closing_notional=Decimal("100"), fee_basis_complete=False,
                 lifecycle_status="CLOSED", sequence=1,
                 metadata_json=(
-                    '{"allocated_entry_fee":"0","closing_fee":"0.02",'
+                    '{"allocated_entry_fee":"0","closing_fee":"0.02","entry_fee_order_verified":false,"closing_fee_order_verified":true,"fee_basis_complete":false,'
                     '"fee_basis_complete":true}'
                 ),
             )
