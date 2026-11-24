@@ -1270,6 +1270,7 @@ class StrategyOutcome(Base):
             "ix_strategy_outcome_platform_closed_trade_time",
             "trade_id",
             "created_at",
+            "id",
             postgresql_where=sa.text(
                 "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
             ),
