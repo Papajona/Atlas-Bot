@@ -1794,3 +1794,79 @@ def test_unfilled_zero_quantity_without_lifecycle_anchor_stays_ignored():
             assert pending is False
 
     asyncio.run(with_database(check))
+
+def test_zero_filled_snapshot_does_not_hide_anchored_pending_order_from_outcome_reconciliation():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, signal_id="outcome-anchor-entry",
+                client_order_id="outcome-anchor-entry", side="buy",
+                quantity=1, requested_quantity=1, filled_quantity=1,
+                fee=Decimal("0.01"), status="FILLED",
+                fee_reconciliation_pending=False,
+            )
+            closing = _trade(
+                customer_id=None, signal_id="outcome-anchor-close",
+                client_order_id="outcome-anchor-close", side="sell",
+                quantity=1, requested_quantity=1, filled_quantity=1,
+                fee=Decimal("0.02"), status="FILLED",
+                fee_reconciliation_pending=False,
+            )
+            add_on = _trade(
+                customer_id=None, signal_id="outcome-anchor-addon",
+                client_order_id="outcome-anchor-addon", side="buy",
+                quantity=0.5, requested_quantity=0.5, filled_quantity=0,
+                fee=0, status="OPEN", fee_reconciliation_pending=True,
+            )
+            db.add_all([entry, closing, add_on])
+            await db.flush()
+            add_on.reason = json.dumps({
+                "fee_basis_lifecycle_entry_trade_ids": [entry.id]
+            })
+            outcome = StrategyOutcome(
+                trade_id=entry.id,
+                closing_trade_id=closing.id,
+                customer_id=None,
+                strategy="fee-basis-regression",
+                regime="UNKNOWN",
+                asset="crypto",
+                symbol="BTC/USDT",
+                side="buy",
+                realized_pnl=Decimal("1"),
+                fee=Decimal("0.03"),
+                return_bps=100.0,
+                net_pnl=Decimal("0.97"),
+                net_return_bps=9700.0,
+                closing_quantity=Decimal("1"),
+                closing_notional=Decimal("100"),
+                fee_basis_complete=False,
+                lifecycle_status="CLOSED",
+                sequence=1,
+                metadata_json=json.dumps({
+                    "allocated_entry_fee": "0.01",
+                    "closing_fee": "0.02",
+                    "entry_fee_order_verified": True,
+                    "closing_fee_order_verified": False,
+                    "fee_basis_complete": False,
+                }),
+            )
+            db.add(outcome)
+            await db.flush()
+
+            # The latest zero-filled order snapshot has overwritten its mutable
+            # filled_quantity. The persisted lifecycle anchor proves it did fill
+            # into this position and its unresolved fee must keep returns blocked.
+            assert add_on.filled_quantity == 0
+            await execution._apply_reconciled_live_fee_basis(
+                db, closing, Decimal("0")
+            )
+            await db.commit()
+            await db.refresh(outcome)
+
+            assert add_on.fee_reconciliation_pending is True
+            assert outcome.fee_basis_complete is False
+            assert outcome.net_pnl is None
+            assert outcome.net_return_bps is None
+            assert json.loads(outcome.metadata_json)["closing_fee_order_verified"] is True
+
+    asyncio.run(with_database(check))
