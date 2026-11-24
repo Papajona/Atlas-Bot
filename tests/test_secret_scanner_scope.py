@@ -48,7 +48,7 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
 
     seed_marker_value = "ci-only-" + "rotated-seed-material-123456789"
     (tmp_path / "wallet.env").write_text(
-        "private" + "_key=" + seed_marker_value + "\\n",
+        "private" + "_key=" + seed_marker_value + "\n",
         encoding="utf-8",
     )
 
@@ -661,12 +661,12 @@ def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
     assert not check_no_secrets._is_bip39_wordlist_phrase(phrase)
 
     (tmp_path / "proprietary-recovery.yml").write_text(
-        "wallet:\\n  mnemonic: |\\n"
-        + "".join("    " + word + "\\n" for word in words),
+        "wallet:\n  mnemonic: |\n"
+        + "".join("    " + word + "\n" for word in words),
         encoding="utf-8",
     )
     (tmp_path / "proprietary-recovery.env").write_text(
-        "mnemonic:\\n" + "".join("  " + word + "\\n" for word in words),
+        "mnemonic:\n" + "".join("  " + word + "\n" for word in words),
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -683,9 +683,9 @@ def test_secret_scanner_detects_generic_key_component_inside_private_key_mapping
     private_field = "private" + "_key"
     key_material = "0123456789abcdef0123456789abcdef"
     (tmp_path / "nested-private-key.yml").write_text(
-        "wallet:\\n"
-        + "  " + private_field + ":\\n"
-        + "    key: " + key_material + "\\n",
+        "wallet:\n"
+        + "  " + private_field + ":\n"
+        + "    key: " + key_material + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -714,7 +714,7 @@ def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
         "  api_token: qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG",
     ])
     (tmp_path / "alias-expansion-mnemonic.yml").write_text(
-        "\\n".join(lines) + "\\n", encoding="utf-8"
+        "\n".join(lines) + "\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
@@ -746,7 +746,7 @@ def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
         "  api_token: qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG",
     ])
     (tmp_path / "alias-expansion-private-key.yml").write_text(
-        "\\n".join(lines) + "\\n", encoding="utf-8"
+        "\n".join(lines) + "\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
