@@ -21,6 +21,7 @@ def test_strategy_benchmark_capture_is_opt_in_and_private_by_default():
     assert "if req.benchmark_opt_in:" in main
     assert "prompt_ciphertext" in service and "native_output_ciphertext" in service
     assert "prompt_sha256" not in service
+    assert 'if not (permissions["can_select"] and permissions["can_insert"] and permissions["can_delete"]):' in service
     assert "prompt_sha256" not in model
     assert "prompt_sha256" not in migration
     assert "hashlib" not in service
