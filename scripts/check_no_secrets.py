@@ -757,6 +757,33 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
     return findings
 
 
+
+JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
+MULTILINE_TEMPLATE_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\\.)*(?:export\\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\\s*[:=]\\s*\\x60(?P<value>(?:\\\\.|[^\\x60\\\\]){0,65536}?)\\x60"""
+)
+
+
+def _find_multiline_template_literal_assignments(source: str) -> dict[int, str]:
+    """Find credential values assigned with multiline JS/TS template literals."""
+    findings: dict[int, str] = {}
+    for match in MULTILINE_TEMPLATE_CREDENTIAL_ASSIGNMENT.finditer(source):
+        key = match.group("key")
+        value = _mask_template_interpolations(match.group("value")).strip()
+        key_kind = _credential_key_kind(key)
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            sensitive = _is_likely_recovery_phrase(value)
+        else:
+            sensitive = (
+                "-----BEGIN" in value
+                or re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", value) is not None
+            ) and value.lower() not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(value)
+        if sensitive:
+            line = source.count("\\n", 0, match.start("key")) + 1
+            findings[line] = key
+    return findings
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -790,11 +817,18 @@ def scan() -> list[str]:
             _find_triple_quoted_source_assignments(text)
             if suffix in SOURCE_CODE_SUFFIXES else set()
         )
+        multiline_template_findings = (
+            _find_multiline_template_literal_assignments(text)
+            if suffix in JS_TEMPLATE_LITERAL_SUFFIXES else {}
+        )
         documented_recovery_findings = (
             _find_documented_recovery_assignments(lines)
             if suffix in {".md", ".txt"} else {}
         )
         for lineno,line in enumerate(lines,1):
+            if lineno in multiline_template_findings:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
             if lineno in triple_quoted_findings:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
