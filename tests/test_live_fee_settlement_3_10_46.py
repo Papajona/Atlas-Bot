@@ -498,7 +498,7 @@ def test_reversal_order_fee_true_up_accounts_for_closed_opposite_leg():
                     net_return_bps=0, closing_quantity=1,
                     closing_notional=100, fee_basis_complete=True,
                     lifecycle_status="CLOSED", sequence=1,
-                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0"}',
+                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0","entry_fee_order_verified":true,"closing_fee_order_verified":false}',
                 ),
                 StrategyOutcome(
                     trade_id=reversal.id, closing_trade_id=short_close.id,
@@ -509,7 +509,7 @@ def test_reversal_order_fee_true_up_accounts_for_closed_opposite_leg():
                     closing_quantity=0.5, closing_notional=55,
                     fee_basis_complete=True, lifecycle_status="CLOSED",
                     sequence=1,
-                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0"}',
+                    metadata_json='{"allocated_entry_fee":"0","closing_fee":"0","entry_fee_order_verified":false,"closing_fee_order_verified":true}',
                 ),
             ])
             await db.commit()
@@ -834,6 +834,7 @@ def test_entry_fee_true_up_does_not_mark_basis_complete_while_add_on_fee_is_pend
                 lifecycle_status="OPEN", sequence=1,
                 metadata_json=(
                     '{"allocated_entry_fee":"0","closing_fee":"0",'
+                    '"entry_fee_order_verified":false,"closing_fee_order_verified":true,'
                     '"fee_basis_complete":false}'
                 ),
             )
@@ -919,6 +920,7 @@ def test_reconciled_partial_close_restores_remaining_entry_fee_basis_for_later_c
                 fee_basis_complete=False, lifecycle_status="OPEN", sequence=1,
                 metadata_json=(
                     '{"allocated_entry_fee":"0","closing_fee":"0",'
+                    '"entry_fee_order_verified":true,"closing_fee_order_verified":false,'
                     '"fee_basis_complete":false}'
                 ),
             )
@@ -1011,6 +1013,7 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
                 lifecycle_status="CLOSED", sequence=1,
                 metadata_json=(
                     '{"allocated_entry_fee":"0","closing_fee":"0.02",'
+                    '"entry_fee_order_verified":true,"closing_fee_order_verified":true,"
                     '"fee_basis_complete":true}'
                 ),
             )
@@ -1018,14 +1021,15 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
             await db.commit()
 
             await execution._apply_reconciled_live_fee_basis(
-                db, old_entry, Decimal("0.10")
+                db, new_entry, Decimal("0.10")
             )
             await db.commit()
             await db.refresh(old_outcome)
 
             assert old_outcome.fee_basis_complete is True
-            assert Decimal(str(old_outcome.net_pnl)) == Decimal("9.88")
-            assert old_outcome.net_return_bps == pytest.approx(988.0)
+            assert Decimal(str(old_outcome.net_pnl)) == Decimal("9.98")
+            assert old_outcome.net_return_bps == pytest.approx(998.0)
+            assert current_position.entry_fee == pytest.approx(0.10)
 
     asyncio.run(with_database(check))
 
