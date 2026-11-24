@@ -3745,26 +3745,90 @@ async def _order_with_verified_trade_history_fee(
     symbol: str,
     expected_order_id: str,
     stored_filled_quantity: Any = None,
+    created_at: Any = None,
+    page_limit: int = 100,
+    max_pages: int = 10,
 ) -> dict[str, Any]:
-    """Use exchange fill history only when it completely covers this pending order."""
+    """Use bounded, timestamped broker fill-history pages for a pending order."""
     if not order:
         return order
     fetch_my_trades = getattr(broker, "fetch_my_trades", None)
     if not callable(fetch_my_trades):
         return order
-    try:
-        history = await asyncio.to_thread(fetch_my_trades, symbol)
-    except Exception:
-        # No usable history leaves the fee unresolved rather than using an estimate.
-        return order
-    enriched = _merge_authoritative_trade_history_fee(
-        order,
-        history if isinstance(history, list) else [],
-        expected_order_id=expected_order_id,
-        stored_filled_quantity=stored_filled_quantity,
-    )
-    return enriched or order
 
+    raw_timestamp = order.get("timestamp")
+    try:
+        since = int(raw_timestamp) if raw_timestamp is not None else None
+    except (TypeError, ValueError, OverflowError):
+        since = None
+    if since is None and created_at is not None:
+        try:
+            created = created_at
+            if getattr(created, "tzinfo", None) is None:
+                created = created.replace(tzinfo=timezone.utc)
+            since = int(created.timestamp() * 1000)
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            since = None
+    if since is not None:
+        since = max(0, since - 60_000)
+
+    order_id = str(expected_order_id or order.get("id") or "").strip()
+    exchange_id = str(
+        getattr(getattr(broker, "cfg", None), "exchange_id", "")
+        or getattr(getattr(broker, "config", None), "exchange_id", "")
+        or ""
+    ).lower()
+    params = {"orderId": order_id} if exchange_id == "binance" and order_id else {}
+    page_limit = max(1, min(int(page_limit), 100))
+    max_pages = max(1, min(int(max_pages), 10))
+    collected: list[dict[str, Any]] = []
+    cursor = since
+
+    for _page in range(max_pages):
+        try:
+            page = await asyncio.to_thread(
+                fetch_my_trades, symbol, cursor, page_limit, params
+            )
+        except Exception:
+            if not params:
+                return order
+            params = {}
+            try:
+                page = await asyncio.to_thread(
+                    fetch_my_trades, symbol, cursor, page_limit, params
+                )
+            except Exception:
+                return order
+        if not isinstance(page, list) or not page:
+            break
+        collected.extend(fill for fill in page if isinstance(fill, dict))
+        enriched = _merge_authoritative_trade_history_fee(
+            order,
+            collected,
+            expected_order_id=order_id,
+            stored_filled_quantity=stored_filled_quantity,
+        )
+        if enriched is not None:
+            return enriched
+        if len(page) < page_limit:
+            break
+        timestamps = []
+        for fill in page:
+            if not isinstance(fill, dict):
+                continue
+            try:
+                stamp = int(fill.get("timestamp"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if stamp >= 0:
+                timestamps.append(stamp)
+        if not timestamps:
+            break
+        next_cursor = max(timestamps) + 1
+        if cursor is not None and next_cursor <= cursor:
+            break
+        cursor = next_cursor
+    return order
 
 async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
     """Apply one broker snapshot without guessing an execution outcome.
@@ -3955,9 +4019,10 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
         snapshots = [(
             t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id,
             t.client_order_id, bool(t.fee_reconciliation_pending), t.filled_quantity,
+            t.created_at,
         ) for t in trades]
     results = []
-    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id, fee_pending, stored_filled in snapshots:
+    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id, fee_pending, stored_filled, trade_created_at in snapshots:
         try:
             if str(exchange).lower() != "binance":
                 raise RuntimeError("Customer live reconciliation is only enabled for Binance isolation")
@@ -3998,6 +4063,7 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                     symbol=symbol,
                     expected_order_id=str(broker_order_id or order.get("id") or ""),
                     stored_filled_quantity=stored_filled,
+                    created_at=trade_created_at,
                 )
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
@@ -4049,7 +4115,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
         trades = (await db.execute(query)).scalars().all()
         snapshots = [(
             t.id, t.broker_order_id, t.symbol, t.client_order_id,
-            bool(t.fee_reconciliation_pending), t.filled_quantity,
+            bool(t.fee_reconciliation_pending), t.filled_quantity, t.created_at,
         ) for t in trades]
     results = []
     oanda_changes = None
@@ -4084,7 +4150,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     cursor.last_sync_at = utcnow()
                     await db.commit()
                     raise
-    for trade_id, broker_order_id, trade_symbol, cid, fee_pending, stored_filled in snapshots:
+    for trade_id, broker_order_id, trade_symbol, cid, fee_pending, stored_filled, trade_created_at in snapshots:
         trade_broker = broker
         try:
             async with SessionLocal() as lookup_db:
@@ -4132,6 +4198,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     symbol=trade_symbol,
                     expected_order_id=str(broker_order_id or order.get("id") or ""),
                     stored_filled_quantity=stored_filled,
+                    created_at=trade_created_at,
                 )
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
