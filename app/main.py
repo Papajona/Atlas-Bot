@@ -7608,20 +7608,31 @@ async def customer_delete_benchmark_captures(authorization: str | None = Header(
     """Delete every benchmark submission owned by the authenticated customer."""
     async with SessionLocal() as db:
         profile, _claims = await get_customer(authorization, db, require_aal2=True)
-        from .benchmark_capture import benchmark_capture_permissions
+        from .benchmark_capture import (
+            benchmark_capture_permissions,
+            lock_customer_benchmark_captures,
+        )
         permissions = await benchmark_capture_permissions(db)
         if not permissions["can_delete"]:
             raise HTTPException(
                 status_code=503,
                 detail="Benchmark submissions are unavailable in this read-only runtime",
             )
+        # Capture and DELETE share this transaction-scoped lock. A capture
+        # cannot commit after DELETE has reported zero remaining rows.
+        await lock_customer_benchmark_captures(db, int(profile.id))
         result = await db.execute(
             delete(BenchmarkPromptCapture).where(
                 BenchmarkPromptCapture.customer_id == profile.id
             )
         )
+        remaining = int((await db.execute(
+            select(func.count(BenchmarkPromptCapture.id)).where(
+                BenchmarkPromptCapture.customer_id == profile.id
+            )
+        )).scalar_one() or 0)
         await db.commit()
-        return {"deleted": int(result.rowcount or 0), "remaining": 0}
+        return {"deleted": int(result.rowcount or 0), "remaining": remaining}
 
 
 @app.post("/api/customer/strategy-lab/candidates")
