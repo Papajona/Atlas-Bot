@@ -170,7 +170,7 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
         if prefix[-1] in "([{=,:;!?&|+-*%^~<>":
             return True
         return re.search(
-            r"\\b(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await)\\s*$",
+            r"\b(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await)\s*$",
             prefix,
         ) is not None
 
@@ -180,9 +180,9 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
         in_character_class = False
         while position < len(value):
             char = value[position]
-            if char in {"\\n", "\\r"}:
+            if char in {"\n", "\r"}:
                 return None
-            if char == "\\\\":
+            if char == "\\":
                 position += 2
                 continue
             if char == "[" and not in_character_class:
@@ -224,7 +224,7 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                 # Invalid or unterminated regex syntax is preserved as literal
                 # material through the current line. This prevents malformed
                 # patterns from hiding credential-like text behind comment markers.
-                newline = value.find("\\n", position)
+                newline = value.find("\n", position)
                 literal_end = len(value) if newline < 0 else newline
                 literal_parts.append(value[position:literal_end])
                 position = literal_end
