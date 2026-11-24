@@ -26,7 +26,8 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy import select, desc, or_, and_, exists, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -8300,31 +8301,34 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
 
 
 async def _recent_closed_platform_outcome_returns(db):
-    """Read one latest completed lifecycle per trade from a bounded sample."""
-    ranked = (
-        select(
-            StrategyOutcome.net_return_bps.label("net_return_bps"),
-            StrategyOutcome.created_at.label("created_at"),
-            func.row_number().over(
-                partition_by=StrategyOutcome.trade_id,
-                order_by=(
-                    StrategyOutcome.created_at.desc(),
-                    StrategyOutcome.id.desc(),
-                ),
-            ).label("lifecycle_rank"),
-        )
-        .where(
+    """Read the latest closed outcome per trade with a stop-after-100 anti-join."""
+    candidate = aliased(StrategyOutcome)
+    has_newer_lifecycle = exists(
+        select(StrategyOutcome.id).where(
+            StrategyOutcome.trade_id == candidate.trade_id,
             StrategyOutcome.customer_id.is_(None),
             StrategyOutcome.lifecycle_status == "CLOSED",
             StrategyOutcome.closing_notional > 0,
             StrategyOutcome.fee_basis_complete.is_(True),
+            or_(
+                StrategyOutcome.created_at > candidate.created_at,
+                and_(
+                    StrategyOutcome.created_at == candidate.created_at,
+                    StrategyOutcome.id > candidate.id,
+                ),
+            ),
         )
-        .subquery()
     )
     return (await db.execute(
-        select(ranked.c.net_return_bps, ranked.c.created_at)
-        .where(ranked.c.lifecycle_rank == 1)
-        .order_by(ranked.c.created_at.desc())
+        select(candidate.net_return_bps, candidate.created_at)
+        .where(
+            candidate.customer_id.is_(None),
+            candidate.lifecycle_status == "CLOSED",
+            candidate.closing_notional > 0,
+            candidate.fee_basis_complete.is_(True),
+            ~has_newer_lifecycle,
+        )
+        .order_by(candidate.created_at.desc(), candidate.id.desc())
         .limit(100)
     )).all()
 
