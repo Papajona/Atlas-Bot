@@ -816,8 +816,10 @@ def test_identity_summary_can_show_pending_status_without_reactivating_account(m
     async def no_remaining_conflict(_db, _uid, _email):
         return False
 
+    subscription_calls = []
+
     async def ensure_subscription(_db, _profile):
-        return None
+        subscription_calls.append(_profile.id)
 
     monkeypatch.setattr(main, "customer_claims", verified_claims)
     monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_remaining_conflict)
@@ -834,3 +836,4 @@ def test_identity_summary_can_show_pending_status_without_reactivating_account(m
     assert claims["sub"] == "pending-summary-customer"
     assert returned.status == "PENDING_IDENTITY_REVIEW"
     assert returned.identity_review_required is False
+    assert subscription_calls == []
