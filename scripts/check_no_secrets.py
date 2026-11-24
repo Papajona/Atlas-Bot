@@ -779,7 +779,7 @@ def _find_multiline_template_literal_assignments(source: str) -> dict[int, str]:
                 or re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", value) is not None
             ) and value.lower() not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(value)
         if sensitive:
-            line = source.count("\\n", 0, match.start("key")) + 1
+            line = source.count("\n", 0, match.start("key")) + 1
             findings[line] = key
     return findings
 
