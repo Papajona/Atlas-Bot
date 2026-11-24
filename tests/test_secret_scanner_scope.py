@@ -1020,3 +1020,30 @@ def test_secret_scanner_detects_namespaced_recovery_keys_in_properties(
 
     for name in ("wallet.properties", "namespaced-source.py"):
         assert any(name in item for item in findings), name
+
+def test_secret_scanner_detects_namespaced_recovery_properties(
+    tmp_path, monkeypatch
+):
+    mnemonic_field = "mne" + "monic"
+    seed_field = "se" + "ed"
+    recovery_field = "recovery" + "_phrase"
+    phrase = " ".join(["amber", "birch", "cobalt", "dahlia", "elm", "fuchsia"])
+    for filename, field in (
+        ("namespaced-mnemonic.properties", mnemonic_field),
+        ("namespaced-seed.properties", seed_field),
+        ("namespaced-recovery.properties", recovery_field),
+    ):
+        (tmp_path / filename).write_text(
+            "wallet." + field + "=" + phrase + "\n",
+            encoding="utf-8",
+        )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    for filename in (
+        "namespaced-mnemonic.properties",
+        "namespaced-seed.properties",
+        "namespaced-recovery.properties",
+    ):
+        assert any(filename in item for item in findings), filename
