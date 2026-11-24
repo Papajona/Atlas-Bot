@@ -341,3 +341,13 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
         raise primary_error.with_traceback(primary_error.__traceback__)
     if cleanup_error is not None:
         raise cleanup_error
+
+def test_capture_requires_delete_permission_as_well_as_select_and_insert():
+    service = (ROOT / "app/benchmark_capture.py").read_text(encoding="utf-8")
+    assert 'if not (permissions["can_select"] and permissions["can_insert"] and permissions["can_delete"]):' in service
+    assert 'return {"status": "SKIPPED_STORAGE_UNAVAILABLE"}' in service
+    assert "prompt_sha256" not in service
+    model = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    migration = (ROOT / "alembic/versions/0062_customer_benchmark_capture.py").read_text(encoding="utf-8")
+    assert "prompt_sha256" not in model
+    assert "prompt_sha256" not in migration
