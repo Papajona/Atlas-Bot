@@ -148,7 +148,7 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
               'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
             )
           )
-          AND EXISTS (
+          AND NOT EXISTS (
             SELECT 1 FROM matching_withdrawals w
             WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
           )
@@ -215,13 +215,9 @@ def reconcile_rows(
             "zero activity cannot be independently verified without provider-authenticated evidence"
         )
     provider_rows = {row["provider_id"]: row for row in statement_rows}
-    if not statement_rows:
-        failures.append(
-            "provider statement contains no payout rows; zero activity cannot be independently verified"
-        )
     if unattributed_withdrawal_journal_count:
         failures.append("withdrawal journals exist in the specified window without an attributable withdrawal record")
-    if not database_rows and withdrawal_journal_count:
+    if withdrawal_journal_count:
         failures.append("withdrawal journals exist in the specified window without matching withdrawal rows")
     db_by_id: dict[str, dict[str, Any]] = {}
     unresolved_no_id = 0
