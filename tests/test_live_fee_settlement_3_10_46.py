@@ -1367,3 +1367,61 @@ def test_pending_order_anchored_to_new_lifecycle_does_not_invalidate_old_closed_
             assert old_outcome.net_return_bps == pytest.approx(9.88 / 110.0 * 10_000)
 
     asyncio.run(with_database(check))
+
+def test_later_verified_cumulative_fee_restores_open_position_fee_basis():
+    async def check(sessions):
+        async with sessions() as db:
+            trade = _trade(
+                customer_id=None,
+                filled_quantity=0,
+                remaining_quantity=0.2,
+                requested_quantity=0.2,
+                quantity=0.2,
+                status="OPEN",
+                fee=0,
+                fee_reconciliation_pending=False,
+            )
+            db.add(trade)
+            await db.flush()
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                {
+                    "id": "broker-order-1",
+                    "status": "open",
+                    "filled": 0.1,
+                    "remaining": 0.1,
+                    "average": 100,
+                    "fee": {"cost": "0.10"},
+                },
+            )
+            await db.commit()
+            assert trade.fee_reconciliation_pending is True
+            position = (await db.execute(select(Position))).scalar_one()
+            assert position.entry_fee_basis_known is False
+            assert position.entry_fee == Decimal("0")
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                {
+                    "id": "broker-order-1",
+                    "status": "closed",
+                    "filled": 0.2,
+                    "remaining": 0,
+                    "average": 100,
+                    "fee": {"currency": "USDT", "cost": "0.20"},
+                },
+            )
+            await db.commit()
+            await db.refresh(position)
+            await db.refresh(trade)
+
+            assert trade.fee_reconciliation_pending is False
+            assert trade.fee == Decimal("0.200000")
+            assert position.quantity == pytest.approx(0.2)
+            assert position.entry_fee == Decimal("0.200000")
+            assert position.entry_fee_basis_known is True
+
+    asyncio.run(with_database(check))
