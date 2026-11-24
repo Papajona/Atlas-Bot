@@ -163,6 +163,40 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                 position += 1
         return len(value)
 
+    def regex_literal_start(position: int) -> bool:
+        prefix = value[:position].rstrip()
+        if not prefix:
+            return True
+        if prefix[-1] in "([{=,:;!?&|+-*%^~<>":
+            return True
+        return re.search(
+            r"\\b(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await)\\s*$",
+            prefix,
+        ) is not None
+
+    def skip_regex_literal(position: int) -> int | None:
+        """Skip a JavaScript regex, respecting escapes and slash-containing character classes."""
+        position += 1
+        in_character_class = False
+        while position < len(value):
+            char = value[position]
+            if char in {"\\n", "\\r"}:
+                return None
+            if char == "\\\\":
+                position += 2
+                continue
+            if char == "[" and not in_character_class:
+                in_character_class = True
+            elif char == "]" and in_character_class:
+                in_character_class = False
+            elif char == "/" and not in_character_class:
+                position += 1
+                while position < len(value) and value[position].isalpha():
+                    position += 1
+                return position
+            position += 1
+        return None
+
     def skip_interpolation(position: int) -> tuple[int, str]:
         brace_depth = 1
         position += 2
@@ -181,6 +215,19 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                 literal_parts.append(
                     _mask_template_interpolations(nested_template, _depth + 1)
                 )
+                continue
+            if char == "/" and regex_literal_start(position):
+                regex_end = skip_regex_literal(position)
+                if regex_end is not None:
+                    position = regex_end
+                    continue
+                # Invalid or unterminated regex syntax is preserved as literal
+                # material through the current line. This prevents malformed
+                # patterns from hiding credential-like text behind comment markers.
+                newline = value.find("\\n", position)
+                literal_end = len(value) if newline < 0 else newline
+                literal_parts.append(value[position:literal_end])
+                position = literal_end
                 continue
             if value.startswith("//", position):
                 newline = value.find("\n", position + 2)
