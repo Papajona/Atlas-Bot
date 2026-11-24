@@ -265,16 +265,52 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index("def _funding_signature_valid")
     ]
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
-    assert "if profile is None:" in get_customer
-    assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
-    assert "await _legacy_customer_email_conflict(db, uid, email)" in get_customer
-    assert "await _customer_profile_effectively_active(guard_db, current_profile)" in source
-    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in get_customer
-    assert "await db.commit()" in get_customer
-    assert "await db.refresh(profile)" in get_customer
+    assert "await _quarantine_customer_identity_review(profile.id)" in get_customer
+    assert "await db.commit()" not in get_customer
     assert "if not identity_review_required:" in get_customer
     assert "allow_identity_review_summary" in get_customer
     assert "PENDING_IDENTITY_REVIEW" in get_customer
+
+
+def test_conflicted_identity_quarantine_uses_an_isolated_transaction(monkeypatch):
+    from types import SimpleNamespace
+    from app import main
+
+    profile = SimpleNamespace(id=42, status="ACTIVE")
+
+    class QuarantineSession:
+        def __init__(self):
+            self.commits = 0
+            self.get_calls = []
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _type, _value, _traceback):
+            return False
+
+        async def get(self, model, profile_id, *, with_for_update=False):
+            self.get_calls.append((model, profile_id, with_for_update))
+            return profile
+
+        async def commit(self):
+            self.commits += 1
+
+    quarantine_session = QuarantineSession()
+    caller_session = SimpleNamespace(commits=0)
+    monkeypatch.setattr(main, "SessionLocal", lambda: quarantine_session)
+
+    quarantined = asyncio.run(
+        main._quarantine_customer_identity_review(profile_id=42)
+    )
+
+    assert quarantined is True
+    assert profile.status == "PENDING_IDENTITY_REVIEW"
+    assert quarantine_session.get_calls == [(main.CustomerProfile, 42, True)]
+    assert quarantine_session.commits == 1
+    # The caller's session is deliberately not passed into this helper and is
+    # therefore never committed as a side effect of identity quarantine.
+    assert caller_session.commits == 0
 
 
 def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain():
