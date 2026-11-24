@@ -1086,6 +1086,7 @@ def test_pending_identity_status_is_denied_by_both_protected_customer_gates():
     assert "if identity_review_required and not allow_identity_review_summary" in staging_gate
     assert 'str(getattr(profile, "status", "")).upper() != "ACTIVE"' in staging_gate
 
+
 @pytest.mark.asyncio
 async def test_paper_staging_rejects_pending_identity_even_after_legacy_conflict_clears(monkeypatch):
     from fastapi import HTTPException
@@ -1120,6 +1121,7 @@ async def test_paper_staging_rejects_pending_identity_even_after_legacy_conflict
 
     assert raised.value.status_code == 409
     assert "paused until legacy customer identities" in raised.value.detail
+
 
 @pytest.mark.asyncio
 async def test_pending_identity_is_not_effectively_active_after_legacy_conflict_clears(monkeypatch):
