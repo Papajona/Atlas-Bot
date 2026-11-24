@@ -979,3 +979,22 @@ def test_secret_scanner_fails_closed_on_deep_private_json_and_traversal_limit(
         "limited-private-key.env:1: seed/private-key assignment" in item
         for item in limited_findings
     )
+
+
+def test_secret_scanner_detects_bare_seed_aliases_in_source_code(
+    tmp_path, monkeypatch
+):
+    seed_field = "se" + "ed"
+    recovery_field = "recovery" + "_" + "phrase"
+    phrase = "amber birch cobalt dahlia elm fuchsia"
+    (tmp_path / "source-recovery.py").write_text(
+        seed_field + ' = "' + phrase + '"\n'
+        + recovery_field + ' = "' + phrase + '"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("source-recovery.py:1: seed/private-key assignment" in item for item in findings)
+    assert any("source-recovery.py:2: seed/private-key assignment" in item for item in findings)
