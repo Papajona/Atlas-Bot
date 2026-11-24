@@ -1,6 +1,6 @@
 """Second-copy security audit sink for Cloud Logging / external log retention."""
 from __future__ import annotations
-import json, logging, sys
+import json, logging, sys, re
 from datetime import datetime, timezone
 from .config import settings
 
@@ -10,13 +10,13 @@ _SENSITIVE_KEY_PARTS = (
     "token",
     "secret",
     "password",
-    "api_key",
-    "api_secret",
+    "apikey",
+    "apisecret",
     "authorization",
-    "private_key",
-    "signing_key",
-    "encryption_key",
-    "service_role",
+    "privatekey",
+    "signingkey",
+    "encryptionkey",
+    "servicerole",
     "seed",
     "mnemonic",
     "ciphertext",
@@ -28,7 +28,7 @@ def _redact(value):
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
-            key_text = str(key).lower()
+            key_text = re.sub(r"[^a-z0-9]", "", str(key).lower())
             if any(part in key_text for part in _SENSITIVE_KEY_PARTS):
                 out[str(key)] = "[REDACTED]"
             else:
