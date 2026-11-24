@@ -1529,3 +1529,30 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
         "template-literal-private-key.js:1: seed/private-key assignment" in item
         for item in findings
     )
+
+
+def test_secret_scanner_does_not_treat_slashes_in_js_regex_class_as_comments(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_value = "0123456789abcdef" + "0123456789abcdef"
+    source = (
+        "const settings = { "
+        + private_key_field + ": "
+        + chr(96)
+        + "marker:" + "$" + "{/[//]/.test(path)}"
+        + private_value
+        + chr(96)
+        + " };\n"
+    )
+    (tmp_path / "regex-template-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "regex-template-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
