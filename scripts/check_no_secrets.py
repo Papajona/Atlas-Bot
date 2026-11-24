@@ -772,12 +772,14 @@ def _source_literal_contains_sensitive_assignment(line: str) -> bool:
                 if _is_likely_recovery_phrase(candidate):
                     return True
             elif key_kind == "privatekey":
-                if (
-                    PRIVATE_KEY.search(candidate)
-                    or re.search(
-                        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
-                        candidate,
-                    )
+                token_match = re.search(
+                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                    candidate,
+                )
+                if PRIVATE_KEY.search(candidate) or (
+                    token_match is not None
+                    and token_match.group(0).lower() not in PLACEHOLDERS
+                    and not ANGLE_PLACEHOLDER.fullmatch(token_match.group(0))
                 ):
                     return True
     return False
