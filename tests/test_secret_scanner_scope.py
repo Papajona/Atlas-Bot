@@ -688,12 +688,32 @@ def test_secret_scanner_detects_generic_key_component_inside_private_key_mapping
         + "    key: " + key_material + "\n",
         encoding="utf-8",
     )
+    (tmp_path / "nested-private-key-value.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ":\n"
+        + "    value: " + key_material + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nested-private-key-json-value.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ": |\n"
+        + '    {"value": "' + key_material + '"}\n',
+        encoding="utf-8",
+    )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
     findings = check_no_secrets.scan()
 
     assert any(
         "nested-private-key.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "nested-private-key-value.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "nested-private-key-json-value.yml:2: seed/private-key assignment" in item
         for item in findings
     )
 
@@ -742,10 +762,12 @@ def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
         anchor = f"layer{index}"
         lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
         previous = anchor
+    token_field = "api" + "_token"
+    token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
     lines.extend([
         "wallet:",
         f"  private_key: *{previous}",
-        "  api_token: qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG",
+        f"  {token_field}: {token_value}",
     ])
     (tmp_path / "alias-expansion-private-key.yml").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
