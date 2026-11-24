@@ -305,7 +305,11 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
 
     # Private keys may be split across adjacent quoted components. Join them
     # without separators before checking for a long key-like token.
-    combined = "".join(components)
+    combined = "".join(components).strip()
+    # Exact fixture values may also appear inside source-language literals.
+    # Keep the exception exact: do not exempt a substring or a generated secret.
+    if combined.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(combined):
+        return False
     return re.search(
         r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=-]{20,}(?![A-Za-z0-9])",
         combined,
