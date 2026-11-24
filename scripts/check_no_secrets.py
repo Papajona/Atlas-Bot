@@ -719,81 +719,92 @@ def scan() -> list[str]:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             is_yaml = path.suffix.lower() in {".yaml", ".yml"}
-            seed_match = (
-                TRON_SEED_IN_SOURCE.search(line)
+            seed_matches = (
+                list(TRON_SEED_IN_SOURCE.finditer(line))
                 if source_code
-                else TRON_SEED.search(line) if not is_yaml or not yaml_parsed else None
+                else ([TRON_SEED.search(line)] if not is_yaml or not yaml_parsed else [])
             )
-            if seed_match and "re.compile" not in line:
-                raw_seed_value = seed_match.group("value").strip()
-                yaml_block_scalar = (
-                    path.suffix.lower() in {".yaml", ".yml"}
-                    and raw_seed_value in {"|", "|-", "|+", ">", ">-", ">+"}
-                )
-                if yaml_block_scalar:
-                    # The indented block was already scanned as a whole above;
-                    # the YAML marker itself is not credential material.
-                    continue
-                computed_source_value = (
-                    source_code
-                    and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
-                )
-                if source_code:
-                    # In source code, only literal material (including literals
-                    # inside concatenations/arrays) is a checked-in secret.
-                    # Numeric RNG seeds, parameter defaults, variable references
-                    # and runtime key-generation calls are not credential literals.
-                    if computed_source_value:
-                        sensitive_source_value = _has_sensitive_source_literal(
-                            seed_match.group("key"), raw_seed_value
-                        )
-                    elif SOURCE_STRING_LITERAL.search(raw_seed_value):
-                        sensitive_source_value = _has_sensitive_source_literal(
-                            seed_match.group("key"), raw_seed_value
-                        )
-                    else:
-                        # TRON_SEED_IN_SOURCE may match an assignment embedded
-                        # in a quoted config string (for example
-                        # runtime_config = "mnemonic=amber ..."). In that case
-                        # raw_seed_value begins after the inner key and may only
-                        # have a closing quote. Normalize both ends before the
-                        # recovery-phrase/long-token check.
-                        bare_source_value = raw_seed_value.strip().strip('"').strip("'").strip()
-                        key_kind = _credential_key_kind(seed_match.group("key"))
-                        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
-                            sensitive_source_value = _is_likely_recovery_phrase(
-                                bare_source_value
+            seed_assignment_found = False
+            yaml_block_scalar_found = False
+            if "re.compile" not in line:
+                # A source object can contain several credential properties on
+                # one physical line. Inspect every match so an innocuous first
+                # field (for example private_key: "example") cannot hide a later
+                # real mnemonic or private-key value.
+                for seed_match in seed_matches:
+                    if seed_match is None:
+                        continue
+                    raw_seed_value = seed_match.group("value").strip()
+                    yaml_block_scalar = (
+                        path.suffix.lower() in {".yaml", ".yml"}
+                        and raw_seed_value in {"|", "|-", "|+", ">", ">-", ">+"}
+                    )
+                    if yaml_block_scalar:
+                        # The indented block was already scanned as a whole above;
+                        # the YAML marker itself is not credential material.
+                        yaml_block_scalar_found = True
+                        break
+                    computed_source_value = (
+                        source_code
+                        and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
+                    )
+                    if source_code:
+                        # In source code, only literal material (including literals
+                        # inside concatenations/arrays) is a checked-in secret.
+                        # Numeric RNG seeds, parameter defaults, variable references
+                        # and runtime key-generation calls are not credential literals.
+                        if computed_source_value:
+                            sensitive_source_value = _has_sensitive_source_literal(
+                                seed_match.group("key"), raw_seed_value
+                            )
+                        elif SOURCE_STRING_LITERAL.search(raw_seed_value):
+                            sensitive_source_value = _has_sensitive_source_literal(
+                                seed_match.group("key"), raw_seed_value
                             )
                         else:
-                            sensitive_source_value = (
-                                re.fullmatch(
-                                    r"[A-Za-z0-9_+/=-]{20,}", bare_source_value
-                                ) is not None
-                                and bare_source_value.lower() not in PLACEHOLDERS
-                                and not ANGLE_PLACEHOLDER.fullmatch(bare_source_value)
+                            # TRON_SEED_IN_SOURCE may match an assignment embedded
+                            # in a quoted config string (for example
+                            # runtime_config = "mnemonic=amber ..."). In that case
+                            # raw_seed_value begins after the inner key and may only
+                            # have a closing quote. Normalize both ends before the
+                            # recovery-phrase/long-token check.
+                            bare_source_value = raw_seed_value.strip().strip('"').strip("'").strip()
+                            key_kind = _credential_key_kind(seed_match.group("key"))
+                            if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                                sensitive_source_value = _is_likely_recovery_phrase(
+                                    bare_source_value
+                                )
+                            else:
+                                sensitive_source_value = (
+                                    re.fullmatch(
+                                        r"[A-Za-z0-9_+/=-]{20,}", bare_source_value
+                                    ) is not None
+                                    and bare_source_value.lower() not in PLACEHOLDERS
+                                    and not ANGLE_PLACEHOLDER.fullmatch(bare_source_value)
+                                )
+                    else:
+                        key_kind = _credential_key_kind(seed_match.group("key"))
+                        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                            # A bare "seed" field is also commonly used for numeric
+                            # RNG defaults. Only flag actual recovery phrases or
+                            # sufficiently long single-token seed material.
+                            normalized_seed_value = raw_seed_value.strip().strip('"').strip("'").strip()
+                            sensitive_seed_value = _is_likely_recovery_phrase(
+                                normalized_seed_value
                             )
+                        else:
+                            seed_value = raw_seed_value.strip('"').strip("'").strip().lower()
+                            sensitive_seed_value = (
+                                seed_value not in PLACEHOLDERS
+                                and not ANGLE_PLACEHOLDER.fullmatch(seed_value)
+                            )
+                        sensitive_source_value = sensitive_seed_value
                     if sensitive_source_value:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                        continue
-                else:
-                    key_kind = _credential_key_kind(seed_match.group("key"))
-                    if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
-                        # A bare "seed" field is also commonly used for numeric
-                        # RNG defaults. Only flag actual recovery phrases or
-                        # sufficiently long single-token seed material.
-                        normalized_seed_value = raw_seed_value.strip().strip('"').strip("'").strip()
-                        sensitive_seed_value = _is_likely_recovery_phrase(
-                            normalized_seed_value
-                        )
-                    else:
-                        seed_value = raw_seed_value.strip('"').strip("'").strip().lower()
-                        sensitive_seed_value = (
-                            seed_value not in PLACEHOLDERS
-                            and not ANGLE_PLACEHOLDER.fullmatch(seed_value)
-                        )
-                    if sensitive_seed_value:
-                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
-                        continue
+                        seed_assignment_found = True
+                        break
+            if seed_assignment_found or yaml_block_scalar_found:
+                continue
             for match in ASSIGNMENT.finditer(line):
                 if is_yaml and yaml_parsed:
                     yaml_key = _credential_key_kind(match.group("key"))
