@@ -3709,12 +3709,26 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"filled={filled} remaining={remaining} requested={requested}"
         )
 
+    fee_was_pending = bool(trade.fee_reconciliation_pending)
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
+    fee_is_verified = fee_quality_is_verified(fee_quality)
+    reconciled_prior_fee = (
+        fee_was_pending
+        and fee_is_verified
+        and not bool(trade.fee_reconciliation_pending)
+    )
+    # The verified cumulative fee now covers earlier fills as well as this
+    # snapshot. Let the lifecycle allocator distribute that prior basis after
+    # the new fill quantity/outcomes have been recorded; otherwise the same
+    # cumulative amount would be added twice to the open position.
+    fill_fee = Decimal("0") if reconciled_prior_fee else fee_delta
     realized_delta = await _apply_fill_to_position(
         db, trade, filled, avg,
-        current_fill_fee=fee_delta,
-        current_fill_fee_verified=fee_quality_is_verified(fee_quality),
+        current_fill_fee=fill_fee,
+        current_fill_fee_verified=fee_is_verified,
     )
+    if reconciled_prior_fee:
+        await _apply_reconciled_live_fee_basis(db, trade, fee_delta)
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
 
     if status in {"closed", "filled"} and remaining <= 0:
