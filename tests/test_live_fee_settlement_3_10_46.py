@@ -16,6 +16,9 @@ from app.db import Base, CustomerLedgerAccount, Incident, LedgerJournal, Positio
 from app.live_fees import fee_quality_is_verified, UNVERIFIED
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 @pytest.fixture(autouse=True)
 def encryption_key(monkeypatch):
     from cryptography.fernet import Fernet
