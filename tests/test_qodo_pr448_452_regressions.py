@@ -1143,3 +1143,53 @@ async def test_pending_identity_is_not_effectively_active_after_legacy_conflict_
     # protected API and bot execution gates.
     pending.status = "ACTIVE"
     assert await main._customer_profile_effectively_active(object(), pending) is True
+
+
+@pytest.mark.asyncio
+async def test_customer_api_rejects_pending_identity_after_legacy_conflict_clears(monkeypatch):
+    from fastapi import HTTPException
+
+    profile = SimpleNamespace(
+        id=94,
+        auth_user_id="pending-api-customer",
+        email="customer@example.test",
+        display_name="Pending customer",
+        status="PENDING_IDENTITY_REVIEW",
+    )
+    subscription_calls = []
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+        async def flush(self):
+            return None
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {
+            "sub": profile.auth_user_id,
+            "email": profile.email,
+            "user_metadata": {},
+            "aal": "aal2",
+        }
+
+    async def no_legacy_conflict(_db, _uid, _email):
+        return False
+
+    async def ensure_subscription(_db, _profile):
+        subscription_calls.append(_profile.id)
+
+    monkeypatch.setattr(main, "customer_claims", verified_claims)
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_legacy_conflict)
+    monkeypatch.setattr(main, "_ensure_customer_subscription", ensure_subscription)
+
+    with pytest.raises(HTTPException) as raised:
+        await main.get_customer("Bearer test-token", Database())
+
+    assert raised.value.status_code == 403
+    assert profile.status == "PENDING_IDENTITY_REVIEW"
+    assert subscription_calls == []
