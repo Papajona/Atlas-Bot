@@ -224,6 +224,9 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                     _mask_template_interpolations(nested_template, _depth + 1)
                 )
                 continue
+            if char == "/" and regex_can_start(expression_start, position):
+                position = skip_regex_literal(position)
+                continue
             if value.startswith("//", position):
                 newline = value.find("\\n", position + 2)
                 position = len(value) if newline < 0 else newline + 1
@@ -231,9 +234,6 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
             if value.startswith("/*", position):
                 closing = value.find("*/", position + 2)
                 position = len(value) if closing < 0 else closing + 2
-                continue
-            if char == "/" and regex_can_start(expression_start, position):
-                position = skip_regex_literal(position)
                 continue
             if char == "{":
                 brace_depth += 1
