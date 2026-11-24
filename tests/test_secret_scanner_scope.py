@@ -1529,3 +1529,28 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
         "template-literal-private-key.js:1: seed/private-key assignment" in item
         for item in findings
     )
+
+def test_secret_scanner_detects_private_key_after_regex_slashes_in_js_template_interpolation(
+    tmp_path, monkeypatch
+):
+    private_material = "0123456789abcdef" * 2
+    source = (
+        "const label = "
+        + chr(96)
+        + "safe ${/[//]/.test(path)} private_key="
+        + private_material
+        + chr(96)
+        + ";\\n"
+    )
+    (tmp_path / "template-regex-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "template-regex-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
