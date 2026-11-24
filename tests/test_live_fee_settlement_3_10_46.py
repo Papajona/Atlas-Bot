@@ -1490,3 +1490,137 @@ def test_verified_followup_on_entry_cannot_clear_pending_add_on_fee_basis():
             assert add_on.fee_reconciliation_pending is True
 
     asyncio.run(with_database(check))
+
+def test_cumulative_fee_true_up_changes_only_unverified_partial_fill_rows():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, side="buy", quantity=0.3,
+                requested_quantity=0.3, filled_quantity=0.3, fee=0.03,
+                status="FILLED",
+            )
+            closing = _trade(
+                customer_id=None, signal_id="verified-unverified-verified",
+                client_order_id="verified-unverified-verified", side="sell",
+                quantity=0.3, requested_quantity=0.3, filled_quantity=0.3,
+                fee=0, status="FILLED", fee_reconciliation_pending=False,
+            )
+            db.add_all([entry, closing])
+            await db.flush()
+
+            rows = [
+                StrategyOutcome(
+                    trade_id=entry.id,
+                    closing_trade_id=closing.id,
+                    customer_id=None,
+                    strategy="test",
+                    regime="UNKNOWN",
+                    asset="crypto",
+                    symbol="BTC/USDT",
+                    side="buy",
+                    realized_pnl=Decimal("1"),
+                    fee=Decimal("0.04"),
+                    return_bps=1000,
+                    net_pnl=Decimal("0.96"),
+                    net_return_bps=960,
+                    closing_quantity=Decimal("0.1"),
+                    closing_notional=Decimal("10"),
+                    fee_basis_complete=True,
+                    lifecycle_status="PARTIAL_CLOSED",
+                    sequence=1,
+                    metadata_json=json.dumps({
+                        "entry_trade_id": entry.id,
+                        "closing_trade_id": closing.id,
+                        "allocated_entry_fee": "0.03",
+                        "closing_fee": "0.01",
+                        "entry_fee_order_verified": True,
+                        "closing_fee_order_verified": True,
+                        "fee_basis_complete": True,
+                    }),
+                ),
+                StrategyOutcome(
+                    trade_id=entry.id,
+                    closing_trade_id=closing.id,
+                    customer_id=None,
+                    strategy="test",
+                    regime="UNKNOWN",
+                    asset="crypto",
+                    symbol="BTC/USDT",
+                    side="buy",
+                    realized_pnl=Decimal("1"),
+                    fee=Decimal("0.03"),
+                    return_bps=1000,
+                    net_pnl=None,
+                    net_return_bps=None,
+                    closing_quantity=Decimal("0.1"),
+                    closing_notional=Decimal("10"),
+                    fee_basis_complete=False,
+                    lifecycle_status="PARTIAL_CLOSED",
+                    sequence=2,
+                    metadata_json=json.dumps({
+                        "entry_trade_id": entry.id,
+                        "closing_trade_id": closing.id,
+                        "allocated_entry_fee": "0.03",
+                        "closing_fee": "0",
+                        "entry_fee_order_verified": True,
+                        "closing_fee_order_verified": False,
+                        "fee_basis_complete": False,
+                    }),
+                ),
+                StrategyOutcome(
+                    trade_id=entry.id,
+                    closing_trade_id=closing.id,
+                    customer_id=None,
+                    strategy="test",
+                    regime="UNKNOWN",
+                    asset="crypto",
+                    symbol="BTC/USDT",
+                    side="buy",
+                    realized_pnl=Decimal("1"),
+                    fee=Decimal("0.03"),
+                    return_bps=1000,
+                    net_pnl=None,
+                    net_return_bps=None,
+                    closing_quantity=Decimal("0.3"),
+                    closing_notional=Decimal("30"),
+                    fee_basis_complete=False,
+                    lifecycle_status="CLOSED",
+                    sequence=3,
+                    metadata_json=json.dumps({
+                        "entry_trade_id": entry.id,
+                        "closing_trade_id": closing.id,
+                        "allocated_entry_fee": "0.03",
+                        "closing_fee": "0",
+                        "entry_fee_order_verified": True,
+                        "closing_fee_order_verified": False,
+                        "fee_basis_complete": False,
+                        "aggregate_fill_count": 3,
+                        "final_fill_closing_quantity": "0.1",
+                        "final_fill_closing_notional": "10",
+                        "total_closing_notional": "30",
+                    }),
+                ),
+            ]
+            db.add_all(rows)
+            await db.commit()
+
+            await execution._apply_reconciled_live_fee_basis(
+                db, closing, Decimal("0.04")
+            )
+            await db.commit()
+            for row in rows:
+                await db.refresh(row)
+
+            assert rows[0].fee == Decimal("0.04")
+            assert rows[0].fee_basis_complete is True
+            assert rows[1].fee == Decimal("0.05")
+            assert rows[1].fee_basis_complete is True
+            assert rows[2].fee == Decimal("0.05")
+            assert rows[2].fee_basis_complete is True
+            assert rows[0].metadata_json
+            assert json.loads(rows[0].metadata_json)["closing_fee_order_verified"] is True
+            assert json.loads(rows[1].metadata_json)["closing_fee_order_verified"] is True
+            assert json.loads(rows[2].metadata_json)["closing_fee_order_verified"] is True
+
+    asyncio.run(with_database(check))
+
