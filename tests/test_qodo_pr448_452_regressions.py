@@ -272,46 +272,109 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
     assert "PENDING_IDENTITY_REVIEW" in get_customer
 
 
-def test_conflicted_identity_quarantine_uses_an_isolated_transaction(monkeypatch):
-    from types import SimpleNamespace
-    from app import main
+def test_conflicted_identity_quarantine_commits_without_committing_caller_writes(
+    tmp_path, monkeypatch
+):
+    import pytest
+    from cryptography.fernet import Fernet
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-    profile = SimpleNamespace(id=42, status="ACTIVE")
+    from app.config import settings
+    from app.db import Base, CustomerProfile
 
-    class QuarantineSession:
-        def __init__(self):
-            self.commits = 0
-            self.get_calls = []
+    async def run():
+        monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+        monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+        monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'identity-quarantine.db'}",
+            connect_args={"timeout": 15},
+        )
+        try:
+            async with engine.connect() as connection:
+                await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+                await connection.commit()
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
 
-        async def __aenter__(self):
-            return self
+            sessions = async_sessionmaker(
+                engine, expire_on_commit=False, autoflush=False
+            )
+            monkeypatch.setattr(main, "SessionLocal", sessions)
 
-        async def __aexit__(self, _type, _value, _traceback):
-            return False
+            auth_calls = []
 
-        async def get(self, model, profile_id, *, with_for_update=False):
-            self.get_calls.append((model, profile_id, with_for_update))
-            return profile
+            async def verified_claims(_authorization, *, require_aal2=True):
+                assert require_aal2 is False
+                return {"sub": "existing-customer"}
 
-        async def commit(self):
-            self.commits += 1
+            async def verified_auth_user(_token):
+                auth_calls.append("auth")
+                return {
+                    "id": "existing-customer",
+                    "email": "customer@example.test",
+                    "email_confirmed_at": "2026-11-24T00:00:00Z",
+                    "user_metadata": {},
+                }
 
-    quarantine_session = QuarantineSession()
-    caller_session = SimpleNamespace(commits=0)
-    monkeypatch.setattr(main, "SessionLocal", lambda: quarantine_session)
+            async def conflicting_legacy_identity(_db, _uid, _email):
+                return True
 
-    quarantined = asyncio.run(
-        main._quarantine_customer_identity_review(profile_id=42)
-    )
+            monkeypatch.setattr(main, "customer_claims", verified_claims)
+            monkeypatch.setattr(main, "_supabase_user", verified_auth_user)
+            monkeypatch.setattr(
+                main, "_legacy_customer_email_conflict", conflicting_legacy_identity
+            )
 
-    assert quarantined is True
-    assert profile.status == "PENDING_IDENTITY_REVIEW"
-    assert quarantine_session.get_calls == [(main.CustomerProfile, 42, True)]
-    assert quarantine_session.commits == 1
-    # The caller's session is deliberately not passed into this helper and is
-    # therefore never committed as a side effect of identity quarantine.
-    assert caller_session.commits == 0
+            async with sessions() as seed_db:
+                profile = CustomerProfile(
+                    auth_user_id="existing-customer",
+                    email="",
+                    display_name="Customer",
+                    status="ACTIVE",
+                )
+                seed_db.add(profile)
+                await seed_db.commit()
+                profile_id = int(profile.id)
 
+            async with sessions() as caller_db:
+                unrelated = CustomerProfile(
+                    auth_user_id="unrelated-caller-write",
+                    email="unrelated@example.test",
+                    display_name="Unrelated",
+                    status="ACTIVE",
+                )
+                caller_db.add(unrelated)
+                assert unrelated in caller_db.new
+
+                with pytest.raises(main.HTTPException) as caught:
+                    await main.get_customer(
+                        "Bearer verified-token",
+                        caller_db,
+                        require_aal2=False,
+                    )
+                assert caught.value.status_code == 409
+                # The read helper did not commit the caller's pending write.
+                assert unrelated in caller_db.new
+                await caller_db.rollback()
+
+            async with sessions() as verify_db:
+                quarantined = await verify_db.get(CustomerProfile, profile_id)
+                assert quarantined is not None
+                assert quarantined.status == "PENDING_IDENTITY_REVIEW"
+                unrelated = (await verify_db.execute(
+                    select(CustomerProfile).where(
+                        CustomerProfile.auth_user_id == "unrelated-caller-write"
+                    )
+                )).scalar_one_or_none()
+                assert unrelated is None
+
+            assert auth_calls == ["auth"]
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 def test_paper_customer_access_fails_closed_while_legacy_auth_references_remain():
     source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
