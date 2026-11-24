@@ -56,8 +56,9 @@ SOURCE_STRING_CONCATENATION = re.compile(
     )""",
     re.VERBOSE,
 )
+# Include JavaScript/TypeScript template literals as well as quoted strings.
 SOURCE_STRING_LITERAL = re.compile(
-    r"""(?P<quote>["'])(?P<value>(?:\\.|[^\\])*?)\1"""
+    r"""(?P<quote>["'\x60])(?P<value>(?:\\.|[^\\])*?)\1"""
 )
 
 # Match complete Python-style triple-quoted credential assignments before the
