@@ -804,6 +804,57 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
     return findings
 
 
+
+EMBEDDED_RECOVERY_SUFFIXES = {".env", ".toml", ".ini", ".conf", ".cfg", ".properties"}
+EMBEDDED_RECOVERY_ASSIGNMENT = re.compile(
+    r"""(?i)(?<![A-Za-z0-9_])(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)\s*[:=]\s*(?P<value>[^#\r\n]+)"""
+)
+
+JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".ts", ".tsx", ".mjs", ".cjs"}
+TEMPLATE_LITERAL_SOURCE_ASSIGNMENT = re.compile(
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*\x60(?P<value>(?:\\.|[^\x60\\]){0,65536}?)\x60"""
+)
+
+
+def _find_embedded_recovery_assignments(lines: list[str]) -> dict[int, str]:
+    """Find likely recovery phrases embedded in quoted property/config values."""
+    findings: dict[int, str] = {}
+    for lineno, line in enumerate(lines, 1):
+        for match in EMBEDDED_RECOVERY_ASSIGNMENT.finditer(line):
+            value = match.group("value").strip()
+            if value.startswith(('"', "'")):
+                quote = value[0]
+                candidate = value[1:].split(quote, 1)[0]
+            else:
+                candidate = re.split(r"""["']""", value, maxsplit=1)[0]
+            if _is_likely_recovery_phrase(candidate.strip()):
+                findings[lineno] = match.group("key")
+                break
+    return findings
+
+
+def _find_multiline_template_literal_assignments(source: str) -> dict[int, str]:
+    """Find credential values assigned with multiline JavaScript template literals."""
+    findings: dict[int, str] = {}
+    for match in TEMPLATE_LITERAL_SOURCE_ASSIGNMENT.finditer(source):
+        key = match.group("key")
+        value = _mask_template_interpolations(match.group("value")).strip()
+        key_kind = _credential_key_kind(key)
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            sensitive = _is_likely_recovery_phrase(value)
+        else:
+            sensitive = (
+                re.search(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----", value) is not None
+                or re.search(
+                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                    value,
+                ) is not None
+            )
+        if sensitive:
+            findings[source.count("\n", 0, match.start("key")) + 1] = key
+    return findings
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -837,6 +888,14 @@ def scan() -> list[str]:
             _find_triple_quoted_source_assignments(text)
             if suffix in SOURCE_CODE_SUFFIXES else set()
         )
+        embedded_recovery_findings = (
+            _find_embedded_recovery_assignments(lines)
+            if suffix in EMBEDDED_RECOVERY_SUFFIXES else {}
+        )
+        template_literal_findings = (
+            _find_multiline_template_literal_assignments(text)
+            if suffix in JS_TEMPLATE_LITERAL_SUFFIXES else {}
+        )
         documented_recovery_findings = (
             _find_documented_recovery_assignments(lines)
             if suffix in {".md", ".txt"} else {}
@@ -847,6 +906,13 @@ def scan() -> list[str]:
                 continue
             multiline_seed_key = multiline_seed_findings.get(lineno)
             if multiline_seed_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
+            embedded_recovery_key = embedded_recovery_findings.get(lineno)
+            if embedded_recovery_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
+            if lineno in template_literal_findings:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             documented_recovery_key = documented_recovery_findings.get(lineno)
