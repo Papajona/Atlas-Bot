@@ -12,6 +12,11 @@ def test_external_audit_redacts_service_role_signing_encryption_and_session_valu
         "encryption_key": "fixture_encryption_value_abcdefghijklmnopqrstuvwxyz",
         "jwt": "fixture_jwt_value_abcdefghijklmnopqrstuvwxyz",
         "cookie": "fixture_cookie_value_abcdefghijklmnopqrstuvwxyz",
+        "apiKey": "fixture_api_key_camel_abcdefghijklmnopqrstuvwxyz",
+        "serviceRoleKey": "fixture_service_role_camel_abcdefghijklmnopqrstuvwxyz",
+        "privateKey": "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz",
+        "signingKey": "fixture_signing_key_camel_abcdefghijklmnopqrstuvwxyz",
+        "encryptionKey": "fixture_encryption_key_camel_abcdefghijklmnopqrstuvwxyz",
     }
     assert emit_security_audit(
         event="REDACTION_TEST",
