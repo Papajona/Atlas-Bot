@@ -19,7 +19,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 if TYPE_CHECKING:
     from .db import TradeLearningEpisode
@@ -307,11 +307,25 @@ def _fetch_learning_data(episode: TradeLearningEpisode, *, days: int = 365) -> p
 
 async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int = 365) -> dict[str, Any]:
     """Process completed episodes and persist market-memory/counterfactual results."""
-    from .db import SessionLocal, TradeLearningEpisode, TradeReplayResult
+    from .db import SessionLocal, StrategyOutcome, TradeLearningEpisode, TradeReplayResult
+    # Historical rows may predate the FEE_PENDING episode status. Independently
+    # require at least one closing outcome and explicit fee verification for every
+    # linked close fill before allowing a legacy COMPLETED episode into replay.
+    verified_closing_entries = (
+        select(StrategyOutcome.trade_id)
+        .where(StrategyOutcome.closing_trade_id.is_not(None))
+        .group_by(StrategyOutcome.trade_id)
+        .having(
+            func.sum(
+                case((StrategyOutcome.fee_basis_complete.is_(True), 0), else_=1)
+            ) == 0
+        )
+    )
     async with SessionLocal() as db:
         rows = (await db.execute(
             select(TradeLearningEpisode)
             .where(TradeLearningEpisode.status == "COMPLETED")
+            .where(TradeLearningEpisode.entry_trade_id.in_(verified_closing_entries))
             .where(
                 TradeLearningEpisode.replay_status.in_(["PENDING", "ERROR"])
                 | (
@@ -332,7 +346,11 @@ async def process_trade_learning_episodes(*, limit: int = 10, lookback_days: int
             result = await asyncio.to_thread(replay_trade_episode, df, episode)
             async with SessionLocal() as db:
                 ep = await db.get(TradeLearningEpisode, episode.id, with_for_update=True)
-                if not ep:
+                if not ep or str(ep.status or "").upper() != "COMPLETED":
+                    # Fee reconciliation can quarantine an episode while market
+                    # data is being fetched. Recheck under the row lock so an
+                    # obsolete replay cannot overwrite the new fee gate.
+                    skipped += 1
                     continue
                 ep.replay_status = "COMPLETE"
                 ep.replay_version = REPLAY_VERSION

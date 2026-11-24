@@ -19,6 +19,67 @@ def _finite(value: Any) -> float | None:
     return parsed if math.isfinite(parsed) else None
 
 
+UNCOMPILED_CANDIDATE_SAFEGUARDS = frozenset({
+    "HIGHER_TIMEFRAME_AGREEMENT",
+    "CONSERVATIVE_VOLATILITY_CAP",
+    "TIME_STOP",
+    "REGIME_ADAPTATION",
+    "VOLATILITY_SCALED_RISK",
+})
+
+
+def uncompiled_candidate_safeguards(spec: Any) -> list[str]:
+    """List Native AI profile safeguards not yet executed by the Strategy Lab backtester.
+
+    These rule objects are descriptive StrategyCondition values, not executable filters.
+    Until the backtest compiles and exercises them, a candidate containing one must not
+    receive a VALIDATED result based only on the base strategy-family/stop/target test.
+    """
+    if not isinstance(spec, dict):
+        return []
+    found: set[str] = set()
+    for field in ("entry_conditions", "exit_conditions"):
+        conditions = spec.get(field)
+        if not isinstance(conditions, list):
+            continue
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            condition_type = str(condition.get("type") or "").strip().upper()
+            if condition_type in UNCOMPILED_CANDIDATE_SAFEGUARDS:
+                found.add(condition_type)
+    return sorted(found)
+
+
+def record_validation_unavailable_reason(gate: dict[str, Any], reason: str) -> None:
+    """Preserve every independent reason a candidate cannot be validated.
+
+    Keep the first reason as the backwards-compatible primary field while exposing
+    the complete ordered list to API callers and the append-only validation history.
+    """
+    if not isinstance(gate, dict):
+        raise TypeError("validation gate must be a dictionary")
+    normalized = str(reason or "").strip()
+    if not normalized:
+        raise ValueError("validation-unavailable reason must not be empty")
+    existing = gate.get("validation_unavailable_reason")
+    prior = gate.get("validation_unavailable_reasons")
+    reasons: list[str] = []
+    candidates = [existing]
+    if isinstance(prior, list):
+        candidates.extend(prior)
+    candidates.append(normalized)
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value and value not in reasons:
+            reasons.append(value)
+    if not str(gate.get("validation_unavailable_reason") or "").strip():
+        # setdefault would preserve an existing empty/whitespace value and hide
+        # the concrete reason from legacy API consumers.
+        gate["validation_unavailable_reason"] = reasons[0]
+    gate["validation_unavailable_reasons"] = reasons
+
+
 def strategy_lab_candidate_passes(
     oos_gate: dict,
     *,

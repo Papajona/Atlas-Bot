@@ -68,9 +68,12 @@ def performance_ratios(
 
     n = len(clean)
     mean_ret = sum(clean) / n
-    vol = math.sqrt(sum((value - mean_ret) ** 2 for value in clean) / n)
-    downside = [value for value in clean if value < 0]
-    downside_vol = math.sqrt(sum(value * value for value in downside) / max(1, len(downside)))
+    # Sample standard deviation (n-1): the population form overstates Sharpe and the t-statistic
+    # for the small samples this dashboard reports on.
+    vol = math.sqrt(sum((value - mean_ret) ** 2 for value in clean) / (n - 1))
+    # Downside deviation (target 0) is averaged over ALL observations, not only the losing ones.
+    # Dividing by the loser count inflates downside risk and understates Sortino.
+    downside_vol = math.sqrt(sum(min(0.0, value) ** 2 for value in clean) / n)
 
     periods = 1.0
     annualized = False

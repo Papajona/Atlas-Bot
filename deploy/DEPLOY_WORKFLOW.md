@@ -212,7 +212,7 @@ co-located hash is checked; treat any shared bucket as production.
 ## 6. Observability and alerting
 
 Alert on, at minimum: any open **CRITICAL** incident (`LEDGER_INVARIANT_BREACH`, `CUSTOMER_DEFICIT:*`, `KEY_PERMISSIONS:*`, reconcile/recovery failures); **HIGH**
-incidents (`EDGE_DECAY:*`, `LIVE_FEE_ESTIMATED:*`, `KEY_AUDIT_UNVERIFIED:*`); worker heartbeat older than a few minutes; `readyz` failing; Cloud Run 5xx rate and latency;
+incidents (`EDGE_DECAY:*`, `LIVE_FEE_ESTIMATED:*`, `LIVE_FEE_UNVERIFIED:*`, `KEY_AUDIT_UNVERIFIED:*`); worker heartbeat older than a few minutes; `readyz` failing; Cloud Run 5xx rate and latency;
 Redis availability; Cloud Armor blocks. `/metrics` (Prometheus format, admin only) exposes application counters. Schedule `GET /api/admin/ledger/invariants` and
 `GET /api/admin/custody/reconciliation` from an external scheduler and alert on a non-200 or `ok: false`: they are on-demand today, not scheduled.
 

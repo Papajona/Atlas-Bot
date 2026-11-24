@@ -17,15 +17,33 @@ ALLOWED_STRATEGY_FAMILIES = {"TREND", "MOMENTUM", "BREAKOUT", "MEAN_REVERSION", 
 
 class StrategyCondition(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: str = Field(min_length=2, max_length=60)
-    rule: str = Field(min_length=3, max_length=500)
+    type: str
+    rule: str
     timeframe: str | None = Field(default=None, max_length=10)
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not 2 <= len(cleaned) <= 60:
+            raise ValueError("Condition type must contain 2 to 60 non-whitespace characters")
+        return cleaned
+
+    @field_validator("rule")
+    @classmethod
+    def validate_rule(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not 3 <= len(cleaned) <= 500:
+            raise ValueError("Condition rule must contain 3 to 500 non-whitespace characters")
+        return cleaned
 
     @field_validator("timeframe")
     @classmethod
     def validate_timeframe(cls, value: str | None) -> str | None:
-        if value is not None and value not in ALLOWED_TIMEFRAMES:
-            raise ValueError(f"Unsupported timeframe: {value}")
+        if value is not None and (
+            not isinstance(value, str) or value not in ALLOWED_TIMEFRAMES
+        ):
+            raise ValueError("Unsupported timeframe")
         return value
 
 
