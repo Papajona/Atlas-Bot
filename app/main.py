@@ -4034,6 +4034,7 @@ async def get_customer(
     )).scalar_one_or_none()
 
     email = str(claims.get("email") or "").strip().lower()[:320]
+    jwt_email_missing = not email
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
@@ -4049,7 +4050,11 @@ async def get_customer(
     # backfill the email when the existing profile has no encrypted email.
     # Every Auth-backed identity lookup or email backfill requires a confirmed
     # Auth email; active profiles with an already-persisted email avoid this call.
-    needs_auth_identity = profile is None or not str(profile.email or "").strip()
+    needs_auth_identity = (
+        jwt_email_missing
+        or profile is None
+        or not str(profile.email or "").strip()
+    )
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
@@ -8295,16 +8300,31 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
 
 
 async def _recent_closed_platform_outcome_returns(db):
-    """Read a bounded sample of one-row-per-trade completion summaries."""
-    return (await db.execute(
-        select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+    """Read one latest completed lifecycle per trade from a bounded sample."""
+    ranked = (
+        select(
+            StrategyOutcome.net_return_bps.label("net_return_bps"),
+            StrategyOutcome.created_at.label("created_at"),
+            func.row_number().over(
+                partition_by=StrategyOutcome.trade_id,
+                order_by=(
+                    StrategyOutcome.created_at.desc(),
+                    StrategyOutcome.id.desc(),
+                ),
+            ).label("lifecycle_rank"),
+        )
         .where(
             StrategyOutcome.customer_id.is_(None),
             StrategyOutcome.lifecycle_status == "CLOSED",
             StrategyOutcome.closing_notional > 0,
             StrategyOutcome.fee_basis_complete.is_(True),
         )
-        .order_by(StrategyOutcome.created_at.desc())
+        .subquery()
+    )
+    return (await db.execute(
+        select(ranked.c.net_return_bps, ranked.c.created_at)
+        .where(ranked.c.lifecycle_rank == 1)
+        .order_by(ranked.c.created_at.desc())
         .limit(100)
     )).all()
 
