@@ -21,6 +21,10 @@ jobs:
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
       ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+      # Deterministic CI-only Fernet material for PostgreSQL tests that persist encrypted customer fields.
+      # Never reuse this fixture key in staging or production.
+      APP_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+      APP_ENCRYPTION_ACTIVE_KEY_ID: "v1"
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
       CUSTOMER_LIVE_TRADING_ENABLED: "false"
