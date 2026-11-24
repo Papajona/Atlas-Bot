@@ -175,7 +175,7 @@ def _charge_yaml_traversal(budget: list[int], depth: int) -> None:
 PRIVATE_JWK_MATERIAL_FIELDS = {
     "d", "p", "q", "dp", "dq", "qi", "oth", "k",
     "private", "privatekey", "privatekeypem", "privkey",
-    "secret", "secretkey", "seed", "key", "keymaterial", "pem",
+    "secret", "secretkey", "seed", "key", "value", "keymaterial", "pem",
 }
 YAML_CREDENTIAL_KEY = re.compile(
     r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)$"""
