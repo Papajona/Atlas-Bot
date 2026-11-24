@@ -3885,7 +3885,12 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
         query = select(Trade).where(
             Trade.exchange == exchange,
             Trade.mode == reconciliation_mode,
-            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+            or_(
+                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                # A terminal fill can still carry a withheld fee; keep polling it
+                # until the broker supplies an authoritative fee.
+                Trade.fee_reconciliation_pending.is_(True),
+            ),
         )
         if symbol:
             query = query.where(Trade.symbol == symbol)
