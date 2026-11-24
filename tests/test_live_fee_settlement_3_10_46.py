@@ -1630,6 +1630,7 @@ def test_cumulative_fee_true_up_changes_only_unverified_partial_fill_rows():
 
     asyncio.run(with_database(check))
 
+
 def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
     async def check(sessions):
         async with sessions() as db:
@@ -1728,6 +1729,7 @@ def test_unfilled_legacy_pending_order_does_not_quarantine_a_position():
 
     asyncio.run(with_database(check))
 
+
 def test_filled_pending_add_on_anchor_survives_zero_fill_snapshot():
     async def check(sessions):
         async with sessions() as db:
@@ -1794,6 +1796,7 @@ def test_unfilled_zero_quantity_without_lifecycle_anchor_stays_ignored():
             assert pending is False
 
     asyncio.run(with_database(check))
+
 
 def test_zero_filled_snapshot_does_not_hide_anchored_pending_order_from_outcome_reconciliation():
     async def check(sessions):
