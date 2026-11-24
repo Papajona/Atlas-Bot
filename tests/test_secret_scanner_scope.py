@@ -411,6 +411,22 @@ def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strin
     assert any("recovery-config.py:4: seed/private-key assignment" in item for item in findings)
 
 
+def test_secret_scanner_detects_quoted_recovery_phrases_with_js_terminator(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    source = 'const settings = "' + "mnemonic" + "=" + phrase + '";\n'
+    (tmp_path / "quoted-recovery-setting.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "quoted-recovery-setting.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_repository_secret_scan_ignores_ordinary_notes_string_construction():
     findings = check_no_secrets.scan()
 
