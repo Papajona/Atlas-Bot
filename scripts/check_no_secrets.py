@@ -143,12 +143,86 @@ def _is_helper_call(value: str, remainder: str) -> bool:
     return bool(re.match(r"\d+\s*[,\)\]]", arguments))
 
 
+def _mask_template_interpolations(value: str) -> str:
+    """Remove JavaScript ${...} expressions while retaining template text."""
+    if "${" not in value:
+        return value
+
+    def skip_quoted(position: int, quote: str) -> int:
+        position += 1
+        while position < len(value):
+            if value[position] == "\\\\":
+                position += 2
+            elif value[position] == quote:
+                return position + 1
+            else:
+                position += 1
+        return len(value)
+
+    def skip_interpolation(position: int) -> int:
+        depth = 1
+        position += 2
+        while position < len(value):
+            char = value[position]
+            if char in {"'", '"', "`"}:
+                position = skip_quoted(position, char)
+                continue
+            if value.startswith("//", position):
+                newline = value.find("\\n", position + 2)
+                position = len(value) if newline < 0 else newline + 1
+                continue
+            if value.startswith("/*", position):
+                closing = value.find("*/", position + 2)
+                position = len(value) if closing < 0 else closing + 2
+                continue
+            if char == "{":
+                depth += 1
+                if depth > 256:
+                    return len(value)
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    return position + 1
+            position += 1
+        # An incomplete interpolation is not trusted as literal key material.
+        return len(value)
+
+    pieces: list[str] = []
+    segment_start = 0
+    position = 0
+    while position < len(value):
+        if value[position] == "\\\\":
+            # Escaped \${ is template text, not an interpolation.
+            position += 2
+            continue
+        if value.startswith("${", position):
+            end = skip_interpolation(position)
+            pieces.extend((value[segment_start:position], " "))
+            position = end
+            segment_start = end
+            continue
+        position += 1
+    pieces.append(value[segment_start:])
+    return "".join(pieces)
+
+
+def _is_inside_template_literal(line: str, position: int) -> bool:
+    """Return whether a source assignment begins inside a backtick literal."""
+    return any(
+        literal.group("quote") == "`"
+        and literal.start() < position < literal.end()
+        for literal in SOURCE_STRING_LITERAL.finditer(line)
+    )
+
+
 def _has_sensitive_source_literal(key: str, expression: str) -> bool:
     """Detect seed/private-key material in quoted pieces of a source concatenation."""
-    components = [
-        match.group("value")
-        for match in SOURCE_STRING_LITERAL.finditer(expression)
-    ]
+    components = []
+    for match in SOURCE_STRING_LITERAL.finditer(expression):
+        component = match.group("value")
+        if match.group("quote") == "`":
+            component = _mask_template_interpolations(component)
+        components.append(component)
     if not components:
         # An identifier-only mnemonic/private-key expression cannot be proven
         # harmless from this line; fail closed rather than trusting unknown values.
@@ -615,6 +689,8 @@ def _source_literal_contains_sensitive_assignment(line: str) -> bool:
             literal_value = literal.group("value")
         if not isinstance(literal_value, str):
             continue
+        if literal.group("quote") == "`":
+            literal_value = _mask_template_interpolations(literal_value)
         for embedded in TRON_SEED_IN_SOURCE.finditer(literal_value):
             key_kind = _credential_key_kind(embedded.group("key"))
             candidate = embedded.group("value").strip().strip('"').strip("'").strip()
@@ -749,6 +825,9 @@ def scan() -> list[str]:
                         and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
                     )
                     if source_code:
+                        inside_template_literal = _is_inside_template_literal(
+                            line, seed_match.start()
+                        )
                         # In source code, only literal material (including literals
                         # inside concatenations/arrays) is a checked-in secret.
                         # Numeric RNG seeds, parameter defaults, variable references
@@ -768,7 +847,14 @@ def scan() -> list[str]:
                             # raw_seed_value begins after the inner key and may only
                             # have a closing quote. Normalize both ends before the
                             # recovery-phrase/long-token check.
-                            bare_source_value = raw_seed_value.strip().strip('"').strip("'").strip()
+                            bare_source_value = raw_seed_value
+                            if inside_template_literal:
+                                bare_source_value = _mask_template_interpolations(
+                                    bare_source_value
+                                )
+                            bare_source_value = (
+                                bare_source_value.strip().strip("`").strip('"').strip("'").strip()
+                            )
                             key_kind = _credential_key_kind(seed_match.group("key"))
                             if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
                                 sensitive_source_value = _is_likely_recovery_phrase(
