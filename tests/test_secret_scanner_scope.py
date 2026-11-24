@@ -1482,3 +1482,25 @@ def test_secret_scanner_keeps_scanning_password_beside_block_marker_in_malformed
         for item in findings
     )
 
+def test_secret_scanner_ignores_private_key_identifier_in_js_template_interpolation(
+    tmp_path, monkeypatch
+):
+    dynamic_identifier = "private" + "KeyMaterialFromEnvironment"
+    source = (
+        "const label = "
+        + chr(96)
+        + "private_key=${" + dynamic_identifier + "}"
+        + chr(96)
+        + ";\\n"
+    )
+    (tmp_path / "template-dynamic-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any(
+        "template-dynamic-private-key.js:" in item for item in findings
+    )
+
