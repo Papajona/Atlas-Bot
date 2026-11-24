@@ -225,3 +225,76 @@ def test_reconstruct_notional_skips_non_finite_historical_return_evidence():
         "realized_pnl": 100,
     }
     assert migration._reconstruct_notional(gross_nan) == Decimal("0")
+
+
+
+def test_revision_0061_recombines_legacy_blanket_closed_rows_when_episode_evidence_matches():
+    migration_path = (
+        ROOT / "alembic" / "versions" / "0061_strategy_outcome_fill_aggregation.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "migration_0061_legacy_closed_lifecycle_test", migration_path
+    )
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    rows = [
+        {
+            "trade_id": 1,
+            "closing_trade_id": 11,
+            "sequence": 1,
+            "lifecycle_status": "CLOSED",
+        },
+        {
+            "trade_id": 1,
+            "closing_trade_id": 12,
+            "sequence": 2,
+            "lifecycle_status": "CLOSED",
+        },
+    ]
+    source_trades = {
+        11: {"id": 11, "filled_quantity": Decimal("0.4")},
+        12: {"id": 12, "filled_quantity": Decimal("0.6")},
+    }
+    episodes = {1: {"entry_quantity": Decimal("1.0"), "status": "COMPLETED"}}
+
+    assert migration._legacy_closed_rows_are_one_lifecycle(
+        rows, source_trades, episodes
+    )
+
+
+def test_revision_0061_keeps_legacy_closed_rows_split_when_quantity_evidence_conflicts():
+    migration_path = (
+        ROOT / "alembic" / "versions" / "0061_strategy_outcome_fill_aggregation.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "migration_0061_legacy_closed_lifecycle_negative_test", migration_path
+    )
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    rows = [
+        {
+            "trade_id": 1,
+            "closing_trade_id": 11,
+            "sequence": 1,
+            "lifecycle_status": "CLOSED",
+        },
+        {
+            "trade_id": 1,
+            "closing_trade_id": 12,
+            "sequence": 2,
+            "lifecycle_status": "CLOSED",
+        },
+    ]
+    source_trades = {
+        11: {"id": 11, "filled_quantity": Decimal("0.4")},
+        12: {"id": 12, "filled_quantity": Decimal("0.3")},
+    }
+    episodes = {1: {"entry_quantity": Decimal("1.0"), "status": "COMPLETED"}}
+
+    assert not migration._legacy_closed_rows_are_one_lifecycle(
+        rows, source_trades, episodes
+    )
