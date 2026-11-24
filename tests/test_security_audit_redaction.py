@@ -24,3 +24,24 @@ def test_external_audit_redacts_service_role_signing_encryption_and_session_valu
         assert secret not in output
     assert output.count("[REDACTED]") == len(fixtures)
     assert "visible" in output
+
+def test_external_audit_redacts_camelcase_and_hyphenated_credential_keys(monkeypatch, capsys):
+    monkeypatch.setattr(settings, "external_security_audit_enabled", True)
+    monkeypatch.setattr(settings, "external_security_audit_required", True)
+    secrets = {
+        "apiKey": "camel_api_key_secret_value_12345",
+        "private-key": "hyphenated_private_key_secret_12345",
+        "X-Api-Key": "header_api_key_secret_value_12345",
+        "signingKey": "camel_signing_key_secret_value_12345",
+    }
+
+    assert emit_security_audit(
+        event="REDACTION_NORMALIZATION_TEST",
+        actor_id="test",
+        detail=secrets,
+    )
+
+    output = capsys.readouterr().out
+    for secret in secrets.values():
+        assert secret not in output
+    assert output.count("[REDACTED]") == len(secrets)
