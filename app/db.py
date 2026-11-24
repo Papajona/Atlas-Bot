@@ -1141,7 +1141,6 @@ class BenchmarkPromptCapture(Base):
     )
     prompt_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
     native_output_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
-    prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     consent_version: Mapped[str] = mapped_column(String(80), nullable=False)
     consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     asset: Mapped[str] = mapped_column(String(20), nullable=False)
