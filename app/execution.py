@@ -3885,7 +3885,10 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
         query = select(Trade).where(
             Trade.exchange == exchange,
             Trade.mode == reconciliation_mode,
-            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+            or_(
+                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                Trade.fee_reconciliation_pending.is_(True),
+            ),
         )
         if symbol:
             query = query.where(Trade.symbol == symbol)
