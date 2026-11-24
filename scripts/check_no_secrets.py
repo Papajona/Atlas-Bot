@@ -178,7 +178,7 @@ PRIVATE_JWK_MATERIAL_FIELDS = {
     "secret", "secretkey", "seed", "key", "value", "keymaterial", "pem",
 }
 YAML_CREDENTIAL_KEY = re.compile(
-    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)$"""
+    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)$"""
 )
 RECOVERY_PROSE_MARKERS = {
     "backup", "backups", "copy", "copied", "enter", "ensure", "instruction",
