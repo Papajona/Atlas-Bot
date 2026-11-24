@@ -4162,7 +4162,10 @@ async def get_customer(
         # Protected customer APIs remain blocked until an audited flow persists
         # an explicit transition back to ACTIVE.
         raise HTTPException(403, "Customer account is not active")
-    if not identity_review_required:
+    if (
+        str(profile.status or "").upper() == "ACTIVE"
+        and not identity_review_required
+    ):
         await _ensure_customer_subscription(db, profile)
     return profile, claims
 
