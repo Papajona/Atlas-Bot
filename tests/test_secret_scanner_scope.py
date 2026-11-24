@@ -660,6 +660,13 @@ def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
     phrase = " ".join(words)
     assert not check_no_secrets._is_bip39_wordlist_phrase(phrase)
 
+    short_phrase = "amber birch cobalt dahlia elm fuchsia"
+    assert not check_no_secrets._is_bip39_wordlist_phrase(short_phrase)
+
+    (tmp_path / "short-proprietary-recovery.yml").write_text(
+        "wallet:\\n  mnemonic: " + short_phrase + "\\n",
+        encoding="utf-8",
+    )
     (tmp_path / "proprietary-recovery.yml").write_text(
         "wallet:\n  mnemonic: |\n"
         + "".join("    " + word + "\n" for word in words),
@@ -674,6 +681,7 @@ def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
     findings = check_no_secrets.scan()
 
     assert any("proprietary-recovery.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("short-proprietary-recovery.yml:2: seed/private-key assignment" in item for item in findings)
     assert any("proprietary-recovery.env:1: seed/private-key assignment" in item for item in findings)
 
 
