@@ -688,27 +688,28 @@ def test_later_verified_fee_snapshot_charges_only_unsettled_authoritative_delta(
     assert cumulative == Decimal("0.250000")
     assert trade.fee == Decimal("0.250000")
 
-def test_stale_identity_quarantine_reactivates_only_after_conflict_clears(monkeypatch):
-    profile = SimpleNamespace(
+def test_identity_conflict_clear_does_not_reactivate_pending_profile_without_persisted_active_status():
+    pending = SimpleNamespace(
         status="PENDING_IDENTITY_REVIEW",
         auth_user_id="customer-auth-id",
         email="customer@example.test",
     )
+    active = SimpleNamespace(
+        status="ACTIVE",
+        auth_user_id="customer-auth-id",
+        email="customer@example.test",
+    )
+    suspended = SimpleNamespace(
+        status="SUSPENDED",
+        auth_user_id="customer-auth-id",
+        email="customer@example.test",
+    )
 
-    async def no_conflict(_db, _auth_user_id, _email):
-        return False
-
-    async def conflict_remains(_db, _auth_user_id, _email):
-        return True
-
-    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_conflict)
-    assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is True
-
-    monkeypatch.setattr(main, "_legacy_customer_email_conflict", conflict_remains)
-    assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is False
-
-    inactive = SimpleNamespace(status="SUSPENDED", auth_user_id="customer-auth-id", email="customer@example.test")
-    assert asyncio.run(main._customer_profile_effectively_active(object(), inactive)) is False
+    # A cleared conflict does not change the persisted quarantine status.
+    assert asyncio.run(main._customer_profile_effectively_active(object(), pending)) is False
+    # Only an explicit, separately audited status transition reopens execution.
+    assert asyncio.run(main._customer_profile_effectively_active(object(), active)) is True
+    assert asyncio.run(main._customer_profile_effectively_active(object(), suspended)) is False
 
 
 def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status():
