@@ -821,6 +821,9 @@ def _find_embedded_recovery_assignments(lines: list[str]) -> dict[int, str]:
     findings: dict[int, str] = {}
     for lineno, line in enumerate(lines, 1):
         for match in EMBEDDED_RECOVERY_ASSIGNMENT.finditer(line):
+            key = _credential_key_kind(match.group("key"))
+            if key not in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                continue
             value = match.group("value").strip()
             if value.startswith(('"', "'")):
                 quote = value[0]
@@ -828,7 +831,7 @@ def _find_embedded_recovery_assignments(lines: list[str]) -> dict[int, str]:
             else:
                 candidate = re.split(r"""["']""", value, maxsplit=1)[0]
             if _is_likely_recovery_phrase(candidate.strip()):
-                findings[lineno] = match.group("key")
+                findings[lineno] = key
                 break
     return findings
 
