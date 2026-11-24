@@ -4047,6 +4047,9 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
     return {"results": results, "checked": len(snapshots)}
 
 
+TERMINAL_FEE_RECONCILIATION_BATCH_SIZE = 25
+
+
 async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
     is_oanda = exchange.lower() == "oanda"
     if is_oanda:
@@ -4058,24 +4061,61 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                            password=settings.exchange_password, sandbox=settings.broker_sandbox,
                            market_type=settings.default_market_type, timeout_ms=settings.exchange_timeout_ms)
         broker = Broker.get(cfg)
+    active_statuses = ("PENDING", "OPEN", "PARTIAL", "UNKNOWN")
     async with SessionLocal() as db:
-        # Atlas OANDA executions are practice-only and persist with FOREX_DEMO mode.
-        # Keep PAPER simulator rows out of every external broker lookup.
+        # Active orders retain their ordinary every-cycle reconciliation path.
+        # Terminal fee true-ups use a separate bounded FIFO batch so a growing
+        # population of unresolved historical fees cannot monopolize this pass.
         reconciliation_mode = "FOREX_DEMO" if is_oanda else "LIVE"
-        query = select(Trade).where(
+        active_query = select(Trade).where(
             Trade.exchange == exchange,
             Trade.mode == reconciliation_mode,
-            or_(
-                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
-                # A terminal fill can still carry a withheld fee; keep polling it
-                # until the broker supplies an authoritative fee.
-                Trade.fee_reconciliation_pending.is_(True),
-            ),
+            Trade.status.in_(active_statuses),
         )
         if symbol:
-            query = query.where(Trade.symbol == symbol)
-        trades = (await db.execute(query)).scalars().all()
+            active_query = active_query.where(Trade.symbol == symbol)
+        active_trades = (await db.execute(
+            active_query.order_by(Trade.updated_at.asc(), Trade.id.asc())
+        )).scalars().all()
+
+        terminal_fee_query = select(Trade).where(
+            Trade.exchange == exchange,
+            Trade.mode == reconciliation_mode,
+            Trade.status.notin_(active_statuses),
+            Trade.fee_reconciliation_pending.is_(True),
+        )
+        if symbol:
+            terminal_fee_query = terminal_fee_query.where(Trade.symbol == symbol)
+        terminal_fee_trades = (await db.execute(
+            terminal_fee_query
+            .order_by(Trade.updated_at.asc(), Trade.id.asc())
+            .limit(TERMINAL_FEE_RECONCILIATION_BATCH_SIZE)
+        )).scalars().all()
+        terminal_fee_trade_ids = {trade.id for trade in terminal_fee_trades}
+        trades = active_trades + terminal_fee_trades
         snapshots = [(t.id, t.broker_order_id, t.symbol, t.client_order_id) for t in trades]
+    async def defer_terminal_fee_retry(trade_id: int) -> None:
+        """Move an unresolved terminal fee to the back of the bounded retry queue."""
+        try:
+            async with SessionLocal() as retry_db:
+                row = await retry_db.get(Trade, trade_id, with_for_update=True)
+                if (
+                    row
+                    and row.fee_reconciliation_pending
+                    and str(row.status or "").upper() not in active_statuses
+                ):
+                    # updated_at is the FIFO retry cursor: successful snapshots
+                    # already refresh it; failed lookups must do the same so one
+                    # unavailable broker order cannot starve the rest of the queue.
+                    row.updated_at = utcnow()
+                    await retry_db.commit()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "terminal_fee_retry_schedule_update_failed trade_id=%s",
+                trade_id,
+                exc_info=True,
+            )
+
     results = []
     oanda_changes = None
     oanda_previous_transaction_id = ""
@@ -4124,6 +4164,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                         select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == trade_customer_id)
                     )).scalar_one_or_none()
                 if customer_binance is None:
+                    await defer_terminal_fee_retry(trade_id)
                     results.append({
                         "trade_id": trade_id,
                         "resolved": False,
@@ -4148,6 +4189,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     history = await asyncio.to_thread(trade_broker.fetch_orders, trade_symbol)
                     order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == cid), None)
             if order is None:
+                await defer_terminal_fee_retry(trade_id)
                 results.append({"trade_id": trade_id, "resolved": False})
                 continue
             async with SessionLocal() as db:
@@ -4168,6 +4210,8 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 await db.commit()
                 results.append({"trade_id": t.id, "status": t.status, "resolved": True})
         except Exception as exc:
+            if trade_id in terminal_fee_trade_ids:
+                await defer_terminal_fee_retry(trade_id)
             if isinstance(exc, ValueError):
                 await _report_snapshot_rejection(trade_id, None, exc)
             results.append({"trade_id": trade_id, "resolved": False, "error": str(exc)})
