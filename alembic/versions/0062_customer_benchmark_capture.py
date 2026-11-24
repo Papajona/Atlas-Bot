@@ -27,7 +27,6 @@ def upgrade() -> None:
         ),
         sa.Column("prompt_ciphertext", sa.Text(), nullable=False),
         sa.Column("native_output_ciphertext", sa.Text(), nullable=False),
-        sa.Column("prompt_sha256", sa.String(64), nullable=False),
         sa.Column("consent_version", sa.String(80), nullable=False),
         sa.Column("consented_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("asset", sa.String(20), nullable=False),
