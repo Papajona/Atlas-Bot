@@ -146,7 +146,7 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
     normalized_key = key.lower().replace("_", "").replace("-", "")
     if normalized_key in {"mnemonic", "seedphrase"}:
         candidates = components + [" ".join(components)]
-        return any(_is_bip39_wordlist_phrase(candidate) for candidate in candidates)
+        return any(_is_likely_recovery_phrase(candidate) for candidate in candidates)
 
     # Private keys may be split across adjacent quoted components. Join them
     # without separators before checking for a long key-like token.
@@ -159,10 +159,23 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
 
 BIP39_VALIDATOR = Bip39MnemonicValidator()
 BIP39_WORD_COUNTS = {12, 15, 18, 21, 24}
+MAX_YAML_NODE_VISITS = 4096
+MAX_YAML_DOCUMENT_NODES = 65536
+MAX_YAML_TRAVERSAL_DEPTH = 64
+
+
+class _YamlTraversalLimitExceeded(ValueError):
+    """Raised when alias expansion or nesting exceeds the bounded scanner budget."""
+
+
+def _charge_yaml_traversal(budget: list[int], depth: int) -> None:
+    if depth > MAX_YAML_TRAVERSAL_DEPTH or budget[0] >= MAX_YAML_NODE_VISITS:
+        raise _YamlTraversalLimitExceeded("YAML alias expansion exceeded the scan budget")
+    budget[0] += 1
 PRIVATE_JWK_MATERIAL_FIELDS = {
     "d", "p", "q", "dp", "dq", "qi", "oth", "k",
     "private", "privatekey", "privatekeypem", "privkey",
-    "secret", "secretkey", "seed", "keymaterial", "pem",
+    "secret", "secretkey", "seed", "key", "keymaterial", "pem",
 }
 YAML_CREDENTIAL_KEY = re.compile(
     r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)$"""
@@ -186,29 +199,57 @@ def _is_bip39_wordlist_phrase(value: str) -> bool:
     return True
 
 
-def _yaml_scalar_values(node, active_nodes: set[int] | None = None):
-    """Yield scalar values without looping on recursive aliases or dropping repeated aliases."""
+def _is_likely_recovery_phrase(value: str) -> bool:
+    """Detect BIP-39 and non-BIP-39 word sequences stored under a recovery-key name."""
+    candidate = unicodedata.normalize("NFKD", value).replace("\u3000", " ")
+    if _is_bip39_wordlist_phrase(candidate):
+        return True
+
+    # Some wallets and providers use proprietary word lists rather than BIP-39.
+    # The key name is already an explicit recovery-secret signal, so retain the
+    # conservative source-code heuristic for 10+ ASCII words. This deliberately
+    # avoids treating unrelated non-Latin operational notes as recovery phrases.
+    words = candidate.split()
+    return len(words) >= 10 and all(
+        re.fullmatch(r"[A-Za-z][A-Za-z0-9'-]{1,23}", word) is not None
+        for word in words
+    )
+
+
+def _yaml_scalar_values(
+    node,
+    active_nodes: set[int] | None = None,
+    budget: list[int] | None = None,
+    depth: int = 0,
+):
+    """Yield YAML scalars while preserving aliases and bounding graph expansion."""
     if node is None:
         return
     if active_nodes is None:
         active_nodes = set()
+    if budget is None:
+        budget = [0]
     node_identity = id(node)
     if node_identity in active_nodes:
         return
-    # Track only the active recursion path. A global visited set would collapse
-    # repeated YAML aliases and could turn a valid recovery phrase into fewer words.
+    _charge_yaml_traversal(budget, depth)
     active_nodes.add(node_identity)
     try:
         if isinstance(node, ScalarNode):
             yield node.value
         elif isinstance(node, SequenceNode):
             for child in node.value:
-                yield from _yaml_scalar_values(child, active_nodes)
+                yield from _yaml_scalar_values(
+                    child, active_nodes, budget, depth + 1
+                )
         elif isinstance(node, MappingNode):
             for _, value_node in node.value:
-                yield from _yaml_scalar_values(value_node, active_nodes)
+                yield from _yaml_scalar_values(
+                    value_node, active_nodes, budget, depth + 1
+                )
     finally:
         active_nodes.remove(node_identity)
+
 
 def _nonempty_private_scalar(value: str) -> bool:
     candidate = value.strip().strip('"').strip("'").strip()
@@ -223,42 +264,55 @@ def _nonempty_private_scalar(value: str) -> bool:
 
 
 def _structured_private_object_has_material(value) -> bool:
-    """Detect private JWK components while allowing empty and public-only key objects."""
-    if isinstance(value, dict):
-        for key, item in value.items():
-            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
-            if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
-                if isinstance(item, str) and _nonempty_private_scalar(item):
-                    return True
-                if isinstance(item, (dict, list)) and _structured_private_object_has_material(item):
-                    return True
-                if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
-                    return True
-        return any(
-            _structured_private_object_has_material(item)
-            for item in value.values()
-            if isinstance(item, (dict, list))
-        )
-    if isinstance(value, list):
-        return any(
-            _structured_private_object_has_material(item)
-            for item in value
-            if isinstance(item, (dict, list))
-        )
+    """Detect nested private JWK components without recursively expanding JSON objects."""
+    stack = [value]
+    visited: set[int] = set()
+    visits = 0
+    while stack:
+        current = stack.pop()
+        if not isinstance(current, (dict, list)):
+            continue
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        visits += 1
+        if visits > MAX_YAML_NODE_VISITS:
+            raise _YamlTraversalLimitExceeded(
+                "structured private-key object exceeded the scan budget"
+            )
+        if isinstance(current, dict):
+            for key, item in current.items():
+                normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+                if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
+                    if isinstance(item, str) and _nonempty_private_scalar(item):
+                        return True
+                    if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                        return True
+                if isinstance(item, (dict, list)):
+                    stack.append(item)
+        else:
+            stack.extend(item for item in current if isinstance(item, (dict, list)))
     return False
 
 
 def _yaml_node_has_private_material(
-    node, active_nodes: set[int] | None = None
+    node,
+    active_nodes: set[int] | None = None,
+    budget: list[int] | None = None,
+    depth: int = 0,
 ) -> bool:
-    """Classify private-key YAML values without loops or alias-collapsing side effects."""
+    """Classify private-key YAML values without loops or unbounded alias expansion."""
     if node is None:
         return False
     if active_nodes is None:
         active_nodes = set()
+    if budget is None:
+        budget = [0]
     node_identity = id(node)
     if node_identity in active_nodes:
         return False
+    _charge_yaml_traversal(budget, depth)
     active_nodes.add(node_identity)
     try:
         if isinstance(node, ScalarNode):
@@ -292,72 +346,98 @@ def _yaml_node_has_private_material(
                     r"[^a-z0-9]", "", key_node.value.lower()
                 )
                 if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
-                    if any(_nonempty_private_scalar(value) for value in _yaml_scalar_values(value_node)):
+                    if any(
+                        _nonempty_private_scalar(value)
+                        for value in _yaml_scalar_values(
+                            value_node, budget=budget, depth=depth + 1
+                        )
+                    ):
                         return True
-                # Public JWK fields (n/e/x/y/crv/kty) are never considered private
-                # material merely because their values are long.
-                if isinstance(value_node, (MappingNode, SequenceNode)) and _yaml_node_has_private_material(value_node, active_nodes):
+                # Public JWK fields (n/e/x/y/crv/kty) are not private merely
+                # because their values are long. Unknown nested mappings still
+                # need inspection for nested private components such as key.
+                if isinstance(value_node, (MappingNode, SequenceNode)) and _yaml_node_has_private_material(
+                    value_node, active_nodes, budget, depth + 1
+                ):
                     return True
             return False
         if isinstance(node, SequenceNode):
-            return any(_yaml_node_has_private_material(child, active_nodes) for child in node.value)
+            return any(
+                _yaml_node_has_private_material(
+                    child, active_nodes, budget, depth + 1
+                )
+                for child in node.value
+            )
         return False
     finally:
         active_nodes.remove(node_identity)
 
+
 def _yaml_value_is_sensitive(key: str, value_node) -> bool:
     normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
     if normalized_key in {"mnemonic", "seedphrase"}:
-        return _is_bip39_wordlist_phrase(" ".join(_yaml_scalar_values(value_node)))
+        try:
+            return _is_likely_recovery_phrase(
+                " ".join(_yaml_scalar_values(value_node))
+            )
+        except _YamlTraversalLimitExceeded:
+            # A sensitive field that cannot be fully inspected is suspicious.
+            return True
     if normalized_key == "privatekey":
-        return _yaml_node_has_private_material(value_node)
+        try:
+            return _yaml_node_has_private_material(value_node)
+        except _YamlTraversalLimitExceeded:
+            return True
     if not YAML_CREDENTIAL_KEY.fullmatch(key):
         return False
 
-    for value in _yaml_scalar_values(value_node):
-        candidate = value.strip().strip('"').strip("'").strip()
-        if not candidate:
-            continue
-        if candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
-            continue
-        if re.fullmatch(r"[A-Za-z0-9_+/=.-]{20,}", candidate):
-            return True
+    try:
+        for value in _yaml_scalar_values(value_node):
+            candidate = value.strip().strip('"').strip("'").strip()
+            if not candidate:
+                continue
+            if candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
+                continue
+            if re.fullmatch(r"[A-Za-z0-9_+/=.-]{20,}", candidate):
+                return True
+    except _YamlTraversalLimitExceeded:
+        return True
     return False
 
 
 def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
-    """Parse YAML mappings so quoted block-scalar examples are never treated as keys."""
+    """Parse YAML mappings with iterative, bounded traversal of alias graphs."""
     try:
         roots = list(yaml.compose_all(text, Loader=yaml.SafeLoader))
     except yaml.YAMLError:
         return None
     findings: dict[int, str] = {}
     visited_nodes: set[int] = set()
+    stack = [root for root in reversed(roots) if root is not None]
+    document_visits = 0
 
-    def visit(node) -> None:
-        if node is None:
-            return
+    while stack:
+        node = stack.pop()
         node_identity = id(node)
         if node_identity in visited_nodes:
-            return
-        # YAML aliases can point back to an ancestor node. Mark before walking
-        # children so recursive aliases terminate without skipping other keys.
+            continue
         visited_nodes.add(node_identity)
+        document_visits += 1
+        if document_visits > MAX_YAML_DOCUMENT_NODES:
+            # The document is too complex to inspect safely. Fail closed at its
+            # first line rather than silently accepting unchecked YAML.
+            findings[1] = "YAML traversal limit exceeded"
+            return findings
 
         if isinstance(node, MappingNode):
-            for key_node, value_node in node.value:
+            for key_node, value_node in reversed(node.value):
                 if isinstance(key_node, ScalarNode):
                     key = key_node.value
                     if YAML_CREDENTIAL_KEY.fullmatch(key) and _yaml_value_is_sensitive(key, value_node):
                         findings[key_node.start_mark.line + 1] = key
-                visit(value_node)
+                stack.append(value_node)
         elif isinstance(node, SequenceNode):
-            for child in node.value:
-                visit(child)
-
-    for root in roots:
-        if root is not None:
-            visit(root)
+            stack.extend(reversed(node.value))
     return findings
 
 
@@ -372,7 +452,7 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
         return False
     normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
     if normalized_key in {"mnemonic", "seedphrase"}:
-        return _is_bip39_wordlist_phrase(candidate)
+        return _is_likely_recovery_phrase(candidate)
     if normalized_key == "privatekey":
         return _yaml_node_has_private_material(ScalarNode("tag:yaml.org,2002:str", candidate))
     return re.search(
