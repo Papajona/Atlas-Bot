@@ -1630,3 +1630,100 @@ def test_cumulative_fee_true_up_changes_only_unverified_partial_fill_rows():
 
     asyncio.run(with_database(check))
 
+def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
+    async def check(sessions):
+        async with sessions() as db:
+            trade = _trade(
+                customer_id=None,
+                filled_quantity=0,
+                remaining_quantity=0.2,
+                requested_quantity=0.2,
+                quantity=0.2,
+                status="OPEN",
+                fee=0,
+                fee_reconciliation_pending=False,
+            )
+            db.add(trade)
+            await db.flush()
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                {
+                    "id": "zero-fee-order",
+                    "status": "open",
+                    "filled": 0.1,
+                    "remaining": 0.1,
+                    "average": 100,
+                    "fee": {"cost": "0"},
+                },
+            )
+            await db.commit()
+            assert trade.fee_reconciliation_pending is True
+            position = (await db.execute(select(Position))).scalar_one()
+            assert position.entry_fee_basis_known is False
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                {
+                    "id": "zero-fee-order",
+                    "status": "closed",
+                    "filled": 0.2,
+                    "remaining": 0,
+                    "average": 100,
+                    "fee": {"currency": "USDT", "cost": "0"},
+                },
+            )
+            await db.commit()
+            await db.refresh(position)
+            await db.refresh(trade)
+
+            assert trade.fee_reconciliation_pending is False
+            assert trade.fee == Decimal("0")
+            assert position.entry_fee == Decimal("0")
+            assert position.entry_fee_basis_known is True
+
+    asyncio.run(with_database(check))
+
+
+def test_unfilled_legacy_pending_order_does_not_quarantine_a_position():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, signal_id="known-entry", client_order_id="known-entry",
+                filled_quantity=1.0, fee_reconciliation_pending=False, status="FILLED",
+            )
+            close_order = _trade(
+                customer_id=None, signal_id="known-close", client_order_id="known-close",
+                side="sell", filled_quantity=0.0, fee_reconciliation_pending=False,
+                status="OPEN",
+            )
+            unfilled = _trade(
+                customer_id=None, signal_id="later-unfilled", client_order_id="later-unfilled",
+                filled_quantity=0.0, fee_reconciliation_pending=True, status="OPEN",
+            )
+            db.add_all([entry, close_order, unfilled])
+            await db.flush()
+            assert entry.id < close_order.id < unfilled.id
+
+            pending = await execution._position_has_pending_fee_order(
+                db, entry, exclude_trade_id=close_order.id
+            )
+            assert pending is False
+
+            # A genuinely filled legacy add-on still conservatively quarantines
+            # the entry lifecycle when it has no explicit anchor metadata.
+            filled_add_on = _trade(
+                customer_id=None, signal_id="legacy-filled-addon",
+                client_order_id="legacy-filled-addon", filled_quantity=0.1,
+                fee_reconciliation_pending=True, status="PARTIAL",
+            )
+            db.add(filled_add_on)
+            await db.flush()
+            pending_filled = await execution._position_has_pending_fee_order(
+                db, entry, exclude_trade_id=close_order.id
+            )
+            assert pending_filled is True
+
+    asyncio.run(with_database(check))

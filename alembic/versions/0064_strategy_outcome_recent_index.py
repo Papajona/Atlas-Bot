@@ -18,10 +18,21 @@ def upgrade() -> None:
     if bind.dialect.name not in {"postgresql", "sqlite"}:
         return
     schema = "public" if bind.dialect.name == "postgresql" else None
-    existing = {
-        item["name"]
+    indexes = {
+        item["name"]: item
         for item in sa.inspect(bind).get_indexes("strategy_outcomes", schema=schema)
     }
+    existing_trade_index = indexes.get(_TRADE_INDEX_NAME)
+    expected_trade_columns = ["trade_id", "created_at", "id"]
+    if (
+        existing_trade_index is not None
+        and list(existing_trade_index.get("column_names") or []) != expected_trade_columns
+    ):
+        # Revision 0060 owns the two-column index with this same name. Replace
+        # that definition in-place so the risk query's id tie-breaker is indexed.
+        op.drop_index(_TRADE_INDEX_NAME, table_name="strategy_outcomes", schema=schema)
+        indexes.pop(_TRADE_INDEX_NAME, None)
+    existing = set(indexes)
     options = (
         {"postgresql_where": _PREDICATE}
         if bind.dialect.name == "postgresql"
@@ -52,11 +63,30 @@ def downgrade() -> None:
     if bind.dialect.name not in {"postgresql", "sqlite"}:
         return
     schema = "public" if bind.dialect.name == "postgresql" else None
-    existing = {
-        item["name"]
+    indexes = {
+        item["name"]: item
         for item in sa.inspect(bind).get_indexes("strategy_outcomes", schema=schema)
     }
-    if _TRADE_INDEX_NAME in existing:
+    trade_index = indexes.get(_TRADE_INDEX_NAME)
+    baseline_trade_columns = ["trade_id", "created_at"]
+    if trade_index is not None and list(trade_index.get("column_names") or []) != baseline_trade_columns:
         op.drop_index(_TRADE_INDEX_NAME, table_name="strategy_outcomes", schema=schema)
-    if _INDEX_NAME in existing:
+        trade_index = None
+    if trade_index is None:
+        # Restore the exact two-column index owned by revision 0060. A downgrade
+        # of 0064 must not remove an index required by the remaining migration chain.
+        options = (
+            {"postgresql_where": _PREDICATE}
+            if bind.dialect.name == "postgresql"
+            else {"sqlite_where": _PREDICATE}
+        )
+        op.create_index(
+            _TRADE_INDEX_NAME,
+            "strategy_outcomes",
+            baseline_trade_columns,
+            unique=False,
+            schema=schema,
+            **options,
+        )
+    if _INDEX_NAME in indexes:
         op.drop_index(_INDEX_NAME, table_name="strategy_outcomes", schema=schema)

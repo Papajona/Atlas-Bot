@@ -914,9 +914,6 @@ async def _apply_reconciled_live_fee_basis(
     delta_fee = Decimal(str(fee_delta or 0))
     if not delta_fee.is_finite() or delta_fee < 0:
         raise ValueError("reconciled fee delta must be a finite non-negative amount")
-    if delta_fee == 0:
-        return
-
     rows = (await db.execute(
         select(StrategyOutcome)
         .where(or_(
@@ -1099,6 +1096,7 @@ async def _apply_reconciled_live_fee_basis(
                     Trade.symbol == entry_trade.symbol,
                     Trade.side == entry_trade.side,
                     Trade.fee_reconciliation_pending.is_(True),
+                    Trade.filled_quantity > 0,
                 )
             )).all()
             pending = False
@@ -1354,7 +1352,7 @@ async def _apply_reconciled_live_fee_basis(
             position_entry_fee_delta = delta_fee
             add_on_fee_only = True
 
-    if position_entry_fee_delta:
+    if position_entry_fee_delta or entry_fee_only or add_on_fee_only:
         if position is None:
             raise ValueError(
                 f"cannot attach recovered fee for trade {trade.id} to its position"
@@ -1483,9 +1481,11 @@ async def _apply_reconciled_live_fee_basis(
         )
         meta["allocated_entry_fee"] = str(allocated)
         meta["closing_fee"] = str(close_fee)
-        if entry_add > 0:
+        if int(row.id) in entry_fee_by_row:
+            # An authoritative zero cumulative fee is still proof that the
+            # previously withheld entry component for this fill is exactly zero.
             meta["entry_fee_order_verified"] = True
-        if close_add > 0:
+        if int(row.id) in closing_fee_by_row:
             meta["closing_fee_order_verified"] = True
         meta["fee_basis_complete"] = basis_known
         meta["net_pnl"] = str(row.net_pnl) if basis_known else None
@@ -1617,6 +1617,7 @@ async def _position_has_pending_fee_order(
             Trade.symbol == entry_trade.symbol,
             Trade.side == entry_trade.side,
             Trade.fee_reconciliation_pending.is_(True),
+            Trade.filled_quantity > 0,
         ).order_by(Trade.id)
     )).scalars().all()
     for candidate in candidates:
