@@ -876,3 +876,97 @@ def test_secret_scanner_distinguishes_public_key_ops_from_private_component_arra
         "private-component-array.yml:2: seed/private-key assignment" in item
         for item in findings
     )
+
+def test_secret_scanner_fails_closed_on_deep_json_key_without_aborting(tmp_path, monkeypatch):
+    private_field = "private" + "_key"
+    token_field = "api" + "_token"
+    sample_credential = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    nested_json = "[" * 1500 + "0" + "]" * 1500
+    content = (
+        "wallet:\\n"
+        + "  " + private_field + ": |\\n"
+        + "    " + nested_json + "\\n"
+        + token_field + ": " + sample_credential + "\\n"
+    )
+    (tmp_path / "deep-private-key.yml").write_text(content, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "deep-private-key.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "deep-private-key.yml:4: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_fails_closed_on_multiline_key_traversal_budget(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(check_no_secrets, "MAX_YAML_NODE_VISITS", 1)
+    private_field = "private" + "_key"
+    sample_credential = "0123456789abcdef0123456789abcdef"
+    nested_json = '{"nested": {"deep": {"d": "' + sample_credential + '"}}}'
+    (tmp_path / "deep-private-key.env").write_text(
+        private_field + "=\\n  " + nested_json + "\\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "deep-private-key.env:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_ignores_boolean_values_in_private_key_mapping(
+    tmp_path, monkeypatch
+):
+    private_field = "private" + "_key"
+    (tmp_path / "boolean-private-key.yml").write_text(
+        "wallet:\\n"
+        + "  " + private_field + ":\\n"
+        + "    key: false\\n"
+        + "    value: false\\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any(
+        "boolean-private-key.yml:" in item for item in findings
+    )
+
+
+def test_secret_scanner_ignores_recovery_instructions_but_detects_word_sequences(
+    tmp_path, monkeypatch
+):
+    recovery_field = "mne" + "monic"
+    prose = "Store your recovery phrase offline and never share it"
+    proprietary_phrase = "amber birch cobalt dahlia elm fuchsia"
+    content = (
+        "wallet:\\n"
+        + "  " + recovery_field + ": " + prose + "\\n"
+        + "backup_wallet:\\n"
+        + "  " + recovery_field + ": " + proprietary_phrase + "\\n"
+    )
+    (tmp_path / "recovery-instructions.yml").write_text(
+        content, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any(
+        "recovery-instructions.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "recovery-instructions.yml:4: seed/private-key assignment" in item
+        for item in findings
+    )
