@@ -807,12 +807,12 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
 
 EMBEDDED_RECOVERY_SUFFIXES = {".env", ".toml", ".ini", ".conf", ".cfg", ".properties"}
 EMBEDDED_RECOVERY_ASSIGNMENT = re.compile(
-    r"""(?i)(?<![A-Za-z0-9_])(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)\s*[:=]\s*(?P<value>[^#\r\n]+)"""
+    r"""(?i)(?<![A-Za-z0-9])(?P<key>(?:[A-Za-z_][A-Za-z0-9_.-]*[._-])?(?:mnemonic|seed(?:[_-]?phrase)?|recovery[_-]?phrase))\s*[:=]\s*(?P<value>[^#\r\n]+)"""
 )
 
 JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".ts", ".tsx", ".mjs", ".cjs"}
 TEMPLATE_LITERAL_SOURCE_ASSIGNMENT = re.compile(
-    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*\x60(?P<value>(?:\\.|[^\x60\\]){0,65536}?)\x60"""
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*)?\x60(?P<value>(?:\\.|[^\x60\\]){0,65536}?)\x60"""
 )
 
 
@@ -890,7 +890,7 @@ def scan() -> list[str]:
         )
         embedded_recovery_findings = (
             _find_embedded_recovery_assignments(lines)
-            if suffix in EMBEDDED_RECOVERY_SUFFIXES else {}
+            if suffix in EMBEDDED_RECOVERY_SUFFIXES or name.lower().startswith(".env") else {}
         )
         template_literal_findings = (
             _find_multiline_template_literal_assignments(text)
