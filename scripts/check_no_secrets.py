@@ -757,6 +757,41 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
     return findings
 
 
+JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".ts", ".tsx", ".mjs", ".cjs"}
+# Complete backtick literals may span physical lines; the bounded value keeps
+# pathological inputs from forcing an unbounded scan.
+TEMPLATE_LITERAL_SOURCE_ASSIGNMENT = re.compile(
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*`(?P<value>(?:\\.|[^`\\]){0,65536}?)`"""
+)
+
+
+def _find_multiline_template_literal_assignments(source: str) -> set[int]:
+    """Return key line numbers whose complete JS/TS template literal holds credential material.
+
+    Line-by-line checks never see a recovery phrase split across physical lines
+    of one backtick literal, so the assembled literal is evaluated here.
+    """
+    findings: set[int] = set()
+    for match in TEMPLATE_LITERAL_SOURCE_ASSIGNMENT.finditer(source):
+        key_kind = _credential_key_kind(match.group("key"))
+        value = _mask_template_interpolations(match.group("value")).strip()
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            sensitive = _is_likely_recovery_phrase(value)
+        elif key_kind == "privatekey":
+            sensitive = (
+                re.search(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----", value) is not None
+                or re.search(
+                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                    value,
+                ) is not None
+            )
+        else:
+            sensitive = False
+        if sensitive:
+            findings.add(source.count("\n", 0, match.start("key")) + 1)
+    return findings
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -789,6 +824,10 @@ def scan() -> list[str]:
         triple_quoted_findings = (
             _find_triple_quoted_source_assignments(text)
             if suffix in SOURCE_CODE_SUFFIXES else set()
+        )
+        template_literal_findings = (
+            _find_multiline_template_literal_assignments(text)
+            if suffix in JS_TEMPLATE_LITERAL_SUFFIXES else set()
         )
         documented_recovery_findings = (
             _find_documented_recovery_assignments(lines)
