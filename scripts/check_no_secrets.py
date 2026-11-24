@@ -619,16 +619,26 @@ def scan() -> list[str]:
                             seed_match.group("key"), raw_seed_value
                         )
                     else:
+                        # TRON_SEED_IN_SOURCE may match an assignment embedded
+                        # in a quoted config string (for example
+                        # runtime_config = "mnemonic=amber ..."). In that case
+                        # raw_seed_value begins after the inner key and may only
+                        # have a closing quote. Normalize both ends before the
+                        # recovery-phrase/long-token check.
                         bare_source_value = raw_seed_value.strip().strip('"').strip("'").strip()
-                        numeric_source_value = re.fullmatch(
-                            r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", bare_source_value
-                        ) is not None
-                        sensitive_source_value = (
-                            not numeric_source_value
-                            and re.fullmatch(
-                                r"[A-Za-z0-9_+/=-]{20,}", bare_source_value
-                            ) is not None
-                        )
+                        key_kind = _credential_key_kind(seed_match.group("key"))
+                        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                            sensitive_source_value = _is_likely_recovery_phrase(
+                                bare_source_value
+                            )
+                        else:
+                            sensitive_source_value = (
+                                re.fullmatch(
+                                    r"[A-Za-z0-9_+/=-]{20,}", bare_source_value
+                                ) is not None
+                                and bare_source_value.lower() not in PLACEHOLDERS
+                                and not ANGLE_PLACEHOLDER.fullmatch(bare_source_value)
+                            )
                     if sensitive_source_value:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
