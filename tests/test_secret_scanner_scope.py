@@ -1491,7 +1491,7 @@ def test_secret_scanner_ignores_private_key_identifier_in_js_template_interpolat
         + chr(96)
         + "private_key=${" + dynamic_identifier + "}"
         + chr(96)
-        + ";\\n"
+        + ";\n"
     )
     (tmp_path / "template-dynamic-private-key.js").write_text(
         source, encoding="utf-8"
