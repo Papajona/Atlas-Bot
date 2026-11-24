@@ -621,3 +621,122 @@ def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status
     assert executor.index("if cid is not None and (") < executor.index('if mode == "LIVE":')
     assert 'row.last_error = "Customer identity is pending manual review or remains conflicted"' in executor
 
+def test_customer_without_jwt_email_must_verify_confirmed_auth_even_when_profile_has_email(
+    monkeypatch,
+):
+    import pytest
+    from types import SimpleNamespace
+    from app import main
+
+    profile = SimpleNamespace(
+        id=7,
+        auth_user_id="existing-customer",
+        email="persisted@example.test",
+        display_name="Customer",
+        status="ACTIVE",
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class CallerSession:
+        async def execute(self, _statement):
+            return Result()
+
+    auth_calls = []
+
+    async def claims(_authorization, *, require_aal2=True):
+        assert require_aal2 is False
+        return {"sub": "existing-customer"}
+
+    async def auth_user(_token):
+        auth_calls.append("lookup")
+        return {
+            "id": "existing-customer",
+            "email": "persisted@example.test",
+            "email_confirmed_at": None,
+            "user_metadata": {},
+        }
+
+    monkeypatch.setattr(main, "customer_claims", claims)
+    monkeypatch.setattr(main, "_supabase_user", auth_user)
+
+    with pytest.raises(main.HTTPException) as caught:
+        asyncio.run(
+            main.get_customer(
+                "Bearer verified-token",
+                CallerSession(),
+                require_aal2=False,
+            )
+        )
+
+    assert caught.value.status_code == 403
+    assert auth_calls == ["lookup"]
+
+
+def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tmp_path):
+    from datetime import datetime, timezone
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+    from app.db import StrategyOutcome
+    from app.main import _recent_closed_platform_outcome_returns
+
+    async def run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            async with engine.begin() as connection:
+                await connection.run_sync(StrategyOutcome.__table__.create)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                db.add_all([
+                    StrategyOutcome(
+                        trade_id=10,
+                        sequence=1,
+                        customer_id=None,
+                        strategy="native",
+                        regime="UNKNOWN",
+                        asset="crypto",
+                        symbol="BTC/USDT",
+                        lifecycle_status="CLOSED",
+                        closing_notional=100,
+                        fee_basis_complete=True,
+                        net_return_bps=100,
+                        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    ),
+                    StrategyOutcome(
+                        trade_id=10,
+                        sequence=2,
+                        customer_id=None,
+                        strategy="native",
+                        regime="UNKNOWN",
+                        asset="crypto",
+                        symbol="BTC/USDT",
+                        lifecycle_status="CLOSED",
+                        closing_notional=100,
+                        fee_basis_complete=True,
+                        net_return_bps=250,
+                        created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+                    ),
+                    StrategyOutcome(
+                        trade_id=11,
+                        sequence=1,
+                        customer_id=None,
+                        strategy="native",
+                        regime="UNKNOWN",
+                        asset="crypto",
+                        symbol="ETH/USDT",
+                        lifecycle_status="CLOSED",
+                        closing_notional=100,
+                        fee_basis_complete=True,
+                        net_return_bps=300,
+                        created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+                    ),
+                ])
+                await db.commit()
+                rows = await _recent_closed_platform_outcome_returns(db)
+                assert len(rows) == 2
+                assert {int(row.net_return_bps) for row in rows} == {250, 300}
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
