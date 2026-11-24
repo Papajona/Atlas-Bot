@@ -1467,8 +1467,8 @@ def test_secret_scanner_keeps_scanning_password_beside_block_marker_in_malformed
     password_key = "pass" + "word"
     password_value = "ABCDEFGHIJKLMNOPQRST"
     malformed_yaml = (
-        "broken: [unterminated\\n"
-        + password_key + ": " + password_value + ", seed: |\\n"
+        "broken: [unterminated\n"
+        + password_key + ": " + password_value + ", seed: |\n"
     )
     (tmp_path / "malformed-yaml-with-password.yml").write_text(
         malformed_yaml, encoding="utf-8"
