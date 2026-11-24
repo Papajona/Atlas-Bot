@@ -80,6 +80,28 @@ if settings.database_url.startswith("sqlite"):
     _configure_sqlite_wal(engine, settings.database_url)
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
+# Keep identity quarantine writes out of the finite request-session pool.
+# A conflicted request already holds one connection; if every request in a burst
+# waits for a second connection from the same pool, no request can finish and
+# return its first connection. Reserve one independent PostgreSQL connection for
+# this short row-locked transaction. SQLite retains the normal factory.
+if settings.database_url.startswith("sqlite"):
+    identity_quarantine_engine = None
+    IdentityQuarantineSessionLocal = SessionLocal
+else:
+    identity_quarantine_engine_kwargs = {
+        **engine_kwargs,
+        "pool_size": 1,
+        "max_overflow": 0,
+        "pool_timeout": 30,
+    }
+    identity_quarantine_engine = create_async_engine(
+        settings.database_url, **identity_quarantine_engine_kwargs
+    )
+    IdentityQuarantineSessionLocal = async_sessionmaker(
+        identity_quarantine_engine, expire_on_commit=False, class_=AsyncSession
+    )
+
 
 class Base(DeclarativeBase):
     pass
