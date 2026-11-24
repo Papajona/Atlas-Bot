@@ -166,3 +166,8 @@ def test_disabled_readyz_enforcement_warns_outside_development():
     assert _status(_run(_settings(**staging)), "readyz_enforcement") == []
     assert _status(_run(_settings(**staging, readyz_fail_when_not_ready=False)), "readyz_enforcement") == [pf.WARN]
     assert _status(_run(_settings(readyz_fail_when_not_ready=False)), "readyz_enforcement") == []
+
+
+def test_database_migration_and_fencing_checks_normalize_plain_postgresql_url():
+    source = (ROOT / "scripts" / "paper_preflight.py").read_text(encoding="utf-8")
+    assert source.count("create_async_engine(_async_engine_url(url))") == 2
