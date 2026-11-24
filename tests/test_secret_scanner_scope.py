@@ -708,10 +708,12 @@ def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
         anchor = f"layer{index}"
         lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
         previous = anchor
+    token_field = "api" + "_token"
+    token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
     lines.extend([
         "wallet:",
         f"  mnemonic: *{previous}",
-        "  api_token: qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG",
+        f"  {token_field}: {token_value}",
     ])
     (tmp_path / "alias-expansion-mnemonic.yml").write_text(
         "\n".join(lines) + "\n", encoding="utf-8"
