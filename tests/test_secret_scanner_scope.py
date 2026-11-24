@@ -1540,7 +1540,7 @@ def test_secret_scanner_detects_private_key_after_regex_slashes_in_js_template_i
         + "safe ${/[//]/.test(path)} private_key="
         + private_material
         + chr(96)
-        + ";\\n"
+        + ";\n"
     )
     (tmp_path / "template-regex-private-key.js").write_text(
         source, encoding="utf-8"
