@@ -1088,7 +1088,7 @@ def test_pending_identity_status_is_denied_by_both_protected_customer_gates():
 
 
 @pytest.mark.asyncio
-async def test_paper_staging_rejects_pending_identity_even_after_legacy_conflict_clears(monkeypatch):
+async def test_paper_staging_blocks_persisted_pending_identity_status(monkeypatch):
     from fastapi import HTTPException
     from types import SimpleNamespace
     from app import paper_staging as paper_staging_module
