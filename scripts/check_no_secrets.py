@@ -163,9 +163,51 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                 position += 1
         return len(value)
 
+    def regex_can_start(expression_start: int, position: int) -> bool:
+        """Distinguish a JavaScript regex literal from the division operator."""
+        prefix = value[expression_start:position].rstrip()
+        if not prefix:
+            return True
+        if prefix.endswith("=>"):
+            return True
+        previous = prefix[-1]
+        if previous in "([{,:;=!?&|+-*%^~<>":
+            return True
+        return re.search(
+            r"(?:^|[^A-Za-z0-9_$])(?:return|throw|case|delete|void|typeof|"
+            r"instanceof|in|of|yield|await|else|do)\\s*$",
+            prefix,
+        ) is not None
+
+    def skip_regex_literal(position: int) -> int:
+        """Skip a JavaScript regex, respecting escapes and character classes."""
+        position += 1
+        in_character_class = False
+        while position < len(value):
+            char = value[position]
+            if char == "\\\\":
+                position += 2
+                continue
+            if char == "[" and not in_character_class:
+                in_character_class = True
+            elif char == "]" and in_character_class:
+                in_character_class = False
+            elif char == "/" and not in_character_class:
+                position += 1
+                while position < len(value) and value[position].isalpha():
+                    position += 1
+                return position
+            elif char in "\\r\\n":
+                # Invalid/unterminated regex literal: leave the remainder visible
+                # so the scanner fails closed rather than hiding trailing text.
+                return position
+            position += 1
+        return position
+
     def skip_interpolation(position: int) -> tuple[int, str]:
         brace_depth = 1
         position += 2
+        expression_start = position
         literal_parts: list[str] = []
         while position < len(value):
             char = value[position]
@@ -183,12 +225,15 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                 )
                 continue
             if value.startswith("//", position):
-                newline = value.find("\n", position + 2)
+                newline = value.find("\\n", position + 2)
                 position = len(value) if newline < 0 else newline + 1
                 continue
             if value.startswith("/*", position):
                 closing = value.find("*/", position + 2)
                 position = len(value) if closing < 0 else closing + 2
+                continue
+            if char == "/" and regex_can_start(expression_start, position):
+                position = skip_regex_literal(position)
                 continue
             if char == "{":
                 brace_depth += 1
