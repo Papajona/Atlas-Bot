@@ -1159,3 +1159,65 @@ def test_secret_scanner_detects_hyphenated_yaml_credentials(
         "hyphenated-wallet-credentials.yml:3: seed/private-key assignment" in item
         for item in findings
     )
+
+
+def test_secret_scanner_detects_single_and_multiline_triple_quoted_private_keys(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    token = "0123456789abcdef" * 2
+    source = (
+        private_key_field + ' = """' + token + '"""\n'
+        + "wallet." + private_key_field + " = '''\n"
+        + "    " + token + "\n"
+        + "'''\n"
+    )
+    (tmp_path / "triple-quoted-private-keys.py").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "triple-quoted-private-keys.py:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "triple-quoted-private-keys.py:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_allows_public_jwk_metadata_arrays_in_private_key_array(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    metadata_value = "0123456789abcdef" * 2
+    private_value = "abcdef0123456789" * 2
+    public_jwk_array = (
+        '[{"kty":"EC","crv":"P-256","x":"public-x","y":"public-y",'
+        '"metadata":["' + metadata_value + '"]}]'
+    )
+    private_jwk_array = (
+        '[{"kty":"EC","d":["' + private_value + '"]}]'
+    )
+    (tmp_path / "public-jwk-array-metadata.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + public_jwk_array + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "private-jwk-array-component.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + private_jwk_array + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("public-jwk-array-metadata.yml" in item for item in findings)
+    assert any(
+        "private-jwk-array-component.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
