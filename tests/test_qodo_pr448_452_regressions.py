@@ -423,9 +423,15 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
     assert "not str(profile.display_name or" not in customer
     assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
     assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
-    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in customer
-    assert "await db.commit()" in customer
-    assert "await db.refresh(profile)" in customer
+    quarantine = source[
+        source.index("async def _quarantine_customer_identity_review("):
+        source.index("async def get_customer(")
+    ]
+    assert "await _quarantine_customer_identity_review(profile.id)" in customer
+    assert "await db.commit()" not in customer
+    assert "async with SessionLocal() as quarantine_db" in quarantine
+    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in quarantine
+    assert "await quarantine_db.commit()" in quarantine
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in customer
