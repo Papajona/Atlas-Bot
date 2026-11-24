@@ -1693,3 +1693,18 @@ def test_secret_scanner_detects_recovery_phrase_in_string_raw_tagged_template(
         "tagged-wallet.ts:2: seed/private-key assignment" in item
         for item in findings
     )
+
+
+def test_source_literal_private_key_scanner_allows_exact_fixture_but_flags_unapproved_token():
+    allowed = (
+        '"privateKey": '
+        '"fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz",'
+    )
+    unapproved = (
+        '"privateKey": '
+        '"unapproved_private_key_literal_abcdefghijklmnopqrstuvwxyz",'
+    )
+
+    assert not check_no_secrets._source_literal_contains_sensitive_assignment(allowed)
+    assert check_no_secrets._source_literal_contains_sensitive_assignment(unapproved)
+
