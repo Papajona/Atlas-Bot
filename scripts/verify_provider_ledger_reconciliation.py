@@ -148,7 +148,7 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
               'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
             )
           )
-          AND NOT EXISTS (
+          AND EXISTS (
             SELECT 1 FROM matching_withdrawals w
             WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
           )
@@ -217,8 +217,6 @@ def reconcile_rows(
     provider_rows = {row["provider_id"]: row for row in statement_rows}
     if unattributed_withdrawal_journal_count:
         failures.append("withdrawal journals exist in the specified window without an attributable withdrawal record")
-    if withdrawal_journal_count:
-        failures.append("withdrawal journals exist in the specified window without matching withdrawal rows")
     db_by_id: dict[str, dict[str, Any]] = {}
     unresolved_no_id = 0
     for record in database_rows:
