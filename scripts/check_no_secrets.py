@@ -41,7 +41,7 @@ TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
 )
 DOCUMENTED_RECOVERY_ASSIGNMENT = re.compile(
-    r"""(?i)\b(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)\s*[:=]\s*(?P<value>[^#\r\n]*)"""
+    r"""(?i)(?:[*_]{1,3})?\b(?P<key>mnemonic|seed(?:[_ -]?phrase)?|recovery[_ -]?phrase)(?:[*_]{1,3})?\s*[:=]\s*(?P<value>[^#\r\n]*)"""
 )
 MULTILINE_SEED_KEY = re.compile(
     r"""(?i)^\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
@@ -573,7 +573,17 @@ def _find_documented_recovery_assignments(lines: list[str]) -> dict[int, str]:
         if match is None:
             continue
 
-        candidate = match.group("value").strip().strip('"').strip("'").strip()
+        candidate = (
+            match.group("value")
+            .strip()
+            .strip("`")
+            .strip("*_")
+            .strip('"')
+            .strip("'")
+            .strip("`")
+            .strip("*_")
+            .strip()
+        )
         if not candidate:
             key_indent = len(line) - len(line.lstrip(" \t"))
             value_lines: list[str] = []
