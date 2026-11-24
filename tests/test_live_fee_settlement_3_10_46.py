@@ -1425,3 +1425,67 @@ def test_later_verified_cumulative_fee_restores_open_position_fee_basis():
             assert position.entry_fee_basis_known is True
 
     asyncio.run(with_database(check))
+
+def test_verified_followup_on_entry_cannot_clear_pending_add_on_fee_basis():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=1,
+                signal_id="entry-with-pending-addon",
+                client_order_id="entry-with-pending-addon",
+                side="buy",
+                quantity=1.2,
+                requested_quantity=1.2,
+                filled_quantity=1.0,
+                fee=Decimal("0.06"),
+                fee_reconciliation_pending=False,
+                status="PARTIAL",
+            )
+            db.add(entry)
+            await db.flush()
+            add_on = _trade(
+                customer_id=1,
+                signal_id="pending-addon-fee",
+                client_order_id="pending-addon-fee",
+                side="buy",
+                quantity=0.5,
+                requested_quantity=0.5,
+                filled_quantity=0.5,
+                fee=Decimal("0"),
+                fee_reconciliation_pending=True,
+                status="FILLED",
+                reason=(
+                    '{"fee_basis_lifecycle_entry_trade_ids":['
+                    + str(entry.id)
+                    + ']}'
+                ),
+            )
+            position = Position(
+                customer_id=1,
+                exchange="binance",
+                symbol="BTC/USDT",
+                quantity=1.5,
+                average_entry_price=Decimal("100"),
+                entry_trade_id=entry.id,
+                entry_fee=Decimal("0.05"),
+                entry_fee_basis_known=False,
+            )
+            db.add_all([add_on, position])
+            await db.flush()
+
+            await execution._apply_fill_to_position(
+                db,
+                entry,
+                1.2,
+                100,
+                current_fill_fee=Decimal("0.01"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+            await db.refresh(position)
+
+            assert position.entry_fee == pytest.approx(0.06)
+            assert position.entry_fee_basis_known is False
+            assert add_on.fee_reconciliation_pending is True
+
+    asyncio.run(with_database(check))
