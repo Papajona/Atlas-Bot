@@ -151,7 +151,7 @@ def _mask_template_interpolations(value: str) -> str:
     def skip_quoted(position: int, quote: str) -> int:
         position += 1
         while position < len(value):
-            if value[position] == "\\\\":
+            if value[position] == "\\":
                 position += 2
             elif value[position] == quote:
                 return position + 1
@@ -168,7 +168,7 @@ def _mask_template_interpolations(value: str) -> str:
                 position = skip_quoted(position, char)
                 continue
             if value.startswith("//", position):
-                newline = value.find("\\n", position + 2)
+                newline = value.find("\n", position + 2)
                 position = len(value) if newline < 0 else newline + 1
                 continue
             if value.startswith("/*", position):
@@ -191,7 +191,7 @@ def _mask_template_interpolations(value: str) -> str:
     segment_start = 0
     position = 0
     while position < len(value):
-        if value[position] == "\\\\":
+        if value[position] == "\\":
             # Escaped \${ is template text, not an interpolation.
             position += 2
             continue
