@@ -1120,3 +1120,24 @@ async def test_paper_staging_rejects_pending_identity_even_after_legacy_conflict
 
     assert raised.value.status_code == 409
     assert "paused until legacy customer identities" in raised.value.detail
+
+@pytest.mark.asyncio
+async def test_pending_identity_is_not_effectively_active_after_legacy_conflict_clears(monkeypatch):
+    pending = SimpleNamespace(
+        id=93,
+        auth_user_id="pending-bot-customer",
+        email="customer@example.test",
+        status="PENDING_IDENTITY_REVIEW",
+    )
+
+    async def no_legacy_conflict(_db, _auth_user_id, _email):
+        return False
+
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_legacy_conflict)
+
+    assert await main._customer_profile_effectively_active(object(), pending) is False
+
+    # Only an explicit state transition by the identity-review process reopens
+    # protected API and bot execution gates.
+    pending.status = "ACTIVE"
+    assert await main._customer_profile_effectively_active(object(), pending) is True

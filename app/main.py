@@ -4003,20 +4003,11 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
 
 
 async def _customer_profile_effectively_active(db, profile) -> bool:
-    """Resolve only this pending profile's legacy identity; preserve other inactive states."""
-    status = str(getattr(profile, "status", "") or "").upper()
-    if status == "ACTIVE":
-        return True
-    if status != "PENDING_IDENTITY_REVIEW":
-        return False
-    auth_user_id = str(getattr(profile, "auth_user_id", "") or "")
-    email = str(getattr(profile, "email", "") or "").strip()
-    conflict = (
-        await _legacy_customer_email_conflict(db, auth_user_id, email)
-        if email
-        else await _has_unmapped_legacy_customer_profile(db, auth_user_id)
-    )
-    return not conflict
+    """Require explicit persisted reactivation after a customer identity quarantine."""
+    # A cleared legacy collision is not itself a manual identity-review decision.
+    # Every API, paper-staging and background-execution gate must wait until an
+    # approved review flow persists status=ACTIVE on the customer profile.
+    return str(getattr(profile, "status", "") or "").upper() == "ACTIVE"
 
 
 async def _quarantine_customer_identity_review(profile_id: int) -> bool:
