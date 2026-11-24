@@ -745,6 +745,22 @@ def test_identity_quarantine_has_reserved_pool_for_postgres_requests():
     assert "async with IdentityQuarantineSessionLocal() as quarantine_db" in (
         ROOT / "app/main.py"
     ).read_text(encoding="utf-8")
+    from app.db import (
+        IdentityQuarantineSessionLocal,
+        SessionLocal,
+        engine,
+        identity_quarantine_engine,
+    )
+    assert IdentityQuarantineSessionLocal.kw["bind"] is (
+        identity_quarantine_engine if identity_quarantine_engine is not None else engine
+    )
+    if engine.dialect.name == "postgresql":
+        assert identity_quarantine_engine is not engine
+        assert identity_quarantine_engine.pool.size() == 1
+        assert identity_quarantine_engine.pool._max_overflow == 0
+    else:
+        assert identity_quarantine_engine is None
+        assert IdentityQuarantineSessionLocal is SessionLocal
 
 
 def test_stale_identity_quarantine_denies_protected_customer_access_after_conflict_clears(monkeypatch):
