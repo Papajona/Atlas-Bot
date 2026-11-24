@@ -56,6 +56,12 @@ SOURCE_STRING_LITERAL = re.compile(
     r"""(?P<quote>["'])(?P<value>(?:\\.|[^\\])*?)\1"""
 )
 
+# Match complete Python-style triple-quoted credential assignments before the
+# line-oriented scanner sees only the opening pair of quotes.
+TRIPLE_QUOTED_SOURCE_ASSIGNMENT = re.compile(
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
+)
+
 PLACEHOLDERS = {
     "changeme", "change-me", "example", "placeholder", "your-secret", "your-key",
     "test-password", "verification-password", "verification", "atlas-ci", "fake-key",
@@ -304,14 +310,17 @@ PUBLIC_JWK_METADATA_FIELDS = {
 
 def _structured_private_object_has_material(value) -> bool:
     """Detect nested private JWK material while preserving public metadata exceptions."""
-    stack = [(value, isinstance(value, list))]
-    visited: set[tuple[int, bool]] = set()
+    # A root array under private_key has private scalar entries, but objects
+    # inside that array may be public JWKs. Do not propagate the array's scalar
+    # rule into unknown fields of those objects.
+    stack = [(value, isinstance(value, list), isinstance(value, dict))]
+    visited: set[tuple[int, bool, bool]] = set()
     visits = 0
     while stack:
-        current, scalar_items_are_private = stack.pop()
+        current, scalar_items_are_private, private_context = stack.pop()
         if not isinstance(current, (dict, list)):
             continue
-        identity = (id(current), scalar_items_are_private)
+        identity = (id(current), scalar_items_are_private, private_context)
         if identity in visited:
             continue
         visited.add(identity)
@@ -331,17 +340,22 @@ def _structured_private_object_has_material(value) -> bool:
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
                 if isinstance(item, (dict, list)):
-                    # Keep private context through arbitrarily nested intermediate
-                    # objects/arrays. Explicit public JWK fields override it so
-                    # key_ops:["verify"] and public key components remain harmless.
+                    # Preserve private traversal through containers entered by a
+                    # recognized private field (or within an already-private object).
+                    # Public JWK members always reset that context.
                     child_private = False if field_is_public else (
-                        scalar_items_are_private or field_is_private
+                        private_context or field_is_private
                     )
-                    stack.append((item, child_private))
+                    child_scalar_items_private = child_private and isinstance(item, list)
+                    stack.append((item, child_scalar_items_private, child_private))
         else:
             for item in current:
-                if isinstance(item, (dict, list)):
-                    stack.append((item, scalar_items_are_private))
+                if isinstance(item, dict):
+                    # The containing array makes direct scalar entries sensitive,
+                    # not arbitrary metadata values inside an object element.
+                    stack.append((item, False, private_context))
+                elif isinstance(item, list):
+                    stack.append((item, scalar_items_are_private, private_context))
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
@@ -547,6 +561,36 @@ def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
     return findings
 
 
+def _find_triple_quoted_source_assignments(source: str) -> set[int]:
+    """Return source line numbers containing sensitive triple-quoted assignments."""
+    findings: set[int] = set()
+    for match in TRIPLE_QUOTED_SOURCE_ASSIGNMENT.finditer(source):
+        key_kind = _credential_key_kind(match.group("key"))
+        value = match.group("value").strip()
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            sensitive = _is_likely_recovery_phrase(value)
+        elif key_kind == "privatekey":
+            if value.startswith(("{", "[")):
+                try:
+                    structured = json.loads(value)
+                    sensitive = _structured_private_object_has_material(structured)
+                except (json.JSONDecodeError, RecursionError, _YamlTraversalLimitExceeded):
+                    sensitive = True
+            else:
+                sensitive = (
+                    PRIVATE_KEY.search(value) is not None
+                    or re.search(
+                        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+                        value,
+                    ) is not None
+                )
+        else:
+            sensitive = False
+        if sensitive:
+            findings.add(source.count("\n", 0, match.start()) + 1)
+    return findings
+
+
 def scan() -> list[str]:
     findings=[]
     for path in ROOT.rglob("*"):
@@ -576,7 +620,14 @@ def scan() -> list[str]:
             multiline_seed_findings = _find_multiline_seed_assignments(lines)
         else:
             multiline_seed_findings = {}
+        triple_quoted_findings = (
+            _find_triple_quoted_source_assignments(text)
+            if suffix in SOURCE_CODE_SUFFIXES else set()
+        )
         for lineno,line in enumerate(lines,1):
+            if lineno in triple_quoted_findings:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
             multiline_seed_key = multiline_seed_findings.get(lineno)
             if multiline_seed_key:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
