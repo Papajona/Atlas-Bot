@@ -299,3 +299,36 @@ def test_unreused_order_ids_remain_eligible_for_reconciliation():
     assert MIGRATION["_cross_role_reused_order_ids"](
         role_rows, {100, 200, 300, 400}
     ) == set()
+
+def test_legacy_completed_episode_rows_all_marked_closed_rejoin_with_fill_evidence():
+    rows = [
+        {"trade_id": 7, "sequence": 1, "closing_trade_id": 11, "lifecycle_status": "CLOSED"},
+        {"trade_id": 7, "sequence": 2, "closing_trade_id": 12, "lifecycle_status": "CLOSED"},
+    ]
+    source_trades = {
+        11: {"id": 11, "filled_quantity": "0.4"},
+        12: {"id": 12, "filled_quantity": "0.6"},
+    }
+    episodes = {7: {"entry_quantity": "1", "status": "COMPLETED"}}
+
+    assert MIGRATION["_legacy_closed_rows_are_one_lifecycle"](
+        rows, source_trades, episodes
+    ) is True
+
+
+def test_legacy_closed_rows_keep_reused_entry_lifecycles_separate():
+    rows = [
+        {"trade_id": 7, "sequence": 1, "closing_trade_id": 11, "lifecycle_status": "CLOSED"},
+        {"trade_id": 7, "sequence": 2, "closing_trade_id": 12, "lifecycle_status": "CLOSED"},
+    ]
+    source_trades = {
+        11: {"id": 11, "filled_quantity": "1"},
+        12: {"id": 12, "filled_quantity": "1"},
+    }
+    # The closes account for two units while the completed episode proves one.
+    # This cannot be safely collapsed into a single historical position.
+    episodes = {7: {"entry_quantity": "1", "status": "COMPLETED"}}
+
+    assert MIGRATION["_legacy_closed_rows_are_one_lifecycle"](
+        rows, source_trades, episodes
+    ) is False
