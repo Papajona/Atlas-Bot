@@ -1636,3 +1636,60 @@ def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
     assert check_no_secrets.scan() == []
+
+
+def test_secret_scanner_detects_embedded_recovery_phrase_in_env_local(tmp_path, monkeypatch):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    (tmp_path / ".env.local").write_text(
+        'WALLET_CONFIG="mnemonic=' + phrase + '"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        ".env.local:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_prefixed_recovery_key_in_properties(tmp_path, monkeypatch):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    (tmp_path / "wallet.properties").write_text(
+        "WALLET_MNEMONIC=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet.properties:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_recovery_phrase_in_string_raw_tagged_template(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon\n"
+    phrase += "abandon abandon abandon abandon abandon\nabout"
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: String.raw" + chr(96) + "\n"
+        + phrase
+        + "\n  " + chr(96) + ",\n"
+        "};\n"
+    )
+    (tmp_path / "tagged-wallet.ts").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "tagged-wallet.ts:2: seed/private-key assignment" in item
+        for item in findings
+    )
