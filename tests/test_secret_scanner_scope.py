@@ -1504,3 +1504,28 @@ def test_secret_scanner_ignores_private_key_identifier_in_js_template_interpolat
         "template-dynamic-private-key.js:" in item for item in findings
     )
 
+
+
+def test_secret_scanner_detects_private_key_literal_inside_js_template_interpolation(
+    tmp_path, monkeypatch
+):
+    key_field = "private" + "_key"
+    private_value = "0123456789abcdef0123456789abcdef"
+    source = (
+        "const label = "
+        + chr(96)
+        + key_field + "= + chr(34) + private_value + chr(34) + "
+        + chr(96)
+        + ";\n"
+    )
+    (tmp_path / "template-literal-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "template-literal-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
