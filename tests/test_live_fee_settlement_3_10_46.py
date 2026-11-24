@@ -1013,7 +1013,7 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
                 lifecycle_status="CLOSED", sequence=1,
                 metadata_json=(
                     '{"allocated_entry_fee":"0","closing_fee":"0.02",'
-                    '"entry_fee_order_verified":true,"closing_fee_order_verified":true,"
+                    '"entry_fee_order_verified":true,"closing_fee_order_verified":true,'
                     '"fee_basis_complete":true}'
                 ),
             )
