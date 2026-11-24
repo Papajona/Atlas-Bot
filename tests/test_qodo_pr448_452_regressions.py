@@ -435,7 +435,8 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in customer
-    assert "stale_legacy_quarantine" in customer
+    assert "pending_identity_quarantine" in customer
+    assert "stale_legacy_quarantine" not in customer
 
 
 def test_edge_legacy_identity_offset_paging_has_a_stable_order():
