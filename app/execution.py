@@ -1541,6 +1541,50 @@ async def _apply_reconciled_live_fee_basis(
         episode.updated_at = utcnow()
 
 
+async def _position_has_pending_fee_order(
+    db, entry_trade: Trade, *, exclude_trade_id: int
+) -> bool:
+    """Return True when another unresolved fee order belongs to this position lifecycle."""
+    entry_id = int(entry_trade.id)
+    candidates = (await db.execute(
+        select(Trade).where(
+            Trade.id != int(exclude_trade_id),
+            Trade.customer_id == entry_trade.customer_id,
+            Trade.mode == entry_trade.mode,
+            Trade.exchange == entry_trade.exchange,
+            Trade.symbol == entry_trade.symbol,
+            Trade.side == entry_trade.side,
+            Trade.fee_reconciliation_pending.is_(True),
+        ).order_by(Trade.id)
+    )).scalars().all()
+    for candidate in candidates:
+        try:
+            context = json.loads(candidate.reason or "{}")
+        except (TypeError, ValueError):
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
+        raw_ids = context.get("fee_basis_lifecycle_entry_trade_ids", [])
+        if not isinstance(raw_ids, (list, tuple, set)):
+            raw_ids = []
+        lifecycle_ids: set[int] = set()
+        for value in raw_ids:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if parsed > 0:
+                lifecycle_ids.add(parsed)
+        if lifecycle_ids:
+            if entry_id in lifecycle_ids:
+                return True
+        elif int(candidate.id) > entry_id:
+            # Conservative compatibility for add-on orders created before explicit
+            # lifecycle anchors were persisted.
+            return True
+    return False
+
+
 async def _apply_fill_to_position(
     db, trade: Trade, new_filled: float, fill_price: float,
     *,
@@ -1659,9 +1703,22 @@ async def _apply_fill_to_position(
                 # A verified cumulative fee for this same entry order repairs
                 # earlier unverified partial-fill fees. Add-on orders must not
                 # certify the original entry order's fee basis.
+                position_entry_trade = (
+                    await db.get(Trade, int(position.entry_trade_id))
+                    if position.entry_trade_id is not None else None
+                )
+                unresolved_lifecycle_fee_order = (
+                    await _position_has_pending_fee_order(
+                        db,
+                        position_entry_trade,
+                        exclude_trade_id=int(trade.id),
+                    )
+                    if position_entry_trade is not None else True
+                )
                 same_entry_order_fee_reconciled = (
                     current_fill_fee_verified
                     and not bool(trade.fee_reconciliation_pending)
+                    and not unresolved_lifecycle_fee_order
                     and int(position.entry_trade_id or 0) == int(trade.id)
                     and Decimal(str(position.entry_fee or 0)).quantize(
                         Decimal("0.000001"), rounding=ROUND_HALF_EVEN
@@ -1671,7 +1728,11 @@ async def _apply_fill_to_position(
                 )
                 position.entry_fee_basis_known = bool(
                     same_entry_order_fee_reconciled
-                    or (position.entry_fee_basis_known and current_fill_fee_verified)
+                    or (
+                        position.entry_fee_basis_known
+                        and current_fill_fee_verified
+                        and not unresolved_lifecycle_fee_order
+                    )
                 )
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))
