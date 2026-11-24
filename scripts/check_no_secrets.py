@@ -293,8 +293,14 @@ def _nonempty_private_scalar(value: str) -> bool:
     return True
 
 
+PUBLIC_JWK_METADATA_FIELDS = {
+    "n", "e", "x", "y", "crv", "kty", "keyops", "use", "alg", "kid",
+    "x5c", "x5t", "x5tu", "x5ts256",
+}
+
+
 def _structured_private_object_has_material(value) -> bool:
-    """Detect nested private JWK components without recursively expanding JSON objects."""
+    """Detect nested private JWK material while preserving public metadata exceptions."""
     stack = [(value, isinstance(value, list))]
     visited: set[tuple[int, bool]] = set()
     visits = 0
@@ -314,18 +320,24 @@ def _structured_private_object_has_material(value) -> bool:
         if isinstance(current, dict):
             for key, item in current.items():
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
-                if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
+                field_is_private = normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
+                field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
+                if field_is_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
                 if isinstance(item, (dict, list)):
-                    stack.append((item, normalized_key in PRIVATE_JWK_MATERIAL_FIELDS))
+                    # Keep private context through arbitrarily nested intermediate
+                    # objects/arrays. Explicit public JWK fields override it so
+                    # key_ops:["verify"] and public key components remain harmless.
+                    child_private = False if field_is_public else (
+                        scalar_items_are_private or field_is_private
+                    )
+                    stack.append((item, child_private))
         else:
             for item in current:
-                if isinstance(item, dict):
-                    stack.append((item, False))
-                elif isinstance(item, list):
+                if isinstance(item, (dict, list)):
                     stack.append((item, scalar_items_are_private))
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
@@ -590,12 +602,31 @@ def scan() -> list[str]:
                     source_code
                     and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
                 )
-                if computed_source_value:
-                    # Ignore harmless computed labels, but never suppress a literal
-                    # recovery phrase or long private-key token in a quoted component.
-                    if _has_sensitive_source_literal(
-                        seed_match.group("key"), raw_seed_value
-                    ):
+                if source_code:
+                    # In source code, only literal material (including literals
+                    # inside concatenations/arrays) is a checked-in secret.
+                    # Numeric RNG seeds, parameter defaults, variable references
+                    # and runtime key-generation calls are not credential literals.
+                    if computed_source_value:
+                        sensitive_source_value = _has_sensitive_source_literal(
+                            seed_match.group("key"), raw_seed_value
+                        )
+                    elif SOURCE_STRING_LITERAL.search(raw_seed_value):
+                        sensitive_source_value = _has_sensitive_source_literal(
+                            seed_match.group("key"), raw_seed_value
+                        )
+                    else:
+                        bare_source_value = raw_seed_value.strip().strip('"').strip("'").strip()
+                        numeric_source_value = re.fullmatch(
+                            r"(?:0[xX][0-9a-fA-F]+|[0-9]+)", bare_source_value
+                        ) is not None
+                        sensitive_source_value = (
+                            not numeric_source_value
+                            and re.fullmatch(
+                                r"[A-Za-z0-9_+/=-]{20,}", bare_source_value
+                            ) is not None
+                        )
+                    if sensitive_source_value:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
                 else:

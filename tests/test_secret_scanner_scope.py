@@ -1047,3 +1047,49 @@ def test_secret_scanner_detects_namespaced_recovery_properties(
         "namespaced-recovery.properties",
     ):
         assert any(filename in item for item in findings), filename
+
+
+def test_secret_scanner_detects_nested_private_json_material_through_arrays(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    nested_component = "0123456789abcdef" * 2
+    (tmp_path / "nested-private-json-arrays.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + '    {"value":[{"chunks":["' + nested_component + '"]}]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "nested-public-key-ops.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + '    {"value":[{"key_ops":["verify"]}]}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "nested-private-json-arrays.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("nested-public-key-ops.yml" in item for item in findings)
+
+
+def test_secret_scanner_ignores_nonsecret_seed_parameters_and_runtime_calls(
+    tmp_path, monkeypatch
+):
+    seed_field = "se" + "ed"
+    source = (
+        seed_field + ": int = 17\n"
+        + "bootstrap_mean_ci(returns, samples=100, " + seed_field + "=17)\n"
+        + seed_field + " = bytes.fromhex(args." + seed_field + "_hex.strip())\n"
+        + seed_field + " = secrets.token_bytes(32)\n"
+        + seed_field + " = 59\n"
+        + seed_field + ': str = "atlas-paper-v1"\n'
+    )
+    (tmp_path / "research-seed-defaults.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("research-seed-defaults.py" in item for item in findings)
