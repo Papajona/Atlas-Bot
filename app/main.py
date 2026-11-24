@@ -3286,7 +3286,10 @@ async def _reconciliation_loop():
                             Trade.customer_id.is_(None),
                             Trade.mode == "LIVE",
                             Trade.exchange == settings.default_exchange,
-                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                            or_(
+                                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                                Trade.fee_reconciliation_pending.is_(True),
+                            ),
                         ).limit(1)
                     )).scalar_one_or_none()
                 if unresolved_platform_live_order is None:
