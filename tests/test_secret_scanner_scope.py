@@ -1,3 +1,5 @@
+import json
+
 from scripts import check_no_secrets
 
 
@@ -75,6 +77,44 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
     assert not any("derived-token.py" in item for item in findings)
     assert not any("ci-fixture.yml" in item for item in findings)
     assert not any("verification-fixture.yml" in item for item in findings)
+
+
+def test_secret_scanner_detects_recovery_phrases_after_documentation_labels(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / "wallet-notes.md").write_text(
+        "Wallet mnemonic: " + phrase + "\n", encoding="utf-8"
+    )
+    (tmp_path / "redacted-wallet-notes.md").write_text(
+        "Wallet mnemonic: <example phrase>\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet-notes.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("redacted-wallet-notes.md" in item for item in findings)
+
+
+def test_secret_scanner_detects_escaped_json_private_keys_in_source_literals(
+    tmp_path, monkeypatch
+):
+    token = "0123456789abcdef" * 2
+    payload = '{"private_key": "' + token + '"}'
+    source = "const settings = " + json.dumps(payload) + ";\n"
+    (tmp_path / "escaped-private-key.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "escaped-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
 
 
 def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
