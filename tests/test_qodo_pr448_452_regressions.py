@@ -265,13 +265,15 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index("def _funding_signature_valid")
     ]
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
-    assert "if profile is None:" in get_customer
-    assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
-    assert "await _legacy_customer_email_conflict(db, uid, email)" in get_customer
-    assert "await _customer_profile_effectively_active(guard_db, current_profile)" in source
-    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in get_customer
-    assert "await db.commit()" in get_customer
-    assert "await db.refresh(profile)" in get_customer
+    assert "await _quarantine_customer_identity_review(profile.id)" in get_customer
+    assert "await db.commit()" not in get_customer
+    quarantine = source[
+        source.index("async def _quarantine_customer_identity_review("):
+        source.index("async def get_customer(")
+    ]
+    assert "async with SessionLocal() as quarantine_db" in quarantine
+    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in quarantine
+    assert "await quarantine_db.commit()" in quarantine
     assert "if not identity_review_required:" in get_customer
     assert "allow_identity_review_summary" in get_customer
     assert "PENDING_IDENTITY_REVIEW" in get_customer
@@ -321,12 +323,17 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
         source.index("async def get_customer("):
         source.index("def _funding_signature_valid")
     ]
+    quarantine = source[
+        source.index("async def _quarantine_customer_identity_review("):
+        source.index("async def get_customer(")
+    ]
     assert "not str(profile.display_name or" not in customer
     assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
     assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
-    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in customer
-    assert "await db.commit()" in customer
-    assert "await db.refresh(profile)" in customer
+    assert "await _quarantine_customer_identity_review(profile.id)" in customer
+    assert "await db.commit()" not in customer
+    assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in quarantine
+    assert "await quarantine_db.commit()" in quarantine
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in customer
@@ -627,129 +634,108 @@ def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status
 
 
 
-def test_identity_conflict_is_quarantined_before_identity_summary_returns(monkeypatch):
-    profile = SimpleNamespace(
-        id=501,
-        auth_user_id="identity-conflict-user",
-        email="",
-        display_name="",
-        status="ACTIVE",
-    )
 
-    class Result:
-        def scalar_one_or_none(self):
-            return profile
 
-    class FakeDB:
-        def __init__(self):
-            self.commits = 0
+def test_conflicted_identity_quarantine_commits_without_committing_caller_writes(
+    tmp_path, monkeypatch
+):
+    import pytest
+    from cryptography.fernet import Fernet
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-        async def execute(self, _statement):
-            return Result()
+    from app.config import settings
+    from app.db import Base, CustomerProfile
 
-        async def flush(self):
-            return None
-
-        async def commit(self):
-            self.commits += 1
-
-        async def refresh(self, _instance):
-            return None
-
-    db = FakeDB()
-
-    async def customer_claims(_authorization, *, require_aal2=True):
-        assert require_aal2 is True
-        return {"sub": profile.auth_user_id, "email": ""}
-
-    async def supabase_user(_token):
-        return {
-            "id": profile.auth_user_id,
-            "email": "verified@example.invalid",
-            "email_confirmed_at": "2026-11-24T00:00:00Z",
-        }
-
-    async def legacy_conflict(_db, _uid, _email):
-        return True
-
-    async def unmapped_legacy(_db, _uid):
-        return True
-
-    monkeypatch.setattr(main, "customer_claims", customer_claims)
-    monkeypatch.setattr(main, "_supabase_user", supabase_user)
-    monkeypatch.setattr(main, "_legacy_customer_email_conflict", legacy_conflict)
-    monkeypatch.setattr(main, "_has_unmapped_legacy_customer_profile", unmapped_legacy)
-
-    returned, _claims = asyncio.run(
-        main.get_customer(
-            "Bearer identity-token",
-            db,
-            allow_identity_review_summary=True,
+    async def run():
+        monkeypatch.setattr(settings, "app_encryption_key", Fernet.generate_key().decode())
+        monkeypatch.setattr(settings, "app_encryption_keys_json", "")
+        monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / 'identity-quarantine.db'}",
+            connect_args={"timeout": 15},
         )
-    )
+        try:
+            async with engine.connect() as connection:
+                await connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+                await connection.commit()
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
 
-    assert returned is profile
-    assert profile.status == "PENDING_IDENTITY_REVIEW"
-    assert profile.identity_review_required is True
-    assert db.commits == 1
-    assert asyncio.run(main._customer_profile_effectively_active(db, profile)) is False
+            sessions = async_sessionmaker(
+                engine, expire_on_commit=False, autoflush=False
+            )
+            monkeypatch.setattr(main, "SessionLocal", sessions)
 
+            auth_calls = []
 
-def test_identity_conflict_is_committed_before_customer_access_is_rejected(monkeypatch):
-    profile = SimpleNamespace(
-        id=502,
-        auth_user_id="identity-conflict-denied-user",
-        email="",
-        display_name="",
-        status="ACTIVE",
-    )
+            async def verified_claims(_authorization, *, require_aal2=True):
+                assert require_aal2 is False
+                return {"sub": "existing-customer"}
 
-    class Result:
-        def scalar_one_or_none(self):
-            return profile
+            async def verified_auth_user(_token):
+                auth_calls.append("auth")
+                return {
+                    "id": "existing-customer",
+                    "email": "customer@example.test",
+                    "email_confirmed_at": "2026-11-24T00:00:00Z",
+                    "user_metadata": {},
+                }
 
-    class FakeDB:
-        def __init__(self):
-            self.commits = 0
+            async def conflicting_legacy_identity(_db, _uid, _email):
+                return True
 
-        async def execute(self, _statement):
-            return Result()
+            monkeypatch.setattr(main, "customer_claims", verified_claims)
+            monkeypatch.setattr(main, "_supabase_user", verified_auth_user)
+            monkeypatch.setattr(
+                main, "_legacy_customer_email_conflict", conflicting_legacy_identity
+            )
 
-        async def flush(self):
-            return None
+            async with sessions() as seed_db:
+                profile = CustomerProfile(
+                    auth_user_id="existing-customer",
+                    email="",
+                    display_name="Customer",
+                    status="ACTIVE",
+                )
+                seed_db.add(profile)
+                await seed_db.commit()
+                profile_id = int(profile.id)
 
-        async def commit(self):
-            self.commits += 1
+            async with sessions() as caller_db:
+                unrelated = CustomerProfile(
+                    auth_user_id="unrelated-caller-write",
+                    email="unrelated@example.test",
+                    display_name="Unrelated",
+                    status="ACTIVE",
+                )
+                caller_db.add(unrelated)
+                assert unrelated in caller_db.new
 
-        async def refresh(self, _instance):
-            return None
+                with pytest.raises(main.HTTPException) as caught:
+                    await main.get_customer(
+                        "Bearer verified-token",
+                        caller_db,
+                        require_aal2=False,
+                    )
+                assert caught.value.status_code == 409
+                # The read helper did not commit the caller's pending write.
+                assert unrelated in caller_db.new
+                await caller_db.rollback()
 
-    db = FakeDB()
+            async with sessions() as verify_db:
+                quarantined = await verify_db.get(CustomerProfile, profile_id)
+                assert quarantined is not None
+                assert quarantined.status == "PENDING_IDENTITY_REVIEW"
+                unrelated = (await verify_db.execute(
+                    select(CustomerProfile).where(
+                        CustomerProfile.auth_user_id == "unrelated-caller-write"
+                    )
+                )).scalar_one_or_none()
+                assert unrelated is None
 
-    async def customer_claims(_authorization, *, require_aal2=True):
-        assert require_aal2 is True
-        return {"sub": profile.auth_user_id, "email": ""}
+            assert auth_calls == ["auth"]
+        finally:
+            await engine.dispose()
 
-    async def supabase_user(_token):
-        return {
-            "id": profile.auth_user_id,
-            "email": "verified@example.invalid",
-            "email_confirmed_at": "2026-11-24T00:00:00Z",
-        }
-
-    async def legacy_conflict(_db, _uid, _email):
-        return True
-
-    monkeypatch.setattr(main, "customer_claims", customer_claims)
-    monkeypatch.setattr(main, "_supabase_user", supabase_user)
-    monkeypatch.setattr(main, "_legacy_customer_email_conflict", legacy_conflict)
-
-    try:
-        asyncio.run(main.get_customer("Bearer identity-token", db))
-    except main.HTTPException as exc:
-        assert exc.status_code == 409
-    else:
-        raise AssertionError("Conflicted identity was not rejected")
-
-    assert profile.status == "PENDING_IDENTITY_REVIEW"
-    assert db.commits == 1
+    asyncio.run(run())
