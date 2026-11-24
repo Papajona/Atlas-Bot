@@ -653,29 +653,30 @@ def test_secret_scanner_preserves_repeated_yaml_mnemonic_aliases(
 def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
     tmp_path, monkeypatch
 ):
+    mnemonic_field = "mne" + "monic"
     words = [
         "amber", "birch", "cobalt", "dahlia", "elm",
         "fuchsia", "garden", "harbor", "ivory", "juniper",
     ]
     phrase = " ".join(words)
+    short_phrase = " ".join(words[:6])
     assert not check_no_secrets._is_bip39_wordlist_phrase(phrase)
-
-    short_phrase = "amber birch cobalt dahlia elm fuchsia"
     assert not check_no_secrets._is_bip39_wordlist_phrase(short_phrase)
-    mnemonic_field = "mne" + "monic"
+
+    short_lines = ["wallet:", f"  {mnemonic_field}: {short_phrase}"]
+    block_lines = ["wallet:", f"  {mnemonic_field}: |"]
+    block_lines.extend("    " + word for word in words)
+    env_lines = [mnemonic_field + ":"]
+    env_lines.extend("  " + word for word in words)
 
     (tmp_path / "short-proprietary-recovery.yml").write_text(
-        "wallet:\n  " + mnemonic_field + ": " + short_phrase + "\n",
-        encoding="utf-8",
+        "\n".join(short_lines) + "\n", encoding="utf-8"
     )
     (tmp_path / "proprietary-recovery.yml").write_text(
-        "wallet:\n  " + mnemonic_field + ": |\n"
-        + "".join("    " + word + "\n" for word in words),
-        encoding="utf-8",
+        "\n".join(block_lines) + "\n", encoding="utf-8"
     )
     (tmp_path / "proprietary-recovery.env").write_text(
-        mnemonic_field + ":\n" + "".join("  " + word + "\n" for word in words),
-        encoding="utf-8",
+        "\n".join(env_lines) + "\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
@@ -737,6 +738,7 @@ def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
         anchor = f"layer{index}"
         lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
         previous = anchor
+
     mnemonic_field = "mne" + "monic"
     token_field = "api" + "_token"
     token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
@@ -772,6 +774,7 @@ def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
         anchor = f"layer{index}"
         lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
         previous = anchor
+
     private_field = "private" + "_key"
     token_field = "api" + "_token"
     token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
@@ -795,4 +798,5 @@ def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
         "alias-expansion-private-key.yml:25: seed/private-key assignment" in item
         for item in findings
     )
+
 
