@@ -1493,6 +1493,7 @@ def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered(
 
     asyncio.run(run())
 
+
 def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
     async def check(sessions):
         async with sessions() as db:
@@ -1548,6 +1549,7 @@ def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
             assert position.entry_fee_basis_known is True
 
     asyncio.run(with_database(check))
+
 
 def test_fee_history_uses_binance_trade_id_cursor_for_same_millisecond_pages():
     from datetime import datetime, timezone
