@@ -1529,3 +1529,67 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
         "template-literal-private-key.js:1: seed/private-key assignment" in item
         for item in findings
     )
+
+def test_secret_scanner_detects_recovery_phrase_in_multiline_js_template_literal(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon\n"
+    phrase += "abandon abandon abandon abandon abandon\nabout"
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: " + chr(96) + "\n"
+        + phrase
+        + "\n  " + chr(96) + "\n"
+        "};\n"
+    )
+    (tmp_path / "multiline-wallet.ts").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "multiline-wallet.ts:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_ignores_dynamic_mnemonic_in_multiline_template_literal(
+    tmp_path, monkeypatch
+):
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: " + chr(96) + "\n"
+        "    " + "$" + "{runtimeMnemonicFromSecretManager}\n"
+        "  " + chr(96) + "\n"
+        "};\n"
+    )
+    (tmp_path / "dynamic-wallet.ts").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("dynamic-wallet.ts:" in item for item in findings)
+
+
+def test_secret_scanner_keeps_static_phrase_after_dynamic_multiline_template_expression(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: " + chr(96) + "$" + "{runtimeComment}\n"
+        + phrase
+        + "\n  " + chr(96) + "\n"
+        "};\n"
+    )
+    (tmp_path / "mixed-wallet.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "mixed-wallet.js:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
