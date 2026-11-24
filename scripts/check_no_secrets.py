@@ -175,7 +175,7 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
             return True
         return re.search(
             r"(?:^|[^A-Za-z0-9_$])(?:return|throw|case|delete|void|typeof|"
-            r"instanceof|in|of|yield|await|else|do)\\s*$",
+            r"instanceof|in|of|yield|await|else|do)\s*$",
             prefix,
         ) is not None
 
@@ -185,7 +185,7 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
         in_character_class = False
         while position < len(value):
             char = value[position]
-            if char == "\\\\":
+            if char == "\\":
                 position += 2
                 continue
             if char == "[" and not in_character_class:
@@ -197,7 +197,7 @@ def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
                 while position < len(value) and value[position].isalpha():
                     position += 1
                 return position
-            elif char in "\\r\\n":
+            elif char in "\r\n":
                 # Invalid/unterminated regex literal: leave the remainder visible
                 # so the scanner fails closed rather than hiding trailing text.
                 return position
