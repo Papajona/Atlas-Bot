@@ -1159,3 +1159,23 @@ def test_secret_scanner_detects_hyphenated_yaml_credentials(
         "hyphenated-wallet-credentials.yml:3: seed/private-key assignment" in item
         for item in findings
     )
+
+
+def test_secret_scanner_detects_split_private_key_literals_in_source_assignments(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    first_half = "0123456789abcdef"
+    second_half = "fedcba9876543210"
+    source = (
+        private_key_field + ' = "' + first_half + '" + "' + second_half + '"\n'
+    )
+    (tmp_path / "split-private-key.py").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "split-private-key.py:1: seed/private-key assignment" in item
+        for item in findings
+    )
