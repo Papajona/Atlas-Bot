@@ -4088,7 +4088,14 @@ async def get_customer(
         profile.identity_review_required = identity_review_required
         profile.auth_identity_email = email if identity_review_required else ""
 
+        if identity_review_required:
+            # Persist the quarantine so background trading/executor gates, which
+            # check the stored status, fail closed for this conflicted account.
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            await db.flush()
+
         if identity_review_required and not allow_identity_review_summary:
+            await db.commit()
             raise HTTPException(
                 409,
                 "This customer identity conflicts with an unmapped legacy profile. Manual identity review is required before using this account.",
