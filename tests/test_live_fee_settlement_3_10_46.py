@@ -41,6 +41,70 @@ def _trade(**kw):
     return Trade(**base)
 
 
+
+def test_trade_history_fee_requires_complete_order_matched_fills_in_one_currency():
+    order = {"id": "broker-42", "filled": "0.3"}
+    history = [
+        {
+            "id": "fill-1",
+            "order": "broker-42",
+            "amount": "0.1",
+            "fee": {"cost": "0.02", "currency": "USDT"},
+        },
+        {
+            "id": "fill-2",
+            "info": {"orderId": "broker-42", "qty": "0.2"},
+            "fee": {"cost": "0.04", "currency": "USDT"},
+        },
+        {
+            "id": "other-order-fill",
+            "order": "broker-99",
+            "amount": "9",
+            "fee": {"cost": "5", "currency": "USDT"},
+        },
+    ]
+
+    enriched = execution._merge_authoritative_trade_history_fee(
+        order, history, expected_order_id="broker-42"
+    )
+    assert enriched is not None
+    assert enriched["fees"] == [{"cost": "0.06", "currency": "USDT"}]
+    assert "fee" not in enriched
+
+    incomplete = execution._merge_authoritative_trade_history_fee(
+        order, history[:1], expected_order_id="broker-42"
+    )
+    assert incomplete is None
+
+    mixed_currency = execution._merge_authoritative_trade_history_fee(
+        order,
+        [
+            history[0],
+            {
+                **history[1],
+                "fee": {"cost": "0.04", "currency": "BNB"},
+            },
+        ],
+        expected_order_id="broker-42",
+    )
+    assert mixed_currency is None
+
+
+def test_platform_terminal_fee_pending_orders_remain_in_reconciliation_and_scheduler():
+    execution_source = (ROOT / "app/execution.py").read_text(encoding="utf-8")
+    platform_reconcile = execution_source[
+        execution_source.index("async def reconcile(exchange"):
+        execution_source.index("async def emergency_stop")
+    ]
+    assert "Trade.fee_reconciliation_pending.is_(True)" in platform_reconcile
+
+    main_source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    scheduler = main_source[
+        main_source.index("async def reconcile_crypto_orders"):
+        main_source.index("async def skip_platform_loss_limits_when_live_unavailable")
+    ]
+    assert "Trade.fee_reconciliation_pending.is_(True)" in scheduler
+
 def test_partial_then_full_fill_charges_fee_delta_once_and_replay_is_noop():
     async def check(sessions):
         async with sessions() as db:
