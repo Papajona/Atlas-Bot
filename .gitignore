@@ -37,11 +37,11 @@ dist/
 
 .venv/
 
-# Android signing material and local build config (never commit)
+# Local Android signing material and machine-specific build config; .gitignore only affects untracked files.
+# Already-tracked sensitive files must be explicitly removed with git rm --cached.
 *.jks
 *.keystore
 *.p12
 *.pfx
 local.properties
-google-services.json
 keystore.properties
