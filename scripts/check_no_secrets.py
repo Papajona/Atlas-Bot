@@ -156,6 +156,34 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
         combined,
     ) is not None
 
+def _source_literal_contains_sensitive_assignment(line: str) -> bool:
+    """Inspect quoted source settings for embedded credential assignments."""
+    for literal in SOURCE_STRING_LITERAL.finditer(line):
+        embedded = TRON_SEED_IN_SOURCE.search(literal.group("value"))
+        if embedded is None:
+            continue
+        key_kind = _credential_key_kind(embedded.group("key"))
+        candidate = embedded.group("value").strip().strip('"').strip("'").strip()
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            if _is_likely_recovery_phrase(candidate):
+                return True
+        elif key_kind == "privatekey":
+            if (
+                PRIVATE_KEY.search(candidate)
+                or re.search(
+                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=-]{20,}(?![A-Za-z0-9])",
+                    candidate,
+                )
+            ):
+                return True
+        elif (
+            re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", candidate) is not None
+            and candidate.lower() not in PLACEHOLDERS
+            and not ANGLE_PLACEHOLDER.fullmatch(candidate)
+        ):
+            return True
+    return False
+
 
 BIP39_VALIDATOR = Bip39MnemonicValidator()
 BIP39_WORD_COUNTS = {12, 15, 18, 21, 24}
@@ -585,6 +613,9 @@ def scan() -> list[str]:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
             source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
+            if source_code and _source_literal_contains_sensitive_assignment(line):
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
             is_yaml = path.suffix.lower() in {".yaml", ".yml"}
             seed_match = (
                 TRON_SEED_IN_SOURCE.search(line)
