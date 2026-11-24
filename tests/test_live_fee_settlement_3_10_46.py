@@ -1727,3 +1727,70 @@ def test_unfilled_legacy_pending_order_does_not_quarantine_a_position():
             assert pending_filled is True
 
     asyncio.run(with_database(check))
+
+def test_filled_pending_add_on_anchor_survives_zero_fill_snapshot():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, signal_id="zeroed-entry", client_order_id="zeroed-entry",
+                side="buy", quantity=1.0, requested_quantity=1.0,
+                filled_quantity=1.0, fee=Decimal("0.01"),
+                fee_reconciliation_pending=False, status="FILLED",
+            )
+            close_order = _trade(
+                customer_id=None, signal_id="zeroed-close", client_order_id="zeroed-close",
+                side="sell", quantity=1.0, requested_quantity=1.0,
+                filled_quantity=0.0, fee_reconciliation_pending=False, status="OPEN",
+            )
+            filled_add_on = _trade(
+                customer_id=None, signal_id="zeroed-addon", client_order_id="zeroed-addon",
+                side="buy", quantity=0.5, requested_quantity=0.5,
+                filled_quantity=0.0, fee_reconciliation_pending=True, status="OPEN",
+                reason='{"fee_basis_lifecycle_entry_trade_ids":[]}',
+            )
+            db.add_all([entry, close_order, filled_add_on])
+            await db.flush()
+            # The add-on joined the lifecycle before a later broker poll reported
+            # filled=0. Its persisted lifecycle anchor is the durable fill evidence.
+            filled_add_on.reason = json.dumps({
+                "fee_basis_lifecycle_entry_trade_ids": [entry.id]
+            })
+
+            pending = await execution._position_has_pending_fee_order(
+                db, entry, exclude_trade_id=close_order.id
+            )
+            assert pending is True
+
+    asyncio.run(with_database(check))
+
+
+def test_unfilled_zero_quantity_without_lifecycle_anchor_stays_ignored():
+    async def check(sessions):
+        async with sessions() as db:
+            entry = _trade(
+                customer_id=None, signal_id="valid-entry-no-addon",
+                client_order_id="valid-entry-no-addon", side="buy",
+                filled_quantity=1.0, fee_reconciliation_pending=False,
+                status="FILLED",
+            )
+            close_order = _trade(
+                customer_id=None, signal_id="valid-close-no-addon",
+                client_order_id="valid-close-no-addon", side="sell",
+                filled_quantity=0.0, fee_reconciliation_pending=False,
+                status="OPEN",
+            )
+            unfilled = _trade(
+                customer_id=None, signal_id="never-filled-addon",
+                client_order_id="never-filled-addon", side="buy",
+                filled_quantity=0.0, fee_reconciliation_pending=True,
+                status="OPEN", reason="{}",
+            )
+            db.add_all([entry, close_order, unfilled])
+            await db.flush()
+
+            pending = await execution._position_has_pending_fee_order(
+                db, entry, exclude_trade_id=close_order.id
+            )
+            assert pending is False
+
+    asyncio.run(with_database(check))

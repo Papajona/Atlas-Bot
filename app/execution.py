@@ -1088,7 +1088,7 @@ async def _apply_reconciled_live_fee_basis(
             # on each filled order so reconciliation does not infer fill order
             # from unrelated auto-increment IDs.
             candidates = (await db.execute(
-                select(Trade.id, Trade.reason).where(
+                select(Trade.id, Trade.reason, Trade.filled_quantity).where(
                     Trade.id != trade.id,
                     Trade.customer_id == entry_trade.customer_id,
                     Trade.mode == entry_trade.mode,
@@ -1096,11 +1096,10 @@ async def _apply_reconciled_live_fee_basis(
                     Trade.symbol == entry_trade.symbol,
                     Trade.side == entry_trade.side,
                     Trade.fee_reconciliation_pending.is_(True),
-                    Trade.filled_quantity > 0,
                 )
             )).all()
             pending = False
-            for candidate_id, reason in candidates:
+            for candidate_id, reason, candidate_filled_quantity in candidates:
                 try:
                     candidate_context = json.loads(reason or "{}")
                 except (TypeError, ValueError):
@@ -1126,8 +1125,14 @@ async def _apply_reconciled_live_fee_basis(
                 # a newer position can be filled after this lifecycle's close
                 # even if its order was created between the entry and close.
                 # The legacy boundary is only for pre-anchor orders.
+                try:
+                    legacy_filled_quantity = Decimal(str(candidate_filled_quantity or 0))
+                except (TypeError, ValueError, ArithmeticError):
+                    legacy_filled_quantity = Decimal("0")
                 legacy_in_lifecycle = (
                     not parsed_lifecycle_ids
+                    and legacy_filled_quantity.is_finite()
+                    and legacy_filled_quantity > 0
                     and int(candidate_id) > entry_id
                     and (
                         lifecycle_end_trade_id is None
@@ -1617,7 +1622,6 @@ async def _position_has_pending_fee_order(
             Trade.symbol == entry_trade.symbol,
             Trade.side == entry_trade.side,
             Trade.fee_reconciliation_pending.is_(True),
-            Trade.filled_quantity > 0,
         ).order_by(Trade.id)
     )).scalars().all()
     for candidate in candidates:
@@ -1641,10 +1645,21 @@ async def _position_has_pending_fee_order(
         if lifecycle_ids:
             if entry_id in lifecycle_ids:
                 return True
-        elif int(candidate.id) > entry_id:
-            # Conservative compatibility for add-on orders created before explicit
-            # lifecycle anchors were persisted.
-            return True
+        else:
+            try:
+                legacy_filled_quantity = Decimal(
+                    str(candidate.filled_quantity or 0)
+                )
+            except (TypeError, ValueError, ArithmeticError):
+                legacy_filled_quantity = Decimal("0")
+            if (
+                legacy_filled_quantity.is_finite()
+                and legacy_filled_quantity > 0
+                and int(candidate.id) > entry_id
+            ):
+                # Conservative compatibility for positively-filled legacy
+                # add-ons created before explicit lifecycle anchors were stored.
+                return True
     return False
 
 
