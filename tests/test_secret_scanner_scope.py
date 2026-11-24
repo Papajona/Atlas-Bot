@@ -1529,3 +1529,20 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
         "template-literal-private-key.js:1: seed/private-key assignment" in item
         for item in findings
     )
+
+def test_secret_scanner_detects_mnemonic_embedded_in_quoted_dotenv_value(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / "embedded-wallet.env").write_text(
+        "WALLET_CONFIG='mnemonic: " + phrase + "'\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "embedded-wallet.env:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
