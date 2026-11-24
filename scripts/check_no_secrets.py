@@ -195,12 +195,11 @@ def _credential_key_kind(key: str) -> str:
     return normalized
 
 
-RECOVERY_INSTRUCTION_WORDS = {
-    "write", "down", "store", "safely", "safe", "somewhere", "keep", "your",
-    "these", "words", "word", "should", "must", "please", "never", "share",
-    "copy", "record", "backup", "offline", "secure", "enter", "type",
-    "instructions", "instruction", "recovery", "phrase",
-}
+RECOVERY_INSTRUCTION_PHRASES = (
+    "write down", "store your", "keep your", "never share", "please enter",
+    "copy these", "record your", "these words", "your recovery phrase",
+    "should store", "must write", "do not share",
+)
 
 def _is_bip39_wordlist_phrase(value: str) -> bool:
     """Detect full-length phrases from supported BIP-39 wordlists, even with a bad checksum."""
@@ -237,8 +236,12 @@ def _is_likely_recovery_phrase(value: str) -> bool:
             and not ANGLE_PLACEHOLDER.fullmatch(token)
             and re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", token) is not None
         )
-    normalized_words = [word.lower().strip(".,;:!?()[]{}") for word in words]
-    if any(word in RECOVERY_INSTRUCTION_WORDS for word in normalized_words):
+    normalized_text = " ".join(
+        word.lower().strip(".,;:!?()[]{}") for word in words
+    )
+    # Require a phrase-level instruction pattern; a single common word such
+    # as "safe" or "share" can legitimately occur in proprietary recovery lists.
+    if any(pattern in normalized_text for pattern in RECOVERY_INSTRUCTION_PHRASES):
         return False
     return len(words) >= 6 and all(
         re.fullmatch(r"[A-Za-z][A-Za-z0-9'-]{1,23}", word) is not None
@@ -630,8 +633,22 @@ def scan() -> list[str]:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
                 else:
-                    seed_value = raw_seed_value.strip('"').strip("'").strip().lower()
-                    if seed_value not in PLACEHOLDERS and not ANGLE_PLACEHOLDER.fullmatch(seed_value):
+                    key_kind = _credential_key_kind(seed_match.group("key"))
+                    if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                        # A bare "seed" field is also commonly used for numeric
+                        # RNG defaults. Only flag actual recovery phrases or
+                        # sufficiently long single-token seed material.
+                        normalized_seed_value = raw_seed_value.strip().strip('"').strip("'").strip()
+                        sensitive_seed_value = _is_likely_recovery_phrase(
+                            normalized_seed_value
+                        )
+                    else:
+                        seed_value = raw_seed_value.strip('"').strip("'").strip().lower()
+                        sensitive_seed_value = (
+                            seed_value not in PLACEHOLDERS
+                            and not ANGLE_PLACEHOLDER.fullmatch(seed_value)
+                        )
+                    if sensitive_seed_value:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         continue
             for match in ASSIGNMENT.finditer(line):
