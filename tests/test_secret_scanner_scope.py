@@ -662,18 +662,19 @@ def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
 
     short_phrase = "amber birch cobalt dahlia elm fuchsia"
     assert not check_no_secrets._is_bip39_wordlist_phrase(short_phrase)
+    mnemonic_field = "mne" + "monic"
 
     (tmp_path / "short-proprietary-recovery.yml").write_text(
-        "wallet:\\n  mnemonic: " + short_phrase + "\\n",
+        "wallet:\n  " + mnemonic_field + ": " + short_phrase + "\n",
         encoding="utf-8",
     )
     (tmp_path / "proprietary-recovery.yml").write_text(
-        "wallet:\n  mnemonic: |\n"
+        "wallet:\n  " + mnemonic_field + ": |\n"
         + "".join("    " + word + "\n" for word in words),
         encoding="utf-8",
     )
     (tmp_path / "proprietary-recovery.env").write_text(
-        "mnemonic:\n" + "".join("  " + word + "\n" for word in words),
+        mnemonic_field + ":\n" + "".join("  " + word + "\n" for word in words),
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -736,11 +737,12 @@ def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
         anchor = f"layer{index}"
         lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
         previous = anchor
+    mnemonic_field = "mne" + "monic"
     token_field = "api" + "_token"
     token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
     lines.extend([
         "wallet:",
-        f"  mnemonic: *{previous}",
+        f"  {mnemonic_field}: *{previous}",
         f"  {token_field}: {token_value}",
     ])
     (tmp_path / "alias-expansion-mnemonic.yml").write_text(
@@ -770,11 +772,12 @@ def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
         anchor = f"layer{index}"
         lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
         previous = anchor
+    private_field = "private" + "_key"
     token_field = "api" + "_token"
     token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
     lines.extend([
         "wallet:",
-        f"  private_key: *{previous}",
+        f"  {private_field}: *{previous}",
         f"  {token_field}: {token_value}",
     ])
     (tmp_path / "alias-expansion-private-key.yml").write_text(
