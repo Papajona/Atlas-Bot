@@ -914,9 +914,6 @@ async def _apply_reconciled_live_fee_basis(
     delta_fee = Decimal(str(fee_delta or 0))
     if not delta_fee.is_finite() or delta_fee < 0:
         raise ValueError("reconciled fee delta must be a finite non-negative amount")
-    if delta_fee == 0:
-        return
-
     rows = (await db.execute(
         select(StrategyOutcome)
         .where(or_(
@@ -1296,7 +1293,7 @@ async def _apply_reconciled_live_fee_basis(
             position_entry_fee_delta = delta_fee
             add_on_fee_only = True
 
-    if position_entry_fee_delta:
+    if position_entry_fee_delta or entry_fee_only or add_on_fee_only:
         if position is None:
             raise ValueError(
                 f"cannot attach recovered fee for trade {trade.id} to its position"
@@ -3749,7 +3746,7 @@ async def _order_with_verified_trade_history_fee(
     page_limit: int = 100,
     max_pages: int = 10,
 ) -> dict[str, Any]:
-    """Use bounded, timestamped broker fill-history pages for a pending order."""
+    """Use bounded trade-history pages without skipping fills at a timestamp boundary."""
     if not order:
         return order
     fetch_my_trades = getattr(broker, "fetch_my_trades", None)
@@ -3782,15 +3779,22 @@ async def _order_with_verified_trade_history_fee(
     page_limit = max(1, min(int(page_limit), 100))
     max_pages = max(1, min(int(max_pages), 10))
     collected: list[dict[str, Any]] = []
+    seen_fill_ids: set[str] = set()
     cursor = since
+    from_id_cursor: int | None = None
 
     for _page in range(max_pages):
+        request_params = dict(params)
+        if from_id_cursor is not None:
+            request_params["fromId"] = str(from_id_cursor)
         try:
             page = await asyncio.to_thread(
-                fetch_my_trades, symbol, cursor, page_limit, params
+                fetch_my_trades, symbol, cursor, page_limit, request_params
             )
         except Exception:
-            if not params:
+            # Some CCXT adapters do not expose Binance orderId/fromId filters.
+            # Fall back to time-bounded history only before ID pagination begins.
+            if not request_params or from_id_cursor is not None:
                 return order
             params = {}
             try:
@@ -3801,7 +3805,27 @@ async def _order_with_verified_trade_history_fee(
                 return order
         if not isinstance(page, list) or not page:
             break
-        collected.extend(fill for fill in page if isinstance(fill, dict))
+
+        page_ids: set[str] = set()
+        new_page_ids: set[str] = set()
+        page_numeric_ids: list[int] = []
+        page_has_missing_id = False
+        for fill in page:
+            if not isinstance(fill, dict):
+                continue
+            raw_id = fill.get("id")
+            fill_id = str(raw_id).strip() if raw_id is not None else ""
+            if not fill_id:
+                page_has_missing_id = True
+                continue
+            page_ids.add(fill_id)
+            if fill_id.isdigit():
+                page_numeric_ids.append(int(fill_id))
+            if fill_id not in seen_fill_ids:
+                collected.append(fill)
+                seen_fill_ids.add(fill_id)
+                new_page_ids.add(fill_id)
+
         enriched = _merge_authoritative_trade_history_fee(
             order,
             collected,
@@ -3811,6 +3835,24 @@ async def _order_with_verified_trade_history_fee(
         if enriched is not None:
             return enriched
         if len(page) < page_limit:
+            break
+
+        if exchange_id == "binance":
+            # Binance trade IDs are monotonically increasing and fetchMyTrades
+            # supports fromId. Keep the timestamp unchanged so same-ms fills remain.
+            if page_has_missing_id or len(page_numeric_ids) != len(page_ids):
+                break
+            next_from_id = max(page_numeric_ids) + 1 if page_numeric_ids else None
+            if next_from_id is None or (
+                from_id_cursor is not None and next_from_id <= from_id_cursor
+            ):
+                break
+            from_id_cursor = next_from_id
+            continue
+
+        # Other adapters may page inclusively by timestamp. Keep the boundary,
+        # deduplicate IDs, and stop safely if a full page repeats without progress.
+        if page_has_missing_id or not page_ids or not new_page_ids:
             break
         timestamps = []
         for fill in page:
@@ -3824,8 +3866,8 @@ async def _order_with_verified_trade_history_fee(
                 timestamps.append(stamp)
         if not timestamps:
             break
-        next_cursor = max(timestamps) + 1
-        if cursor is not None and next_cursor <= cursor:
+        next_cursor = max(timestamps)
+        if cursor is not None and next_cursor < cursor:
             break
         cursor = next_cursor
     return order

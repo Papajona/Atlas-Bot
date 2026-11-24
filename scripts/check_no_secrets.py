@@ -37,6 +37,10 @@ SOURCE_CODE_SUFFIXES = {
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
+EMBEDDED_RECOVERY_ASSIGNMENT = re.compile(
+    r"""(?i)(?<![A-Za-z0-9_])(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)\s*[:=]\s*(?P<value>[^#\r\n]+)"""
+)
+EMBEDDED_RECOVERY_SUFFIXES = {".properties", ".ini", ".conf", ".cfg", ".env", ".toml"}
 TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')(?:\s*\+\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_][A-Za-z0-9_.]*))*|[^#\r\n]+)"""
 )
@@ -847,6 +851,25 @@ def scan() -> list[str]:
             if source_code and _source_literal_contains_sensitive_assignment(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
+            if suffix in EMBEDDED_RECOVERY_SUFFIXES and "re.compile" not in line:
+                for embedded_match in EMBEDDED_RECOVERY_ASSIGNMENT.finditer(line):
+                    embedded_value = (
+                        embedded_match.group("value")
+                        .strip()
+                        .strip('"')
+                        .strip("'")
+                        .strip()
+                        .rstrip(";,:")
+                        .strip()
+                    )
+                    if _is_likely_recovery_phrase(embedded_value):
+                        findings.append(
+                            f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment"
+                        )
+                        seed_assignment_found = True
+                        break
+                if seed_assignment_found:
+                    continue
             is_yaml = path.suffix.lower() in {".yaml", ".yml"}
             seed_matches = (
                 list(TRON_SEED_IN_SOURCE.finditer(line))

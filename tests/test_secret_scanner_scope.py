@@ -1593,3 +1593,27 @@ def test_secret_scanner_keeps_static_phrase_after_dynamic_multiline_template_exp
         for item in findings
     )
 
+
+
+def test_secret_scanner_detects_embedded_recovery_phrase_in_quoted_properties_value(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    (tmp_path / "wallet.properties").write_text(
+        'wallet_config="mnemonic: ' + phrase + '"\\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "wallet-placeholder.properties").write_text(
+        'wallet_config="mnemonic: <YOUR_RECOVERY_PHRASE>"\\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet.properties:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("wallet-placeholder.properties:" in item for item in findings)

@@ -1436,6 +1436,7 @@ def test_later_verified_cumulative_fee_restores_open_position_fee_basis():
 
     asyncio.run(with_database(check))
 
+
 def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered():
     from datetime import datetime, timezone
     from types import SimpleNamespace
@@ -1492,3 +1493,106 @@ def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered(
 
     asyncio.run(run())
 
+def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
+    async def check(sessions):
+        async with sessions() as db:
+            trade = _trade(
+                customer_id=None,
+                filled_quantity=0,
+                remaining_quantity=0.2,
+                requested_quantity=0.2,
+                quantity=0.2,
+                status="OPEN",
+                fee=0,
+                fee_reconciliation_pending=False,
+            )
+            db.add(trade)
+            await db.flush()
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                {
+                    "id": "zero-fee-order",
+                    "status": "open",
+                    "filled": 0.1,
+                    "remaining": 0.1,
+                    "average": 100,
+                    "fee": {"cost": "0"},
+                },
+            )
+            await db.commit()
+            assert trade.fee_reconciliation_pending is True
+            position = (await db.execute(select(Position))).scalar_one()
+            assert position.entry_fee_basis_known is False
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                {
+                    "id": "zero-fee-order",
+                    "status": "closed",
+                    "filled": 0.2,
+                    "remaining": 0,
+                    "average": 100,
+                    "fee": {"currency": "USDT", "cost": "0"},
+                },
+            )
+            await db.commit()
+            await db.refresh(position)
+            await db.refresh(trade)
+
+            assert trade.fee_reconciliation_pending is False
+            assert trade.fee == Decimal("0")
+            assert position.entry_fee == Decimal("0")
+            assert position.entry_fee_basis_known is True
+
+    asyncio.run(with_database(check))
+
+def test_fee_history_uses_binance_trade_id_cursor_for_same_millisecond_pages():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    calls = []
+    pages = [
+        [
+            {"id": "1001", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+            {"id": "1002", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+        ],
+        [
+            {"id": "1003", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+            {"id": "1004", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+        ],
+    ]
+
+    class FakeBroker:
+        cfg = SimpleNamespace(exchange_id="binance")
+
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            calls.append((symbol, since, limit, params))
+            return pages.pop(0) if pages else []
+
+    result = asyncio.run(
+        execution._order_with_verified_trade_history_fee(
+            FakeBroker(),
+            {"id": "same-ms-order", "timestamp": 100_000, "filled": "0.4"},
+            symbol="BTC/USDT",
+            expected_order_id="same-ms-order",
+            stored_filled_quantity="0.4",
+            created_at=datetime.fromtimestamp(90, tz=timezone.utc),
+            page_limit=2,
+            max_pages=3,
+        )
+    )
+
+    assert result["fees"] == [{"cost": "0.04", "currency": "USDT"}]
+    assert len(calls) == 2
+    assert calls[0] == ("BTC/USDT", 40_000, 2, {"orderId": "same-ms-order"})
+    assert calls[1] == (
+        "BTC/USDT", 40_000, 2,
+        {"orderId": "same-ms-order", "fromId": "1003"},
+    )
