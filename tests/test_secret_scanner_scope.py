@@ -876,3 +876,106 @@ def test_secret_scanner_distinguishes_public_key_ops_from_private_component_arra
         "private-component-array.yml:2: seed/private-key assignment" in item
         for item in findings
     )
+
+
+def test_secret_scanner_detects_bare_seed_and_recovery_phrase_keys(
+    tmp_path, monkeypatch
+):
+    seed_field = "se" + "ed"
+    recovery_field = "recovery" + "_" + "phrase"
+    words = ["amber", "birch", "cobalt", "dahlia", "elm", "fuchsia"]
+    phrase = " ".join(words)
+    (tmp_path / "bare-seed.yml").write_text(
+        "wallet:\n  " + seed_field + ": " + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "recovery-phrase.yml").write_text(
+        "wallet:\n  " + recovery_field + ": " + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bare-seed.env").write_text(
+        seed_field + ":\n" + "".join("  " + word + "\n" for word in words),
+        encoding="utf-8",
+    )
+    (tmp_path / "recovery-phrase.env").write_text(
+        recovery_field + "=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    for name in ("bare-seed.yml", "recovery-phrase.yml", "bare-seed.env", "recovery-phrase.env"):
+        assert any(name in item for item in findings), name
+
+
+def test_secret_scanner_ignores_instructional_prose_under_mnemonic_key(
+    tmp_path, monkeypatch
+):
+    mnemonic_field = "mne" + "monic"
+    instructional_note = "write down your words and store them safely"
+    (tmp_path / "mnemonic-instructions.yml").write_text(
+        "wallet:\n  " + mnemonic_field + ": " + instructional_note + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("mnemonic-instructions.yml" in item for item in findings)
+
+
+def test_secret_scanner_ignores_boolean_false_under_private_material_fields(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    (tmp_path / "boolean-private-key.yml").write_text(
+        "wallet:\n  " + private_key_field + ":\n    d: false\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "boolean-private-key-false-root.yml").write_text(
+        "wallet:\n  " + private_key_field + ": false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("boolean-private-key.yml" in item for item in findings)
+    assert not any("boolean-private-key-false-root.yml" in item for item in findings)
+
+
+def test_secret_scanner_fails_closed_on_deep_private_json_and_traversal_limit(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    deeply_nested_json = "[" * 1200 + '"leaf"' + "]" * 1200
+    (tmp_path / "deep-private-json.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + deeply_nested_json + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "deep-private-json.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+    limited_root = tmp_path / "limited"
+    limited_root.mkdir()
+    (limited_root / "limited-private-key.env").write_text(
+        private_key_field + ":\n  " + "0123456789abcdef" * 2 + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", limited_root)
+    monkeypatch.setattr(check_no_secrets, "MAX_YAML_NODE_VISITS", 0)
+
+    limited_findings = check_no_secrets.scan()
+
+    assert any(
+        "limited-private-key.env:1: seed/private-key assignment" in item
+        for item in limited_findings
+    )
