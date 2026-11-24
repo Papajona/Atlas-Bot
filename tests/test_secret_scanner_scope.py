@@ -163,6 +163,36 @@ def test_secret_scanner_detects_multiline_documented_wallet_phrases(
     assert not any("redacted-wallet-notes.md" in item for item in findings)
 
 
+def test_secret_scanner_detects_markdown_formatted_recovery_labels_and_values(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / "formatted-label.md").write_text(
+        "**Mnemonic:**\n  " + "\n  ".join(["abandon"] * 11 + ["about"]) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "formatted-value.md").write_text(
+        "Mnemonic: " + chr(96) + phrase + chr(96) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "formatted-redacted.md").write_text(
+        "**Mnemonic:** " + chr(96) + "<redacted>" + chr(96) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "formatted-label.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "formatted-value.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("formatted-redacted.md" in item for item in findings)
+
+
 def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
     tmp_path, monkeypatch
 ):
