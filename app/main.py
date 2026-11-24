@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -4020,8 +4020,13 @@ async def _customer_profile_effectively_active(db, profile) -> bool:
 
 
 async def _quarantine_customer_identity_review(profile_id: int) -> bool:
-    """Persist an identity conflict in an isolated transaction, not the request session."""
+    """Persist an identity conflict in an isolated, short-lock transaction."""
     async with IdentityQuarantineSessionLocal() as quarantine_db:
+        # The quarantine pool is intentionally one connection. Bound the row-lock
+        # wait so a contested profile cannot monopolize that connection and block
+        # unrelated customers queued behind it.
+        if quarantine_db.get_bind().dialect.name == "postgresql":
+            await quarantine_db.execute(text("SET LOCAL lock_timeout = '500ms'"))
         profile = await quarantine_db.get(
             CustomerProfile, int(profile_id), with_for_update=True
         )
@@ -4105,9 +4110,29 @@ async def get_customer(
             # Commit the quarantine through a dedicated transaction. get_customer
             # is also called by read handlers that may share a session with
             # unrelated writes; never commit the caller's request transaction.
-            quarantined = await _quarantine_customer_identity_review(profile.id)
-            if quarantined:
-                profile.status = "PENDING_IDENTITY_REVIEW"
+            try:
+                quarantined = await _quarantine_customer_identity_review(profile.id)
+            except SQLAlchemyError as exc:
+                # Pool acquisition and row-lock timeouts are transient. Do not
+                # admit the identity on a failed quarantine; return a retryable
+                # response so unrelated customer requests are not stranded.
+                logging.getLogger(__name__).warning(
+                    "customer_identity_quarantine_busy profile_id=%s",
+                    profile.id,
+                    exc_info=True,
+                )
+                raise HTTPException(
+                    503,
+                    "Customer identity review is temporarily busy; retry the request.",
+                    headers={"Retry-After": "1"},
+                ) from exc
+            if not quarantined:
+                raise HTTPException(
+                    503,
+                    "Customer identity review could not be persisted; retry the request.",
+                    headers={"Retry-After": "1"},
+                )
+            profile.status = "PENDING_IDENTITY_REVIEW"
         profile.identity_review_required = identity_review_required
         profile.auth_identity_email = email if identity_review_required else ""
 

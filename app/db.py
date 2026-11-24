@@ -94,7 +94,7 @@ else:
         **engine_kwargs,
         "pool_size": 1,
         "max_overflow": 0,
-        "pool_timeout": 30,
+        "pool_timeout": 2,
     }
     identity_quarantine_engine = create_async_engine(
         settings.database_url, **identity_quarantine_engine_kwargs

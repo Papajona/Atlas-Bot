@@ -978,3 +978,88 @@ def test_identity_summary_can_show_pending_status_without_reactivating_account(m
     assert returned.status == "PENDING_IDENTITY_REVIEW"
     assert returned.identity_review_required is False
     assert subscription_calls == []
+
+
+@pytest.mark.asyncio
+async def test_identity_quarantine_row_lock_contention_returns_retryable_response(monkeypatch):
+    from sqlalchemy.exc import SQLAlchemyError
+    from fastapi import HTTPException
+
+    profile = SimpleNamespace(
+        id=987654321,
+        auth_user_id="quarantine-timeout-customer",
+        email="",
+        display_name="",
+        status="ACTIVE",
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class RequestSession:
+        async def execute(self, _statement):
+            return Result()
+
+    async def claims(_authorization, *, require_aal2=True):
+        return {"sub": profile.auth_user_id, "email": "customer@example.test", "aal": "aal2"}
+
+    async def auth_user(_token):
+        return {
+            "id": profile.auth_user_id,
+            "email": "customer@example.test",
+            "email_confirmed_at": "2026-01-01T00:00:00Z",
+            "user_metadata": {},
+        }
+
+    async def legacy_conflict(_db, _uid, _email):
+        return True
+
+    async def timed_out_quarantine(_profile_id):
+        raise SQLAlchemyError("simulated dedicated-pool / row-lock timeout")
+
+    monkeypatch.setattr(main, "customer_claims", claims)
+    monkeypatch.setattr(main, "_supabase_user", auth_user)
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", legacy_conflict)
+    monkeypatch.setattr(main, "_quarantine_customer_identity_review", timed_out_quarantine)
+
+    with pytest.raises(HTTPException) as raised:
+        await main.get_customer("Bearer test-token", RequestSession())
+
+    assert raised.value.status_code == 503
+    assert raised.value.headers["Retry-After"] == "1"
+    assert profile.status == "ACTIVE"
+
+
+def test_identity_quarantine_pool_wait_is_bounded_and_row_lock_timeout_is_short():
+    db_source = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    main_source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    quarantine_config = db_source[
+        db_source.index('identity_quarantine_engine_kwargs = {'):
+        db_source.index('IdentityQuarantineSessionLocal = async_sessionmaker', db_source.index('identity_quarantine_engine_kwargs = {'))
+    ]
+    quarantine_helper = main_source[
+        main_source.index("async def _quarantine_customer_identity_review("):
+        main_source.index("async def get_customer(", main_source.index("async def _quarantine_customer_identity_review("))
+    ]
+    assert '"pool_timeout": 2' in quarantine_config
+    assert "SET LOCAL lock_timeout = '500ms'" in quarantine_helper
+    assert "with_for_update=True" in quarantine_helper
+
+
+def test_pending_identity_status_is_denied_by_both_protected_customer_gates():
+    main_source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    staging_source = (ROOT / "app/paper_staging.py").read_text(encoding="utf-8")
+    customer_gate = main_source[
+        main_source.index("pending_identity_quarantine ="):
+        main_source.index("def _funding_signature_valid")
+    ]
+    staging_gate = staging_source[
+        staging_source.index("identity_review_required = status"):
+        staging_source.index("async def _paper_state_guard")
+    ]
+    assert 'str(profile.status or "").upper() != "ACTIVE"' in customer_gate
+    assert "allow_identity_review_summary and pending_identity_quarantine" in customer_gate
+    assert "raise HTTPException(403, \"Customer account is not active\")" in customer_gate
+    assert "if identity_review_required and not allow_identity_review_summary" in staging_gate
+    assert 'str(getattr(profile, "status", "")).upper() != "ACTIVE"' in staging_gate
