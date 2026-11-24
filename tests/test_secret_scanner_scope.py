@@ -1422,6 +1422,26 @@ def test_secret_scanner_detects_recovery_phrase_in_js_template_literal_with_term
     )
 
 
+def test_secret_scanner_detects_nested_private_key_in_js_template_literal(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_material = "0123456789abcdef" * 2
+    payload = '{"' + private_key_field + '": "' + private_material + '"}'
+    source = "const settings = " + chr(96) + payload + chr(96) + ";\n"
+    (tmp_path / "template-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "template-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_split_private_key_literals_in_source_assignments(
     tmp_path, monkeypatch
 ):
