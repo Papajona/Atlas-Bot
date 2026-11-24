@@ -136,7 +136,6 @@ def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_source_strin
     )
 
 
-
 def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_direct_source_object(
     tmp_path, monkeypatch
 ):
@@ -155,6 +154,8 @@ def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_direct_sourc
         "later-wallet-object.js:1: seed/private-key assignment" in item
         for item in findings
     )
+
+
 
 def test_secret_scanner_detects_multiline_documented_wallet_phrases(
     tmp_path, monkeypatch
