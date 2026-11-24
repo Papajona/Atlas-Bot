@@ -849,3 +849,30 @@ def test_secret_scanner_detects_private_key_json_arrays_and_nested_arrays(
         for item in findings
     )
 
+
+
+def test_secret_scanner_distinguishes_public_key_ops_from_private_component_arrays(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_component = "0123456789abcdef" * 2
+    (tmp_path / "public-key-ops.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + '    {"kty":"EC","crv":"P-256","x":"public-x","y":"public-y",'
+        '"key_ops":["verify"]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "private-component-array.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + '    {"kty":"EC","d":["' + private_component + '"]}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("public-key-ops.yml" in item for item in findings)
+    assert any(
+        "private-component-array.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
