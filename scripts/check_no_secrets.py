@@ -29,18 +29,18 @@ TEXT_SUFFIXES = {
     ".dockerignore", ".conf", ".cfg", ".lock", ".patch",
 }
 SCANNED_TEXT_FILENAMES = {".dockerignore", "Makefile", "Procfile"}
-ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase))["']?\s*[:=]\s*["']?(?P<value>[A-Za-z0-9_+/=.-]{20,})""")
+ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase))["']?\s*[:=]\s*["']?(?P<value>[A-Za-z0-9_+/=.-]{20,})""")
 SOURCE_CODE_SUFFIXES = {
     ".py", ".js", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".kt", ".sh", ".bash"
 }
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
-TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
+TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 TRON_SEED_IN_SOURCE = re.compile(
-    r"""(?i)(?<![A-Za-z0-9_])(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
-) 
+    r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
+)
 MULTILINE_SEED_KEY = re.compile(
-    r"""(?i)^\s*(?:-\s*)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
+    r"""(?i)^\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
 )
 
 SOURCE_STRING_CONCATENATION = re.compile(
@@ -143,7 +143,7 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
         # harmless from this line; fail closed rather than trusting unknown values.
         return True
 
-    normalized_key = key.lower().replace("_", "").replace("-", "")
+    normalized_key = key.rsplit(".", 1)[-1].lower().replace("_", "").replace("-", "")
     if normalized_key in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
         candidates = components + [" ".join(components)]
         return any(_is_likely_recovery_phrase(candidate) for candidate in candidates)
@@ -178,7 +178,7 @@ PRIVATE_JWK_MATERIAL_FIELDS = {
     "secret", "secretkey", "seed", "key", "value", "keymaterial", "pem",
 }
 YAML_CREDENTIAL_KEY = re.compile(
-    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)$"""
+    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)$"""
 )
 
 
@@ -281,7 +281,7 @@ def _nonempty_private_scalar(value: str) -> bool:
 
 
 def _structured_private_object_has_material(value) -> bool:
-    """Detect nested private JWK components without recursively expanding JSON objects."""
+    """Detect private JWK components while keeping public metadata arrays harmless."""
     stack = [(value, isinstance(value, list))]
     visited: set[tuple[int, bool]] = set()
     visits = 0
@@ -301,13 +301,14 @@ def _structured_private_object_has_material(value) -> bool:
         if isinstance(current, dict):
             for key, item in current.items():
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
-                if normalized_key in PRIVATE_JWK_MATERIAL_FIELDS:
+                is_private_component = normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
+                if is_private_component:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
                 if isinstance(item, (dict, list)):
-                    stack.append((item, normalized_key in PRIVATE_JWK_MATERIAL_FIELDS))
+                    stack.append((item, is_private_component))
         else:
             for item in current:
                 if isinstance(item, dict):
@@ -320,7 +321,6 @@ def _structured_private_object_has_material(value) -> bool:
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
     return False
-
 
 def _yaml_node_has_private_material(
     node,
@@ -403,7 +403,7 @@ def _yaml_node_has_private_material(
 
 
 def _yaml_value_is_sensitive(key: str, value_node) -> bool:
-    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.rsplit(".", 1)[-1].lower())
     if normalized_key in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
         try:
             return _is_likely_recovery_phrase(
@@ -482,8 +482,8 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
     ).strip()
     if not candidate or candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
         return False
-    normalized_key = re.sub(r"[^a-z0-9]", "", key.lower())
-    if normalized_key in {"mnemonic", "seedphrase"}:
+    normalized_key = re.sub(r"[^a-z0-9]", "", key.rsplit(".", 1)[-1].lower())
+    if normalized_key in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
         return _is_likely_recovery_phrase(candidate)
     if normalized_key == "privatekey":
         try:
