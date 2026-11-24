@@ -830,6 +830,9 @@ def scan() -> list[str]:
             if suffix in {".md", ".txt"} else {}
         )
         for lineno,line in enumerate(lines,1):
+            # Initialize before the embedded-config path, which may continue
+            # early before the ordinary seed-assignment scan is reached.
+            seed_assignment_found = False
             if lineno in multiline_template_findings:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
@@ -876,7 +879,6 @@ def scan() -> list[str]:
                 if source_code
                 else ([TRON_SEED.search(line)] if not is_yaml or not yaml_parsed else [])
             )
-            seed_assignment_found = False
             if "re.compile" not in line:
                 # A source object can contain several credential properties on
                 # one physical line. Inspect every match so an innocuous first

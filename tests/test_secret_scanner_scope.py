@@ -1617,3 +1617,14 @@ def test_secret_scanner_detects_embedded_recovery_phrase_in_quoted_properties_va
         for item in findings
     )
     assert not any("wallet-placeholder.properties:" in item for item in findings)
+
+
+def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "ordinary.properties").write_text(
+        "service.name=atlas\\nfeature.enabled=true\\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    assert check_no_secrets.scan() == []
