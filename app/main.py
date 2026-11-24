@@ -4152,15 +4152,15 @@ async def get_customer(
                 profile.display_name = name
             await db.flush()
 
-    stale_legacy_quarantine = (
+    pending_identity_quarantine = (
         str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-        and not identity_review_required
     )
     if str(profile.status or "").upper() != "ACTIVE" and not (
-        (allow_identity_review_summary and identity_review_required
-         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW")
-        or stale_legacy_quarantine
+        allow_identity_review_summary and pending_identity_quarantine
     ):
+        # A cleared legacy conflict is not an approval to reactivate the account.
+        # Protected customer APIs remain blocked until an audited flow persists
+        # an explicit transition back to ACTIVE.
         raise HTTPException(403, "Customer account is not active")
     if not identity_review_required:
         await _ensure_customer_subscription(db, profile)
@@ -5702,7 +5702,7 @@ async def customer_me(authorization: str | None = Header(default=None)):
                 "email": getattr(profile, "auth_identity_email", "") or profile.email,
                 "display_name": profile.display_name, "status": (
                     "PENDING_IDENTITY_REVIEW"
-                    if bool(getattr(profile, "identity_review_required", False))
+                    if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
                     else ("ACTIVE" if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW" else profile.status)
                 ),
                 "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
