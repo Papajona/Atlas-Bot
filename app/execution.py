@@ -3938,9 +3938,12 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
             Trade.exchange.in_(list(requested)),
         )
         trades = (await db.execute(query.order_by(Trade.updated_at).limit(200))).scalars().all()
-        snapshots = [(t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id, t.client_order_id) for t in trades]
+        snapshots = [(
+            t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id,
+            t.client_order_id, bool(t.fee_reconciliation_pending), t.filled_quantity,
+        ) for t in trades]
     results = []
-    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id in snapshots:
+    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id, fee_pending, stored_filled in snapshots:
         try:
             if str(exchange).lower() != "binance":
                 raise RuntimeError("Customer live reconciliation is only enabled for Binance isolation")
@@ -3974,6 +3977,14 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                     )
                 results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "order_not_found"})
                 continue
+            if fee_pending:
+                order = await _order_with_verified_trade_history_fee(
+                    broker,
+                    order,
+                    symbol=symbol,
+                    expected_order_id=str(broker_order_id or order.get("id") or ""),
+                    stored_filled_quantity=stored_filled,
+                )
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
@@ -4022,7 +4033,10 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
         if symbol:
             query = query.where(Trade.symbol == symbol)
         trades = (await db.execute(query)).scalars().all()
-        snapshots = [(t.id, t.broker_order_id, t.symbol, t.client_order_id) for t in trades]
+        snapshots = [(
+            t.id, t.broker_order_id, t.symbol, t.client_order_id,
+            bool(t.fee_reconciliation_pending), t.filled_quantity,
+        ) for t in trades]
     results = []
     oanda_changes = None
     oanda_previous_transaction_id = ""
@@ -4056,7 +4070,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     cursor.last_sync_at = utcnow()
                     await db.commit()
                     raise
-    for trade_id, broker_order_id, trade_symbol, cid in snapshots:
+    for trade_id, broker_order_id, trade_symbol, cid, fee_pending, stored_filled in snapshots:
         trade_broker = broker
         try:
             async with SessionLocal() as lookup_db:
@@ -4097,6 +4111,14 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
             if order is None:
                 results.append({"trade_id": trade_id, "resolved": False})
                 continue
+            if fee_pending and not is_oanda:
+                order = await _order_with_verified_trade_history_fee(
+                    trade_broker,
+                    order,
+                    symbol=trade_symbol,
+                    expected_order_id=str(broker_order_id or order.get("id") or ""),
+                    stored_filled_quantity=stored_filled,
+                )
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
