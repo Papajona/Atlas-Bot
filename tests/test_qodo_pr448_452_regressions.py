@@ -590,24 +590,19 @@ def test_later_verified_fee_snapshot_charges_only_unsettled_authoritative_delta(
     assert cumulative == Decimal("0.250000")
     assert trade.fee == Decimal("0.250000")
 
-def test_stale_identity_quarantine_reactivates_only_after_conflict_clears(monkeypatch):
+def test_customer_effective_active_requires_persisted_active_status():
     profile = SimpleNamespace(
         status="PENDING_IDENTITY_REVIEW",
         auth_user_id="customer-auth-id",
         email="customer@example.test",
     )
 
-    async def no_conflict(_db, _auth_user_id, _email):
-        return False
-
-    async def conflict_remains(_db, _auth_user_id, _email):
-        return True
-
-    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_conflict)
-    assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is True
-
-    monkeypatch.setattr(main, "_legacy_customer_email_conflict", conflict_remains)
+    # A cleared legacy conflict is not enough to reactivate a quarantined identity.
     assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is False
+
+    # Only an explicit, persisted ACTIVE transition reopens protected execution.
+    profile.status = "ACTIVE"
+    assert asyncio.run(main._customer_profile_effectively_active(object(), profile)) is True
 
     inactive = SimpleNamespace(status="SUSPENDED", auth_user_id="customer-auth-id", email="customer@example.test")
     assert asyncio.run(main._customer_profile_effectively_active(object(), inactive)) is False
