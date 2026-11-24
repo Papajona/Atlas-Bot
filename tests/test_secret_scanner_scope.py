@@ -800,3 +800,52 @@ def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
     )
 
 
+def test_secret_scanner_detects_single_token_recovery_seed_in_yaml(
+    tmp_path, monkeypatch
+):
+    mnemonic_field = "mne" + "monic"
+    token = "0123456789abcdef" * 4
+    (tmp_path / "single-token-seed.yml").write_text(
+        "\n".join(["wallet:", f"  {mnemonic_field}: {token}"]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "single-token-seed.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_private_key_json_arrays_and_nested_arrays(
+    tmp_path, monkeypatch
+):
+    private_field = "private" + "_key"
+    token = "0123456789abcdef" * 4
+    (tmp_path / "array-private-key.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ": |\n"
+        + '    ["' + token + '"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "nested-array-private-key.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ": |\n"
+        + '    [["' + token + '"]]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "array-private-key.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "nested-array-private-key.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+

@@ -210,6 +210,13 @@ def _is_likely_recovery_phrase(value: str) -> bool:
     # proprietary recovery phrases shorter than BIP-39's standard lengths too,
     # while avoiding ordinary prose and unrelated non-Latin operational notes.
     words = candidate.split()
+    if len(words) == 1:
+        token = words[0]
+        return (
+            token.lower() not in PLACEHOLDERS
+            and not ANGLE_PLACEHOLDER.fullmatch(token)
+            and re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", token) is not None
+        )
     return len(words) >= 6 and all(
         re.fullmatch(r"[A-Za-z][A-Za-z0-9'-]{1,23}", word) is not None
         for word in words
@@ -292,7 +299,15 @@ def _structured_private_object_has_material(value) -> bool:
                 if isinstance(item, (dict, list)):
                     stack.append(item)
         else:
-            stack.extend(item for item in current if isinstance(item, (dict, list)))
+            for item in current:
+                if isinstance(item, (dict, list)):
+                    stack.append(item)
+                elif isinstance(item, str) and _nonempty_private_scalar(item):
+                    # Scalar array members are key material too; ignoring them
+                    # lets private-key JSON arrays pass the scan.
+                    return True
+                elif isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    return True
     return False
 
 
