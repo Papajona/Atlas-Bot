@@ -1234,45 +1234,46 @@ async def _apply_reconciled_live_fee_basis(
                 "remaining position does not match the reversal episode"
             )
 
-    unresolved_entry_quantity = sum(
-        (entry_fill_quantities[row_id] for row_id in unresolved_entry_ids),
-        Decimal("0"),
-    )
-    unresolved_closing_quantity = sum(
-        (closing_fill_quantities[row_id] for row_id in unresolved_closing_ids),
-        Decimal("0"),
-    )
-    unresolved_open_quantity = (
-        remaining_quantity
-        if position is not None and int(position.entry_trade_id or 0) == int(trade.id)
-        else Decimal("0")
-    )
-    unresolved_total_quantity = (
-        unresolved_entry_quantity
-        + unresolved_closing_quantity
-        + unresolved_open_quantity
-    )
-    if unresolved_total_quantity <= Decimal("0.000000000001"):
-        raise ValueError(
-            f"cannot safely allocate recovered fee for trade {trade.id}: "
-            "no unresolved fill quantity can be established"
+    if entry_rows or closing_rows:
+        unresolved_entry_quantity = sum(
+            (entry_fill_quantities[row_id] for row_id in unresolved_entry_ids),
+            Decimal("0"),
         )
-    if not unresolved_total_quantity.is_finite():
-        raise ValueError(
-            f"cannot safely allocate recovered fee for trade {trade.id}: "
-            "unresolved fill quantity is invalid"
+        unresolved_closing_quantity = sum(
+            (closing_fill_quantities[row_id] for row_id in unresolved_closing_ids),
+            Decimal("0"),
         )
+        unresolved_open_quantity = (
+            remaining_quantity
+            if position is not None and int(position.entry_trade_id or 0) == int(trade.id)
+            else Decimal("0")
+        )
+        unresolved_total_quantity = (
+            unresolved_entry_quantity
+            + unresolved_closing_quantity
+            + unresolved_open_quantity
+        )
+        if unresolved_total_quantity <= Decimal("0.000000000001"):
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "no unresolved fill quantity can be established"
+            )
+        if not unresolved_total_quantity.is_finite():
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "unresolved fill quantity is invalid"
+            )
 
-    for row_id in unresolved_entry_ids:
-        quantity = entry_fill_quantities[row_id]
-        entry_fee_by_row[row_id] = delta_fee * quantity / unresolved_total_quantity
-    for row_id in unresolved_closing_ids:
-        quantity = closing_fill_quantities[row_id]
-        closing_fee_by_row[row_id] = delta_fee * quantity / unresolved_total_quantity
-    if unresolved_open_quantity > 0:
-        position_entry_fee_delta = (
-            delta_fee * unresolved_open_quantity / unresolved_total_quantity
-        )
+        for row_id in unresolved_entry_ids:
+            quantity = entry_fill_quantities[row_id]
+            entry_fee_by_row[row_id] = delta_fee * quantity / unresolved_total_quantity
+        for row_id in unresolved_closing_ids:
+            quantity = closing_fill_quantities[row_id]
+            closing_fee_by_row[row_id] = delta_fee * quantity / unresolved_total_quantity
+        if unresolved_open_quantity > 0:
+            position_entry_fee_delta = (
+                delta_fee * unresolved_open_quantity / unresolved_total_quantity
+            )
 
     add_on_fee_only = False
     entry_fee_only = False
