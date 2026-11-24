@@ -206,11 +206,11 @@ def _is_likely_recovery_phrase(value: str) -> bool:
         return True
 
     # Some wallets and providers use proprietary word lists rather than BIP-39.
-    # The key name is already an explicit recovery-secret signal, so retain the
-    # conservative source-code heuristic for 10+ ASCII words. This deliberately
-    # avoids treating unrelated non-Latin operational notes as recovery phrases.
+    # The key name is already an explicit recovery-secret signal. Catch
+    # proprietary recovery phrases shorter than BIP-39's standard lengths too,
+    # while avoiding ordinary prose and unrelated non-Latin operational notes.
     words = candidate.split()
-    return len(words) >= 10 and all(
+    return len(words) >= 6 and all(
         re.fullmatch(r"[A-Za-z][A-Za-z0-9'-]{1,23}", word) is not None
         for word in words
     )
