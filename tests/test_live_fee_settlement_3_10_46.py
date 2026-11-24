@@ -1557,3 +1557,89 @@ def test_zero_filled_snapshot_does_not_hide_anchored_pending_order_from_outcome_
             assert json.loads(outcome.metadata_json)["closing_fee_order_verified"] is True
 
     asyncio.run(with_database(check))
+
+
+def test_terminal_fee_reconciliation_is_bounded_fair_and_keeps_active_orders_eligible(
+    monkeypatch,
+):
+    from datetime import datetime, timedelta, timezone
+
+    batch_size = execution.TERMINAL_FEE_RECONCILIATION_BATCH_SIZE
+    pending_count = batch_size + 5
+    calls = []
+
+    class FailingBroker:
+        def fetch_order(self, broker_order_id, symbol):
+            calls.append(broker_order_id)
+            raise RuntimeError("temporary broker lookup failure")
+
+    broker = FailingBroker()
+
+    async def fake_audit(*args, **kwargs):
+        return None
+
+    async def check(sessions):
+        now = datetime.now(timezone.utc)
+        async with sessions() as db:
+            pending = []
+            for index in range(pending_count):
+                pending.append(
+                    _trade(
+                        customer_id=None,
+                        signal_id=f"terminal-fee-{index}",
+                        client_order_id=f"terminal-fee-client-{index}",
+                        broker_order_id=f"terminal-fee-order-{index}",
+                        quantity=1.0,
+                        requested_quantity=1.0,
+                        filled_quantity=1.0,
+                        remaining_quantity=0.0,
+                        status="FILLED",
+                        fee=Decimal("0"),
+                        fee_reconciliation_pending=True,
+                        updated_at=now - timedelta(seconds=pending_count - index),
+                    )
+                )
+            active = _trade(
+                customer_id=None,
+                signal_id="active-fee-order",
+                client_order_id="active-fee-client",
+                broker_order_id="active-fee-order",
+                quantity=0.2,
+                requested_quantity=0.2,
+                filled_quantity=0.1,
+                remaining_quantity=0.1,
+                status="OPEN",
+                fee=Decimal("0"),
+                fee_reconciliation_pending=True,
+                updated_at=now - timedelta(days=1),
+            )
+            db.add_all([*pending, active])
+            await db.commit()
+            pending_order_ids = {
+                f"terminal-fee-order-{index}" for index in range(pending_count)
+            }
+            active_order_id = "active-fee-order"
+
+        monkeypatch.setattr(execution, "SessionLocal", sessions)
+        monkeypatch.setattr(execution.Broker, "get", lambda _cfg: broker)
+        monkeypatch.setattr(execution, "audit", fake_audit)
+        monkeypatch.setattr(settings, "paper_trading", True)
+        monkeypatch.setattr(settings, "live_trading_enabled", False)
+
+        await execution.reconcile("binance")
+        first_cycle = set(calls)
+        assert active_order_id in first_cycle
+        assert len(first_cycle & pending_order_ids) == batch_size
+        assert len(first_cycle) == batch_size + 1
+
+        calls.clear()
+        await execution.reconcile("binance")
+        second_cycle = set(calls)
+        assert active_order_id in second_cycle
+        assert len(second_cycle) == batch_size + 1
+        # Failed attempts advance the FIFO retry timestamp, so the remaining
+        # five terminal orders are reached on the next cycle rather than being
+        # starved by the first batch.
+        assert pending_order_ids <= first_cycle | second_cycle
+
+    asyncio.run(with_database(check))
