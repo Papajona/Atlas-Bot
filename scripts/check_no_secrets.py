@@ -725,6 +725,7 @@ def scan() -> list[str]:
                 else ([TRON_SEED.search(line)] if not is_yaml or not yaml_parsed else [])
             )
             seed_assignment_found = False
+            yaml_block_scalar_found = False
             if "re.compile" not in line:
                 # A source object can contain several credential properties on
                 # one physical line. Inspect every match so an innocuous first
@@ -741,7 +742,8 @@ def scan() -> list[str]:
                     if yaml_block_scalar:
                         # The indented block was already scanned as a whole above;
                         # the YAML marker itself is not credential material.
-                        continue
+                        yaml_block_scalar_found = True
+                        break
                     computed_source_value = (
                         source_code
                         and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
@@ -801,7 +803,7 @@ def scan() -> list[str]:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         seed_assignment_found = True
                         break
-            if seed_assignment_found:
+            if seed_assignment_found or yaml_block_scalar_found:
                 continue
             for match in ASSIGNMENT.finditer(line):
                 if is_yaml and yaml_parsed:

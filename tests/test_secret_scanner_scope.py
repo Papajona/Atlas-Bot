@@ -144,7 +144,7 @@ def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_direct_sourc
     source = (
         'const settings = { private_key: "example", mnemonic: "'
         + phrase
-        + '" };\\n'
+        + '" };'
     )
     (tmp_path / "later-wallet-object.js").write_text(source, encoding="utf-8")
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -155,7 +155,6 @@ def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_direct_sourc
         "later-wallet-object.js:1: seed/private-key assignment" in item
         for item in findings
     )
-
 
 def test_secret_scanner_detects_multiline_documented_wallet_phrases(
     tmp_path, monkeypatch
