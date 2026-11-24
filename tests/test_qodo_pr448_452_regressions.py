@@ -337,7 +337,8 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in customer
-    assert "stale_legacy_quarantine" in customer
+    assert "pending_identity_quarantine" in customer
+    assert "stale_legacy_quarantine" not in customer
 
 
 def test_edge_legacy_identity_offset_paging_has_a_stable_order():
@@ -739,3 +740,97 @@ def test_conflicted_identity_quarantine_commits_without_committing_caller_writes
             await engine.dispose()
 
     asyncio.run(run())
+
+
+def test_stale_identity_quarantine_denies_protected_customer_access_after_conflict_clears(monkeypatch):
+    import asyncio
+    import pytest
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+
+    profile = SimpleNamespace(
+        id=71,
+        auth_user_id="pending-customer",
+        email="customer@example.test",
+        display_name="Pending customer",
+        status="PENDING_IDENTITY_REVIEW",
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+        async def flush(self):
+            return None
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": "pending-customer", "email": "customer@example.test", "user_metadata": {}}
+
+    async def no_remaining_conflict(_db, _uid, _email):
+        return False
+
+    async def ensure_subscription(_db, _profile):
+        return None
+
+    monkeypatch.setattr(main, "customer_claims", verified_claims)
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_remaining_conflict)
+    monkeypatch.setattr(main, "_ensure_customer_subscription", ensure_subscription)
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(main.get_customer("Bearer test-token", Database()))
+
+    assert raised.value.status_code == 403
+    assert profile.status == "PENDING_IDENTITY_REVIEW"
+
+
+def test_identity_summary_can_show_pending_status_without_reactivating_account(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    profile = SimpleNamespace(
+        id=72,
+        auth_user_id="pending-summary-customer",
+        email="customer@example.test",
+        display_name="Pending customer",
+        status="PENDING_IDENTITY_REVIEW",
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+        async def flush(self):
+            return None
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": "pending-summary-customer", "email": "customer@example.test", "user_metadata": {}}
+
+    async def no_remaining_conflict(_db, _uid, _email):
+        return False
+
+    async def ensure_subscription(_db, _profile):
+        return None
+
+    monkeypatch.setattr(main, "customer_claims", verified_claims)
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_remaining_conflict)
+    monkeypatch.setattr(main, "_ensure_customer_subscription", ensure_subscription)
+
+    returned, claims = asyncio.run(
+        main.get_customer(
+            "Bearer test-token",
+            Database(),
+            allow_identity_review_summary=True,
+        )
+    )
+
+    assert claims["sub"] == "pending-summary-customer"
+    assert returned.status == "PENDING_IDENTITY_REVIEW"
+    assert returned.identity_review_required is False
