@@ -6,6 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+ROOT = Path(__file__).resolve().parents[1]
+
+
 _SPEC = importlib.util.spec_from_file_location("paper_preflight", Path(__file__).resolve().parents[1] / "scripts" / "paper_preflight.py")
 pf = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(pf)
