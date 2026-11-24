@@ -677,6 +677,7 @@ def test_customer_without_jwt_email_must_verify_confirmed_auth_even_when_profile
 
 def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tmp_path):
     from datetime import datetime, timezone
+    from sqlalchemy import event
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from app.db import StrategyOutcome
     from app.main import _recent_closed_platform_outcome_returns
@@ -684,6 +685,11 @@ def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tm
     async def run():
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         try:
+            captured = []
+            def capture_query(conn, cursor, statement, parameters, context, executemany):
+                if "NOT EXISTS" in statement.upper() and "STRATEGY_OUTCOMES" in statement.upper():
+                    captured.append((statement, parameters))
+            event.listen(engine.sync_engine, "before_cursor_execute", capture_query)
             async with engine.begin() as connection:
                 await connection.run_sync(StrategyOutcome.__table__.create)
             sessions = async_sessionmaker(engine, expire_on_commit=False)
@@ -736,6 +742,18 @@ def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tm
                 rows = await _recent_closed_platform_outcome_returns(db)
                 assert len(rows) == 2
                 assert {int(row.net_return_bps) for row in rows} == {250, 300}
+                assert captured, "risk query SQL was not captured"
+                sql, parameters = captured[-1]
+                assert "ROW_NUMBER" not in sql.upper()
+                assert "LIMIT" in sql.upper()
+                connection = await db.connection()
+                plan = (await connection.exec_driver_sql(
+                    "EXPLAIN QUERY PLAN " + sql, parameters
+                )).all()
+                plan_text = " ".join(str(row[-1]) for row in plan)
+                assert "ix_strategy_outcome_platform_closed_recent" in plan_text
+                assert "ix_strategy_outcome_platform_closed_trade_time" in plan_text
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_query)
         finally:
             await engine.dispose()
 
