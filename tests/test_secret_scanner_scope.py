@@ -117,6 +117,52 @@ def test_secret_scanner_detects_escaped_json_private_keys_in_source_literals(
     )
 
 
+def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_source_string(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    payload = (
+        '{"private_key": "example", "mnemonic": "' + phrase + '"}'
+    )
+    source = "const settings = " + json.dumps(payload) + ";\n"
+    (tmp_path / "later-wallet-phrase.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "later-wallet-phrase.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_multiline_documented_wallet_phrases(
+    tmp_path, monkeypatch
+):
+    words = ["abandon"] * 11 + ["about"]
+    markdown = "Wallet mnemonic:\n" + "".join("  " + word + "\n" for word in words)
+    (tmp_path / "wallet-notes.md").write_text(markdown, encoding="utf-8")
+    (tmp_path / "wallet-notes.txt").write_text(
+        "Recovery phrase:\n  " + " ".join(words) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "redacted-wallet-notes.md").write_text(
+        "Wallet mnemonic:\n  <redacted>\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet-notes.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "wallet-notes.txt:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("redacted-wallet-notes.md" in item for item in findings)
+
+
 def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
     tmp_path, monkeypatch
 ):
