@@ -1514,11 +1514,13 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
     source = (
         "const label = "
         + chr(96)
-        + key_field + "= + chr(34) + private_value + chr(34) + "
+        + "${"
+        + chr(34) + key_field + "=" + private_value + chr(34)
+        + "}"
         + chr(96)
-        + ";\n"
+        + ";\\n"
     )
-    (tmp_path / "template-literal-private-key.js").write_text(
+    (tmp_path / "template-interpolated-private-key.js").write_text(
         source, encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -1526,7 +1528,7 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
     findings = check_no_secrets.scan()
 
     assert any(
-        "template-literal-private-key.js:1: seed/private-key assignment" in item
+        "template-interpolated-private-key.js:1: seed/private-key assignment" in item
         for item in findings
     )
 
