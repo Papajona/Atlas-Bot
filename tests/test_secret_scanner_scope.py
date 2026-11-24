@@ -1,3 +1,5 @@
+import json
+
 from scripts import check_no_secrets
 
 
@@ -75,6 +77,120 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
     assert not any("derived-token.py" in item for item in findings)
     assert not any("ci-fixture.yml" in item for item in findings)
     assert not any("verification-fixture.yml" in item for item in findings)
+
+
+def test_secret_scanner_detects_recovery_phrases_after_documentation_labels(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / "wallet-notes.md").write_text(
+        "Wallet mnemonic: " + phrase + "\n", encoding="utf-8"
+    )
+    (tmp_path / "redacted-wallet-notes.md").write_text(
+        "Wallet mnemonic: <example phrase>\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet-notes.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("redacted-wallet-notes.md" in item for item in findings)
+
+
+def test_secret_scanner_detects_escaped_json_private_keys_in_source_literals(
+    tmp_path, monkeypatch
+):
+    token = "0123456789abcdef" * 2
+    payload = '{"private_key": "' + token + '"}'
+    source = "const settings = " + json.dumps(payload) + ";\n"
+    (tmp_path / "escaped-private-key.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "escaped-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_later_mnemonic_after_placeholder_in_source_string(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    payload = (
+        '{"private_key": "example", "mnemonic": "' + phrase + '"}'
+    )
+    source = "const settings = " + json.dumps(payload) + ";\n"
+    (tmp_path / "later-wallet-phrase.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "later-wallet-phrase.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_multiline_documented_wallet_phrases(
+    tmp_path, monkeypatch
+):
+    words = ["abandon"] * 11 + ["about"]
+    markdown = "Wallet mnemonic:\n" + "".join("  " + word + "\n" for word in words)
+    (tmp_path / "wallet-notes.md").write_text(markdown, encoding="utf-8")
+    (tmp_path / "wallet-notes.txt").write_text(
+        "Recovery phrase:\n  " + " ".join(words) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "redacted-wallet-notes.md").write_text(
+        "Wallet mnemonic:\n  <redacted>\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet-notes.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "wallet-notes.txt:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("redacted-wallet-notes.md" in item for item in findings)
+
+
+def test_secret_scanner_detects_markdown_formatted_recovery_labels_and_values(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / "formatted-label.md").write_text(
+        "**Mnemonic:**\n  " + "\n  ".join(["abandon"] * 11 + ["about"]) + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "formatted-value.md").write_text(
+        "Mnemonic: " + chr(96) + phrase + chr(96) + "\n", encoding="utf-8"
+    )
+    (tmp_path / "formatted-redacted.md").write_text(
+        "**Mnemonic:** " + chr(96) + "<redacted>" + chr(96) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "formatted-label.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "formatted-value.md:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert not any("formatted-redacted.md" in item for item in findings)
 
 
 def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
@@ -409,22 +525,6 @@ def test_secret_scanner_detects_seed_phrases_in_quoted_source_mappings_and_strin
 
     assert any("recovery-config.py:2: seed/private-key assignment" in item for item in findings)
     assert any("recovery-config.py:4: seed/private-key assignment" in item for item in findings)
-
-
-def test_secret_scanner_detects_quoted_recovery_phrases_with_js_terminator(
-    tmp_path, monkeypatch
-):
-    phrase = " ".join(["abandon"] * 11 + ["about"])
-    source = 'const settings = "' + "mnemonic" + "=" + phrase + '";\n'
-    (tmp_path / "quoted-recovery-setting.js").write_text(source, encoding="utf-8")
-    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
-
-    findings = check_no_secrets.scan()
-
-    assert any(
-        "quoted-recovery-setting.js:1: seed/private-key assignment" in item
-        for item in findings
-    )
 
 
 def test_repository_secret_scan_ignores_ordinary_notes_string_construction():
@@ -1173,6 +1273,107 @@ def test_secret_scanner_detects_hyphenated_yaml_credentials(
     )
     assert any(
         "hyphenated-wallet-credentials.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_single_and_multiline_triple_quoted_private_keys(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    token = "0123456789abcdef" * 2
+    source = (
+        private_key_field + ' = """' + token + '"""\n'
+        + "wallet." + private_key_field + " = '''\n"
+        + "    " + token + "\n"
+        + "'''\n"
+    )
+    (tmp_path / "triple-quoted-private-keys.py").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "triple-quoted-private-keys.py:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "triple-quoted-private-keys.py:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_allows_public_jwk_metadata_arrays_in_private_key_array(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    metadata_value = "0123456789abcdef" * 2
+    private_value = "abcdef0123456789" * 2
+    public_jwk_array = (
+        '[{"kty":"EC","crv":"P-256","x":"public-x","y":"public-y",'
+        '"metadata":["' + metadata_value + '"]}]'
+    )
+    private_jwk_array = (
+        '[{"kty":"EC","d":["' + private_value + '"]}]'
+    )
+    (tmp_path / "public-jwk-array-metadata.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + public_jwk_array + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "private-jwk-array-component.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + private_jwk_array + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("public-jwk-array-metadata.yml" in item for item in findings)
+    assert any(
+        "private-jwk-array-component.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_prefixed_multiline_triple_quoted_private_keys(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    token = "0123456789abcdef" * 2
+    source = (
+        private_key_field + ' = r"""\n'
+        + "    " + token + "\n"
+        + '"""\n'
+    )
+    (tmp_path / "prefixed-triple-quoted-private-key.py").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "prefixed-triple-quoted-private-key.py:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_quoted_recovery_phrases_with_js_terminator(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    source = 'const settings = "' + "mnemonic" + "=" + phrase + '";\n'
+    (tmp_path / "quoted-recovery-setting.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "quoted-recovery-setting.js:1: seed/private-key assignment" in item
         for item in findings
     )
 
