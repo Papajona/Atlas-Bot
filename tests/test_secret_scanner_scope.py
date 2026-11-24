@@ -1460,3 +1460,25 @@ def test_secret_scanner_detects_split_private_key_literals_in_source_assignments
         "split-private-key.py:1: seed/private-key assignment" in item
         for item in findings
     )
+
+def test_secret_scanner_keeps_scanning_password_beside_block_marker_in_malformed_yaml(
+    tmp_path, monkeypatch
+):
+    password_key = "pass" + "word"
+    password_value = "ABCDEFGHIJKLMNOPQRST"
+    malformed_yaml = (
+        "broken: [unterminated\\n"
+        + password_key + ": " + password_value + ", seed: |\\n"
+    )
+    (tmp_path / "malformed-yaml-with-password.yml").write_text(
+        malformed_yaml, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "malformed-yaml-with-password.yml:2: credential-like assignment" in item
+        for item in findings
+    )
+
