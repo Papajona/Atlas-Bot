@@ -159,19 +159,34 @@ def test_unattributed_withdrawal_journals_block_reconciliation_even_with_provide
 
 
 
-def test_withdrawal_journal_outside_matching_window_blocks_even_with_other_rows():
+def test_other_provider_and_out_of_window_withdrawals_do_not_fail_selected_journal_count():
     matched, unresolved, failures = reconcile_rows(
         [provider_row()],
         [db_row()],
         "sandbox-payout",
         withdrawal_journal_count=1,
+        unattributed_withdrawal_journal_count=0,
     )
     assert matched == 1
     assert unresolved == 0
-    assert any(
-        "withdrawal journals exist in the specified window without matching withdrawal rows" in failure
-        for failure in failures
+    assert not any("withdrawal journal" in failure for failure in failures)
+
+
+def test_orphan_journal_is_reported_once_even_with_scoped_journal_count():
+    _matched, _unresolved, failures = reconcile_rows(
+        [provider_row()],
+        [db_row()],
+        "sandbox-payout",
+        withdrawal_journal_count=0,
+        unattributed_withdrawal_journal_count=1,
     )
+    orphan_failures = [
+        failure for failure in failures if "withdrawal journal" in failure
+    ]
+    assert orphan_failures == [
+        "withdrawal journals exist in the specified window without an attributable withdrawal record"
+    ]
+
 
 
 def test_zero_activity_statement_reports_one_independent_attestation_failure():
