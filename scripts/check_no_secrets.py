@@ -29,13 +29,13 @@ TEXT_SUFFIXES = {
     ".dockerignore", ".conf", ".cfg", ".lock", ".patch",
 }
 SCANNED_TEXT_FILENAMES = {".dockerignore", "Makefile", "Procfile"}
-ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase))["']?\s*[:=]\s*["']?(?P<value>[A-Za-z0-9_+/=.-]{20,})""")
+ASSIGNMENT = re.compile(r"""(?i)(?<![A-Za-z0-9_])["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase))["']?\s*[:=]\s*["']?(?P<value>[A-Za-z0-9_+/=.-]{20,})""")
 SOURCE_CODE_SUFFIXES = {
     ".py", ".js", ".ts", ".tsx", ".mjs", ".cjs", ".java", ".kt", ".sh", ".bash"
 }
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
-TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
+TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
 ) 
@@ -144,7 +144,7 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
         return True
 
     normalized_key = key.lower().replace("_", "").replace("-", "")
-    if normalized_key in {"mnemonic", "seedphrase"}:
+    if normalized_key in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
         candidates = components + [" ".join(components)]
         return any(_is_likely_recovery_phrase(candidate) for candidate in candidates)
 
@@ -178,23 +178,16 @@ PRIVATE_JWK_MATERIAL_FIELDS = {
     "secret", "secretkey", "seed", "key", "value", "keymaterial", "pem",
 }
 YAML_CREDENTIAL_KEY = re.compile(
-    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed[_-]?phrase)$"""
+    r"""(?i)^(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)$"""
 )
-RECOVERY_PROSE_MARKERS = {
-    "backup", "backups", "copy", "copied", "enter", "ensure", "instruction",
-    "instructions", "keep", "never", "offline", "paste", "please", "record",
-    "remember", "restore", "save", "securely", "share", "should", "store",
-    "stored", "type", "use", "write", "written",
-}
-RECOVERY_PROSE_STOPWORDS = {
-    "a", "an", "the", "and", "or", "but", "if", "then", "when", "because",
-    "that", "this", "these", "those", "with", "from", "into", "for", "to",
-    "of", "in", "on", "at", "by", "as", "is", "are", "was", "were", "be",
-    "been", "being", "you", "your", "we", "our", "they", "their", "it",
-    "its", "do", "does", "did", "not", "can", "could", "would", "will",
-    "may", "might", "must",
-}
 
+
+RECOVERY_INSTRUCTION_WORDS = {
+    "write", "down", "store", "safely", "safe", "somewhere", "keep", "your",
+    "these", "words", "word", "should", "must", "please", "never", "share",
+    "copy", "record", "backup", "offline", "secure", "enter", "type",
+    "instructions", "instruction", "recovery", "phrase",
+}
 
 def _is_bip39_wordlist_phrase(value: str) -> bool:
     """Detect full-length phrases from supported BIP-39 wordlists, even with a bad checksum."""
@@ -231,15 +224,8 @@ def _is_likely_recovery_phrase(value: str) -> bool:
             and not ANGLE_PLACEHOLDER.fullmatch(token)
             and re.fullmatch(r"[A-Za-z0-9_+/=-]{20,}", token) is not None
         )
-    normalized_words = [
-        re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", word).lower()
-        for word in words
-    ]
-    # Recovery-field documentation is not wallet material. Avoid flagging
-    # ordinary operator instructions while retaining word-list-like phrases.
-    if any(word in RECOVERY_PROSE_MARKERS for word in normalized_words):
-        return False
-    if sum(word in RECOVERY_PROSE_STOPWORDS for word in normalized_words) >= 2:
+    normalized_words = [word.lower().strip(".,;:!?()[]{}") for word in words]
+    if any(word in RECOVERY_INSTRUCTION_WORDS for word in normalized_words):
         return False
     return len(words) >= 6 and all(
         re.fullmatch(r"[A-Za-z][A-Za-z0-9'-]{1,23}", word) is not None
@@ -287,7 +273,7 @@ def _nonempty_private_scalar(value: str) -> bool:
     if not candidate:
         return False
     normalized = candidate.lower()
-    if normalized in {"null", "none", "~", "false", "true"}:
+    if normalized in {"null", "none", "~", "true", "false"}:
         return False
     if normalized in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
         return False
@@ -357,7 +343,7 @@ def _yaml_node_has_private_material(
     try:
         if isinstance(node, ScalarNode):
             candidate = node.value.strip()
-            if not candidate or candidate.lower() in {"null", "none", "~"}:
+            if not candidate or candidate.lower() in {"null", "none", "~", "true", "false"}:
                 return False
             if candidate.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(candidate):
                 return False
@@ -368,9 +354,12 @@ def _yaml_node_has_private_material(
             if candidate.startswith(("{", "[")):
                 try:
                     structured = json.loads(candidate)
-                except (json.JSONDecodeError, RecursionError):
-                    # Malformed or excessively nested non-empty key objects are
-                    # suspicious; fail closed without aborting the repository scan.
+                except RecursionError:
+                    # Deeply nested JSON key material cannot be inspected safely.
+                    return True
+                except json.JSONDecodeError:
+                    # Malformed non-empty key objects are suspicious; valid empty or
+                    # public-only objects are handled structurally below.
                     return candidate not in {"{}", "[]"}
                 return _structured_private_object_has_material(structured)
             if PRIVATE_KEY.search(candidate):
@@ -449,6 +438,9 @@ def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
     """Parse YAML mappings with iterative, bounded traversal of alias graphs."""
     try:
         roots = list(yaml.compose_all(text, Loader=yaml.SafeLoader))
+    except RecursionError:
+        # The YAML parser itself hit the recursion limit; fail closed.
+        return {1: "YAML parsing recursion limit exceeded"}
     except yaml.YAMLError:
         return None
     findings: dict[int, str] = {}
@@ -499,7 +491,6 @@ def _multiline_seed_material_is_secret(key: str, value_lines: list[str]) -> bool
                 ScalarNode("tag:yaml.org,2002:str", candidate)
             )
         except _YamlTraversalLimitExceeded:
-            # The value is too large to inspect safely; keep the scanner fail-closed.
             return True
     return re.search(
         r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
@@ -602,7 +593,7 @@ def scan() -> list[str]:
             for match in ASSIGNMENT.finditer(line):
                 if is_yaml and yaml_parsed:
                     yaml_key = re.sub(r"[^a-z0-9]", "", match.group("key").lower())
-                    if yaml_key in {"mnemonic", "seedphrase", "privatekey"}:
+                    if yaml_key in {"mnemonic", "seed", "seedphrase", "recoveryphrase", "privatekey"}:
                         # These keys are validated against YAML mapping structure above.
                         # Do not reinterpret the same words inside block-scalar prose.
                         continue
