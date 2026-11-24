@@ -998,3 +998,25 @@ def test_secret_scanner_detects_bare_seed_aliases_in_source_code(
 
     assert any("source-recovery.py:1: seed/private-key assignment" in item for item in findings)
     assert any("source-recovery.py:2: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_detects_namespaced_recovery_keys_in_properties(
+    tmp_path, monkeypatch
+):
+    phrase = "amber birch cobalt dahlia elm fuchsia"
+    (tmp_path / "wallet.properties").write_text(
+        "wallet.mnemonic=" + phrase + "\n"
+        + "account.recovery_phrase=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "namespaced-source.py").write_text(
+        'wallet.mnemonic = "' + phrase + '"\n'
+        + 'account.recovery_phrase = "' + phrase + '"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    for name in ("wallet.properties", "namespaced-source.py"):
+        assert any(name in item for item in findings), name
