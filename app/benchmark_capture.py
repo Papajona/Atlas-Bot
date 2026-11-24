@@ -108,7 +108,7 @@ async def capture_strategy_prompt(
         # transaction aborted when strategy creation continues.
         async with db.begin_nested():
             permissions = await benchmark_capture_permissions(db)
-        if not permissions["can_select"] or not permissions["can_insert"]:
+        if not (permissions["can_select"] and permissions["can_insert"] and permissions["can_delete"]):
             return {"status": "SKIPPED_STORAGE_UNAVAILABLE"}
 
         async with db.begin_nested():
