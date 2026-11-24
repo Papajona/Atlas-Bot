@@ -4005,21 +4005,14 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     return False
 
 
-async def _customer_profile_effectively_active(db, profile) -> bool:
-    """Resolve only this pending profile's legacy identity; preserve other inactive states."""
-    status = str(getattr(profile, "status", "") or "").upper()
-    if status == "ACTIVE":
-        return True
-    if status != "PENDING_IDENTITY_REVIEW":
-        return False
-    auth_user_id = str(getattr(profile, "auth_user_id", "") or "")
-    email = str(getattr(profile, "email", "") or "").strip()
-    conflict = (
-        await _legacy_customer_email_conflict(db, auth_user_id, email)
-        if email
-        else await _has_unmapped_legacy_customer_profile(db, auth_user_id)
-    )
-    return not conflict
+async def _customer_profile_effectively_active(_db, profile) -> bool:
+    """Only an explicitly persisted ACTIVE status authorizes background execution.
+
+    Clearing a legacy identity conflict is not an audited reactivation. A profile
+    that remains PENDING_IDENTITY_REVIEW stays blocked until a reviewed flow
+    persists status=ACTIVE.
+    """
+    return str(getattr(profile, "status", "") or "").upper() == "ACTIVE"
 
 
 async def _quarantine_customer_identity_review(profile_id: int) -> bool:
