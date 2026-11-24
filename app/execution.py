@@ -268,7 +268,7 @@ async def _acquire_live_execution_lease(ttl_seconds: int = 30) -> tuple[str, int
             raise RiskBlocked("Another live execution worker currently holds the submit lease")
         row.owner_id = _EXECUTION_OWNER
         row.fencing_token = int(row.fencing_token or 0) + 1
-        row.expires_at = now + __import__("datetime").timedelta(seconds=max(5, int(ttl_seconds)))
+        row.expires_at = now + timedelta(seconds=max(5, int(ttl_seconds)))
         row.updated_at = now
         token = int(row.fencing_token)
         await db.commit()
@@ -382,7 +382,7 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
 
     recent_q = (
         select(OrderCommand)
-        .where(OrderCommand.updated_at >= datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=5))
+        .where(OrderCommand.updated_at >= datetime.now(timezone.utc) - timedelta(minutes=5))
         .order_by(OrderCommand.updated_at.desc())
         .limit(window)
     )
