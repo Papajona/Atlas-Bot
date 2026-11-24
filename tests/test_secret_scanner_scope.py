@@ -1126,3 +1126,36 @@ def test_secret_scanner_distinguishes_numeric_seed_defaults_from_secret_material
     assert any("literal-seed-material.env:1: seed/private-key assignment" in item for item in findings)
     assert any("proprietary-safe-word.env:1: seed/private-key assignment" in item for item in findings)
     assert not any("recovery-instructions.env" in item for item in findings)
+
+def test_secret_scanner_detects_hyphenated_yaml_credentials(
+    tmp_path, monkeypatch
+):
+    private_key = "private" + "-" + "key"
+    mnemonic_key = "mne" + "monic"
+    recovery_key = "recovery" + "-" + "phrase"
+    private_material = "0123456789abcdef" * 2
+    phrase = "amber birch cobalt dahlia elm safe"
+    content = (
+        "wallet-" + private_key + ": " + private_material + "\n"
+        + "wallet-" + mnemonic_key + ": " + phrase + "\n"
+        + "account.wallet-" + recovery_key + ": " + phrase + "\n"
+    )
+    (tmp_path / "hyphenated-wallet-credentials.yml").write_text(
+        content, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "hyphenated-wallet-credentials.yml:1: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "hyphenated-wallet-credentials.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "hyphenated-wallet-credentials.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
