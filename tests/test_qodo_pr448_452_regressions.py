@@ -301,7 +301,7 @@ def test_conflicted_identity_quarantine_commits_without_committing_caller_writes
             sessions = async_sessionmaker(
                 engine, expire_on_commit=False, autoflush=False
             )
-            monkeypatch.setattr(main, "SessionLocal", sessions)
+            monkeypatch.setattr(main, "IdentityQuarantineSessionLocal", sessions)
 
             auth_calls = []
 
@@ -429,7 +429,7 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
     ]
     assert "await _quarantine_customer_identity_review(profile.id)" in customer
     assert "await db.commit()" not in customer
-    assert "async with SessionLocal() as quarantine_db" in quarantine
+    assert "async with IdentityQuarantineSessionLocal() as quarantine_db" in quarantine
     assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in quarantine
     assert "await quarantine_db.commit()" in quarantine
     assert "profile.identity_review_required = identity_review_required" in customer
@@ -733,6 +733,18 @@ def test_adaptive_and_live_executor_gates_use_effective_customer_identity_status
 
 
 
+
+
+def test_identity_quarantine_has_reserved_pool_for_postgres_requests():
+    source = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    assert "identity_quarantine_engine_kwargs" in source
+    assert '"pool_size": 1' in source
+    assert '"max_overflow": 0' in source
+    assert "IdentityQuarantineSessionLocal = async_sessionmaker(" in source
+    assert "IdentityQuarantineSessionLocal = SessionLocal" in source
+    assert "async with IdentityQuarantineSessionLocal() as quarantine_db" in (
+        ROOT / "app/main.py"
+    ).read_text(encoding="utf-8")
 
 
 def test_stale_identity_quarantine_denies_protected_customer_access_after_conflict_clears(monkeypatch):
