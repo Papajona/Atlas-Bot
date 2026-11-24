@@ -4019,6 +4019,22 @@ async def _customer_profile_effectively_active(db, profile) -> bool:
     return not conflict
 
 
+async def _quarantine_customer_identity_review(profile_id: int) -> bool:
+    """Persist an identity conflict in an isolated transaction, not the request session."""
+    async with SessionLocal() as quarantine_db:
+        profile = await quarantine_db.get(
+            CustomerProfile, int(profile_id), with_for_update=True
+        )
+        if profile is None:
+            return False
+        status = str(profile.status or "").upper()
+        if status == "ACTIVE":
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            await quarantine_db.commit()
+            return True
+        return status == "PENDING_IDENTITY_REVIEW"
+
+
 async def get_customer(
     authorization: str | None,
     db,
@@ -4086,13 +4102,12 @@ async def get_customer(
                 else await _has_unmapped_legacy_customer_profile(db, uid)
             )
         if identity_review_required and str(profile.status or "").upper() == "ACTIVE":
-            # Quarantine the persisted profile before returning a conflict. A 409
-            # alone is not enough: background bot/executor gates read this status
-            # in independent transactions and must stop the conflicted account.
-            profile.status = "PENDING_IDENTITY_REVIEW"
-            await db.flush()
-            await db.commit()
-            await db.refresh(profile)
+            # Commit the quarantine through a dedicated transaction. get_customer
+            # is also called by read handlers that may share a session with
+            # unrelated writes; never commit the caller's request transaction.
+            quarantined = await _quarantine_customer_identity_review(profile.id)
+            if quarantined:
+                profile.status = "PENDING_IDENTITY_REVIEW"
         profile.identity_review_required = identity_review_required
         profile.auth_identity_email = email if identity_review_required else ""
 
