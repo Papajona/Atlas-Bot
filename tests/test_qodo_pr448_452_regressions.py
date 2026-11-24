@@ -666,7 +666,7 @@ def test_conflicted_identity_quarantine_commits_without_committing_caller_writes
             sessions = async_sessionmaker(
                 engine, expire_on_commit=False, autoflush=False
             )
-            monkeypatch.setattr(main, "SessionLocal", sessions)
+            monkeypatch.setattr(main, "IdentityQuarantineSessionLocal", sessions)
 
             auth_calls = []
 
@@ -740,6 +740,18 @@ def test_conflicted_identity_quarantine_commits_without_committing_caller_writes
             await engine.dispose()
 
     asyncio.run(run())
+
+
+def test_identity_quarantine_has_reserved_pool_for_postgres_requests():
+    source = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    assert "identity_quarantine_engine_kwargs" in source
+    assert '"pool_size": 1' in source
+    assert '"max_overflow": 0' in source
+    assert "IdentityQuarantineSessionLocal = async_sessionmaker(" in source
+    assert "IdentityQuarantineSessionLocal = SessionLocal" in source
+    assert "async with IdentityQuarantineSessionLocal() as quarantine_db" in (
+        ROOT / "app/main.py"
+    ).read_text(encoding="utf-8")
 
 
 def test_stale_identity_quarantine_denies_protected_customer_access_after_conflict_clears(monkeypatch):
