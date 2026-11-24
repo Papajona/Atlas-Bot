@@ -1514,7 +1514,7 @@ def test_secret_scanner_detects_private_key_literal_inside_js_template_interpola
     source = (
         "const label = "
         + chr(96)
-        + key_field + "= + chr(34) + private_value + chr(34) + "
+        + key_field + "=" + "$" + "{" + chr(34) + private_value + chr(34) + "}"
         + chr(96)
         + ";\n"
     )
