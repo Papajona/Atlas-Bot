@@ -1,7 +1,6 @@
 """Consent-gated encryption and retention for strategy benchmark submissions."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -85,7 +84,7 @@ async def capture_strategy_prompt(
     if not prompt or not isinstance(prompt, str):
         return {"status": "SKIPPED_INVALID_PROMPT"}
     permissions = await benchmark_capture_permissions(db)
-    if not permissions["can_select"] or not permissions["can_insert"]:
+    if not (permissions["can_select"] and permissions["can_insert"] and permissions["can_delete"]):
         return {"status": "SKIPPED_STORAGE_UNAVAILABLE"}
     if contains_obvious_sensitive_text(prompt):
         return {"status": "SKIPPED_POSSIBLE_SENSITIVE_CONTENT"}
@@ -127,7 +126,6 @@ async def capture_strategy_prompt(
             customer_id=customer_id,
             prompt_ciphertext=encrypted_prompt,
             native_output_ciphertext=encrypted_output,
-            prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             consent_version=CONSENT_VERSION,
             consented_at=now,
             asset=asset,
