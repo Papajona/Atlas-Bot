@@ -998,3 +998,75 @@ def test_secret_scanner_detects_bare_seed_aliases_in_source_code(
 
     assert any("source-recovery.py:1: seed/private-key assignment" in item for item in findings)
     assert any("source-recovery.py:2: seed/private-key assignment" in item for item in findings)
+
+def test_secret_scanner_distinguishes_public_jwk_metadata_arrays_from_private_arrays(
+    tmp_path, monkeypatch
+):
+    private_field = "private" + "_key"
+    private_component = "0123456789abcdef" * 2
+    (tmp_path / "public-key-ops.yml").write_text(
+        "wallet:\n  " + private_field + ": |\n"
+        + '    {"kty":"EC","crv":"P-256","x":"public-x","y":"public-y",'
+        + '"key_ops":["verify"]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "private-component-array.yml").write_text(
+        "wallet:\n  " + private_field + ": |\n"
+        + '    {"kty":"EC","d":["' + private_component + '"]}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("public-key-ops.yml" in item for item in findings)
+    assert any(
+        "private-component-array.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_namespaced_and_bare_recovery_fields(
+    tmp_path, monkeypatch
+):
+    mnemonic_field = "mne" + "monic"
+    seed_field = "se" + "ed"
+    recovery_field = "recovery" + "_phrase"
+    phrase = " ".join(["amber", "birch", "cobalt", "dahlia", "elm", "fuchsia"])
+    (tmp_path / "namespaced-mnemonic.properties").write_text(
+        "wallet." + mnemonic_field + "=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "namespaced-seed.properties").write_text(
+        "wallet." + seed_field + "=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "namespaced-recovery.properties").write_text(
+        "wallet." + recovery_field + "=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bare-seed.yml").write_text(
+        "wallet:\n  " + seed_field + ": " + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "recovery-phrase.yml").write_text(
+        "wallet:\n  " + recovery_field + ": " + phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "bare-seed.env").write_text(
+        seed_field + ":\n" + "".join("  " + word + "\n" for word in phrase.split()),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    for filename in (
+        "namespaced-mnemonic.properties",
+        "namespaced-seed.properties",
+        "namespaced-recovery.properties",
+        "bare-seed.yml",
+        "recovery-phrase.yml",
+        "bare-seed.env",
+    ):
+        assert any(filename in item for item in findings), filename
