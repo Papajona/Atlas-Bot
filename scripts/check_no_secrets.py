@@ -38,7 +38,7 @@ HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
 TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 TRON_SEED_IN_SOURCE = re.compile(
-    r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>[^\r\n]+)"""
+    r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')(?:\s*\+\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[A-Za-z_][A-Za-z0-9_.]*))*|[^#\r\n]+)"""
 )
 DOCUMENTED_RECOVERY_ASSIGNMENT = re.compile(
     r"""(?i)(?:[*_]{1,3})?\b(?P<key>mnemonic|seed(?:[_ -]?phrase)?|recovery[_ -]?phrase)(?:[*_]{1,3})?\s*[:=]\s*(?P<value>[^#\r\n]*)"""
