@@ -1656,8 +1656,22 @@ async def _apply_fill_to_position(
                 position.entry_fee_basis_known = current_fill_fee_verified
             else:
                 position.entry_fee = Decimal(str(position.entry_fee or 0)) + current_fee_decimal
+                # A verified cumulative fee for this same entry order repairs
+                # earlier unverified partial-fill fees. Add-on orders must not
+                # certify the original entry order's fee basis.
+                same_entry_order_fee_reconciled = (
+                    current_fill_fee_verified
+                    and not bool(trade.fee_reconciliation_pending)
+                    and int(position.entry_trade_id or 0) == int(trade.id)
+                    and Decimal(str(position.entry_fee or 0)).quantize(
+                        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+                    ) == Decimal(str(trade.fee or 0)).quantize(
+                        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+                    )
+                )
                 position.entry_fee_basis_known = bool(
-                    position.entry_fee_basis_known and current_fill_fee_verified
+                    same_entry_order_fee_reconciled
+                    or (position.entry_fee_basis_known and current_fill_fee_verified)
                 )
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))

@@ -293,6 +293,61 @@ def test_zero_fill_snapshot_does_not_clear_pending_fee_or_close_incident():
     asyncio.run(with_database(check))
 
 
+def test_verified_cumulative_fee_repairs_first_partial_fill_fee_quarantine():
+    async def check(sessions):
+        async with sessions() as db:
+            trade = _trade(
+                customer_id=None,
+                signal_id="late-verified-entry-fee",
+                client_order_id="late-verified-entry-fee",
+                filled_quantity=0.1,
+                fee=0,
+                fee_reconciliation_pending=True,
+                status="PARTIAL",
+            )
+            db.add(trade)
+            await db.flush()
+            position = Position(
+                customer_id=None,
+                exchange=trade.exchange,
+                symbol=trade.symbol,
+                quantity=0.1,
+                average_entry_price=100,
+                entry_trade_id=trade.id,
+                entry_fee=0,
+                entry_fee_basis_known=False,
+            )
+            db.add(position)
+            await db.flush()
+
+            fee_delta, cumulative_fee, quality, _note = execution._prepare_live_fee(
+                trade,
+                {"fee": {"currency": "USDT", "cost": "0.20"}},
+                0.2,
+                100,
+            )
+            assert fee_delta == Decimal("0.200000")
+            assert cumulative_fee == Decimal("0.200000")
+            assert quality == "exact"
+            assert trade.fee_reconciliation_pending is False
+
+            await execution._apply_fill_to_position(
+                db,
+                trade,
+                0.2,
+                100,
+                current_fill_fee=fee_delta,
+                current_fill_fee_verified=True,
+            )
+            await db.flush()
+
+            assert position.entry_fee == Decimal("0.200000")
+            assert position.entry_fee_basis_known is True
+            assert Decimal(str(trade.fee)).quantize(Decimal("0.000001")) == position.entry_fee
+
+    asyncio.run(with_database(check))
+
+
 def test_terminal_fee_reconciliation_is_included_in_customer_scheduler_query():
     source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
         encoding="utf-8"
