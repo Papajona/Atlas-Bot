@@ -5,6 +5,7 @@ This is intentionally conservative: it reports high-signal credential assignment
 private-key/seed material while allowing placeholders and public-key material.
 """
 from __future__ import annotations
+import ast
 import json
 import re
 import sys
@@ -38,6 +39,9 @@ PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----
 TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 TRON_SEED_IN_SOURCE = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)"""
+)
+DOCUMENTED_RECOVERY_ASSIGNMENT = re.compile(
+    r"""(?i)\b(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)\s*[:=]\s*(?P<value>[^#\r\n]+)"""
 )
 MULTILINE_SEED_KEY = re.compile(
     r"""(?i)^\s*(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[|>][+-]?)\s*)?(?:#.*)?$"""
@@ -562,9 +566,17 @@ def _find_multiline_seed_assignments(lines: list[str]) -> dict[int, str]:
 
 
 def _source_literal_contains_sensitive_assignment(line: str) -> bool:
-    """Inspect quoted source snippets that embed serialized config assignments."""
+    """Inspect decoded quoted source snippets for embedded credential assignments."""
     for literal in SOURCE_STRING_LITERAL.finditer(line):
-        embedded = TRON_SEED_IN_SOURCE.search(literal.group("value"))
+        try:
+            # Decode escapes without executing the surrounding source file.
+            # This exposes escaped JSON key/value quotes inside JS/Python strings.
+            literal_value = ast.literal_eval(literal.group(0))
+        except (SyntaxError, ValueError):
+            literal_value = literal.group("value")
+        if not isinstance(literal_value, str):
+            continue
+        embedded = TRON_SEED_IN_SOURCE.search(literal_value)
         if embedded is None:
             continue
         key_kind = _credential_key_kind(embedded.group("key"))
@@ -659,6 +671,19 @@ def scan() -> list[str]:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: private-key material")
                 continue
             source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES
+            if not source_code and suffix in {".md", ".txt"}:
+                documented_match = DOCUMENTED_RECOVERY_ASSIGNMENT.search(line)
+                if documented_match:
+                    documented_value = (
+                        documented_match.group("value")
+                        .strip()
+                        .strip('"')
+                        .strip("'")
+                        .strip()
+                    )
+                    if _is_likely_recovery_phrase(documented_value):
+                        findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                        continue
             if source_code and _source_literal_contains_sensitive_assignment(line):
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
