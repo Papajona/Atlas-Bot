@@ -649,3 +649,115 @@ def test_secret_scanner_preserves_repeated_yaml_mnemonic_aliases(
         "repeated-mnemonic-aliases.yml:3: seed/private-key assignment" in item
         for item in findings
     )
+
+def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
+    tmp_path, monkeypatch
+):
+    words = [
+        "amber", "birch", "cobalt", "dahlia", "elm",
+        "fuchsia", "garden", "harbor", "ivory", "juniper",
+    ]
+    phrase = " ".join(words)
+    assert not check_no_secrets._is_bip39_wordlist_phrase(phrase)
+
+    (tmp_path / "proprietary-recovery.yml").write_text(
+        "wallet:\\n  mnemonic: |\\n"
+        + "".join("    " + word + "\\n" for word in words),
+        encoding="utf-8",
+    )
+    (tmp_path / "proprietary-recovery.env").write_text(
+        "mnemonic:\\n" + "".join("  " + word + "\\n" for word in words),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("proprietary-recovery.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("proprietary-recovery.env:1: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_detects_generic_key_component_inside_private_key_mapping(
+    tmp_path, monkeypatch
+):
+    private_field = "private" + "_key"
+    key_material = "0123456789abcdef0123456789abcdef"
+    (tmp_path / "nested-private-key.yml").write_text(
+        "wallet:\\n"
+        + "  " + private_field + ":\\n"
+        + "    key: " + key_material + "\\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "nested-private-key.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(check_no_secrets, "MAX_YAML_NODE_VISITS", 64)
+    lines = ["word: &word drift"]
+    previous = "word"
+    for index in range(1, 22):
+        anchor = f"layer{index}"
+        lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
+        previous = anchor
+    lines.extend([
+        "wallet:",
+        f"  mnemonic: *{previous}",
+        "  api_token: qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG",
+    ])
+    (tmp_path / "alias-expansion-mnemonic.yml").write_text(
+        "\\n".join(lines) + "\\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "alias-expansion-mnemonic.yml:24: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "alias-expansion-mnemonic.yml:25: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(check_no_secrets, "MAX_YAML_NODE_VISITS", 64)
+    lines = ["word: &word ordinary"]
+    previous = "word"
+    for index in range(1, 22):
+        anchor = f"layer{index}"
+        lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
+        previous = anchor
+    lines.extend([
+        "wallet:",
+        f"  private_key: *{previous}",
+        "  api_token: qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG",
+    ])
+    (tmp_path / "alias-expansion-private-key.yml").write_text(
+        "\\n".join(lines) + "\\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "alias-expansion-private-key.yml:24: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "alias-expansion-private-key.yml:25: seed/private-key assignment" in item
+        for item in findings
+    )
+
