@@ -35,10 +35,13 @@ def test_strategy_benchmark_capture_is_opt_in_and_private_by_default():
 def test_benchmark_submissions_can_only_be_deleted_by_the_authenticated_owner():
     main = (ROOT / "app" / "main.py").read_text(encoding="utf-8")
     start = main.index('@app.delete("/api/customer/benchmark-captures")')
-    route = main[start:start + 1200]
+    route = main[start:start + 1800]
     assert "get_customer(authorization, db, require_aal2=True)" in route
     assert "BenchmarkPromptCapture.customer_id == profile.id" in route
     assert "delete(BenchmarkPromptCapture)" in route
+    assert "lock_customer_benchmark_captures(db, int(profile.id))" in route
+    assert "select(func.count(BenchmarkPromptCapture.id))" in route
+    assert '"remaining": remaining' in route
 
 
 def test_benchmark_capture_guard_flags_obvious_emails_and_credentials():
@@ -341,3 +344,17 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
         raise primary_error.with_traceback(primary_error.__traceback__)
     if cleanup_error is not None:
         raise cleanup_error
+
+def test_benchmark_capture_and_delete_share_one_advisory_lock_and_store_no_plain_prompt_hash():
+    service = (ROOT / "app/benchmark_capture.py").read_text(encoding="utf-8")
+    assert "BENCHMARK_CAPTURE_ADVISORY_LOCK_NAMESPACE = 17012026" in service
+    assert "async def lock_customer_benchmark_captures" in service
+    assert service.count("await lock_customer_benchmark_captures(db, customer_id)") == 1
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert "lock_customer_benchmark_captures(db, int(profile.id))" in main
+    model = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    migration = (ROOT / "alembic/versions/0062_customer_benchmark_capture.py").read_text(encoding="utf-8")
+    assert "prompt_sha256" not in service
+    assert "prompt_sha256" not in model
+    assert "prompt_sha256" not in migration
+
