@@ -4085,6 +4085,14 @@ async def get_customer(
                 if email
                 else await _has_unmapped_legacy_customer_profile(db, uid)
             )
+        if identity_review_required and str(profile.status or "").upper() == "ACTIVE":
+            # Quarantine the persisted profile before returning a conflict. A 409
+            # alone is not enough: background bot/executor gates read this status
+            # in independent transactions and must stop the conflicted account.
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            await db.flush()
+            await db.commit()
+            await db.refresh(profile)
         profile.identity_review_required = identity_review_required
         profile.auth_identity_email = email if identity_review_required else ""
 
