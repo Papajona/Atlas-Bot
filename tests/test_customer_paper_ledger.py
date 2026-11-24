@@ -666,6 +666,10 @@ def test_customer_paper_lifecycle_rejects_derivatives_and_mismatched_quote_curre
     asyncio.run(run())
 
 
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the dedicated disposable PostgreSQL paper databases provisioned by CI",
+)
 def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypatch):
     customer_id = 92001
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])

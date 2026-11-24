@@ -95,18 +95,134 @@ _SYMBOL_ASSET = {
 }
 
 
-def _classify_family(text: str) -> str:
+_FAMILY_NEGATION_CUE = re.compile(
+    r"\b(?:do\s+not|does\s+not|did\s+not|don't|dont|doesn't|doesnt|never|"
+    r"is\s+not|are\s+not|was\s+not|were\s+not|isn't|isnt|aren't|arent|"
+    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\b"
+)
+
+_FAMILY_HINT_TERMS = (
+    "trend", "trending", "moving average", "ema", "sma", "golden cross",
+    "death cross", "mean reversion", "mean-reversion", "meanreversion",
+    "revert", "range-bound", "rangebound", "oversold", "overbought",
+    "breakout", "break out", "prior high", "range high", "range low",
+    "momentum", "roc", "rate of change", "acceleration", "ensemble",
+    "combine", "multiple strategies",
+)
+
+
+def _has_affirmed_family_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    """Match an explicit family cue unless its local clause rejects that cue."""
     value = text.lower()
-    # Explicit multi-strategy intent takes precedence over component keywords.
-    if any(x in value for x in ("ensemble", "combine strategies", "multiple strategies", "combine momentum and trend")):
+    for phrase in phrases:
+        pattern = re.compile(r"\b" + re.escape(phrase) + r"\b")
+        for match in pattern.finditer(value):
+            before = value[max(0, match.start() - 120):match.start()]
+            before = re.split(
+                r"[.!?;,:]|\b(?:but|however|instead|rather)\b|"
+                r"\b(?:and|or)\b(?=\s+(?:please|use|using|choose|select|"
+                r"apply|adopt|enable|switch|prefer)\b)",
+                before,
+            )[-1]
+            # "Not only X" is affirmative emphasis, not a rejection of X.
+            before = re.sub(r"\bnot\s+(?:only|just)\b", "", before)
+            if (
+                _FAMILY_NEGATION_CUE.search(before)
+                or re.search(r"\bnon[-\s]+$", before)
+            ):
+                continue
+            return True
+    return False
+
+
+def _classify_family(text: str) -> str:
+    # "Not only A but B" explicitly combines two strategy families.
+    not_only = re.search(r"\bnot\s+only\b(.{0,100}?)\bbut\b(.{0,100})", text.lower())
+    if not_only and (
+        _has_affirmed_family_phrase(not_only.group(1), _FAMILY_HINT_TERMS)
+        and _has_affirmed_family_phrase(not_only.group(2), _FAMILY_HINT_TERMS)
+    ):
         return "ENSEMBLE"
-    if any(x in value for x in ("mean reversion", "mean-reversion", "revert to mean", "range-bound", "oversold", "overbought")):
+
+    # Explicit multi-strategy intent takes precedence over component keywords.
+    if _has_affirmed_family_phrase(
+        text, ("ensemble", "combine strategies", "multiple strategies",
+               "combine momentum and trend")
+    ):
+        return "ENSEMBLE"
+    if _has_affirmed_family_phrase(
+        text, ("mean reversion", "mean-reversion", "meanreversion",
+               "revert to mean", "range-bound", "rangebound",
+               "oversold", "overbought")
+    ):
         return "MEAN_REVERSION"
-    if any(x in value for x in ("breakout", "break out", "prior high", "range high", "range low")):
+    if _has_affirmed_family_phrase(
+        text, ("breakout", "break out", "prior high", "range high", "range low")
+    ):
         return "BREAKOUT"
-    if any(x in value for x in ("momentum", "rate of change", "acceleration")) or re.search(r"\broc\b", value):
+    if _has_affirmed_family_phrase(
+        text, ("momentum", "rate of change", "acceleration", "roc")
+    ):
         return "MOMENTUM"
     return "TREND"
+
+
+def _family_was_inferred(text: str) -> bool:
+    """True when the prompt affirmed a strategy cue; False for a fallback TREND."""
+    return _has_affirmed_family_phrase(text, _FAMILY_HINT_TERMS)
+
+
+_PROFILE_NEGATION_PREFIX = re.compile(
+    r"\b(?:non[-\s]+|do\s+not|does\s+not|did\s+not|don't|dont|doesn't|doesnt|never|"
+    r"is\s+not|are\s+not|was\s+not|were\s+not|isn't|isnt|aren't|arent|"
+    r"not|no|avoid|without|exclude|excluding|reject(?:ed)?)\b"
+    r"(?:\s+(?:please|use|using|choose|select|apply|adopt|enable|switch|to|the|a|an|"
+    r"this|that|very|too|profile|mode|setting|strategy|approach)){0,6}\s*$"
+)
+_CONSERVATIVE_RE = re.compile(
+    r"\b(?:conservative(?:ly)?|cautious(?:ly)?|defensive|capital\s+preservation|preserve\s+capital|"
+    r"low[-\s]?risk|risk[-\s]?averse|safe(?:ly|r|st)?)\b")
+_ADAPTIVE_RE = re.compile(
+    r"\b(?:adaptive|adaptively|regime[-\s]?(?:aware|adaptive|switching|based|filter(?:ed)?)|self[-\s]?adjust(?:ing)?|"
+    r"volatility[-\s]?(?:adjusted|scaled|aware)|dynamic(?:ally)?\s+(?:size|sizing|adjust\w*))\b")
+_AGGRESSIVE_RE = re.compile(r"\b(?:aggressive(?:ly)?|high[-\s]?risk|max(?:imum)?\s+leverage|all[-\s]?in|yolo)\b")
+
+
+def _profile_flag(pattern: re.Pattern[str], lower: str) -> bool:
+    """Match a profile keyword unless the surrounding prompt explicitly rejects it."""
+    for match in pattern.finditer(lower):
+        before = lower[max(0, match.start() - 80):match.start()]
+        # A negation applies only within its local clause; a later corrective clause such
+        # as "but use adaptive" must not inherit an earlier "do not use conservative".
+        before = re.split(r"[.!?;,:]|\b(?:but|however|instead|rather)\b", before)[-1]
+        # A non- prefix ends in a hyphen/space (both non-word characters),
+        # so the generic trailing word-boundary assertion cannot match the slice.
+        if (
+            _PROFILE_NEGATION_PREFIX.search(before)
+            or re.search(r"\bnon[-\s]+$", before)
+        ):
+            continue
+        return True
+    return False
+
+
+def _detect_profiles(lower: str) -> tuple[bool, bool, bool]:
+    """Return (conservative, adaptive, aggressive) request flags from the prompt."""
+    conservative = _profile_flag(_CONSERVATIVE_RE, lower)
+    aggressive = _profile_flag(_AGGRESSIVE_RE, lower)
+    if conservative and aggressive:  # contradictory: the safer reading wins and the caller is told
+        aggressive = False
+    return conservative, _profile_flag(_ADAPTIVE_RE, lower), aggressive
+
+
+# Profile conditions are free-form StrategyCondition types, so no schema change is needed.
+_CONSERVATIVE_ENTRY = [
+    {"type": "HIGHER_TIMEFRAME_AGREEMENT", "rule": "Require the next-higher timeframe trend/regime to agree with the proposed side on completed bars; otherwise stand aside."},
+    {"type": "CONSERVATIVE_VOLATILITY_CAP", "rule": "Skip entries when ATR percentile or spread is above the configured cap, and stand aside around scheduled high-impact news."}]
+_ADAPTIVE_ENTRY = [
+    {"type": "REGIME_ADAPTATION", "rule": "Classify trend versus range and low versus high volatility on completed bars; enable trend/breakout/momentum rules only in a trending regime and mean-reversion rules only in a ranging regime."},
+    {"type": "VOLATILITY_SCALED_RISK", "rule": "Scale position size down as realized volatility rises so cash risk per trade stays at or below the configured fraction."}]
+_CONSERVATIVE_EXIT = {"type": "TIME_STOP", "rule": "Close a trade that has not reached its target or stop within a configured number of bars; never widen a stop after entry."}
 
 
 def _template_rules(family: str) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -247,11 +363,11 @@ def _reward_risk(lower: str) -> float | None:
     return float(match.group(1)) if match else None
 
 
-def _parse_stop_and_target(lower: str) -> tuple[float, float, list[str]]:
+def _parse_stop_and_target(lower: str, default_stop_atr: float = 1.5, default_reward: float = 2.0) -> tuple[float, float, list[str]]:
     notes: list[str] = []
     stops, targets, plain = _atr_levels(lower)
     stop = stops[0] if stops else (plain[0] if plain else None)
-    stop_atr = _clamp(stop, 0.1, 10.0) if stop is not None else 1.5
+    stop_atr = _clamp(stop, 0.1, 10.0) if stop is not None else default_stop_atr
     reward = _reward_risk(lower)
     if reward is None and targets:
         reward = targets[0] / stop_atr
@@ -260,7 +376,7 @@ def _parse_stop_and_target(lower: str) -> tuple[float, float, list[str]]:
     if reward is None:
         if re.search(r"(?:reward|\brr\b)[^.;]{0,20}\d", lower):
             notes.append("A reward:risk target was mentioned but not understood; the default 2.0R was used. Write it as '3R' or 'reward risk 3'.")
-        reward = 2.0
+        reward = default_reward
     clamped = _clamp(reward, 0.1, 10.0)
     if clamped != reward:
         notes.append(f"Requested reward:risk {reward:g}R was limited to {clamped:g}R.")
@@ -307,7 +423,8 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
                           symbol: str | None = None, timeframe: str | None = None,
                           max_risk_per_trade: float = 0.005) -> dict[str, Any]:
     """Map a request to a supported strategy template, not to generated executable code."""
-    text = str(prompt or "").strip()
+    # Normalize mobile smart quotes before every semantic classifier, including strategy-family negation.
+    text = str(prompt or "").replace("\u2019", "'").replace("\u2018", "'").strip()
     if not text:
         raise NativeAIError("Enter a strategy request before generating a draft.")
     title = re.sub(r"\s+", " ", str(name or "Atlas Native Strategy").strip())[:120] or "Atlas Native Strategy"
@@ -346,7 +463,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
     )
     tf = requested_timeframes[0]
     family = _classify_family(text)
-    lower = text.lower()
+    lower = text.lower().replace("\u2019", "'").replace("\u2018", "'")
     # Curly apostrophes are common on mobile keyboards and must share ASCII negation semantics.
     direction_source = lower.replace("\u2019", "'").replace("\u2018", "'")
     direction_text = _strip_negated_direction(direction_source)
@@ -404,7 +521,7 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
         warnings.append(
             f"Selected timeframe {explicit_timeframe} overrides the draft's multi-timeframe setup inferred from the prompt."
         )
-    risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s{0,6}(?:of|=|:)?\s{0,6}(\d{1,6}(?:\.\d{1,6})?)\s{0,6}(%|percent|bps|bp)?", lower)
+    risk_match = re.search(r"\brisk(?:\s+per\s+trade)?\s{0,6}(?:of|=|:)?\s{0,6}(\d{1,6}(?:\.\d{1,6})?)\s{0,6}(%|percent|bps|bp)?(?![a-z])", lower)
     if risk_match:
         amount = float(risk_match.group(1))
         unit = (risk_match.group(2) or "").lower()
@@ -413,9 +530,28 @@ def compose_strategy_spec(*, prompt: str, name: str, asset: str | None = None,
             risk = min(cap, requested)
             if requested > cap:
                 warnings.append(f"Requested risk capped at platform maximum {cap:.4f}.")
-    stop_atr, target_rr, stop_notes = _parse_stop_and_target(lower)
+    conservative, adaptive, aggressive = _detect_profiles(lower)
+    profile_notes: list[str] = []
+    if conservative and not risk_match:
+        risk = min(risk, 0.0025)  # half the platform default; an explicit risk in the prompt still wins
+    stop_atr, target_rr, stop_notes = _parse_stop_and_target(
+        lower, default_stop_atr=2.0 if conservative else 1.5)
     warnings.extend(stop_notes)
+    if conservative:
+        profile_notes.append("Conservative profile: default risk 0.25%, default 2 ATR stop (explicit values in the prompt still apply), higher-timeframe agreement, volatility cap and a time stop were added.")
+    if adaptive:
+        profile_notes.append("Adaptive profile: regime classification and volatility-scaled sizing rules were added; regime thresholds are not tuned here and must be validated out of sample.")
+    if aggressive:
+        profile_notes.append("Aggressive wording was ignored: risk is never raised above the platform cap and the default balanced template was kept.")
+    if not _family_was_inferred(text):
+        profile_notes.append("No strategy type was recognised in the prompt; the TREND template is only a draft default, so confirm or name a strategy type.")
+    warnings.extend(profile_notes)
     entries, exits = _template_rules(family)
+    if conservative:
+        entries = entries + _CONSERVATIVE_ENTRY
+        exits = exits + [_CONSERVATIVE_EXIT]
+    if adaptive:
+        entries = entries + _ADAPTIVE_ENTRY
     if explicit_timeframe:
         entry_conditions = [dict(x, timeframe=tf) for x in entries]
         exit_conditions = [dict(x, timeframe=tf) for x in exits]

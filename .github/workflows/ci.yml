@@ -21,6 +21,10 @@ jobs:
       ENVIRONMENT: development
       DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
       ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
+      # Deterministic CI-only Fernet material for PostgreSQL tests that persist encrypted customer fields.
+      # Never reuse this fixture key in staging or production.
+      APP_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+      APP_ENCRYPTION_ACTIVE_KEY_ID: "v1"
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
       CUSTOMER_LIVE_TRADING_ENABLED: "false"
@@ -540,6 +544,186 @@ jobs:
           SQL
           # Check drift only after reaching the actual migration head, not at an older revision.
           python -m alembic check
+      - name: Verify internal trigger ACLs with a restricted runtime role
+        run: |
+          set -euo pipefail
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $create_runtime_trigger_probe$
+          BEGIN
+              IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'atlas_runtime_trigger_probe') THEN
+                  RAISE EXCEPTION 'runtime trigger probe role unexpectedly exists';
+              END IF;
+              CREATE ROLE atlas_runtime_trigger_probe
+                  NOLOGIN NOINHERIT BYPASSRLS
+                  NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+          END
+          $create_runtime_trigger_probe$;
+
+          GRANT USAGE ON SCHEMA public TO atlas_runtime_trigger_probe;
+          GRANT SELECT, INSERT, UPDATE ON TABLE
+              public.ledger_journals, public.ledger_journal_lines,
+              public.research_trial_archive, public.research_holdout_registry
+          TO atlas_runtime_trigger_probe;
+
+          DO $grant_runtime_probe_sequences$
+          DECLARE sequence_name text;
+          BEGIN
+              FOR sequence_name IN
+                  SELECT pg_get_serial_sequence('public.ledger_journals', 'id')
+                  UNION ALL
+                  SELECT pg_get_serial_sequence('public.ledger_journal_lines', 'id')
+              LOOP
+                  IF sequence_name IS NULL THEN
+                      RAISE EXCEPTION 'ledger probe sequence is missing';
+                  END IF;
+                  EXECUTE format(
+                      'GRANT USAGE, SELECT ON SEQUENCE %s TO atlas_runtime_trigger_probe',
+                      sequence_name
+                  );
+              END LOOP;
+          END
+          $grant_runtime_probe_sequences$;
+
+          DO $verify_internal_function_acl$
+          BEGIN
+              IF has_function_privilege('atlas_runtime_trigger_probe', 'public.atlas_block_ledger_mutation()', 'EXECUTE')
+                 OR has_function_privilege('atlas_runtime_trigger_probe', 'public.atlas_ledger_journal_deferred_check()', 'EXECUTE')
+                 OR has_function_privilege('atlas_runtime_trigger_probe', 'public.atlas_validate_ledger_journal(integer)', 'EXECUTE')
+                 OR has_function_privilege('atlas_runtime_trigger_probe', 'public.atlas_research_trial_archive_immutable()', 'EXECUTE')
+                 OR has_function_privilege('atlas_runtime_trigger_probe', 'public.atlas_research_holdout_registry_immutable()', 'EXECUTE') THEN
+                  RAISE EXCEPTION 'restricted runtime probe can directly execute an internal public function';
+              END IF;
+
+              IF NOT has_function_privilege(
+                  'atlas_ledger_trigger_owner',
+                  'public.atlas_validate_ledger_journal(integer)',
+                  'EXECUTE'
+              ) THEN
+                  RAISE EXCEPTION 'isolated ledger trigger owner cannot execute the validation helper';
+              END IF;
+
+              IF has_table_privilege('atlas_ledger_trigger_owner', 'public.ledger_journals', 'INSERT')
+                 OR has_table_privilege('atlas_ledger_trigger_owner', 'public.ledger_journals', 'UPDATE')
+                 OR has_table_privilege('atlas_ledger_trigger_owner', 'public.ledger_journals', 'DELETE')
+                 OR has_table_privilege('atlas_ledger_trigger_owner', 'public.ledger_journal_lines', 'INSERT')
+                 OR has_table_privilege('atlas_ledger_trigger_owner', 'public.ledger_journal_lines', 'UPDATE')
+                 OR has_table_privilege('atlas_ledger_trigger_owner', 'public.ledger_journal_lines', 'DELETE')
+                 OR has_schema_privilege('atlas_ledger_trigger_owner', 'public', 'CREATE') THEN
+                  RAISE EXCEPTION 'isolated ledger trigger owner has privileges beyond read-only validation';
+              END IF;
+          END
+          $verify_internal_function_acl$;
+          SQL
+
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+            BEGIN;
+            SET LOCAL ROLE atlas_runtime_trigger_probe;
+            INSERT INTO public.ledger_journals
+                (currency, entry_type, idempotency_key, created_at)
+            VALUES ('USDT', 'ACL_TRIGGER_PROBE', 'atlas-acl-probe:balanced', now());
+            INSERT INTO public.ledger_journal_lines
+                (journal_id, line_no, account_code, currency, debit, credit, created_at)
+            SELECT id, 1, 'acl-probe-debit', 'USDT', 1, 0, now()
+            FROM public.ledger_journals
+            WHERE idempotency_key = 'atlas-acl-probe:balanced'
+            UNION ALL
+            SELECT id, 2, 'acl-probe-credit', 'USDT', 0, 1, now()
+            FROM public.ledger_journals
+            WHERE idempotency_key = 'atlas-acl-probe:balanced';
+            SET CONSTRAINTS ALL IMMEDIATE;
+            COMMIT;
+          "
+          echo "PASS: restricted runtime role committed a balanced journal without public function EXECUTE"
+
+          if unbalanced_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+            BEGIN;
+            SET LOCAL ROLE atlas_runtime_trigger_probe;
+            INSERT INTO public.ledger_journals
+                (currency, entry_type, idempotency_key, created_at)
+            VALUES ('USDT', 'ACL_TRIGGER_PROBE', 'atlas-acl-probe:unbalanced', now());
+            INSERT INTO public.ledger_journal_lines
+                (journal_id, line_no, account_code, currency, debit, credit, created_at)
+            SELECT id, 1, 'acl-probe-debit', 'USDT', 1, 0, now()
+            FROM public.ledger_journals
+            WHERE idempotency_key = 'atlas-acl-probe:unbalanced';
+            SET CONSTRAINTS ALL IMMEDIATE;
+            COMMIT;
+          " 2>&1)"; then
+              echo "ERROR: unbalanced journal unexpectedly committed" >&2
+              exit 1
+          elif [[ "$unbalanced_output" != *"Unbalanced or invalid ledger journal"* ]]; then
+              echo "$unbalanced_output" >&2
+              echo "ERROR: unbalanced journal failed for an unexpected reason" >&2
+              exit 1
+          fi
+          echo "PASS: restricted runtime role could not commit an unbalanced journal"
+
+          if ledger_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+            BEGIN;
+            SET LOCAL ROLE atlas_runtime_trigger_probe;
+            UPDATE public.ledger_journals
+            SET description = 'must-not-change'
+            WHERE idempotency_key = 'atlas-acl-probe:balanced';
+            COMMIT;
+          " 2>&1)"; then
+              echo "ERROR: immutable ledger journal unexpectedly updated" >&2
+              exit 1
+          elif [[ "$ledger_immutable_output" != *"Ledger journal records are immutable"* ]]; then
+              echo "$ledger_immutable_output" >&2
+              echo "ERROR: ledger immutability trigger failed for an unexpected reason" >&2
+              exit 1
+          fi
+          echo "PASS: ledger immutability trigger fired without caller EXECUTE privilege"
+
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+            BEGIN;
+            SET LOCAL ROLE atlas_runtime_trigger_probe;
+            INSERT INTO public.research_trial_archive (trial_key, trial_label)
+            VALUES ('atlas-acl-probe-trial', 'ACL trigger probe');
+            INSERT INTO public.research_holdout_registry
+                (scope_sha256, holdout_version, source_sample_sha256, report_sha256, holdout_plan_json)
+            VALUES (repeat('a', 64), 'acl-probe-v1', repeat('b', 64), repeat('c', 64), '{}');
+            COMMIT;
+          "
+
+          if archive_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+            BEGIN;
+            SET LOCAL ROLE atlas_runtime_trigger_probe;
+            UPDATE public.research_trial_archive
+            SET trial_label = 'must-not-change'
+            WHERE trial_key = 'atlas-acl-probe-trial';
+            COMMIT;
+          " 2>&1)"; then
+              echo "ERROR: research archive unexpectedly updated" >&2
+              exit 1
+          elif [[ "$archive_immutable_output" != *"research_trial_archive is append-only"* ]]; then
+              echo "$archive_immutable_output" >&2
+              echo "ERROR: research archive trigger failed for an unexpected reason" >&2
+              exit 1
+          fi
+          echo "PASS: research archive immutability trigger fired without caller EXECUTE privilege"
+
+          if holdout_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+            BEGIN;
+            SET LOCAL ROLE atlas_runtime_trigger_probe;
+            UPDATE public.research_holdout_registry
+            SET holdout_plan_json = '{\"changed\":true}'
+            WHERE scope_sha256 = repeat('a', 64);
+            COMMIT;
+          " 2>&1)"; then
+              echo "ERROR: one-time holdout registry unexpectedly updated" >&2
+              exit 1
+          elif [[ "$holdout_immutable_output" != *"research_holdout_registry is write-once"* ]]; then
+              echo "$holdout_immutable_output" >&2
+              echo "ERROR: holdout immutability trigger failed for an unexpected reason" >&2
+              exit 1
+          fi
+          echo "PASS: holdout registry immutability trigger fired without caller EXECUTE privilege"
+
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DROP OWNED BY atlas_runtime_trigger_probe;
+          DROP ROLE atlas_runtime_trigger_probe;
+          SQL
       - name: Controlled withdrawal recovery regressions
         run: |
           python -m pytest -q \
@@ -664,8 +848,12 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.13"
-      - name: Install Android security test runner
-        run: python -m pip install --disable-pip-version-check pytest
+      - name: Install Android security test dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          # Install only the already hash-locked PyYAML dependency used by the source-gate tests.
+          awk '/^pyyaml==6[.]0[.]3 / { capture=1 } capture && /^[[:alnum:]_.+-]+==/ && $0 !~ /^pyyaml==6[.]0[.]3 / { exit } capture { print }' requirements-dev.lock > "$RUNNER_TEMP/pyyaml-requirement.txt"
+          python -m pip install --disable-pip-version-check --no-deps --require-hashes -r "$RUNNER_TEMP/pyyaml-requirement.txt"
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: temurin

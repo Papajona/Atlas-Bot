@@ -21,6 +21,14 @@ from app.schemas import CustomerPaperMarketRequest, MarketRequest
 from app.paper_staging import PaperMarketRequest
 
 
+def test_manual_customer_paper_fee_uses_shared_spot_fee_setting(monkeypatch):
+    monkeypatch.setattr(settings, "customer_paper_spot_taker_bps", 17.0)
+    monkeypatch.setattr(settings, "research_taker_bps", 5.5)
+    assert paper_api._manual_customer_paper_fee_bps() == Decimal("17.0")
+
+
+
+
 def _verified_bars(latest_bar_at: datetime, *, volume: str = "100") -> pd.DataFrame:
     index = pd.date_range(end=latest_bar_at, periods=25, freq="min")
     frame = pd.DataFrame(

@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.schemas import MarketRequest
+from app.main import _customer_paper_configuration_ready
 
 from app import paper_staging
 
@@ -388,12 +389,13 @@ def test_paper_customer_auth_returns_only_an_active_existing_profile(monkeypatch
         async def execute(self, query):
             self.statements.append(query)
             selected = {column.name for column in query.selected_columns}
-            if selected == {"id", "auth_user_id", "status"}:
+            if selected == {"id", "auth_user_id", "status", "has_stored_email"}:
                 return QueryResult(
                     row=SimpleNamespace(
                         id=profile.id,
                         auth_user_id=profile.auth_user_id,
                         status=profile.status,
+                        has_stored_email=True,
                     )
                 )
             return QueryResult(values=[])
@@ -410,9 +412,9 @@ def test_paper_customer_auth_returns_only_an_active_existing_profile(monkeypatch
     assert result_profile.status == profile.status
     assert claims["aal"] == "aal2"
     selected = {column.name for column in db.statements[0].selected_columns}
-    assert selected == {"id", "auth_user_id", "status"}
+    assert selected == {"id", "auth_user_id", "status", "has_stored_email"}
     assert "email" not in selected and "display_name" not in selected
-    assert len(db.statements) == 2
+    assert len(db.statements) == 1
 
 
 def test_paper_customer_auth_rejects_uuid_profile_while_legacy_auth_references_exist(monkeypatch):
@@ -439,7 +441,10 @@ def test_paper_customer_auth_rejects_uuid_profile_while_legacy_auth_references_e
             self.calls += 1
             if self.calls == 1:
                 return QueryResult(
-                    row=SimpleNamespace(id=42, auth_user_id=profile_id, status="ACTIVE")
+                    row=SimpleNamespace(
+                        id=42, auth_user_id=profile_id, status="ACTIVE",
+                        has_stored_email=False,
+                    )
                 )
             return QueryResult(values=["legacy-tron-reference"])
 
@@ -452,3 +457,79 @@ def test_paper_customer_auth_rejects_uuid_profile_while_legacy_auth_references_e
     assert exc.value.status_code == 409
     assert "legacy customer identities are manually reviewed" in exc.value.detail
     assert db.calls == 2
+
+
+
+def test_pending_paper_identity_does_not_materialize_encrypted_email_without_keyring(monkeypatch):
+    auth_id = "8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7"
+
+    async def fake_customer_claims(_authorization, require_aal2=True):
+        return {"sub": auth_id, "aal": "aal2"}
+
+    class Result:
+        def one_or_none(self):
+            return SimpleNamespace(
+                id=42, auth_user_id=auth_id,
+                status="PENDING_IDENTITY_REVIEW",
+                has_stored_email=False,
+            )
+
+        def scalars(self):
+            return SimpleNamespace(all=lambda: [])
+
+    class ReadOnlyDatabase:
+        statements = []
+
+        async def execute(self, query):
+            self.statements.append(query)
+            return Result()
+
+    db = ReadOnlyDatabase()
+    monkeypatch.setattr(paper_staging, "customer_claims", fake_customer_claims)
+
+    profile, _claims = asyncio.run(
+        paper_staging.get_existing_customer(
+            "Bearer test", db, allow_identity_review_summary=True
+        )
+    )
+
+    assert profile.status == "PENDING_IDENTITY_REVIEW"
+    assert profile.identity_review_required is True
+    selected_names = {column.name for column in db.statements[0].selected_columns}
+    assert "email" not in selected_names
+    assert "has_stored_email" in selected_names
+
+
+@pytest.mark.parametrize("flag,enabled", [
+    ("live_trading_enabled", True),
+    ("customer_live_trading_enabled", True),
+    ("payout_live_enabled", True),
+    ("usdt_tron_enabled", True),
+    ("usdt_tron_sweep_enabled", True),
+    ("deriv_live_enabled", True),
+    ("forex_live_enabled", True),
+    ("binance_arbitrage_live_enabled", True),
+    ("broker_sandbox", False),
+])
+def test_customer_paper_runtime_gate_rejects_each_unsafe_money_path(monkeypatch, flag, enabled):
+    settings = paper_staging.settings
+    safe_values = {
+        "paper_trading": True,
+        "live_trading_enabled": False,
+        "customer_live_trading_enabled": False,
+        "payout_live_enabled": False,
+        "usdt_tron_enabled": False,
+        "usdt_tron_sweep_enabled": False,
+        "deriv_live_enabled": False,
+        "forex_live_enabled": False,
+        "binance_arbitrage_live_enabled": False,
+        "broker_sandbox": True,
+        "customer_paper_ledger_enabled": True,
+        "customer_paper_database_url": "postgresql+asyncpg://paper:secret@db.example/paper",
+    }
+    for name, value in safe_values.items():
+        monkeypatch.setattr(settings, name, value)
+    assert _customer_paper_configuration_ready() is True
+
+    monkeypatch.setattr(settings, flag, enabled)
+    assert _customer_paper_configuration_ready() is False

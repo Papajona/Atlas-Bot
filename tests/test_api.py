@@ -1,12 +1,19 @@
+import asyncio
 import os
+from types import SimpleNamespace
+
 import pytest
+from fastapi import HTTPException
 pytest.importorskip("aiosqlite")
 os.environ["ENVIRONMENT"] = "development"
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_trading.db"
+# Keep the forced throw-away SQLite URL but isolate each pytest-xdist worker.
+_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./test_trading{'_' + _worker if _worker else ''}.db"
 os.environ["BACKGROUND_RECONCILIATION_ENABLED"] = "false"
 os.environ.setdefault("ADMIN_TOKEN", "test-admin-token-for-pytest-only")
 
 from fastapi.testclient import TestClient
+from app import main as main_module
 from app.main import app
 
 
@@ -33,3 +40,85 @@ def test_metrics_endpoint_exists():
         r = client.get("/metrics", headers={"x-admin-token": os.environ.get("ADMIN_TOKEN", "")})
         assert r.status_code == 200
         assert b"trader_http_requests_total" in r.content
+
+
+
+class _CustomerQueryResult:
+    def __init__(self, profile):
+        self.profile = profile
+
+    def scalar_one_or_none(self):
+        return self.profile
+
+
+class _CustomerIdentityDatabase:
+    def __init__(self, profile):
+        self.profile = profile
+
+    async def execute(self, _statement):
+        return _CustomerQueryResult(self.profile)
+
+    async def flush(self):
+        return None
+
+
+def test_existing_active_profile_email_backfill_rejects_unconfirmed_auth_email(monkeypatch):
+    auth_id = "11111111-2222-4333-8444-555555555555"
+    profile = SimpleNamespace(
+        auth_user_id=auth_id,
+        email="",
+        display_name="Existing customer",
+        status="ACTIVE",
+    )
+    db = _CustomerIdentityDatabase(profile)
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": auth_id, "email": ""}
+
+    async def auth_user(_token):
+        return {
+            "id": auth_id,
+            "email": "unconfirmed@example.test",
+            "email_confirmed_at": None,
+            "user_metadata": {},
+        }
+
+    monkeypatch.setattr(main_module, "customer_claims", verified_claims)
+    monkeypatch.setattr(main_module, "_supabase_user", auth_user)
+    monkeypatch.setattr(main_module, "_bearer_token", lambda _authorization: "test-token")
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(main_module.get_customer("Bearer test-token", db))
+
+    assert raised.value.status_code == 403
+    assert "confirmed email" in raised.value.detail.lower()
+
+
+def test_active_profile_with_persisted_email_does_not_trigger_auth_backfill(monkeypatch):
+    auth_id = "11111111-2222-4333-8444-555555555555"
+    profile = SimpleNamespace(
+        auth_user_id=auth_id,
+        email="existing@example.test",
+        display_name="Existing customer",
+        status="ACTIVE",
+    )
+    db = _CustomerIdentityDatabase(profile)
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": auth_id, "email": ""}
+
+    async def unexpected_auth_call(_token):
+        pytest.fail("an active profile with a stored email must not require an Auth backfill")
+
+    async def ensure_subscription(_db, _profile):
+        return None
+
+    monkeypatch.setattr(main_module, "customer_claims", verified_claims)
+    monkeypatch.setattr(main_module, "_supabase_user", unexpected_auth_call)
+    monkeypatch.setattr(main_module, "_ensure_customer_subscription", ensure_subscription)
+
+    returned_profile, _claims = asyncio.run(
+        main_module.get_customer("Bearer test-token", db)
+    )
+
+    assert returned_profile is profile

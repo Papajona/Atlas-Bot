@@ -324,7 +324,7 @@ async def ensure_customer_paper_account(customer_id: int, currency: str) -> dict
 
 def _cost_inputs() -> tuple[Decimal, Decimal, str]:
     """Return visible configured assumptions; they are not proof of venue calibration."""
-    fee_bps = _finite_decimal(settings.research_taker_bps, "research_taker_bps", non_negative=True)
+    fee_bps = _finite_decimal(settings.customer_paper_spot_taker_bps, "customer_paper_spot_taker_bps", non_negative=True)
     slippage_bps = _finite_decimal(settings.research_slippage_bps, "research_slippage_bps", non_negative=True)
     return fee_bps, slippage_bps, "UNVERIFIED_DEFAULT_ASSUMPTIONS"
 

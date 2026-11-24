@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import subprocess
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -584,27 +585,12 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
 
 
 def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
-    ruby = r"""
-require "yaml"
-deploy = YAML.load_file(ARGV.fetch(0))
-preflight = YAML.load_file(ARGV.fetch(1))
-acceptance = YAML.load_file(ARGV.fetch(2))
-abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
-abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
-abort("customer paper acceptance job missing") unless acceptance.fetch("jobs").key?("customer-paper-acceptance")
-"""
-    result = subprocess.run(
-        [
-            "ruby", "-e", ruby,
-            str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
-            str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
-            str(ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml"),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr or result.stdout
+    deploy = yaml.safe_load((ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8"))
+    preflight = yaml.safe_load((ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8"))
+    acceptance = yaml.safe_load((ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml").read_text(encoding="utf-8"))
+    assert "deploy-paper-staging" in deploy.get("jobs", {})
+    assert "verify-staging-identity" in preflight.get("jobs", {})
+    assert "customer-paper-acceptance" in acceptance.get("jobs", {})
 
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
@@ -691,23 +677,16 @@ def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: P
 
 def test_production_deploy_workflow_is_valid_yaml_with_unique_named_steps():
     workflow_path = ROOT / ".github" / "workflows" / "production-deploy.yml"
-    ruby = r"""
-require "yaml"
-workflow = YAML.load_file(ARGV.fetch(0))
-steps = workflow.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
-names = steps.map { |step| step["name"] }.compact
-duplicates = names.group_by(&:itself).select { |_, occurrences| occurrences.length > 1 }.keys
-abort("duplicate production deployment step names: #{duplicates.join(', ')}") unless duplicates.empty?
-abort("exact staging identity job gate missing") unless names.include?("Require all release CI gates on this exact commit")
-"""
-    result = subprocess.run(
-        ["ruby", "-e", ruby, str(workflow_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr or result.stdout
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = [
+        step
+        for job in workflow.get("jobs", {}).values()
+        for step in job.get("steps", [])
+    ]
+    names = [step["name"] for step in steps if isinstance(step, dict) and step.get("name")]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    assert not duplicates, f"duplicate production deployment step names: {duplicates}"
+    assert "Require all release CI gates on this exact commit" in names
 
 
 
@@ -827,6 +806,9 @@ def test_audit_reader_provisioning_is_strictly_read_only_and_separate_from_paper
     assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_audit_reader" in sql
     assert "ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on" in sql
     assert "GRANT SELECT (created_at, request_id, provider_id, provider, amount, currency, status, provider_status)" in sql
+    assert "GRANT SELECT (id, entry_type, idempotency_key, reference_type, reference_id, created_at)" in sql
+    verifier = (ROOT / "scripts" / "verify_staging_restore.py").read_text(encoding="utf-8")
+    assert '"ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id", "created_at")' in verifier
     assert "GRANT SELECT ON TABLE" not in sql
     for forbidden in ("GRANT INSERT", "GRANT UPDATE", "GRANT DELETE", "GRANT TRUNCATE", "GRANT EXECUTE"):
         assert forbidden not in sql
@@ -934,3 +916,35 @@ def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
     assert 'if self.environment == "production" and self.docs_enabled:' in src
     assert 'if self.max_request_body_bytes < 0:' in src
     assert 'if self.environment in {"staging", "production"} and self.max_request_body_bytes == 0:' in src
+
+
+def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles():
+    archive = (
+        ROOT / "alembic" / "versions" / "0051_research_trial_archive.py"
+    ).read_text(encoding="utf-8")
+    integrity = (
+        ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"
+    ).read_text(encoding="utf-8")
+
+    assert "REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM PUBLIC" in archive
+    assert "'atlas_api_runtime', 'atlas_audit_reader'" in archive
+
+    for function_name in (
+        "atlas_block_ledger_mutation()",
+        "atlas_ledger_journal_deferred_check()",
+        "atlas_validate_ledger_journal(integer)",
+        "atlas_research_trial_archive_immutable()",
+        "atlas_research_holdout_registry_immutable()",
+    ):
+        assert f"public.{function_name}" in integrity
+    assert "atlas_ledger_trigger_owner" in integrity
+    assert "NOLOGIN NOINHERIT BYPASSRLS" in integrity
+    assert "SECURITY DEFINER" in integrity
+    assert "SET search_path = pg_catalog, public, pg_temp" in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner" in integrity
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'INSERT')" in integrity
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'UPDATE')" in integrity
+    assert "has_schema_privilege(role_name, 'public', 'CREATE')" in integrity
+    assert "atlas_api_runtime" in integrity and "atlas_audit_reader" in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_api_runtime" not in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_audit_reader" not in integrity
