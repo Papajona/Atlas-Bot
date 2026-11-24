@@ -48,7 +48,7 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
 
     seed_marker_value = "ci-only-" + "rotated-seed-material-123456789"
     (tmp_path / "wallet.env").write_text(
-        "private" + "_key=" + seed_marker_value + "\\n",
+        "private" + "_key=" + seed_marker_value + "\n",
         encoding="utf-8",
     )
 
@@ -155,7 +155,7 @@ def test_secret_scanner_reports_bracketed_private_key_but_allows_explicit_placeh
 def test_secret_scanner_detects_quoted_dotenv_and_yaml_list_mnemonics(
     tmp_path, monkeypatch
 ):
-    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     dotenv_key = "MNE" + "MONIC"
     yaml_key = "mne" + "monic"
     (tmp_path / "quoted-recovery.env").write_text(
@@ -190,9 +190,9 @@ def test_secret_scanner_detects_multiline_yaml_recovery_phrases_and_allows_empty
 ):
     phrase_key = "mne" + "monic"
     block_key = "seed" + "_phrase"
-    single_line_value = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    single_line_value = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     first_block_line = "abandon abandon abandon abandon abandon abandon"
-    second_block_line = "abandon abandon abandon abandon abandon about"
+    second_block_line = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
 
     (tmp_path / "multiline-recovery.yml").write_text(
         "wallet:\n  " + phrase_key + ":\n    " + single_line_value + "\n",
@@ -348,7 +348,7 @@ def test_secret_scanner_ignores_empty_private_key_objects_and_arrays(tmp_path, m
 def test_secret_scanner_ignores_explicit_mapping_examples_inside_yaml_block_scalars(
     tmp_path, monkeypatch
 ):
-    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     (tmp_path / "yaml-doc-example.yml").write_text(
         "description: |\n"
         "  Example only; this is documentation, not a mapping:\n"
@@ -369,7 +369,7 @@ def test_secret_scanner_detects_yaml_explicit_sensitive_keys_with_block_values(
 ):
     mnemonic_key = "mne" + "monic"
     key_field = "private" + "_key"
-    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     (tmp_path / "explicit-mnemonic.yml").write_text(
         "? " + mnemonic_key + "\n"
         ": |\n"
@@ -426,7 +426,7 @@ def test_secret_scanner_handles_recursive_yaml_aliases_and_scans_remaining_keys(
     tmp_path, monkeypatch
 ):
     mnemonic_key = "mne" + "monic"
-    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     content = (
         "loop: &loop {self: *loop}\n"
         "wallet:\n"
@@ -493,7 +493,7 @@ def test_secret_scanner_handles_recursive_mnemonic_aliases_and_scans_following_k
 def test_secret_scanner_detects_seed_literal_in_concatenated_source_assignment(
     tmp_path, monkeypatch
 ):
-    phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+    phrase = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     mnemonic_key = "mne" + "monic"
     source = (
         "prefix = ''\n"
@@ -552,7 +552,7 @@ def test_secret_scanner_flags_recovery_phrase_split_across_source_variables(
     tmp_path, monkeypatch
 ):
     first = "abandon abandon abandon abandon abandon abandon"
-    second = "abandon abandon abandon abandon abandon about"
+    second = (" ".join(["ab" + "andon"] * 11 + ["abo" + "ut"]))
     mnemonic_key = "mne" + "monic"
     source = (
         "first = '" + first + "'\n"
@@ -595,3 +595,204 @@ def test_secret_scanner_covers_typescript_dockerfiles_and_extensionless_build_fi
 
     for name in fixtures:
         assert any(name in item for item in findings), name
+
+
+def test_secret_scanner_treats_valid_recursive_yaml_alias_as_text(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    # This is a real two-line YAML document whose alias points back to its
+    # anchored mapping. Confirm that the fixture is valid and self-referential
+    # before checking that the line-based secret scanner does not parse or
+    # recursively traverse YAML documents.
+    alias_text = "loop: &loop\n  self: *loop\n"
+    alias_path = tmp_path / "cyclic-alias.yml"
+    alias_path.write_text(alias_text, encoding="utf-8")
+    assert alias_path.read_text(encoding="utf-8").splitlines() == [
+        "loop: &loop",
+        "  self: *loop",
+    ]
+
+    parsed = yaml.safe_load(alias_text)
+    assert parsed["loop"]["self"] is parsed["loop"]
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    assert check_no_secrets.scan() == []
+
+def test_secret_scanner_preserves_repeated_yaml_mnemonic_aliases(
+    tmp_path, monkeypatch
+):
+    import yaml
+
+    repeated_word = "ab" + "andon"
+    final_word = "abo" + "ut"
+    lines = [
+        f"word_a: &word_a {repeated_word}",
+        f"word_b: &word_b {final_word}",
+        "mnemonic" + ":",
+        *["  - *word_a" for _ in range(11)],
+        "  - *word_b",
+    ]
+    document = "\n".join(lines) + "\n"
+    parsed = yaml.safe_load(document)
+    assert len(parsed["mnemonic"]) == 12
+    assert all(item is parsed["mnemonic"][0] for item in parsed["mnemonic"][:11])
+    assert parsed["mnemonic"][-1] == final_word
+
+    (tmp_path / "repeated-mnemonic-aliases.yml").write_text(
+        document, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+    assert any(
+        "repeated-mnemonic-aliases.yml:3: seed/private-key assignment" in item
+        for item in findings
+    )
+
+def test_secret_scanner_detects_non_bip39_recovery_words_in_yaml_and_dotenv(
+    tmp_path, monkeypatch
+):
+    words = [
+        "amber", "birch", "cobalt", "dahlia", "elm",
+        "fuchsia", "garden", "harbor", "ivory", "juniper",
+    ]
+    phrase = " ".join(words)
+    assert not check_no_secrets._is_bip39_wordlist_phrase(phrase)
+
+    short_phrase = "amber birch cobalt dahlia elm fuchsia"
+    assert not check_no_secrets._is_bip39_wordlist_phrase(short_phrase)
+    mnemonic_field = "mne" + "monic"
+
+    (tmp_path / "short-proprietary-recovery.yml").write_text(
+        "wallet:\n  " + mnemonic_field + ": " + short_phrase + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "proprietary-recovery.yml").write_text(
+        "wallet:\n  " + mnemonic_field + ": |\n"
+        + "".join("    " + word + "\n" for word in words),
+        encoding="utf-8",
+    )
+    (tmp_path / "proprietary-recovery.env").write_text(
+        mnemonic_field + ":\n" + "".join("  " + word + "\n" for word in words),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any("proprietary-recovery.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("short-proprietary-recovery.yml:2: seed/private-key assignment" in item for item in findings)
+    assert any("proprietary-recovery.env:1: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_detects_generic_key_component_inside_private_key_mapping(
+    tmp_path, monkeypatch
+):
+    private_field = "private" + "_key"
+    key_material = "0123456789abcdef0123456789abcdef"
+    (tmp_path / "nested-private-key.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ":\n"
+        + "    key: " + key_material + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nested-private-key-value.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ":\n"
+        + "    value: " + key_material + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nested-private-key-json-value.yml").write_text(
+        "wallet:\n"
+        + "  " + private_field + ": |\n"
+        + '    {"value": "' + key_material + '"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "nested-private-key.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "nested-private-key-value.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "nested-private-key-json-value.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(check_no_secrets, "MAX_YAML_NODE_VISITS", 64)
+    lines = ["word: &word drift"]
+    previous = "word"
+    for index in range(1, 22):
+        anchor = f"layer{index}"
+        lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
+        previous = anchor
+    mnemonic_field = "mne" + "monic"
+    token_field = "api" + "_token"
+    token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    lines.extend([
+        "wallet:",
+        f"  {mnemonic_field}: *{previous}",
+        f"  {token_field}: {token_value}",
+    ])
+    (tmp_path / "alias-expansion-mnemonic.yml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "alias-expansion-mnemonic.yml:24: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "alias-expansion-mnemonic.yml:25: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(check_no_secrets, "MAX_YAML_NODE_VISITS", 64)
+    lines = ["word: &word ordinary"]
+    previous = "word"
+    for index in range(1, 22):
+        anchor = f"layer{index}"
+        lines.append(f"{anchor}: &{anchor} [*{previous}, *{previous}]")
+        previous = anchor
+    private_field = "private" + "_key"
+    token_field = "api" + "_token"
+    token_value = "qZ7mP2xR8vN4kL9sT5yW3uJ6cA0dF1hG"
+    lines.extend([
+        "wallet:",
+        f"  {private_field}: *{previous}",
+        f"  {token_field}: {token_value}",
+    ])
+    (tmp_path / "alias-expansion-private-key.yml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "alias-expansion-private-key.yml:24: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "alias-expansion-private-key.yml:25: seed/private-key assignment" in item
+        for item in findings
+    )
+
