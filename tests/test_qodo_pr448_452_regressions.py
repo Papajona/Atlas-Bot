@@ -271,7 +271,7 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
         source.index("async def _quarantine_customer_identity_review("):
         source.index("async def get_customer(")
     ]
-    assert "async with SessionLocal() as quarantine_db" in quarantine
+    assert "async with IdentityQuarantineSessionLocal() as quarantine_db" in quarantine
     assert 'profile.status = "PENDING_IDENTITY_REVIEW"' in quarantine
     assert "await quarantine_db.commit()" in quarantine
     assert "if not identity_review_required:" in get_customer
