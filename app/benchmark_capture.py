@@ -1,7 +1,6 @@
 """Consent-gated encryption and retention for strategy benchmark submissions."""
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import re
@@ -19,6 +18,20 @@ logger = logging.getLogger(__name__)
 CONSENT_VERSION = "atlas-strategy-benchmark-v1"
 RETENTION_DAYS = 90
 MAX_CAPTURES_PER_24_HOURS = 20
+
+BENCHMARK_CAPTURE_ADVISORY_LOCK_NAMESPACE = 17012026
+
+
+async def lock_customer_benchmark_captures(db, customer_id: int) -> None:
+    """Serialize capture inserts and customer deletions in the same transaction."""
+    if db.get_bind().dialect.name == "postgresql":
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :customer_id)"),
+            {
+                "namespace": BENCHMARK_CAPTURE_ADVISORY_LOCK_NAMESPACE,
+                "customer_id": int(customer_id),
+            },
+        )
 
 _EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _SECRET_RE = re.compile(
@@ -109,11 +122,7 @@ async def capture_strategy_prompt(
     try:
         # Serialize concurrent submissions per customer so the daily cap cannot be
         # bypassed by two requests that both observe the same previous count.
-        if db.get_bind().dialect.name == "postgresql":
-            await db.execute(
-                text("SELECT pg_advisory_xact_lock(17012026, :customer_id)"),
-                {"customer_id": customer_id},
-            )
+        await lock_customer_benchmark_captures(db, customer_id)
         recent = int((await db.execute(
             select(func.count(BenchmarkPromptCapture.id)).where(
                 BenchmarkPromptCapture.customer_id == customer_id,
@@ -127,7 +136,6 @@ async def capture_strategy_prompt(
             customer_id=customer_id,
             prompt_ciphertext=encrypted_prompt,
             native_output_ciphertext=encrypted_output,
-            prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             consent_version=CONSENT_VERSION,
             consented_at=now,
             asset=asset,
