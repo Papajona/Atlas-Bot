@@ -175,19 +175,41 @@ def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access(
     preflight_block = script.split(
         "# The read-only preflight identity may inspect the two DB URLs", 1
     )[1].split("\necho\n", 1)[0]
+    grant_helper = _extract_shell_function(script, "grant_secret_accessor")
+    verify_helper = _extract_shell_function(script, "verify_secret_accessor_binding")
 
     assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do' in runtime_block
-    assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in runtime_block
-    assert '--member="serviceAccount:${RUNTIME_SA}"' in runtime_block
-    assert '--role="roles/secretmanager.secretAccessor"' in runtime_block
-    assert "gcloud projects add-iam-policy-binding" not in runtime_block
-
+    assert 'grant_secret_accessor "$secret_name" "$RUNTIME_SA"' in runtime_block
     assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do' in preflight_block
-    assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in preflight_block
-    assert '--member="serviceAccount:${PREFLIGHT_SA}"' in preflight_block
-    assert '--role="roles/secretmanager.secretAccessor"' in preflight_block
-    assert "ANON_KEY_SECRET" not in preflight_block
-    assert "gcloud projects add-iam-policy-binding" not in preflight_block
+    assert 'grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"' in preflight_block
+    assert '--member="serviceAccount:${principal}"' in grant_helper
+    assert '--role="roles/secretmanager.secretAccessor"' in grant_helper
+    assert 'gcloud secrets get-iam-policy "$secret_name"' in verify_helper
+    assert "binding.get(\"condition\")" in verify_helper
+    assert "gcloud projects add-iam-policy-binding" not in grant_helper
+
+
+def test_gcp_bootstrap_secret_access_repair_is_idempotent_and_never_reads_or_rotates_secrets():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    repair = _extract_shell_function(script, "repair_secret_access_only")
+    dispatch = script.split(
+        'if [[ "${1:-}" == "--repair-secret-access" ]]; then', 1
+    )[1].split("fi", 1)[0]
+
+    assert '--repair-secret-access' in repair
+    assert 'gcloud projects describe "$PROJECT_ID"' in repair
+    assert 'gcloud iam service-accounts describe "$RUNTIME_SA"' in repair
+    assert 'gcloud iam service-accounts describe "$PREFLIGHT_SA"' in repair
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do' in repair
+    assert 'grant_secret_accessor "$secret_name" "$RUNTIME_SA"' in repair
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do' in repair
+    assert 'grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"' in repair
+    assert "put_secret" not in repair
+    assert "versions add" not in repair
+    assert "versions access" not in repair
+    assert "PAPER_URL_FILE" not in repair
+    assert "repair_secret_access_only \"$@\"" in dispatch
+
 
 
 def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
