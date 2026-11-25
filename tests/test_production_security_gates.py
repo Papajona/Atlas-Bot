@@ -915,15 +915,16 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
         # rolbypassrls to precede FROM. A fixed NOLOGIN role guard (NOT rolbypassrls)
         # is not a BYPASSRLS application-role grant loop.
         role_grant_loops = re.findall(
-            r"(?is)\bFOR\s+\w+\s+IN\s+(SELECT\b(?:(?!\bLOOP\b).)*?)\bLOOP\b(?:(?!\bEND\s+LOOP\b).)*?\bGRANT\b",
+            r"(?is)\bFOR\s+\w+\s+IN\s+(SELECT[\s\S]*?)\bLOOP\b([\s\S]*?)\bEND\s+LOOP\b",
             source,
         )
-        for role_query in role_grant_loops:
+        for role_query, loop_body in role_grant_loops:
             selects_login_bypass_roles = (
                 re.search(r"(?i)\bFROM\s+(?:pg_catalog\.)?pg_roles\b", role_query)
                 and re.search(r"(?i)\brolcanlogin\b", role_query)
                 and re.search(r"(?i)\brolbypassrls\b", role_query)
                 and not re.search(r"(?i)\bNOT\s+(?:\w+\.)?rolbypassrls\b", role_query)
+                and re.search(r"(?i)\bGRANT\b", loop_body)
             )
             if selects_login_bypass_roles:
                 excludes_audit_reader = re.search(
