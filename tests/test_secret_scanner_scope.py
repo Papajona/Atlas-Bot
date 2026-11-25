@@ -6,7 +6,7 @@ from scripts import check_no_secrets
 def test_secret_scanner_covers_docs_android_resources_and_key_files():
     expected = {
         ".md", ".txt", ".xml", ".properties", ".java", ".kt", ".js",
-        ".ts", ".tsx", ".mjs", ".cjs", ".tf", ".tfvars", ".dockerignore",
+        ".ts", ".tsx", ".mjs", ".cjs", ".jsx", ".mts", ".cts", ".tf", ".tfvars", ".dockerignore",
         ".html", ".css", ".sql", ".pem", ".key", ".crt",
     }
     assert expected <= check_no_secrets.TEXT_SUFFIXES
@@ -1641,3 +1641,38 @@ def test_secret_scanner_ignores_secret_manager_placeholder_with_shell_continuati
 
     assert check_no_secrets.scan() == []
 
+def test_secret_scanner_fallback_detects_list_item_phrase_in_malformed_yaml(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / "malformed-wallet.yaml").write_text(
+        "- mnemonic: " + phrase + "\ninvalid: [\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "malformed-wallet.yaml:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+@pytest.mark.parametrize("suffix", [".jsx", ".mts", ".cts"])
+def test_secret_scanner_detects_multiline_template_recovery_phrases_for_all_source_suffixes(
+    tmp_path, monkeypatch, suffix
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    (tmp_path / f"wallet{suffix}").write_text(
+        "const recovery_phrase = `\n" + phrase + "\n`;\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        f"wallet{suffix}:1: seed/private-key assignment" in item
+        for item in findings
+    )
