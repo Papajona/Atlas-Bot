@@ -914,7 +914,8 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
         # loop. A defensive check that a dedicated NOLOGIN role is NOT BYPASSRLS
         # is not such a loop and must not be mistaken for one.
         selects_bypassrls_roles = re.search(
-            r"(?is)SELECT\s+.*?rolbypassrls.*?FROM\s+pg_roles",
+            r"(?is)\bSELECT\b(?:(?!;).)*?\brolbypassrls\b"
+            r"(?:(?!;).)*?\bFROM\s+pg_roles\b",
             source,
         )
         if selects_bypassrls_roles and re.search(r"\bGRANT\b", source, re.IGNORECASE):
