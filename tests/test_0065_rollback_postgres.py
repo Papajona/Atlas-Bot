@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import asyncpg
 import pytest
@@ -34,6 +34,33 @@ def _postgres_test_url() -> str:
     if parsed.hostname not in {"localhost", "127.0.0.1"}:
         pytest.fail("0065 rollback regression refuses to mutate a non-local database")
     return value
+
+
+def _url_for_identity(url: str, username: str, password: str) -> str:
+    parsed = urlsplit(url)
+    host = parsed.hostname or "localhost"
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    port = f":{parsed.port}" if parsed.port else ""
+    netloc = f"{quote(username)}:{quote(password)}@{host}{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+def _run_alembic_expect_failure(
+    env: dict[str, str], expected_message: str, *args: str
+) -> None:
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=180,
+        check=False,
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode != 0, "Alembic unexpectedly accepted an unauthorized downgrade identity"
+    assert expected_message in output, output
 
 
 def _run_alembic(env: dict[str, str], *args: str) -> None:
@@ -116,9 +143,6 @@ async def _run_database_assertions(dsn: str, stage: str) -> None:
                 TRIGGER_OWNER,
             )
             assert role_oid is not None, "0065 did not create its isolated trigger role"
-            grantor_oid = await connection.fetchval(
-                "SELECT oid FROM pg_roles WHERE rolname = current_user"
-            )
             schema_direct = await connection.fetchval(
                 """
                 SELECT EXISTS (
@@ -129,12 +153,10 @@ async def _run_database_assertions(dsn: str, stage: str) -> None:
                     ) acl
                     WHERE n.nspname = 'public'
                       AND acl.grantee = $1
-                      AND acl.grantor = $2
                       AND acl.privilege_type = 'USAGE'
                 )
                 """,
                 role_oid,
-                grantor_oid,
             )
             function_direct = await connection.fetchval(
                 """
@@ -146,13 +168,11 @@ async def _run_database_assertions(dsn: str, stage: str) -> None:
                     ) acl
                     WHERE p.oid = to_regprocedure($1)
                       AND acl.grantee = $2
-                      AND acl.grantor = $3
                       AND acl.privilege_type = 'EXECUTE'
                 )
                 """,
                 VALIDATE_FUNCTION,
                 role_oid,
-                grantor_oid,
             )
             assert schema_direct, "0065 did not add its direct schema USAGE grant"
             assert function_direct, "0065 did not add its direct validation EXECUTE grant"
@@ -198,8 +218,8 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
         (
             value
             for value in (
-                os.environ.get("DATABASE_URL"),
                 os.environ.get("ATLAS_POSTGRES_URL"),
+                os.environ.get("DATABASE_URL"),
             )
             if value
             and value.startswith(
@@ -233,6 +253,273 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
         # Keep the shared disposable CI database at the repository head even
         # when an assertion fails, so later integration tests see a valid schema.
         _run_alembic(env, "upgrade", "head")
+
+
+def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
+    dsn = _postgres_test_url()
+    env = os.environ.copy()
+    alembic_url = next(
+        (
+            value
+            for value in (
+                os.environ.get("ATLAS_POSTGRES_URL"),
+                os.environ.get("DATABASE_URL"),
+            )
+            if value
+            and value.startswith(
+                ("postgres://", "postgresql://", "postgresql+asyncpg://")
+            )
+        ),
+        None,
+    )
+    if alembic_url is None:
+        pytest.skip("requires a PostgreSQL DATABASE_URL for Alembic")
+    env["DATABASE_URL"] = alembic_url
+
+    async def prepare_and_check(stage: str) -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            if stage == "prepare":
+                revision = await connection.fetchval(
+                    "SELECT version_num FROM public.alembic_version"
+                )
+                assert revision == PREDECESSOR, revision
+                exists = await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                    TRIGGER_OWNER,
+                )
+                assert not exists
+                await connection.execute(
+                    "CREATE ROLE atlas_ledger_trigger_owner "
+                    "NOLOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER "
+                    "NOCREATEDB NOCREATEROLE NOREPLICATION"
+                )
+                await connection.execute(
+                    "COMMENT ON ROLE atlas_ledger_trigger_owner IS 'pre-existing-trigger-owner-comment'"
+                )
+                await connection.execute(
+                    "GRANT USAGE ON SCHEMA public TO atlas_ledger_trigger_owner"
+                )
+                await connection.execute(
+                    "GRANT SELECT ON TABLE public.ledger_journals, "
+                    "public.ledger_journal_lines TO atlas_ledger_trigger_owner"
+                )
+                await connection.execute(
+                    f"GRANT EXECUTE ON FUNCTION {VALIDATE_FUNCTION} "
+                    "TO atlas_ledger_trigger_owner"
+                )
+
+            elif stage in {"verify-upgrade", "verify-downgrade"}:
+                expected_revision = (
+                    MIGRATION_HEAD if stage == "verify-upgrade" else PREDECESSOR
+                )
+                revision = await connection.fetchval(
+                    "SELECT version_num FROM public.alembic_version"
+                )
+                assert revision == expected_revision, revision
+                role_oid = await connection.fetchval(
+                    "SELECT oid FROM pg_roles WHERE rolname = $1",
+                    TRIGGER_OWNER,
+                )
+                assert role_oid is not None, "0065 discarded a role that predated the migration"
+
+                schema_direct = await connection.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_namespace n
+                        CROSS JOIN LATERAL aclexplode(
+                            coalesce(n.nspacl, acldefault('n', n.nspowner))
+                        ) acl
+                        WHERE n.nspname = 'public'
+                          AND acl.grantee = $1
+                          AND acl.privilege_type = 'USAGE'
+                    )
+                    """,
+                    role_oid,
+                )
+                journals_direct = await connection.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        CROSS JOIN LATERAL aclexplode(
+                            coalesce(c.relacl, acldefault('r', c.relowner))
+                        ) acl
+                        WHERE c.oid = to_regclass('public.ledger_journals')
+                          AND acl.grantee = $1
+                          AND acl.privilege_type = 'SELECT'
+                    )
+                    """,
+                    role_oid,
+                )
+                lines_direct = await connection.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_class c
+                        CROSS JOIN LATERAL aclexplode(
+                            coalesce(c.relacl, acldefault('r', c.relowner))
+                        ) acl
+                        WHERE c.oid = to_regclass('public.ledger_journal_lines')
+                          AND acl.grantee = $1
+                          AND acl.privilege_type = 'SELECT'
+                    )
+                    """,
+                    role_oid,
+                )
+                function_direct = await connection.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_proc p
+                        CROSS JOIN LATERAL aclexplode(
+                            coalesce(p.proacl, acldefault('f', p.proowner))
+                        ) acl
+                        WHERE p.oid = to_regprocedure($1)
+                          AND acl.grantee = $2
+                          AND acl.privilege_type = 'EXECUTE'
+                    )
+                    """,
+                    VALIDATE_FUNCTION,
+                    role_oid,
+                )
+                assert schema_direct
+                assert journals_direct
+                assert lines_direct
+                assert function_direct
+
+                if stage == "verify-downgrade":
+                    comment = await connection.fetchval(
+                        "SELECT shobj_description(oid, 'pg_authid') "
+                        "FROM pg_roles WHERE rolname = $1",
+                        TRIGGER_OWNER,
+                    )
+                    assert comment == "pre-existing-trigger-owner-comment"
+            else:
+                raise AssertionError(stage)
+        finally:
+            await connection.close()
+
+    try:
+        current = asyncio.run(_get_revision(dsn))
+        assert current == MIGRATION_HEAD, current
+        _run_alembic(env, "downgrade", PREDECESSOR)
+        asyncio.run(prepare_and_check("prepare"))
+
+        _run_alembic(env, "upgrade", "head")
+        asyncio.run(prepare_and_check("verify-upgrade"))
+
+        _run_alembic(env, "downgrade", PREDECESSOR)
+        asyncio.run(prepare_and_check("verify-downgrade"))
+    finally:
+        async def cleanup() -> None:
+            connection = await asyncpg.connect(dsn=dsn)
+            try:
+                await connection.execute(
+                    "DROP ROLE IF EXISTS atlas_ledger_trigger_owner"
+                )
+            finally:
+                await connection.close()
+
+        try:
+            asyncio.run(cleanup())
+        finally:
+            _run_alembic(env, "upgrade", "head")
+
+
+def test_0065_downgrade_rejects_a_different_administrator_before_mutating():
+    dsn = _postgres_test_url()
+    env = os.environ.copy()
+    alembic_url = next(
+        (
+            value
+            for value in (
+                os.environ.get("ATLAS_POSTGRES_URL"),
+                os.environ.get("DATABASE_URL"),
+            )
+            if value
+            and value.startswith(
+                ("postgres://", "postgresql://", "postgresql+asyncpg://")
+            )
+        ),
+        None,
+    )
+    if alembic_url is None:
+        pytest.skip("requires a PostgreSQL DATABASE_URL for Alembic")
+    env["DATABASE_URL"] = alembic_url
+
+    alternate_user = "atlas_0065_downgrade_alt"
+    alternate_password = "temporary-0065-alt-admin-password"
+
+    async def create_alternate_admin() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            await connection.execute(f"DROP ROLE IF EXISTS {alternate_user}")
+            await connection.execute(
+                f"CREATE ROLE {alternate_user} LOGIN SUPERUSER "
+                f"PASSWORD '{alternate_password}'"
+            )
+        finally:
+            await connection.close()
+
+    async def verify_unchanged() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            revision = await connection.fetchval(
+                "SELECT version_num FROM public.alembic_version"
+            )
+            assert revision == MIGRATION_HEAD, revision
+            owner = await connection.fetchval(
+                """
+                SELECT r.rolname
+                FROM pg_proc p
+                JOIN pg_roles r ON r.oid = p.proowner
+                WHERE p.oid = to_regprocedure(
+                    'public.atlas_ledger_journal_deferred_check()'
+                )
+                """
+            )
+            assert owner == TRIGGER_OWNER, owner
+            marker = await connection.fetchval(
+                "SELECT shobj_description(oid, 'pg_authid') "
+                "FROM pg_roles WHERE rolname = $1",
+                TRIGGER_OWNER,
+            )
+            assert marker and marker.startswith("atlas:0065:rollback-state:v3:")
+        finally:
+            await connection.close()
+
+    async def drop_alternate_admin() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            await connection.execute(f"DROP ROLE IF EXISTS {alternate_user}")
+        finally:
+            await connection.close()
+
+    try:
+        current = asyncio.run(_get_revision(dsn))
+        assert current == MIGRATION_HEAD, current
+        asyncio.run(create_alternate_admin())
+        alternate_env = env.copy()
+        alternate_env["DATABASE_URL"] = _url_for_identity(
+            alembic_url, alternate_user, alternate_password
+        )
+        _run_alembic_expect_failure(
+            alternate_env,
+            "run Alembic as the original migration identity",
+            "downgrade",
+            PREDECESSOR,
+        )
+        asyncio.run(verify_unchanged())
+        asyncio.run(drop_alternate_admin())
+        _run_alembic(env, "downgrade", PREDECESSOR)
+        assert asyncio.run(_get_revision(dsn)) == PREDECESSOR
+    finally:
+        try:
+            asyncio.run(drop_alternate_admin())
+        finally:
+            _run_alembic(env, "upgrade", "head")
 
 
 async def _get_revision(dsn: str) -> str | None:
