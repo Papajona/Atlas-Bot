@@ -7,6 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app import execution, main
+from app.db import _UUID_AUTH_REFERENCE_GLOB, _UUID_AUTH_REFERENCE_PATTERN
+from app.customer_identity import (
+    _UUID_AUTH_REFERENCE_GLOB as _IDENTITY_UUID_AUTH_REFERENCE_GLOB,
+    _UUID_AUTH_REFERENCE_PATTERN as _IDENTITY_UUID_AUTH_REFERENCE_PATTERN,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1156,3 +1161,13 @@ def test_customer_auth_email_is_verified_when_jwt_omits_email_even_if_profile_ha
     assert auth_calls == ["verified-token"]
     assert compared_emails == ["confirmed@example.test"]
 
+def test_customer_uuid_predicates_share_the_sqlite_index_pattern():
+    assert _UUID_AUTH_REFERENCE_PATTERN == _IDENTITY_UUID_AUTH_REFERENCE_PATTERN
+    assert _UUID_AUTH_REFERENCE_GLOB == _IDENTITY_UUID_AUTH_REFERENCE_GLOB
+
+    main_source = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    db_source = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    assert "uuid_pattern = _UUID_AUTH_REFERENCE_PATTERN" in main_source
+    assert "uuid_glob = _UUID_AUTH_REFERENCE_GLOB" in main_source
+    assert "_UUID_AUTH_REFERENCE_GLOB" in db_source
+    assert "_UUID_AUTH_REFERENCE_PATTERN" in db_source
