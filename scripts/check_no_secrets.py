@@ -478,7 +478,11 @@ def _structured_private_object_has_material(value) -> bool:
                     # Public JWK metadata is exempted field-by-field in the dict
                     # branch above; it must not disable inspection of unknown
                     # sibling fields that may contain private material.
-                    stack.append((item, False, private_context))
+                    stack.append((
+                        item,
+                        False,
+                        private_context or scalar_items_are_private,
+                    ))
                 elif isinstance(item, list):
                     stack.append((item, scalar_items_are_private, private_context))
                 elif scalar_items_are_private:
