@@ -307,12 +307,14 @@
         api("/api/customer/portfolio"),
         api("/api/customer/paper/balances"),
         api("/api/customer/paper/positions"),
-        api("/api/customer/paper/orders")
+        api("/api/customer/paper/orders"),
+        api("/api/customer/paper/history?limit=50")
       ]);
       const portfolio = results[0] || {};
       const balances = Array.isArray(results[1].balances) ? results[1].balances : [];
       const positions = Array.isArray(results[2].positions) ? results[2].positions : [];
       const orders = Array.isArray(results[3].orders) ? results[3].orders : [];
+      const history = Array.isArray(results[4].orders) ? results[4].orders : [];
       const cash = balances
         .filter((row) => String(row.account_code || "") === "PAPER_CASH" && String(row.currency || "").toUpperCase() === "USDT")
         .reduce((sum, row) => sum + Number(row.balance || 0), 0);
@@ -326,6 +328,7 @@
       $("initialize-button").textContent = state.initialized ? "Virtual account initialized" : "Initialize virtual paper balance";
       renderPositions(positions);
       renderOrders(orders);
+      renderHistory(history);
       showWorkspace(true);
       setNotice("order-message", state.initialized ? "Paper account is initialized. Orders remain virtual and are filled only by verified completed bars." : "Initialize the virtual account before submitting an order.", "info");
     } catch (error) {
@@ -371,6 +374,30 @@
           '</td><td>' + escapeHtml(timeframe) +
           '</td><td><button class="mini" type="button" data-advance="' + escapeHtml(id) + '">Advance</button> ' +
           '<button class="mini muted-button" type="button" data-cancel="' + escapeHtml(id) + '">Cancel</button></td></tr>';
+      }).join("") + '</tbody></table>';
+  }
+
+  function renderHistory(orders) {
+    const root = $("history");
+    if (!orders.length) {
+      root.innerHTML = '<p class="empty">No paper orders have been submitted yet.</p>';
+      return;
+    }
+    root.innerHTML = '<table><thead><tr><th>Created</th><th>Market</th><th>Side</th><th>Status</th><th>Filled / requested</th><th>Average fill</th><th>Fills</th></tr></thead><tbody>' +
+      orders.map((row) => {
+        const timestamp = row.created_at ? new Date(row.created_at) : null;
+        const created = timestamp && Number.isFinite(timestamp.getTime())
+          ? timestamp.toLocaleString()
+          : "—";
+        return '<tr><td>' + escapeHtml(created) +
+          '</td><td>' + escapeHtml(row.symbol || "—") +
+          '</td><td>' + escapeHtml(row.side || "—") +
+          '</td><td>' + escapeHtml(row.status || "—") +
+          '</td><td>' + escapeHtml(numberText(row.filled_quantity, 8)) + " / " +
+          escapeHtml(numberText(row.quantity, 8)) +
+          '</td><td>' + escapeHtml(numberText(row.average_fill_price, 8)) +
+          '</td><td>' + escapeHtml(row.fill_count == null ? 0 : row.fill_count) +
+          '</td></tr>';
       }).join("") + '</tbody></table>';
   }
 
