@@ -1052,6 +1052,24 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
   let releasePortfolio;
   page.on("pageerror", error => pageErrors.push(error.message));
 
+  // Record when the application itself has parsed the delayed portfolio body.
+  // This makes the race assertion depend on an observed browser response, not
+  // on a fixed sleep after the test releases the mocked request.
+  await page.addInitScript(() => {
+    window.__atlasPortfolioJsonResponses = [];
+    const originalJson = Response.prototype.json;
+    Response.prototype.json = async function (...args) {
+      const payload = await originalJson.apply(this, args);
+      if (this.url && new URL(this.url, window.location.href).pathname === "/api/customer/portfolio") {
+        window.__atlasPortfolioJsonResponses.push({
+          equity: payload && payload.equity,
+          cash_equity: payload && payload.cash_equity,
+        });
+      }
+      return payload;
+    };
+  });
+
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
@@ -1126,7 +1144,19 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
   assert.equal(logoutCalls[0], "Bearer " + paperTestSession("refresh-race-aal2"));
 
   releasePortfolio();
-  await page.waitForTimeout(150);
+  await waitUntil(async () => await page.evaluate(
+    () => window.__atlasPortfolioJsonResponses.length === 1
+  ));
+  const observedPortfolio = await page.evaluate(() => window.__atlasPortfolioJsonResponses);
+  assert.deepEqual(observedPortfolio, [{
+    equity: 987654.32,
+    cash_equity: 987654.32,
+  }], "the browser must parse the actual delayed portfolio response before stale-session assertions run");
+  // Allow all promise continuations from the parsed response to complete and
+  // reach a paint before checking that the signed-out UI remains cleared.
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
   assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
   assert.equal(await page.locator("#workspace").isHidden(), true);
   assert.equal(await page.locator("#equity").innerText(), "—", "late portfolio data must not repaint the cleared session");
