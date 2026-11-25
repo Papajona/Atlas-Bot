@@ -901,19 +901,16 @@ def test_api_runtime_grants_preserve_financial_custody_execution_and_audit_histo
     assert "GRANT SELECT, INSERT ON TABLE public.revenue_ledger, public.cost_ledger TO atlas_api_runtime" in provisioner
 
 
-def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
+def _assert_bypassrls_grant_loops_exclude_audit_reader(migrations: Path) -> None:
     import re
 
-    migrations = ROOT / "alembic" / "versions"
     for path in sorted(migrations.glob("*.py")):
         source = path.read_text(encoding="utf-8")
         revision = re.search(r'(?m)^revision\s*=\s*["\'](\d{4})_', source)
         if not revision or int(revision.group(1)) <= 59:
             continue
-        # Inspect each role-selection loop as SQL is written: FROM appears
-        # before WHERE in normal SELECT syntax, so the matcher must not require
-        # rolbypassrls to precede FROM. A fixed NOLOGIN role guard (NOT rolbypassrls)
-        # is not a BYPASSRLS application-role grant loop.
+        # FROM precedes WHERE in normal SQL. Capture the SELECT and loop body
+        # separately so a grant inside the loop cannot hide behind SQL ordering.
         role_grant_loops = re.findall(
             r"(?is)\bFOR\s+\w+\s+IN\s+(SELECT[\s\S]*?)\bLOOP\b([\s\S]*?)\bEND\s+LOOP\b",
             source,
@@ -938,6 +935,32 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
                     f"{path.name} grants privileges to BYPASSRLS login roles without excluding atlas_audit_reader"
                 )
 
+
+def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
+    _assert_bypassrls_grant_loops_exclude_audit_reader(ROOT / "alembic" / "versions")
+
+
+def test_bypassrls_guard_detects_from_before_where_future_grant_query(tmp_path):
+    (tmp_path / "0066_future_role_grant.py").write_text(
+        '''
+revision = "0066_future_role_grant"
+sql = """
+FOR role_name IN
+    SELECT r.rolname
+    FROM pg_roles r
+    WHERE r.rolcanlogin AND r.rolbypassrls
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="without excluding atlas_audit_reader",
+    ):
+        _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
 
 
 def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
