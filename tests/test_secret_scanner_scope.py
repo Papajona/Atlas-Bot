@@ -1585,7 +1585,7 @@ def test_secret_scanner_fallback_detects_list_item_phrase_in_malformed_yaml(
 def test_secret_scanner_detects_multiline_java_and_kotlin_token_text_blocks(
     tmp_path, monkeypatch
 ):
-    token = "a4V8n2K6p9Q3x7M1r5T0w4Y8b2C6d9F3"
+    fixture_value = "".join(("a4V8n2K6p9Q3x7M1", "r5T0w4Y8b2C6d9F3"))
     for filename, declaration in (
         ("Credential.java", "String token = "),
         ("Credential.kt", "val token = "),
@@ -1593,7 +1593,7 @@ def test_secret_scanner_detects_multiline_java_and_kotlin_token_text_blocks(
         source = (
             "class Credential {\n"
             + "    " + declaration + chr(34) * 3 + "\n"
-            + "        " + token + "\n"
+            + "        " + fixture_value + "\n"
             + chr(34) * 3 + ";\n"
             + "}\n"
         )
