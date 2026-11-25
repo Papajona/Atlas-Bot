@@ -13,8 +13,8 @@ function send(res, status, type, body, headers = {}) {
   res.writeHead(status, { "content-type": type, "x-content-type-options": "nosniff", ...headers });
   res.end(body);
 }
-function json(route, value, status = 200) {
-  return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+function json(route, value, status = 200, headers = {}) {
+  return route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
 }
 
 const server = http.createServer((req, res) => {
@@ -633,6 +633,9 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
   let advanceCalls = 0;
   let cancelRequest = null;
   let scannerRequest = null;
+  let orderAttempts = 0;
+  let orderAccepted = false;
+  const logoutCalls = [];
   const calls = [];
   await page.addInitScript(() => {
     window.__cspViolations = [];
@@ -654,6 +657,10 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
       assert.equal(body.email, "paper@example.invalid");
       assert.equal(body.password, "test-only-password");
       return json(route, { status: "CONFIRMATION_REQUIRED" });
+    }
+    if (p === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push({ authorization: headers.authorization || "" });
+      return json(route, { status: "SIGNED_OUT" });
     }
     if (p === "/api/auth/login" && method === "POST") {
       return json(route, { access_token: "paper-aal1-token" });
@@ -700,7 +707,12 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
       return json(route, { id: 42, display_name: "Paper Test Customer", email: "paper@example.invalid", status: "ACTIVE" });
     }
     if (p === "/api/customer/portfolio" && method === "GET") {
-      if (!ready) return json(route, { detail: "PAPER_LEDGER_PREFLIGHT_BLOCKED" }, 503);
+      if (!ready) return json(
+        route,
+        { detail: "PAPER_LEDGER_PREFLIGHT_BLOCKED" },
+        503,
+        { "X-Atlas-Paper-Gate": "blocked" }
+      );
       return json(route, {
         equity: initialized ? 10000 : 0,
         cash_equity: initialized ? 10000 : 0,
@@ -794,7 +806,13 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
       });
     }
     if (p === "/api/customer/paper/orders" && method === "POST") {
+      orderAttempts += 1;
       orderPost = { body: req.postDataJSON(), authorization: headers.authorization || "" };
+      if (orderAttempts === 1) {
+        // A normal business conflict is not a platform readiness/risk gate.
+        return json(route, { detail: "Order was rejected because the paper account has insufficient available balance." }, 409);
+      }
+      orderAccepted = true;
       paperOrders = [{
         client_order_id: "mock-paper-order-1",
         symbol: orderPost.body.symbol,
@@ -879,7 +897,11 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
 
   await page.locator("#quantity").fill("0.001");
   await page.locator("#submit-order").click();
-  await waitUntil(async () => orderPost !== null && (await page.locator("#order-count").innerText()) === "1");
+  await waitUntil(async () => (await page.locator("#order-message").innerText()).includes("insufficient available balance"));
+  assert.equal(await page.locator("#workspace").isVisible(), true, "ordinary order rejection must leave the paper workspace usable");
+  assert.equal(await page.locator("#blocked-state").isHidden(), true, "ordinary 409 order rejection must not be misreported as a staging outage");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => orderAccepted && (await page.locator("#order-count").innerText()) === "1");
   assert.equal(orderPost.body.symbol, "BTC/USDT");
   assert.equal(orderPost.body.side, "BUY");
   assert.equal(orderPost.body.order_type, "MARKET");
@@ -920,6 +942,98 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
   assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "paper staging workspace must fit mobile screens: " + JSON.stringify(mobileLayout));
   assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "paper staging workspace must have no CSP violations");
   assert.deepEqual(pageErrors, [], "paper staging browser flow must not throw JavaScript errors");
+
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0].authorization, "Bearer paper-aal2-token", "sign-out must revoke the verified Supabase session");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+  assert.equal(await page.locator("#mfa-panel").isHidden(), true);
+  assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
+  assert.equal(await page.locator("#email").inputValue(), "", "sign-out must clear the email field");
+  assert.equal(await page.locator("#password").inputValue(), "", "sign-out must clear the password field");
+  assert.equal(await page.locator("#totp-code").inputValue(), "", "sign-out must clear the authenticator code");
+  assert.equal(await page.locator("#totp-secret").innerText(), "—", "sign-out must clear the TOTP setup secret");
+  assert.equal(await page.locator("#totp-qr").getAttribute("src"), null, "sign-out must remove the TOTP QR payload");
+  const callsAtSignOut = calls.length;
+  await page.waitForTimeout(100);
+  assert.equal(calls.length, callsAtSignOut, "the signed-out workspace must not issue more customer API requests");
+  await page.close();
+
+  await testPaperStagingSignOutDuringPendingMfa(browser, baseUrl);
+}
+
+async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  const logoutCalls = [];
+  const authCalls = [];
+  let verifyStarted = false;
+  let releaseVerify;
+  page.on("pageerror", error => pageErrors.push(error.message));
+
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const path = url.pathname;
+    const method = req.method();
+    const headers = req.headers();
+    authCalls.push({ path, method, authorization: headers.authorization || "" });
+
+    if (path === "/api/auth/login" && method === "POST") {
+      return json(route, { access_token: "paper-race-aal1-token" });
+    }
+    if (path === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: "aal1",
+        factor_count: 1,
+        factor_ids: ["paper-race-factor"],
+      });
+    }
+    if (path === "/api/auth/mfa/challenge" && method === "POST") {
+      return json(route, { id: "paper-race-challenge" });
+    }
+    if (path === "/api/auth/mfa/verify" && method === "POST") {
+      verifyStarted = true;
+      await new Promise(resolve => { releaseVerify = resolve; });
+      return json(route, { access_token: "paper-late-aal2-token" });
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push(headers.authorization || "");
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    return json(route, { detail: "Unexpected request after sign-out" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200);
+  await page.locator("#email").fill("race@example.invalid");
+  await page.locator("#password").fill("race-test-password");
+  await page.locator("#login-button").click();
+  await page.locator("#mfa-panel").waitFor({ state: "visible" });
+  await page.locator("#totp-code").fill("123456");
+  await page.locator("#verify-button").click();
+  await waitUntil(async () => verifyStarted && typeof releaseVerify === "function");
+
+  // Sign out while the MFA verification request is still unresolved.
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0], "Bearer paper-race-aal1-token");
+  assert.equal(await page.locator("#password").inputValue(), "");
+  assert.equal(await page.locator("#totp-code").inputValue(), "");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+
+  releaseVerify();
+  await waitUntil(async () => logoutCalls.length === 2);
+  assert.equal(logoutCalls[1], "Bearer paper-late-aal2-token", "a late MFA token must be revoked rather than stored");
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+  assert.equal(await page.locator("#password").inputValue(), "");
+  assert.equal(await page.locator("#totp-code").inputValue(), "");
+  assert.equal(authCalls.some(call => call.path === "/api/auth/profile/provision"), false, "late MFA completion must not provision a customer");
+  assert.equal(authCalls.some(call => call.path.startsWith("/api/customer/")), false, "late MFA completion must not load customer data");
+  assert.deepEqual(pageErrors, [], "sign-out during MFA must not throw browser errors");
   await page.close();
 }
 
