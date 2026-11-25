@@ -1,16 +1,35 @@
-"""Pure-ASGI request body size limit.
-
-Reject oversized request bodies before framework parsers and application routes
-can start a response. Both declared Content-Length and streamed/chunked bodies
-are bounded. At most max_bytes of request payload is buffered.
-"""
+"""Pure-ASGI request body size limit with bounded pre-routing reads."""
 from __future__ import annotations
+
+import asyncio
+import time
 
 
 class BodySizeLimitMiddleware:
-    def __init__(self, app, max_bytes: int = 2_097_152) -> None:
+    """Reject oversize bodies before parsing without allowing slow clients to pin workers.
+
+    Body methods are buffered so a streamed oversize request still receives a
+    deterministic 413 before a framework parser can start a response. Reads have
+    both idle and total deadlines. Methods that must not carry request bodies are
+    rejected immediately when they declare one and are never pre-buffered.
+    """
+
+    _BODY_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+    def __init__(
+        self,
+        app,
+        max_bytes: int = 2_097_152,
+        *,
+        body_idle_timeout_seconds: float = 2.0,
+        body_total_timeout_seconds: float = 10.0,
+    ) -> None:
         self.app = app
         self.max_bytes = int(max_bytes)
+        self.body_idle_timeout_seconds = max(0.01, float(body_idle_timeout_seconds))
+        self.body_total_timeout_seconds = max(
+            self.body_idle_timeout_seconds, float(body_total_timeout_seconds)
+        )
 
     async def __call__(self, scope, receive, send):
         if scope.get("type") != "http" or self.max_bytes <= 0:
@@ -19,32 +38,82 @@ class BodySizeLimitMiddleware:
 
         http_version = str(scope.get("http_version") or "1.1")
         close_connection = http_version not in {"2", "3"}
+        headers = scope.get("headers") or []
+        declared_lengths = []
+        has_transfer_encoding = False
 
-        # Reject any oversized declared length before reading the payload. The
-        # streamed byte count below remains authoritative for absent, malformed,
-        # duplicate, or understated Content-Length headers.
-        for name, value in scope.get("headers") or []:
-            if name.lower() != b"content-length":
+        for name, value in headers:
+            lower_name = name.lower()
+            if lower_name == b"transfer-encoding":
+                has_transfer_encoding = True
+            if lower_name != b"content-length":
                 continue
             try:
                 declared = int(value)
             except (TypeError, ValueError):
                 continue
+            if declared < 0:
+                await self._reject(send, close_connection=close_connection, status=400, detail="Invalid Content-Length")
+                return
+            declared_lengths.append(declared)
             if declared > self.max_bytes:
                 await self._reject(send, close_connection=close_connection)
                 return
 
-        # Read and validate before calling downstream middleware. Raising from
-        # receive() while a framework parser is active can be converted into an
-        # HTTP 400/500 after headers have started, making a true 413 impossible.
+        # Content-Length ambiguity is rejected rather than interpreted differently
+        # by this middleware and the downstream HTTP parser.
+        if len(set(declared_lengths)) > 1:
+            await self._reject(send, close_connection=close_connection, status=400, detail="Conflicting Content-Length headers")
+            return
+
+        method = str(scope.get("method") or "GET").upper()
+        body_declared = any(length > 0 for length in declared_lengths) or has_transfer_encoding
+        if method not in self._BODY_METHODS:
+            if body_declared:
+                await self._reject(
+                    send,
+                    close_connection=close_connection,
+                    status=400,
+                    detail="This request method does not accept a body",
+                )
+                return
+            # Do not wait for a request body on bodyless methods or routes.
+            await self.app(scope, receive, send)
+            return
+
+        # A request body can be slow even when every chunk stays below max_bytes.
+        # Bound both the gap between chunks and the total time spent buffering.
         buffered = bytearray()
         saw_request = False
         disconnected = False
         extension_message = None
         request_complete = False
+        deadline = time.monotonic() + self.body_total_timeout_seconds
 
         while True:
-            message = await receive()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                await self._reject(
+                    send,
+                    close_connection=close_connection,
+                    status=408,
+                    detail="Request body timed out",
+                )
+                return
+            try:
+                message = await asyncio.wait_for(
+                    receive(),
+                    timeout=min(self.body_idle_timeout_seconds, remaining),
+                )
+            except asyncio.TimeoutError:
+                await self._reject(
+                    send,
+                    close_connection=close_connection,
+                    status=408,
+                    detail="Request body timed out",
+                )
+                return
+
             message_type = message.get("type")
             if message_type == "http.disconnect":
                 disconnected = True
@@ -88,18 +157,25 @@ class BodySizeLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
     @staticmethod
-    async def _reject(send, *, close_connection: bool) -> None:
-        body = b'{"detail":"Request body too large"}'
+    async def _reject(
+        send,
+        *,
+        close_connection: bool,
+        status: int = 413,
+        detail: str = "Request body too large",
+    ) -> None:
+        import json
+
+        body = json.dumps({"detail": detail}, separators=(",", ":")).encode()
         headers = [
             (b"content-type", b"application/json"),
             (b"content-length", str(len(body)).encode()),
         ]
-        # Connection-specific headers are forbidden on HTTP/2 and HTTP/3.
         if close_connection:
             headers.append((b"connection", b"close"))
         await send({
             "type": "http.response.start",
-            "status": 413,
+            "status": status,
             "headers": headers,
         })
         await send({

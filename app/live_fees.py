@@ -10,7 +10,12 @@ from __future__ import annotations
 from typing import Any
 from decimal import Decimal, localcontext
 
-EXACT, CONVERTED, ESTIMATED = "exact", "converted", "estimated"
+EXACT, CONVERTED, ESTIMATED, UNVERIFIED = "exact", "converted", "estimated", "unverified"
+
+
+def fee_quality_is_verified(quality: str | None) -> bool:
+    """Only exchange-reported fees (or their deterministic quote conversion) are verified."""
+    return quality in {EXACT, CONVERTED}
 
 
 def split_symbol(symbol: str) -> tuple[str, str]:
@@ -80,14 +85,23 @@ def extract_order_fee_quote_decimal(
             continue
         with localcontext() as context:
             context.prec = 50
-            if cur == quote or (not cur and quote):
+            if not cur:
+                # A reported fee with no asset denomination cannot be charged as
+                # quote currency or replaced by a larger taker-rate estimate. Hold it
+                # until a later broker snapshot supplies the authoritative currency.
+                note = "exchange fee currency missing; customer charge withheld pending reconciliation"
+                quality = UNVERIFIED
+            elif cur == quote:
                 total = total + cost
             elif cur == base:
                 total = total + cost * fill_price_d
                 quality = CONVERTED if quality == EXACT else quality
             else:
-                note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
-                quality = ESTIMATED
+                note = f"fee currency {cur} cannot be priced in {quote or '?'}; customer charge withheld pending reconciliation"
+                quality = UNVERIFIED
+    if quality == UNVERIFIED:
+        # Do not convert a reported non-quote amount into an estimated quote charge.
+        return total, UNVERIFIED, note
     if quality == ESTIMATED or not entries or malformed_fee_records:
         try:
             bps = Decimal(str(fallback_taker_bps))

@@ -1,10 +1,12 @@
 """Native AI composer regression tests using a labelled local corpus."""
+import json
 import importlib.util
 from pathlib import Path
 
 import pytest
 
 from app.native_ai import NativeAIInputError, compose_strategy_spec
+from app.strategy_ai import AIStrategySpec
 
 ROOT = Path(__file__).resolve().parents[1]
 _EVAL_SPEC = importlib.util.spec_from_file_location("eval_native_ai", ROOT / "scripts" / "eval_native_ai.py")
@@ -112,3 +114,327 @@ def test_invalid_explicit_symbol_is_a_client_input_error():
         compose_strategy_spec(
             prompt="BTC trend", name="Invalid symbol", symbol="<script>"
         )
+
+
+
+def test_benchmark_reports_field_accuracy_and_output_contract_without_prompt_capture():
+    report = _EVAL.evaluate(ROOT / "app" / "native_ai.py")
+    assert report["expectations_met"] == report["expectations"]
+    assert report["expectation_accuracy"] == 1.0
+    assert report["case_exact_accuracy"] == 1.0
+    assert report["output_contract_rate"] == 1.0
+    assert report["dataset"]["dataset_type"] == "self_authored_synthetic"
+    assert report["dataset"]["raw_prompts_in_report"] is False
+    assert report["comparison"]["status"] == "NOT_RUN"
+
+
+def test_real_user_benchmark_requires_consent_and_anonymisation(tmp_path):
+    import json
+
+    dataset = tmp_path / "real_user_prompts.json"
+    dataset.write_text(json.dumps({
+        "schema_version": 1,
+        "metadata": {
+            "dataset_type": "real_user_consented",
+            "source": "opt-in anonymised strategy-lab sample",
+            "consent_confirmed": False,
+            "anonymized": True,
+        },
+        "cases": [{
+            "id": "sample-1",
+            "prompt": "BTC breakout on 1h",
+            "expect": {"asset": "crypto"},
+        }],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="consent_confirmed=true"):
+        _EVAL.evaluate(ROOT / "app" / "native_ai.py", dataset)
+
+
+def test_consent_attested_real_user_benchmark_is_scored_without_echoing_prompts(tmp_path):
+    import json
+
+    prompt = "BTC breakout on 1h"
+    dataset = tmp_path / "real_user_prompts.json"
+    dataset.write_text(json.dumps({
+        "schema_version": 1,
+        "metadata": {
+            "dataset_type": "real_user_consented",
+            "source": "opt-in anonymised strategy-lab sample",
+            "consent_confirmed": True,
+            "anonymized": True,
+        },
+        "cases": [{
+            "id": "sample-1",
+            "prompt": prompt,
+            "expect": {
+                "asset": "crypto",
+                "symbol": "BTC/USDT",
+                "strategy_family": "BREAKOUT",
+                "timeframes": ["1h"],
+            },
+        }],
+    }), encoding="utf-8")
+
+    report = _EVAL.evaluate(ROOT / "app" / "native_ai.py", dataset)
+    rendered = json.dumps(report)
+    assert report["cases_passed"] == 1
+    assert report["expectation_accuracy"] == 1.0
+    assert report["dataset"]["dataset_type"] == "real_user_consented"
+    assert report["dataset"]["provenance_status"] == "submitter_attested"
+    assert report["dataset"]["raw_prompts_in_report"] is False
+    assert prompt not in rendered
+
+
+def test_comparator_predictions_are_paired_to_exact_dataset_fingerprint(tmp_path):
+    import hashlib
+    import json
+
+    from app.native_ai import compose_strategy_spec
+
+    dataset = tmp_path / "paired_prompts.json"
+    dataset.write_text(json.dumps([{
+        "id": "case-1",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"asset": "crypto", "strategy_family": "BREAKOUT"},
+    }]), encoding="utf-8")
+    output = compose_strategy_spec(prompt="BTC breakout on 1h", name="Comparator output")
+    comparison = tmp_path / "comparison.json"
+    comparison.write_text(json.dumps({
+        "schema_version": 1,
+        "system": "Reference parser v1",
+        "dataset_sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+        "predictions": [{"id": "case-1", "output": output}],
+    }), encoding="utf-8")
+
+    report = _EVAL.evaluate(ROOT / "app" / "native_ai.py", dataset, comparison)
+    assert report["comparison"]["status"] == "SCORED"
+    assert report["comparison"]["system"] == "Reference parser v1"
+    assert report["comparison"]["metrics"]["case_exact_accuracy"] == 1.0
+
+    mismatched = json.loads(comparison.read_text(encoding="utf-8"))
+    mismatched["dataset_sha256"] = "0" * 64
+    comparison.write_text(json.dumps(mismatched), encoding="utf-8")
+    with pytest.raises(ValueError, match="does not match"):
+        _EVAL.evaluate(ROOT / "app" / "native_ai.py", dataset, comparison)
+
+
+def test_missing_predictions_count_as_failed_expected_labels():
+    cases = [{
+        "id": "missing",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"asset": "crypto", "warns": ["confirm direction"]},
+    }]
+    scored = _EVAL._score_predictions(cases, {})
+    assert scored["expectations"] == 2
+    assert scored["expectations_met"] == 0
+    assert scored["expectation_accuracy"] == 0.0
+    assert scored["cases_passed"] == 0
+
+
+def test_benchmark_contract_rejects_blank_or_malformed_conditions():
+    spec = compose_strategy_spec(prompt="BTC breakout on 1h", name="Condition contract")
+    spec["entry_conditions"] = [{"type": "", "rule": ""}]
+    spec["exit_conditions"] = [{"type": "RSI", "rule": "   "}]
+    failures = _EVAL._contract_failures(spec)
+    assert "entry conditions violate the Atlas strategy output contract" in failures
+    assert "exit conditions violate the Atlas strategy output contract" in failures
+
+
+def test_malformed_condition_timeframe_is_scored_as_invalid_not_raised():
+    spec = compose_strategy_spec(
+        prompt="BTC breakout on 1h",
+        name="Malformed timeframe",
+    )
+    spec["exit_conditions"][0]["timeframe"] = {"unexpected": "object"}
+
+    failures = _EVAL._contract_failures(spec)
+
+    assert "exit conditions violate the Atlas strategy output contract" in failures
+
+
+def test_condition_text_is_normalized_before_application_contract_scoring():
+    spec = compose_strategy_spec(
+        prompt="BTC breakout on 1h",
+        name="Condition normalization",
+    )
+    spec["entry_conditions"][0]["type"] = "  RSI  "
+    spec["entry_conditions"][0]["rule"] = "  close above 20  "
+
+    failures = _EVAL._contract_failures(spec)
+
+    assert failures == []
+    normalized = AIStrategySpec.model_validate(spec)
+    assert normalized.entry_conditions[0].type == "RSI"
+    assert normalized.entry_conditions[0].rule == "close above 20"
+
+
+def test_condition_text_that_is_only_whitespace_or_too_short_is_rejected():
+    spec = compose_strategy_spec(
+        prompt="BTC breakout on 1h",
+        name="Short condition text",
+    )
+    spec["entry_conditions"][0]["type"] = " a "
+    spec["entry_conditions"][0]["rule"] = " ab "
+
+    failures = _EVAL._contract_failures(spec)
+
+    assert "entry conditions violate the Atlas strategy output contract" in failures
+
+
+def test_malformed_comparator_symbols_and_warnings_are_scored_not_raised():
+    spec = compose_strategy_spec(prompt="BTC breakout on 1h", name="Malformed comparator")
+    spec["symbols"] = "BTC/USDT"
+    spec["validation_warnings"] = ["PRIVATE WARNING", 123]
+    case = {
+        "id": "malformed",
+        "prompt": "redacted",
+        "expect": {"symbol": "BTC/USDT"},
+    }
+    checks, failures = _EVAL._score_case(case, spec)
+    assert checks == [{"field": "symbol", "passed": False}]
+    assert any("symbols" in failure for failure in failures)
+    assert any("validation warnings" in failure for failure in failures)
+    assert "PRIVATE WARNING" not in " ".join(failures)
+
+
+def test_mismatch_reports_never_echo_private_expected_or_actual_values():
+    case = {
+        "id": "private-case",
+        "prompt": "PRIVATE PROMPT",
+        "expect": {"asset": "PRIVATE EXPECTATION"},
+    }
+    prediction = compose_strategy_spec(prompt="BTC breakout on 1h", name="Private mismatch")
+    prediction["asset"] = "PRIVATE ACTUAL"
+    _checks, failures = _EVAL._score_case(case, prediction)
+    rendered = json.dumps(failures)
+    assert "PRIVATE PROMPT" not in rendered
+    assert "PRIVATE EXPECTATION" not in rendered
+    assert "PRIVATE ACTUAL" not in rendered
+
+
+def test_dataset_rejects_cases_without_any_scored_assertion(tmp_path):
+    import json
+
+    dataset = tmp_path / "unlabelled.json"
+    dataset.write_text(json.dumps([{
+        "id": "case-empty",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"warns": [], "no_warns": []},
+    }]), encoding="utf-8")
+    with pytest.raises(ValueError, match="at least one scored field"):
+        _EVAL._load_dataset(dataset)
+
+
+def test_evaluation_keeps_safe_generation_failure_type_and_redacts_source(tmp_path, monkeypatch):
+    import json
+
+    secret = "PRIVATE PROMPT AND SOURCE"
+    dataset = tmp_path / "custom.json"
+    dataset.write_text(json.dumps({
+        "schema_version": 1,
+        "metadata": {
+            "dataset_type": "synthetic",
+            "source": secret,
+        },
+        "cases": [{
+            "id": "safe-case",
+            "prompt": "BTC breakout on 1h",
+            "expect": {"asset": "crypto"},
+        }],
+    }), encoding="utf-8")
+
+    class BrokenComposer:
+        @staticmethod
+        def compose_strategy_spec(**_kwargs):
+            raise ValueError(secret)
+
+    monkeypatch.setattr(_EVAL, "_load", lambda _path: BrokenComposer)
+    report = _EVAL.evaluate(Path("unused-module"), dataset)
+    rendered = json.dumps(report)
+    assert report["generation_failures"] == {"safe-case": "ValueError"}
+    assert report["dataset"]["source"] == "user_supplied_dataset"
+    assert secret not in rendered
+
+
+
+def test_benchmark_output_contract_matches_application_title_risk_and_extra_field_rules():
+    spec = compose_strategy_spec(prompt="BTC breakout on 1h", name="Contract parity")
+    assert _EVAL._contract_failures(spec) == []
+
+    invalid_title = dict(spec, title="")
+    assert _EVAL._contract_failures(invalid_title)
+
+    invalid_optional_risk = dict(spec, stop_loss_atr=11.0)
+    assert _EVAL._contract_failures(invalid_optional_risk)
+
+    forbidden_extra = dict(spec, unexpected_private_field="do not report this")
+    failures = _EVAL._contract_failures(forbidden_extra)
+    assert failures
+    assert "unexpected_private_field" not in " ".join(failures)
+    assert "do not report this" not in " ".join(failures)
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("asset", True),
+        ("asset", "equities"),
+        ("symbol", 1),
+        ("strategy_family", "SCALPING"),
+        ("direction", "SIDEWAYS"),
+        ("timeframes", "1h"),
+        ("timeframes", ["2h"]),
+        ("risk_per_trade", True),
+        ("risk_per_trade", 0.1),
+        ("stop_loss_atr", False),
+        ("take_profit_rr", 11),
+        ("sessions", "London"),
+    ],
+)
+def test_custom_benchmark_rejects_invalid_expected_label_types_and_domains(tmp_path, field, value):
+    dataset = tmp_path / "invalid-label.json"
+    dataset.write_text(json.dumps([{
+        "id": "invalid-label",
+        "prompt": "BTC breakout on 1h",
+        "expect": {field: value},
+    }]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"invalid expected label for {field}"):
+        _EVAL._load_dataset(dataset)
+
+def test_numeric_benchmark_label_does_not_match_boolean_prediction(tmp_path):
+    case = {
+        "id": "numeric-bool",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"risk_per_trade": 1},
+    }
+    prediction = compose_strategy_spec(prompt="BTC breakout on 1h", name="Boolean numeric")
+    prediction["risk_per_trade"] = True
+
+    checks, failures = _EVAL._score_case(case, prediction, check_contract=False)
+
+    assert checks == [{"field": "risk_per_trade", "passed": False}]
+    assert failures == ["field mismatch: risk_per_trade"]
+
+def test_evaluator_preserves_causal_error_types_without_reporting_exception_messages(tmp_path, monkeypatch):
+    secret = "private prompt text and source"
+    dataset = tmp_path / "causal-errors.json"
+    dataset.write_text(json.dumps([{
+        "id": "causal-case",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"asset": "crypto"},
+    }]), encoding="utf-8")
+
+    class BrokenComposer:
+        @staticmethod
+        def compose_strategy_spec(**_kwargs):
+            try:
+                raise RuntimeError(secret)
+            except RuntimeError as cause:
+                raise ValueError(secret) from cause
+
+    monkeypatch.setattr(_EVAL, "_load", lambda _path: BrokenComposer)
+    report = _EVAL.evaluate(Path("unused-module"), dataset)
+    rendered = json.dumps(report)
+
+    assert report["generation_failures"] == {"causal-case": "ValueError <- RuntimeError"}
+    assert secret not in rendered

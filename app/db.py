@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, Asyn
 from .config import settings
 from .crypto import encrypt_text, decrypt_text
 
+_UUID_AUTH_REFERENCE_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_UUID_AUTH_REFERENCE_GLOB = "[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]"
+
 
 def _utc_date():
     return datetime.now(timezone.utc).date()
@@ -234,6 +237,7 @@ class Trade(Base):
         ForeignKeyConstraint(["trading_account_id", "customer_id"], ["trading_accounts.id", "trading_accounts.customer_id"], name="fk_trade_account_customer"),
         Index("ix_trade_status_symbol", "status", "symbol"),
         Index("ix_trade_account_customer_fk", "trading_account_id", "customer_id"),
+        Index("ix_trade_fee_reconciliation_pending", "fee_reconciliation_pending", "updated_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     customer_id: Mapped[int | None] = mapped_column(ForeignKey("customer_profiles.id"), nullable=True, index=True)
@@ -253,6 +257,9 @@ class Trade(Base):
     reserved_cash: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     average_fill_price: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     fee: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    # Keep terminal orders in the bounded broker reconciliation queue until a
+    # previously withheld fee denomination is resolved.
+    fee_reconciliation_pending: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     notional: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     mode: Mapped[str] = mapped_column(String(20))
     status: Mapped[str] = mapped_column(String(30))
@@ -388,6 +395,9 @@ class Position(Base):
     realized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     unrealized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     reserved_capital: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
+    # Fee basis still attached to the remaining open position after partial exits.
+    entry_fee: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    entry_fee_basis_known: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     strategy: Mapped[str] = mapped_column(String(40), default="")
     entry_regime: Mapped[str] = mapped_column(String(40), default="UNKNOWN")
     entry_trade_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -623,7 +633,19 @@ async def init_db():
 
 class CustomerProfile(Base):
     __tablename__ = "customer_profiles"
-    __table_args__ = (UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),)
+    __table_args__ = (
+        UniqueConstraint("auth_user_id", name="uq_customer_auth_user_id"),
+        Index(
+            "ix_customer_profiles_unmapped_auth_user_id",
+            "auth_user_id",
+            postgresql_where=sa.text(
+                f"auth_user_id !~* '{_UUID_AUTH_REFERENCE_PATTERN}'"
+            ),
+            sqlite_where=sa.text(
+                f"lower(auth_user_id) NOT GLOB '{_UUID_AUTH_REFERENCE_GLOB}'"
+            ),
+        ),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     auth_user_id: Mapped[str] = mapped_column(String(120), nullable=False)
     email: Mapped[str] = mapped_column(EncryptedText, default="")
@@ -1101,6 +1123,32 @@ class StrategyCandidate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class BenchmarkPromptCapture(Base):
+    """Consent-based, encrypted strategy prompt and Native AI output for evaluation."""
+
+    __tablename__ = "customer_benchmark_captures"
+    __table_args__ = (
+        Index("ix_benchmark_capture_customer_created", "customer_id", "created_at"),
+        Index("ix_benchmark_capture_expires_at", "expires_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_profiles.id", ondelete="CASCADE"), nullable=False
+    )
+    prompt_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    native_output_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    prompt_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    consent_version: Mapped[str] = mapped_column(String(80), nullable=False)
+    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    asset: Mapped[str] = mapped_column(String(20), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(80), nullable=False)
+    exchange: Mapped[str] = mapped_column(String(50), nullable=False)
+    timeframe: Mapped[str] = mapped_column(String(20), nullable=False)
+    native_ai_version: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class TradeExecutor(Base):
     __tablename__ = "trade_executors"
     __table_args__ = (
@@ -1201,6 +1249,18 @@ class StrategyOutcome(Base):
         Index("ix_strategy_outcome_customer_strategy_created", "customer_id", "strategy", "created_at"),
         Index("ix_strategy_outcome_symbol_regime_created", "symbol", "regime", "created_at"),
         Index("ix_strategy_outcome_lifecycle_created", "lifecycle_status", "created_at"),
+        Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at"),
+        Index(
+            "ix_strategy_outcome_platform_closed_trade_time",
+            "trade_id",
+            "created_at",
+            postgresql_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+            sqlite_where=sa.text(
+                "customer_id IS NULL AND lifecycle_status = 'CLOSED'"
+            ),
+        ),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     trade_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
@@ -1215,9 +1275,13 @@ class StrategyOutcome(Base):
     side: Mapped[str] = mapped_column(String(10), default="")
     realized_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
     fee: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
-    return_bps: Mapped[float] = mapped_column(Float, default=0.0)
-    net_pnl: Mapped[float] = mapped_column(FinancialNumeric, default=0.0)
-    net_return_bps: Mapped[float] = mapped_column(Float, default=0.0)
+    return_bps: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    net_pnl: Mapped[float | None] = mapped_column(FinancialNumeric, nullable=True, default=None)
+    net_return_bps: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # Exact closed quantity/notional support complete, weighted trade returns.
+    closing_quantity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    closing_notional: Mapped[float] = mapped_column(FinancialNumeric, nullable=False, default=0.0)
+    fee_basis_complete: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     lifecycle_status: Mapped[str] = mapped_column(String(20), nullable=False, default="OPEN")
     mode: Mapped[str] = mapped_column(String(20), default="")
     sequence: Mapped[int] = mapped_column(Integer, default=1)
