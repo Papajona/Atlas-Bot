@@ -202,7 +202,7 @@ jobs:
             echo "- Sanitized candidate: `$SANITIZED_BACKUP_REFERENCE`"
             echo "- Immutable import object: `$IMPORT_OBJECT_REFERENCE`"
             echo
-            echo "**NOT CERTIFIED:** this workflow imports the reviewed 0049 snapshot only. Apply migrations 0050–0064, provision the API/audit/customer-paper roles and schema, verify RLS/ACLs and then manually run `Audit restored staging database`. A green import job is not a successful restore drill."
+            echo "**NOT CERTIFIED:** this workflow imports the reviewed 0049 snapshot only. Apply migrations 0050–0065, provision the API/audit/customer-paper roles and schema, verify RLS/ACLs and then manually run `Audit restored staging database`. A green import job is not a successful restore drill."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Archive restore execution receipt
