@@ -94,7 +94,7 @@ def test_existing_active_profile_email_backfill_rejects_unconfirmed_auth_email(m
     assert "confirmed email" in raised.value.detail.lower()
 
 
-def test_active_profile_with_persisted_email_does_not_trigger_auth_backfill(monkeypatch):
+def test_active_profile_with_persisted_email_verifies_auth_when_jwt_omits_email(monkeypatch):
     auth_id = "11111111-2222-4333-8444-555555555555"
     profile = SimpleNamespace(
         auth_user_id=auth_id,
@@ -103,18 +103,31 @@ def test_active_profile_with_persisted_email_does_not_trigger_auth_backfill(monk
         status="ACTIVE",
     )
     db = _CustomerIdentityDatabase(profile)
+    auth_calls = []
+    conflict_checks = []
 
     async def verified_claims(_authorization, *, require_aal2=True):
         return {"sub": auth_id, "email": ""}
 
-    async def unexpected_auth_call(_token):
-        pytest.fail("an active profile with a stored email must not require an Auth backfill")
+    async def verified_auth_user(token):
+        auth_calls.append(token)
+        return {
+            "id": auth_id,
+            "email": "existing@example.test",
+            "email_confirmed_at": "2026-11-25T00:00:00Z",
+            "user_metadata": {},
+        }
+
+    async def no_legacy_conflict(_db, uid, email):
+        conflict_checks.append((uid, email))
+        return False
 
     async def ensure_subscription(_db, _profile):
         return None
 
     monkeypatch.setattr(main_module, "customer_claims", verified_claims)
-    monkeypatch.setattr(main_module, "_supabase_user", unexpected_auth_call)
+    monkeypatch.setattr(main_module, "_supabase_user", verified_auth_user)
+    monkeypatch.setattr(main_module, "_legacy_customer_email_conflict", no_legacy_conflict)
     monkeypatch.setattr(main_module, "_ensure_customer_subscription", ensure_subscription)
 
     returned_profile, _claims = asyncio.run(
@@ -122,3 +135,6 @@ def test_active_profile_with_persisted_email_does_not_trigger_auth_backfill(monk
     )
 
     assert returned_profile is profile
+    assert returned_profile.email == "existing@example.test"
+    assert auth_calls == ["test-token"]
+    assert conflict_checks == [(auth_id, "existing@example.test")]
