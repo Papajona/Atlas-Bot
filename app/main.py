@@ -3966,10 +3966,11 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
                 continue
             except (ValueError, TypeError, AttributeError):
                 pass
-        # An unmapped legacy identity with no recoverable email must be treated
-        # as a conflict: absence of stored PII is not proof of a distinct person.
+        # A legacy row with no recoverable email cannot be safely linked to this
+        # confirmed identity. Leave that row untouched, but do not let an
+        # unidentifiable record block every unrelated customer from provisioning.
         if not str(stored_email or "").strip():
-            return True
+            continue
         if str(stored_email).strip().casefold() == normalized:
             return True
     return False
