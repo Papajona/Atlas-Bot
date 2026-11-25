@@ -37,15 +37,38 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             migration_role_superuser boolean;
             function_signature text;
             grantee_name text;
+            role_created_by_revision boolean := false;
+            journals_policy_exists boolean;
+            lines_policy_exists boolean;
+            journals_policy_created_by_revision boolean := false;
+            lines_policy_created_by_revision boolean := false;
+            role_comment text;
+            role_state jsonb;
         BEGIN
+            IF migration_role IN ('atlas_api_runtime', 'atlas_audit_reader') THEN
+                RAISE EXCEPTION
+                    '0065 must run as an administrative migration identity, not an application or audit role';
+            END IF;
+
             IF to_regprocedure('public.atlas_ledger_journal_deferred_check()') IS NULL
                OR to_regprocedure('public.atlas_validate_ledger_journal(integer)') IS NULL THEN
                 RAISE EXCEPTION
                     'ledger journal trigger and validation functions must exist before trigger-owner hardening';
             END IF;
 
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+            SELECT oid INTO role_oid
+            FROM pg_roles
+            WHERE rolname = role_name;
+
+            IF role_oid IS NULL THEN
                 EXECUTE 'CREATE ROLE atlas_ledger_trigger_owner NOLOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION';
+                role_created_by_revision := true;
+            ELSE
+                role_comment := shobj_description(role_oid, 'pg_authid');
+                IF role_comment LIKE 'atlas:0065:rollback-state:v1:%' THEN
+                    RAISE EXCEPTION
+                        'atlas_ledger_trigger_owner already carries 0065 rollback metadata; inspect migration state before retrying';
+                END IF;
             END IF;
 
             SELECT oid INTO role_oid
@@ -103,18 +126,24 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     'ledger journal tables must have row-level security enabled before trigger-owner provisioning';
             END IF;
 
-            IF NOT EXISTS (
+            SELECT EXISTS (
                 SELECT 1 FROM pg_policy
                 WHERE polrelid = to_regclass('public.ledger_journals')
                   AND polname = 'atlas_ledger_trigger_owner_select'
-            ) THEN
-                EXECUTE 'CREATE POLICY atlas_ledger_trigger_owner_select ON public.ledger_journals FOR SELECT TO atlas_ledger_trigger_owner USING (true)';
-            END IF;
-            IF NOT EXISTS (
+            ) INTO journals_policy_exists;
+            SELECT EXISTS (
                 SELECT 1 FROM pg_policy
                 WHERE polrelid = to_regclass('public.ledger_journal_lines')
                   AND polname = 'atlas_ledger_trigger_owner_select'
-            ) THEN
+            ) INTO lines_policy_exists;
+
+            journals_policy_created_by_revision := NOT journals_policy_exists;
+            lines_policy_created_by_revision := NOT lines_policy_exists;
+
+            IF journals_policy_created_by_revision THEN
+                EXECUTE 'CREATE POLICY atlas_ledger_trigger_owner_select ON public.ledger_journals FOR SELECT TO atlas_ledger_trigger_owner USING (true)';
+            END IF;
+            IF lines_policy_created_by_revision THEN
                 EXECUTE 'CREATE POLICY atlas_ledger_trigger_owner_select ON public.ledger_journal_lines FOR SELECT TO atlas_ledger_trigger_owner USING (true)';
             END IF;
 
@@ -136,6 +165,31 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 RAISE EXCEPTION
                     'ledger trigger owner SELECT policies are missing or have an unexpected definition';
             END IF;
+
+            -- Store rollback provenance on the role itself. PostgreSQL DDL and
+            -- this comment are transactional, so a failed upgrade cannot leave
+            -- partial ownership markers. Reused roles retain their prior comment
+            -- and grants when this revision is downgraded.
+            role_state := jsonb_build_object(
+                'marker', 'atlas:0065:rollback-state:v1',
+                'role_created_by_revision', role_created_by_revision,
+                'journals_policy_created_by_revision', journals_policy_created_by_revision,
+                'lines_policy_created_by_revision', lines_policy_created_by_revision,
+                'had_public_schema_usage', has_schema_privilege(role_name, 'public', 'USAGE'),
+                'had_ledger_journals_select', has_table_privilege(role_name, 'public.ledger_journals', 'SELECT'),
+                'had_ledger_journal_lines_select', has_table_privilege(role_name, 'public.ledger_journal_lines', 'SELECT'),
+                'had_validate_function_execute', has_function_privilege(
+                    role_name,
+                    'public.atlas_validate_ledger_journal(integer)',
+                    'EXECUTE'
+                ),
+                'prior_role_comment', role_comment
+            );
+            EXECUTE format(
+                'COMMENT ON ROLE %I IS %L',
+                role_name,
+                'atlas:0065:rollback-state:v1:' || role_state::text
+            );
 
             EXECUTE 'GRANT USAGE ON SCHEMA public TO atlas_ledger_trigger_owner';
             EXECUTE 'GRANT SELECT ON TABLE public.ledger_journals, public.ledger_journal_lines TO atlas_ledger_trigger_owner';
@@ -348,6 +402,8 @@ def downgrade() -> None:
             migration_role text := current_user;
             role_oid oid;
             function_owner oid;
+            role_comment text;
+            role_state jsonb;
         BEGIN
             SELECT oid INTO role_oid
             FROM pg_roles
@@ -355,6 +411,21 @@ def downgrade() -> None:
 
             IF role_oid IS NULL THEN
                 RETURN;
+            END IF;
+
+            role_comment := shobj_description(role_oid, 'pg_authid');
+            IF role_comment LIKE 'atlas:0065:rollback-state:v1:%' THEN
+                role_state := substring(
+                    role_comment FROM length('atlas:0065:rollback-state:v1:') + 1
+                )::jsonb;
+            ELSE
+                RAISE EXCEPTION
+                    'cannot safely downgrade 0065: rollback provenance is missing; preserving the trigger role and policies';
+            END IF;
+
+            IF role_state->>'marker' IS DISTINCT FROM 'atlas:0065:rollback-state:v1' THEN
+                RAISE EXCEPTION
+                    'cannot safely downgrade 0065: rollback provenance marker is malformed';
             END IF;
 
             SELECT proowner INTO function_owner
@@ -381,14 +452,40 @@ def downgrade() -> None:
             );
             EXECUTE format('REVOKE %I FROM %I', role_name, migration_role);
 
-            -- Remove only the objects/privileges introduced by this revision.
-            -- The prior PUBLIC and application EXECUTE revocations stay in force.
-            EXECUTE 'DROP POLICY IF EXISTS atlas_ledger_trigger_owner_select ON public.ledger_journals';
-            EXECUTE 'DROP POLICY IF EXISTS atlas_ledger_trigger_owner_select ON public.ledger_journal_lines';
-            EXECUTE 'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM atlas_ledger_trigger_owner';
-            EXECUTE 'REVOKE SELECT ON TABLE public.ledger_journals, public.ledger_journal_lines FROM atlas_ledger_trigger_owner';
-            EXECUTE 'REVOKE USAGE ON SCHEMA public FROM atlas_ledger_trigger_owner';
-            EXECUTE 'DROP ROLE atlas_ledger_trigger_owner';
+            -- Roll back only state created by this revision. Policies that
+            -- predated 0065 and a pre-provisioned trigger-owner role are retained.
+            IF coalesce((role_state->>'journals_policy_created_by_revision')::boolean, false) THEN
+                EXECUTE 'DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journals';
+            END IF;
+            IF coalesce((role_state->>'lines_policy_created_by_revision')::boolean, false) THEN
+                EXECUTE 'DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journal_lines';
+            END IF;
+
+            IF NOT coalesce((role_state->>'had_validate_function_execute')::boolean, false) THEN
+                EXECUTE 'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM atlas_ledger_trigger_owner';
+            END IF;
+            IF NOT coalesce((role_state->>'had_ledger_journals_select')::boolean, false) THEN
+                EXECUTE 'REVOKE SELECT ON TABLE public.ledger_journals FROM atlas_ledger_trigger_owner';
+            END IF;
+            IF NOT coalesce((role_state->>'had_ledger_journal_lines_select')::boolean, false) THEN
+                EXECUTE 'REVOKE SELECT ON TABLE public.ledger_journal_lines FROM atlas_ledger_trigger_owner';
+            END IF;
+            IF NOT coalesce((role_state->>'had_public_schema_usage')::boolean, false) THEN
+                EXECUTE 'REVOKE USAGE ON SCHEMA public FROM atlas_ledger_trigger_owner';
+            END IF;
+
+            IF coalesce((role_state->>'role_created_by_revision')::boolean, false) THEN
+                -- DROP ROLE intentionally fails closed if another actor has
+                -- attached new dependencies/grants since upgrade. Never use
+                -- DROP OWNED, which could erase unrelated operator state.
+                EXECUTE 'DROP ROLE atlas_ledger_trigger_owner';
+            ELSE
+                EXECUTE format(
+                    'COMMENT ON ROLE %I IS %L',
+                    role_name,
+                    role_state->>'prior_role_comment'
+                );
+            END IF;
         END
         $atlas_ledger_trigger_owner_downgrade$;
     """))
