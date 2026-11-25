@@ -3873,44 +3873,6 @@ _CUSTOMER_UUID_GLOB = (
 )
 
 
-async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
-    """Find another non-UUID Auth ID without selecting encrypted customer PII."""
-    bind_getter = getattr(db, "get_bind", None)
-    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
-    dialect = getattr(getattr(bind, "dialect", None), "name", "")
-    try:
-        if dialect == "postgresql":
-            statement = select(CustomerProfile.id).where(
-                CustomerProfile.auth_user_id != auth_user_id,
-                CustomerProfile.auth_user_id.op("!~*")(literal_column(f"'{_CUSTOMER_UUID_PATTERN}'")),
-            ).limit(1)
-            return (await db.execute(statement)).scalar_one_or_none() is not None
-        if dialect == "sqlite":
-            statement = select(CustomerProfile.id).where(
-                CustomerProfile.auth_user_id != auth_user_id,
-                func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'")),
-            ).limit(1)
-            return (await db.execute(statement)).scalar_one_or_none() is not None
-        legacy_ids = (await db.execute(
-            select(CustomerProfile.auth_user_id).where(
-                CustomerProfile.auth_user_id != auth_user_id
-            )
-        )).scalars().all()
-        for legacy_id in legacy_ids:
-            try:
-                uuid.UUID(str(legacy_id))
-            except (ValueError, TypeError, AttributeError):
-                return True
-        return False
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("unmapped_legacy_customer_identity_lookup_failed")
-        raise HTTPException(
-            503, "Customer identity verification is temporarily unavailable"
-        ) from exc
-
-
 async def _customer_profile_effectively_active(
     guard_db, current_profile, confirmed_email: str
 ) -> bool:
