@@ -423,6 +423,25 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
                 assert function_direct
 
                 if stage == "verify-downgrade":
+                    # A downgrade must put function ownership back on the
+                    # migration identity so older revisions can continue with
+                    # owner-only DDL (including their subsequent DROP FUNCTION).
+                    migration_identity = await connection.fetchval(
+                        "SELECT current_user"
+                    )
+                    restored_function_owner = await connection.fetchval(
+                        """
+                        SELECT owner.rolname
+                        FROM pg_proc function_row
+                        JOIN pg_roles owner ON owner.oid = function_row.proowner
+                        WHERE function_row.oid = to_regprocedure($1)
+                        """,
+                        "public.atlas_ledger_journal_deferred_check()",
+                    )
+                    assert restored_function_owner == migration_identity, (
+                        "0065 downgrade did not restore the deferred trigger "
+                        "function to the original migration identity"
+                    )
                     comment = await connection.fetchval(
                         "SELECT shobj_description(oid, 'pg_authid') "
                         "FROM pg_roles WHERE rolname = $1",
