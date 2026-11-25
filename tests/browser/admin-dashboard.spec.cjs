@@ -1038,6 +1038,100 @@ async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
 }
 
 
+async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  const logoutCalls = [];
+  let verified = false;
+  let portfolioStarted = false;
+  let releasePortfolio;
+  page.on("pageerror", error => pageErrors.push(error.message));
+
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    const headers = route.request().headers();
+
+    if (path === "/api/auth/login" && method === "POST") {
+      return json(route, { access_token: "paper-refresh-race-aal1-token" });
+    }
+    if (path === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: verified ? "aal2" : "aal1",
+        factor_count: 1,
+        factor_ids: ["paper-refresh-race-factor"],
+      });
+    }
+    if (path === "/api/auth/mfa/challenge" && method === "POST") {
+      return json(route, { id: "paper-refresh-race-challenge" });
+    }
+    if (path === "/api/auth/mfa/verify" && method === "POST") {
+      verified = true;
+      return json(route, { access_token: "paper-refresh-race-aal2-token" });
+    }
+    if (path === "/api/auth/profile/provision" && method === "POST") {
+      return json(route, { status: "PROVISIONED" });
+    }
+    if (path === "/api/customer/me" && method === "GET") {
+      return json(route, { id: 73, display_name: "Refresh Race Customer", email: "refresh-race@example.invalid" });
+    }
+    if (path === "/api/customer/portfolio" && method === "GET") {
+      portfolioStarted = true;
+      await new Promise(resolve => { releasePortfolio = resolve; });
+      return json(route, {
+        equity: 987654.32,
+        cash_equity: 987654.32,
+        positions: [],
+        valuation_status: "CASH_ONLY",
+      });
+    }
+    if (path === "/api/customer/paper/balances" && method === "GET") {
+      return json(route, { balances: [] });
+    }
+    if (path === "/api/customer/paper/positions" && method === "GET") {
+      return json(route, { positions: [] });
+    }
+    if (path === "/api/customer/paper/orders" && method === "GET") {
+      return json(route, { orders: [] });
+    }
+    if (path === "/api/customer/paper/history" && method === "GET") {
+      return json(route, { orders: [] });
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push(headers.authorization || "");
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    return json(route, { detail: "Unexpected stale-refresh test request" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200);
+  await page.locator("#email").fill("refresh-race@example.invalid");
+  await page.locator("#password").fill("refresh-race-password");
+  await page.locator("#login-button").click();
+  await page.locator("#mfa-panel").waitFor({ state: "visible" });
+  await page.locator("#totp-code").fill("123456");
+  await page.locator("#verify-button").click();
+  await waitUntil(async () => portfolioStarted && typeof releasePortfolio === "function");
+  await page.locator("#workspace").waitFor({ state: "visible" });
+
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0], "Bearer paper-refresh-race-aal2-token");
+
+  releasePortfolio();
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+  assert.equal(await page.locator("#equity").innerText(), "—", "late portfolio data must not repaint the cleared session");
+  assert.equal(await page.locator("#cash-balance").innerText(), "—", "late balance refresh must not repaint the cleared session");
+  assert.equal(await page.locator("#profile-summary").innerText(), "");
+  assert.deepEqual(pageErrors, [], "sign-out during portfolio refresh must not throw browser errors");
+  await page.close();
+}
+
+
 (async () => {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -1056,6 +1150,7 @@ async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
     await testCustomerHostileData(browser, baseUrl);
     await testCustomerMfaOtpWithdrawalFlow(browser, baseUrl);
     await testPaperStagingWorkspace(browser, baseUrl);
+    await testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl);
     console.log("PASS: admin/customer browser regressions, strict CSP, hostile-data rendering, 12x100-row refresh stress, customer MFA/OTP flow, and mocked paper-staging MFA/readiness/order lifecycle.");
   } finally {
     await browser.close();
