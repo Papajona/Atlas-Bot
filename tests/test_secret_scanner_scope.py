@@ -1421,6 +1421,34 @@ def test_secret_scanner_allows_short_public_jwk_metadata_key_labels_but_flags_ke
     )
 
 
+def test_secret_scanner_detects_recovery_phrases_in_public_jwk_metadata_key_and_value(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    recovery_phrase = " ".join(["abandon"] * 11 + ["about"])
+    for metadata_field in ("key", "value"):
+        jwk_json = (
+            '[{"kty":"EC","metadata":{"' + metadata_field + '":"'
+            + recovery_phrase + '"}}]'
+        )
+        source = (
+            "wallet:\n  " + private_key_field + ": |\n"
+            + "    " + jwk_json + "\n"
+        )
+        filename = f"private-jwk-metadata-recovery-{metadata_field}.yml"
+        (tmp_path / filename).write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    for metadata_field in ("key", "value"):
+        filename = f"private-jwk-metadata-recovery-{metadata_field}.yml"
+        assert any(
+            f"{filename}:2: seed/private-key assignment" in item
+            for item in findings
+        )
+
+
 def test_secret_scanner_detects_private_blob_nested_in_public_jwk_metadata(
     tmp_path, monkeypatch
 ):
