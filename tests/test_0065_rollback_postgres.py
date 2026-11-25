@@ -194,7 +194,23 @@ async def _run_database_assertions(dsn: str, stage: str) -> None:
 def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_public():
     dsn = _postgres_test_url()
     env = os.environ.copy()
-    env["DATABASE_URL"] = os.environ.get("DATABASE_URL") or dsn
+    alembic_url = next(
+        (
+            value
+            for value in (
+                os.environ.get("DATABASE_URL"),
+                os.environ.get("ATLAS_POSTGRES_URL"),
+            )
+            if value
+            and value.startswith(
+                ("postgres://", "postgresql://", "postgresql+asyncpg://")
+            )
+        ),
+        None,
+    )
+    if alembic_url is None:
+        pytest.skip("requires a PostgreSQL DATABASE_URL for Alembic")
+    env["DATABASE_URL"] = alembic_url
 
     # The PostgreSQL workflow applies head before running marked integration
     # tests. Downgrade once to establish an explicit PUBLIC-only baseline.
