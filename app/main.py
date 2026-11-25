@@ -4041,10 +4041,10 @@ async def get_customer(
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
-    # Prefer already-persisted encrypted PII when the verified JWT omits a
-    # field. A missing display name is not a reason to call Supabase Auth:
-    # users without name metadata would otherwise trigger an Auth request on
-    # every customer endpoint.
+    # Prefer already-persisted encrypted PII when the JWT omits a field, but
+    # revalidate the current Auth identity when the optional display name is
+    # absent. That Auth lookup must remain separate from the legacy-email
+    # comparison, which is needed only for pending review or email backfill.
     if profile is not None:
         email = email or str(profile.email or "").strip().lower()[:320]
         name = name or str(profile.display_name or "").strip()[:160]
