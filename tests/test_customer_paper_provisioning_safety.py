@@ -215,7 +215,7 @@ def test_gcp_bootstrap_secret_access_repair_is_idempotent_and_never_reads_or_rot
 
 def _run_secret_access_repair_with_fake_gcloud(tmp_path: Path, iam_policy: dict):
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
-    helpers = "\\n".join(
+    helpers = chr(10).join(
         _extract_shell_function(script, name)
         for name in (
             "verify_secret_accessor_binding",
@@ -228,13 +228,14 @@ def _run_secret_access_repair_with_fake_gcloud(tmp_path: Path, iam_policy: dict)
     gcloud_log = tmp_path / "gcloud.log"
     stub = fake_bin / "gcloud"
     stub.write_text(
-        "#!/usr/bin/env bash\\n"
-        "set -euo pipefail\\n"
-        "printf '%s\\\\n' \\\"$*\\\" >> \\\"$GCLOUD_LOG\\\"\\n"
-        "case \\\"$1 $2\\\" in\\n"
-        "  'projects describe') printf '%s' 350896810949 ;;\\n"
-        "  'secrets get-iam-policy') printf '%s' \\\"$IAM_POLICY_JSON\\\" ;;\\n"
-        "esac\\n",
+        r'''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GCLOUD_LOG"
+case "$1 $2" in
+  'projects describe') printf '%s' 350896810949 ;;
+  'secrets get-iam-policy') printf '%s' "$IAM_POLICY_JSON" ;;
+esac
+''',
         encoding="utf-8",
     )
     os.chmod(stub, 0o755)
@@ -253,7 +254,7 @@ def _run_secret_access_repair_with_fake_gcloud(tmp_path: Path, iam_policy: dict)
         "ANON_KEY_SECRET": "atlas-staging-supabase-anon-key",
     })
     completed = subprocess.run(
-        ["bash", "-c", helpers + "\\nrepair_secret_access_only --repair-secret-access"],
+        ["bash", "-c", helpers + chr(10) + "repair_secret_access_only --repair-secret-access"],
         env=env, capture_output=True, text=True, check=False,
     )
     return completed, gcloud_log
