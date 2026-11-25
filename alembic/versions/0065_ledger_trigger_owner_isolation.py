@@ -198,7 +198,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                           AND acl.grantee <> p.proowner
                     LOOP
                         EXECUTE format(
-                            'REVOKE EXECUTE ON FUNCTION %s FROM %I',
+                            'REVOKE EXECUTE ON FUNCTION %s FROM %I CASCADE',
                             function_signature,
                             grantee_name
                         );
@@ -331,12 +331,64 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Reverting ownership here would let an older migration drop the deferred
-    # trigger function only if it could safely reclaim the former owner role.
-    # The migration actor is intentionally not left as a member of that role.
-    # Fail at this revision with a precise message rather than silently leave
-    # the owner changed and allow a later legacy DROP FUNCTION to fail mid-rollback.
-    raise RuntimeError(
-        "downgrade past 0065_ledger_trigger_owner_isolation is blocked: "
-        "restore ledger trigger ownership through a separately reviewed migration"
-    )
+    """Restore the original migration owner and remove the isolated trigger role.
+
+    PUBLIC and application EXECUTE grants deliberately remain revoked. This
+    makes Alembic downgrade/upgrade round-trips safe without reopening the
+    internal trigger functions to runtime identities.
+    """
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+
+    op.execute(sa.text("""
+        DO $atlas_ledger_trigger_owner_downgrade$
+        DECLARE
+            role_name constant text := 'atlas_ledger_trigger_owner';
+            migration_role text := current_user;
+            role_oid oid;
+            function_owner oid;
+        BEGIN
+            SELECT oid INTO role_oid
+            FROM pg_roles
+            WHERE rolname = role_name;
+
+            IF role_oid IS NULL THEN
+                RETURN;
+            END IF;
+
+            SELECT proowner INTO function_owner
+            FROM pg_proc
+            WHERE oid = to_regprocedure('public.atlas_ledger_journal_deferred_check()');
+
+            IF function_owner IS DISTINCT FROM role_oid THEN
+                RAISE EXCEPTION
+                    'cannot downgrade 0065: deferred ledger trigger is not owned by atlas_ledger_trigger_owner';
+            END IF;
+
+            IF NOT has_schema_privilege(migration_role, 'public', 'CREATE') THEN
+                RAISE EXCEPTION
+                    'cannot downgrade 0065: migration identity needs CREATE on public to reclaim trigger ownership';
+            END IF;
+
+            -- Become a temporary member of the current owner so PostgreSQL
+            -- permits OWNER TO migration_role. Remove that membership as soon
+            -- as ownership is restored.
+            EXECUTE format('GRANT %I TO %I', role_name, migration_role);
+            EXECUTE format(
+                'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO %I',
+                migration_role
+            );
+            EXECUTE format('REVOKE %I FROM %I', role_name, migration_role);
+
+            -- Remove only the objects/privileges introduced by this revision.
+            -- The prior PUBLIC and application EXECUTE revocations stay in force.
+            EXECUTE 'DROP POLICY IF EXISTS atlas_ledger_trigger_owner_select ON public.ledger_journals';
+            EXECUTE 'DROP POLICY IF EXISTS atlas_ledger_trigger_owner_select ON public.ledger_journal_lines';
+            EXECUTE 'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM atlas_ledger_trigger_owner';
+            EXECUTE 'REVOKE SELECT ON TABLE public.ledger_journals, public.ledger_journal_lines FROM atlas_ledger_trigger_owner';
+            EXECUTE 'REVOKE USAGE ON SCHEMA public FROM atlas_ledger_trigger_owner';
+            EXECUTE 'DROP ROLE atlas_ledger_trigger_owner';
+        END
+        $atlas_ledger_trigger_owner_downgrade$;
+    """))
