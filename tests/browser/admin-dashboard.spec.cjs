@@ -797,7 +797,9 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
   assert.match(await page.locator("#scanner-results").innerText(), /65%/);
   assert.match(await page.locator("#scanner-results").innerText(), /LONG <img src=x onerror=alert\(1\)>/);
   assert.equal(await page.locator("#scanner-results img").count(), 0, "scanner values must be rendered as text");
-  await page.locator("#scanner-symbols").fill("BTC/USDT,".repeat(9));
+  await page.locator("#scanner-symbols").fill(
+    Array.from({ length: 9 }, (_, index) => "ASSET" + index + "/USDT").join(",")
+  );
   await page.locator("#scanner-button").click();
   assert.match(await page.locator("#scanner-message").innerText(), /between one and eight/);
   assert.equal(calls.filter(call => call.path === "/api/customer/market-scanner").length, 1, "invalid symbol lists must be rejected before a network request");
