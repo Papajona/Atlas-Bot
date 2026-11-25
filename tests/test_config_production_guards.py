@@ -24,9 +24,16 @@ def test_production_requires_admin_metrics_and_disables_api_docs():
 
 def test_paper_staging_market_scanner_is_staging_only_and_disabled_by_default():
     assert _settings().paper_staging_market_scanner_enabled is False
+    # Keep the staging API's unrelated startup requirements satisfied so this
+    # assertion isolates the market-scanner environment boundary.
     _settings().model_copy(update={
         "environment": "staging",
         "paper_staging_market_scanner_enabled": True,
+        "supabase_url": "https://atlas-test.supabase.co",
+        "supabase_anon_key": "test-supabase-anon-key",
+        "funding_webhook_secret": "test-funding-webhook-secret",
+        "forwarded_allow_ips": "127.0.0.1",
+        "model_signing_public_key": "test-model-signing-public-key",
     })._production_security_requirements()
     with pytest.raises(ValueError, match="PAPER_STAGING_MARKET_SCANNER_ENABLED may only be true in staging"):
         _settings().model_copy(update={
