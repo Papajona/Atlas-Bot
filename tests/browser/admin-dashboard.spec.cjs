@@ -728,7 +728,36 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
       });
     }
     if (p === "/api/customer/paper/positions" && method === "GET") {
-      return json(route, { positions: [] });
+      return json(route, {
+        positions: [{
+          venue: "binance",
+          market_type: "spot",
+          symbol: "BTC/USDT",
+          quantity: "0.001",
+          average_entry_price: "60000.5",
+          cost_basis: "60.0005",
+          realized_pnl: "0",
+          timeframe: "1h",
+        }],
+      });
+    }
+    if (p === "/api/customer/paper/history" && method === "GET") {
+      assert.equal(url.searchParams.get("limit"), "50");
+      return json(route, {
+        virtual_only: true,
+        orders: [{
+          order_id: "paper-history-order-1",
+          client_order_id: "paper-history-client-1",
+          symbol: "ETH/USDT",
+          side: "BUY",
+          quantity: "0.1",
+          filled_quantity: "0.1",
+          average_fill_price: "3200.25",
+          fill_count: 2,
+          status: "FILLED",
+          created_at: "2026-11-25T10:00:00+00:00",
+        }],
+      });
     }
     if (p === "/api/customer/paper/orders" && method === "GET") {
       return json(route, { orders: paperOrders.slice() });
@@ -787,6 +816,13 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
   await page.locator("#retry-preflight").click();
   await page.locator("#workspace").waitFor({ state: "visible", timeout: 10000 });
   assert.equal(await page.locator("#blocked-state").isHidden(), true, "successful readiness retry should restore the workspace");
+  assert.match(await page.locator("#positions").innerText(), /BTC\/USDT/);
+  assert.match(await page.locator("#positions").innerText(), /60\.0005/);
+  assert.match(await page.locator("#positions").innerText(), /1h/);
+  assert.match(await page.locator("#history").innerText(), /ETH\/USDT/);
+  assert.match(await page.locator("#history").innerText(), /FILLED/);
+  assert.match(await page.locator("#history").innerText(), /0\.1 \/ 0\.1/);
+  assert.match(await page.locator("#history").innerText(), /3,200\.25/);
 
   await page.locator("#scanner-button").click();
   await waitUntil(async () => scannerRequest !== null && (await page.locator("#scanner-results tbody tr").count()) === 2);
