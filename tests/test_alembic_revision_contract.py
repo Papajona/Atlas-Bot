@@ -147,3 +147,34 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
     ):
         assert expected in source
 
+def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate_steps():
+    runbook = (ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
+
+    schema_step = runbook.index(
+        "4. While still connected as the database owner/admin, apply "
+        "`scripts/customer_paper_ledger_schema.sql`"
+    )
+    migration_step = runbook.index(
+        "5. Apply the repository Alembic chain with `ENVIRONMENT=development`"
+    )
+    assert schema_step < migration_step
+    assert runbook.count("5. Apply the repository Alembic chain") == 1
+    assert runbook.count(
+        "Revision `0065_ledger_trigger_owner_isolation` creates the internal "
+        "`atlas_ledger_trigger_owner` identity"
+    ) == 1
+    assert runbook.count(
+        "The executor verifies the source object's generation, provider checksum, "
+        "Supabase log correlation and locked retention"
+    ) == 1
+    assert runbook.count(
+        "After import, run the post-restore database steps below"
+    ) == 1
+    assert runbook.count(
+        "After the Supabase backup restore or the Cloud SQL post-import migration/schema steps"
+    ) == 1
+    assert runbook.count(
+        "For payout statement matching, upload a provider-generated"
+    ) == 1
+    assert "**Provenance evidence is now available from the source provider logs**" not in runbook
+
