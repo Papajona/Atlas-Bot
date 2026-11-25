@@ -1822,7 +1822,7 @@ def test_secret_scanner_detects_numeric_private_jwk_metadata_values(
     )
 
 
-def test_secret_scanner_ignores_secret_manager_placeholder_with_shell_continuation(
+def test_secret_scanner_ignores_private_key_angle_placeholder_with_shell_continuation(
     tmp_path, monkeypatch
 ):
     (tmp_path / "deployment.md").write_text(
