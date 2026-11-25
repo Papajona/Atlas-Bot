@@ -21,6 +21,9 @@ def test_paper_staging_serves_the_restricted_browser_workspace():
     assert "Recent orders and fills" in response.text
     assert 'id="history"' in response.text
     assert 'id="blocked-state" hidden' in response.text
+    assert 'id="auth-form" autocomplete="off"' in response.text
+    assert 'id="password" type="password" autocomplete="off"' in response.text
+    assert 'id="totp-code" inputmode="numeric" autocomplete="off"' in response.text
     assert "<script>" not in response.text
 
 
@@ -34,6 +37,14 @@ def test_paper_staging_browser_assets_are_same_origin_and_cache_restricted():
     assert script.headers["cache-control"] == "no-store"
     assert '"/api/customer/paper/orders"' in script.text
     assert '"/api/auth/mfa/verify"' in script.text
+    assert '"/api/auth/logout"' in script.text
+    assert "sessionVersion" in script.text
+    assert "revokeSessionToken" in script.text
+    assert "error.paperGate === true" in script.text
+    assert "error.status === 409 || error.status === 503" not in script.text
+    assert '$("email").value = ""' in script.text
+    assert '$("password").value = ""' in script.text
+    assert '$("totp-code").value = ""' in script.text
     assert '"/api/customer/market-scanner?"' in script.text
     assert '"/api/customer/paper/history?limit=50"' in script.text
     assert "renderHistory" in script.text
