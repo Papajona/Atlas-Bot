@@ -255,6 +255,50 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
         _run_alembic(env, "upgrade", "head")
 
 
+def test_0065_inherited_acl_grantor_without_set_option_is_not_settable():
+    dsn = _postgres_test_url()
+    nonce = os.urandom(8).hex()
+    grantor_role = f"atlas_0065_set_grantor_{nonce}"
+    migration_role = f"atlas_0065_set_member_{nonce}"
+
+    async def check() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            await connection.execute(f"CREATE ROLE {grantor_role} NOLOGIN")
+            await connection.execute(f"CREATE ROLE {migration_role} NOLOGIN")
+            await connection.execute(
+                f"GRANT {grantor_role} TO {migration_role} "
+                "WITH INHERIT TRUE, SET FALSE"
+            )
+            member = await connection.fetchval(
+                "SELECT pg_has_role($1, $2, 'MEMBER')",
+                migration_role,
+                grantor_role,
+            )
+            can_set = await connection.fetchval(
+                "SELECT pg_has_role($1, $2, 'SET')",
+                migration_role,
+                grantor_role,
+            )
+            assert member is True
+            assert can_set is False
+
+            migration = (
+                ROOT
+                / "alembic"
+                / "versions"
+                / "0065_ledger_trigger_owner_isolation.py"
+            ).read_text(encoding="utf-8")
+            assert "pg_has_role(migration_role_oid, grantor_oid, 'SET')" in migration
+            assert "pg_has_role(migration_role_oid, grantor_oid, 'MEMBER')" not in migration
+        finally:
+            await connection.execute(f"DROP ROLE IF EXISTS {migration_role}")
+            await connection.execute(f"DROP ROLE IF EXISTS {grantor_role}")
+            await connection.close()
+
+    asyncio.run(check())
+
+
 def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
     dsn = _postgres_test_url()
     env = os.environ.copy()
