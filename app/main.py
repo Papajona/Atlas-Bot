@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete, literal_column
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -3863,6 +3863,16 @@ def approver_auth(admin_id: str, approver_token: str | None, admin_token: str | 
     return True
 
 
+_CUSTOMER_UUID_PATTERN = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+_CUSTOMER_UUID_GLOB = (
+    "[0-9a-f]" * 8 + "-"
+    + "[0-9a-f]" * 4 + "-"
+    + "[0-9a-f]" * 4 + "-"
+    + "[0-9a-f]" * 4 + "-"
+    + "[0-9a-f]" * 12
+)
+
+
 async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     """Find another non-UUID Auth ID without selecting encrypted customer PII."""
     bind_getter = getattr(db, "get_bind", None)
@@ -3870,23 +3880,16 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     dialect = getattr(getattr(bind, "dialect", None), "name", "")
     try:
         if dialect == "postgresql":
-            uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+            uuid_pattern = _CUSTOMER_UUID_PATTERN
             statement = select(CustomerProfile.id).where(
                 CustomerProfile.auth_user_id != auth_user_id,
-                CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+                CustomerProfile.auth_user_id.op("!~*")(literal_column(f"'{_CUSTOMER_UUID_PATTERN}'")),
             ).limit(1)
             return (await db.execute(statement)).scalar_one_or_none() is not None
         if dialect == "sqlite":
-            uuid_glob = (
-                "[0-9a-fA-F]" * 8 + "-"
-                + "[0-9a-fA-F]" * 4 + "-"
-                + "[0-9a-fA-F]" * 4 + "-"
-                + "[0-9a-fA-F]" * 4 + "-"
-                + "[0-9a-fA-F]" * 12
-            )
             statement = select(CustomerProfile.id).where(
                 CustomerProfile.auth_user_id != auth_user_id,
-                ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+                ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'")),
             ).limit(1)
             return (await db.execute(statement)).scalar_one_or_none() is not None
         legacy_ids = (await db.execute(
@@ -3941,20 +3944,13 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     ).where(CustomerProfile.auth_user_id != auth_user_id)
     legacy_ids_filtered_in_sql = dialect in {"postgresql", "sqlite"}
     if dialect == "postgresql":
-        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        uuid_pattern = _CUSTOMER_UUID_PATTERN
         statement = statement.where(
-            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern)
+            CustomerProfile.auth_user_id.op("!~*")(literal_column(f"'{_CUSTOMER_UUID_PATTERN}'"))
         )
     elif dialect == "sqlite":
-        uuid_glob = (
-            "[0-9a-f]" * 8 + "-"
-            + "[0-9a-f]" * 4 + "-"
-            + "[0-9a-f]" * 4 + "-"
-            + "[0-9a-f]" * 4 + "-"
-            + "[0-9a-f]" * 12
-        )
         statement = statement.where(
-            ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(uuid_glob)
+            ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'"))
         )
     try:
         # The partial legacy-ID index bounds this lookup to unmapped identities;
@@ -4034,7 +4030,7 @@ async def get_customer(
     if profile is None:
         # A bounded index lookup avoids decrypting every stored customer email
         # for ordinary signups. Any remaining non-UUID identity is quarantined.
-        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+        identity_review_required = await _legacy_customer_email_conflict(db, uid, email)
     elif stale_legacy_quarantine:
         # Recheck both the current confirmed Auth email and the profile's
         # previously stored email. A changed Auth email must not erase a legacy
