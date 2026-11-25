@@ -170,7 +170,13 @@ def test_0065_rollback_provenance_tracks_exact_direct_acl_deltas_and_identity():
     assert "acl.grantee = role_oid" in migration
     assert "acl.grantor" in migration
     assert "aclexplode(" in migration
-    assert "GRANTED BY %I" in migration
+    assert "GRANTED BY %I" not in migration
+    assert migration.count("EXECUTE format('SET ROLE %I', grantor_name)") == 4
+    assert migration.count("EXECUTE format('SET ROLE %I', migration_role)") == 4
+    assert migration.count("REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM %I") == 1
+    assert migration.count("REVOKE SELECT ON TABLE public.ledger_journals FROM %I") == 1
+    assert migration.count("REVOKE SELECT ON TABLE public.ledger_journal_lines FROM %I") == 1
+    assert migration.count("REVOKE USAGE ON SCHEMA public FROM %I") == 1
     assert "role_state->>'migration_identity'" in migration
     assert "grantee.rolname <> role_name" in migration
     assert "jsonb_array_length(role_state->'pre_validate_function_execute_acl') = 0" in migration
