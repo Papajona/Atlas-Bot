@@ -1498,6 +1498,7 @@ def test_customer_paper_order_history_is_tenant_scoped_and_limit_bounded(monkeyp
             "fill_count": 2,
         }]
 
+    monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
     monkeypatch.setattr(
         paper_api, "list_customer_paper_order_history", order_history
     )
