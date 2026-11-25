@@ -699,7 +699,7 @@ def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tm
         try:
             captured = []
             def capture_query(conn, cursor, statement, parameters, context, executemany):
-                if "NOT EXISTS" in statement.upper() and "STRATEGY_OUTCOMES" in statement.upper():
+                if ("NOT EXISTS" in statement.upper() or "NOT (EXISTS" in statement.upper()) and "STRATEGY_OUTCOMES" in statement.upper():
                     captured.append((statement, parameters))
             event.listen(engine.sync_engine, "before_cursor_execute", capture_query)
             async with engine.begin() as connection:
