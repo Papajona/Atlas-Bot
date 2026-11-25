@@ -1710,18 +1710,18 @@ def test_reused_entry_order_fee_true_up_is_scoped_to_current_position_lifecycle(
     asyncio.run(with_database(check))
 
 
-def test_later_verified_fee_increase_with_unchanged_fill_quantity_updates_verified_outcomes():
+def test_broker_snapshot_reconciles_verified_fee_increase_without_new_fill():
     async def check(sessions):
         async with sessions() as db:
             entry = _trade(
-                customer_id=1, signal_id="verified-entry-fee-increase",
+                customer_id=None, signal_id="verified-entry-fee-increase",
                 client_order_id="verified-entry-fee-increase", side="buy",
                 quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
-                fee=Decimal("0.10"), fee_reconciliation_pending=False,
+                fee=Decimal("0.10"), fee_reconciliation_pending=True,
                 status="FILLED",
             )
             closing = _trade(
-                customer_id=1, signal_id="verified-entry-fee-increase-close",
+                customer_id=None, signal_id="verified-entry-fee-increase-close",
                 client_order_id="verified-entry-fee-increase-close", side="sell",
                 quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
                 fee=Decimal("0.02"), fee_reconciliation_pending=False,
@@ -1732,7 +1732,7 @@ def test_later_verified_fee_increase_with_unchanged_fill_quantity_updates_verifi
 
             outcome = StrategyOutcome(
                 trade_id=entry.id, closing_trade_id=closing.id,
-                customer_id=1, strategy="test", regime="UNKNOWN",
+                customer_id=None, strategy="test", regime="UNKNOWN",
                 asset="crypto", symbol="BTC/USDT", side="buy",
                 realized_pnl=Decimal("10"), fee=Decimal("0.12"),
                 return_bps=1000.0, net_pnl=Decimal("9.88"),
@@ -1746,7 +1746,7 @@ def test_later_verified_fee_increase_with_unchanged_fill_quantity_updates_verifi
                 ),
             )
             episode = TradeLearningEpisode(
-                entry_trade_id=entry.id, customer_id=1, exchange="binance",
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
                 symbol="BTC/USDT", side="buy", entry_quantity=Decimal("1.0"),
                 entry_price=100, gross_pnl=Decimal("10"),
                 total_fees=Decimal("0.12"), net_pnl=Decimal("9.88"),
@@ -1755,10 +1755,16 @@ def test_later_verified_fee_increase_with_unchanged_fill_quantity_updates_verifi
             db.add_all([outcome, episode])
             await db.commit()
 
-            await execution._apply_fill_to_position(
-                db, entry, 1.0, 100.0,
-                current_fill_fee=Decimal("0.05"),
-                current_fill_fee_verified=True,
+            await execution._apply_broker_snapshot(
+                db,
+                entry,
+                {
+                    "status": "open",
+                    "filled": 1.0,
+                    "remaining": 0.0,
+                    "average": 100.0,
+                    "fee": {"currency": "USDT", "cost": "0.15"},
+                },
             )
             await db.commit()
             await db.refresh(outcome)
@@ -1771,5 +1777,7 @@ def test_later_verified_fee_increase_with_unchanged_fill_quantity_updates_verifi
             assert Decimal(str(outcome.net_pnl)) == Decimal("9.83")
             assert Decimal(str(episode.total_fees)) == Decimal("0.17")
             assert Decimal(str(episode.net_pnl)) == Decimal("9.83")
+            assert Decimal(str(entry.fee)) == Decimal("0.15")
+            assert entry.fee_reconciliation_pending is False
 
     asyncio.run(with_database(check))
