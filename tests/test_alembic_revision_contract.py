@@ -113,7 +113,8 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
     ).read_text(encoding="utf-8")
     assert "Restore the original migration owner" in migration
     assert "ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO %I" in migration
-    assert "DROP POLICY IF EXISTS atlas_ledger_trigger_owner_select" in migration
+    assert "DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journals" in migration
+    assert "DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journal_lines" in migration
     assert "DROP ROLE atlas_ledger_trigger_owner" in migration
     assert "downgrade past 0065_ledger_trigger_owner_isolation is blocked" not in migration
 
