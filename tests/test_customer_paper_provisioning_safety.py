@@ -191,17 +191,10 @@ def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access(
     assert "binding.get(\"condition\")" in verify_helper
     assert "gcloud projects add-iam-policy-binding" not in grant_helper
 
-    # Inspect the complete bootstrap source, not only the two expected grant loops:
-    # a project-wide Secret Accessor grant anywhere else must make this test fail.
-    accessor_mentions = [
-        line for line in script.splitlines()
-        if "roles/secretmanager.secretAccessor" in line
-    ]
-    assert len(accessor_mentions) == 2
-    assert all(
-        line in grant_helper or line in verify_helper
-        for line in accessor_mentions
-    )
+    # Inspect every project-level IAM command in the complete script. Only the
+    # reviewed Cloud Run deploy/viewer roles are allowed; secret-capable, basic,
+    # custom, dynamically supplied, or whole-policy grants fail closed.
+    _assert_project_iam_commands_are_allowlisted(script)
     assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in grant_helper
 
 
@@ -226,6 +219,44 @@ def test_gcp_bootstrap_secret_access_repair_is_idempotent_and_never_reads_or_rot
     assert "PAPER_URL_FILE" not in repair
     assert "repair_secret_access_only \"$@\"" in dispatch
 
+
+
+@pytest.mark.parametrize(
+    "unsafe_project_grant",
+    [
+        '--role="roles/secretmanager.secretAccessor"',
+        '--role="roles/secretmanager.admin"',
+        '--role="$PROJECT_WIDE_IAM_ROLE"',
+    ],
+)
+def test_project_iam_guard_rejects_unreviewed_or_dynamic_roles(unsafe_project_grant: str):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script.replace('--role="roles/run.admin"', unsafe_project_grant, 1)
+    assert unsafe != script
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def test_project_iam_guard_rejects_whole_project_policy_replacement():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script.replace(
+        'gcloud projects add-iam-policy-binding "$PROJECT_ID" \\\\',
+        'gcloud projects set-iam-policy "$PROJECT_ID" policy.json \\\\',
+        1,
+    )
+    assert unsafe != script
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def test_project_iam_guard_rejects_unexpected_additional_project_grants():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script + (
+        '\\ngcloud projects add-iam-policy-binding "$PROJECT_ID" '
+        '--member="allUsers" --role="roles/secretmanager.admin" --quiet\\n'
+    )
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
 
 
 def _run_secret_access_repair_with_fake_gcloud(tmp_path: Path, iam_policy: dict):
@@ -345,6 +376,54 @@ def _extract_shell_function(script: str, name: str) -> str:
     match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", script)
     assert match is not None, f"{name}() must be present for behavioral testing"
     return match.group(0)
+
+
+def _extract_project_iam_policy_commands(script: str) -> list[str]:
+    lines = script.splitlines()
+    commands: list[str] = []
+    command_start = re.compile(
+        r"^\s*gcloud\s+projects\s+(?:add-iam-policy-binding|set-iam-policy)\b"
+    )
+    index = 0
+    while index < len(lines):
+        if not command_start.match(lines[index]):
+            index += 1
+            continue
+        parts: list[str] = []
+        while True:
+            part = lines[index].strip()
+            continues = part.endswith("\\")
+            parts.append(part[:-1].rstrip() if continues else part)
+            if not continues:
+                break
+            index += 1
+            assert index < len(lines), "unterminated project IAM command"
+        commands.append(" ".join(parts))
+        index += 1
+    return commands
+
+
+def _assert_project_iam_commands_are_allowlisted(script: str) -> None:
+    commands = _extract_project_iam_policy_commands(script)
+    assert len(commands) == 2, (
+        "unexpected project-wide IAM mutation; review it before adding it to the allowlist"
+    )
+    allowed_roles = {"roles/run.admin", "roles/run.viewer"}
+    observed_roles: list[str] = []
+    for command in commands:
+        assert re.match(r"^gcloud projects add-iam-policy-binding\\b", command), (
+            "project-wide set-iam-policy is forbidden"
+        )
+        role_args = re.findall(
+            r"""--role(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|([^\\s]+))""",
+            command,
+        )
+        assert len(role_args) == 1, "project-wide IAM role must be a single explicit literal"
+        role = next(value for value in role_args[0] if value)
+        assert role in allowed_roles, f"unreviewed project-wide IAM role: {role}"
+        assert "$" not in role and "`" not in role, "dynamic project-wide IAM roles are forbidden"
+        observed_roles.append(role)
+    assert set(observed_roles) == allowed_roles
 
 
 def _run_paper_bootstrap_subset(
