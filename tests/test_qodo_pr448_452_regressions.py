@@ -219,6 +219,9 @@ def test_blank_legacy_email_does_not_block_unrelated_new_identity_but_matching_e
         def __init__(self, rows):
             self.rows = rows
 
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
         async def execute(self, _statement):
             return Result(self.rows)
 
