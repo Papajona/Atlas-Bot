@@ -3964,11 +3964,11 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
                 continue
             except (ValueError, TypeError, AttributeError):
                 pass
-        # A legacy row with no recoverable email cannot be safely linked to this
-        # confirmed identity. Leave that row untouched, but do not let an
-        # unidentifiable record block every unrelated customer from provisioning.
+        # Without a recoverable email this legacy identity cannot be proven
+        # distinct from the caller. Keep new provisioning closed until manual
+        # identity review resolves that row; known, different emails do not block.
         if not str(stored_email or "").strip():
-            continue
+            return True
         if str(stored_email).strip().casefold() == normalized:
             return True
     return False
