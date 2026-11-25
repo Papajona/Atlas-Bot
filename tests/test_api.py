@@ -136,3 +136,34 @@ def test_active_profile_with_persisted_email_verifies_missing_jwt_email_with_aut
 
     assert auth_calls == ["test-token"]
     assert returned_profile is profile
+
+def test_active_profile_with_email_but_no_display_name_rejects_unconfirmed_auth_email(monkeypatch):
+    auth_id = "11111111-2222-4333-8444-555555555555"
+    profile = SimpleNamespace(
+        auth_user_id=auth_id,
+        email="existing@example.test",
+        display_name="",
+        status="ACTIVE",
+    )
+    db = _CustomerIdentityDatabase(profile)
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": auth_id, "email": "existing@example.test"}
+
+    async def auth_user(_token):
+        return {
+            "id": auth_id,
+            "email": "existing@example.test",
+            "email_confirmed_at": None,
+            "user_metadata": {},
+        }
+
+    monkeypatch.setattr(main_module, "customer_claims", verified_claims)
+    monkeypatch.setattr(main_module, "_supabase_user", auth_user)
+    monkeypatch.setattr(main_module, "_bearer_token", lambda _authorization: "test-token")
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(main_module.get_customer("Bearer test-token", db))
+
+    assert raised.value.status_code == 403
+    assert "confirmed email" in raised.value.detail.lower()
