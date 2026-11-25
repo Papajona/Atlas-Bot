@@ -2045,6 +2045,18 @@ def test_terminal_trade_rejects_stale_snapshot_but_accepts_verified_fee_history(
             )
             db.add(trade)
             await db.flush()
+            position = Position(
+                customer_id=None,
+                exchange="binance",
+                symbol="BTC/USDT",
+                quantity=Decimal("0.2"),
+                average_entry_price=Decimal("100"),
+                entry_trade_id=trade.id,
+                entry_fee=Decimal("0"),
+                entry_fee_basis_known=False,
+            )
+            db.add(position)
+            await db.flush()
 
             stale_order = {
                 "id": "terminal-order",
@@ -2111,5 +2123,7 @@ def test_terminal_trade_rejects_stale_snapshot_but_accepts_verified_fee_history(
             assert Decimal(str(trade.filled_quantity)) == Decimal("0.2")
             assert Decimal(str(trade.fee)) == Decimal("0.04")
             assert trade.fee_reconciliation_pending is False
+            assert Decimal(str(position.entry_fee)) == Decimal("0.04")
+            assert position.entry_fee_basis_known is True
 
     asyncio.run(with_database(check))
