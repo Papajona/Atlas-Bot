@@ -467,13 +467,15 @@ def _structured_private_object_has_material(value) -> bool:
                             or _is_likely_recovery_phrase(item)
                         ):
                             return True
-                    # Direct values in a recognized metadata mapping are public
-                    # descriptive metadata. Nested containers still inherit the
-                    # surrounding private context and are inspected recursively.
+                    # Public JWK metadata may contain provider-specific fields.
+                    # Do not exempt the whole mapping: unknown nested values such as
+                    # metadata.private_blob still inherit private context and must be
+                    # checked. Only the ambiguous descriptive labels "key"/"value"
+                    # receive the narrow short-label exception above.
                     if (
                         private_context
-                        and not public_metadata_mapping
                         and not field_is_public
+                        and not ambiguous_public_metadata_field
                         and _looks_like_private_key_material(item)
                     ):
                         return True
