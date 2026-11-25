@@ -169,6 +169,9 @@ def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate
         "Supabase log correlation and locked retention"
     ) == 1
     assert runbook.count(
+        "The original backup source has been independently correlated to Supabase logs."
+    ) == 1
+    assert runbook.count(
         "After import, run the post-restore database steps below"
     ) == 1
     assert runbook.count(
