@@ -384,6 +384,7 @@
       }
     } finally {
       setBusy(button, false);
+      button.disabled = state.initialized;
     }
   }
 
