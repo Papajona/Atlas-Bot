@@ -25,6 +25,84 @@ PRIMARY_SECRET="atlas-staging-primary-db-url"
 PAPER_SECRET="atlas-staging-customer-paper-db-url"
 ANON_KEY_SECRET="atlas-staging-supabase-anon-key"
 
+DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+verify_secret_accessor_binding() {
+  local secret_name="$1"
+  local principal="$2"
+  local policy
+  policy="$(gcloud secrets get-iam-policy "$secret_name" \
+    --project="$PROJECT_ID" --format=json)"
+  if ! python - "$secret_name" "$principal" <<< "$policy" <<'PY'
+import json
+import sys
+
+secret_name, principal = sys.argv[1:3]
+try:
+    policy = json.load(sys.stdin)
+except (json.JSONDecodeError, TypeError) as exc:
+    raise SystemExit(f"BLOCKED: could not verify Secret Manager IAM policy for {secret_name}: {exc}")
+if not any(
+    binding.get("role") == "roles/secretmanager.secretAccessor"
+    and principal in binding.get("members", [])
+    and not binding.get("condition")
+    for binding in policy.get("bindings", [])
+):
+    raise SystemExit(f"BLOCKED: {principal} is missing unconditional Secret Accessor on {secret_name}")
+PY
+  then
+    return 1
+  fi
+}
+
+grant_secret_accessor() {
+  local secret_name="$1"
+  local principal="$2"
+  gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null
+  gcloud secrets add-iam-policy-binding "$secret_name" \
+    --project="$PROJECT_ID" \
+    --member="serviceAccount:${principal}" \
+    --role="roles/secretmanager.secretAccessor" --quiet
+  verify_secret_accessor_binding "$secret_name" "$principal"
+}
+
+repair_secret_access_only() {
+  if [[ "$#" -ne 1 || "$1" != "--repair-secret-access" ]]; then
+    echo "BLOCKED: invalid secret-access repair invocation." >&2
+    return 2
+  fi
+  gcloud config set project "$PROJECT_ID" >/dev/null
+  local actual_project_number
+  actual_project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+  if [[ "$actual_project_number" != "$PROJECT_NUMBER" ]]; then
+    echo "BLOCKED: unexpected Google Cloud project number." >&2
+    return 1
+  fi
+  # This repair mode never reads or rotates secret versions and does not create
+  # service accounts. It repairs only the five exact per-secret IAM bindings.
+  gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" >/dev/null
+  gcloud iam service-accounts describe "$PREFLIGHT_SA" --project="$PROJECT_ID" >/dev/null
+  local secret_name
+  for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
+    grant_secret_accessor "$secret_name" "$RUNTIME_SA"
+  done
+  for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do
+    grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"
+  done
+  echo "PASS: runtime and preflight Secret Manager access is present on only the required staging secrets."
+}
+
+if [[ "${1:-}" == "--repair-secret-access" ]]; then
+  repair_secret_access_only "$@"
+  exit $?
+fi
+if [[ "$#" -ne 0 ]]; then
+  echo "Usage: $0 [--repair-secret-access]" >&2
+  exit 2
+fi
+
 gcloud config set project "$PROJECT_ID" >/dev/null
 gcloud services enable \
   artifactregistry.googleapis.com \
@@ -268,18 +346,12 @@ fi
 
 # Cloud Run can read only its three explicitly referenced secret values.
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
-  gcloud secrets add-iam-policy-binding "$secret_name" \
-    --project="$PROJECT_ID" \
-    --member="serviceAccount:${RUNTIME_SA}" \
-    --role="roles/secretmanager.secretAccessor" --quiet
+  grant_secret_accessor "$secret_name" "$RUNTIME_SA"
 done
 
 # The read-only preflight identity may inspect the two DB URLs but not the Supabase key.
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do
-  gcloud secrets add-iam-policy-binding "$secret_name" \
-    --project="$PROJECT_ID" \
-    --member="serviceAccount:${PREFLIGHT_SA}" \
-    --role="roles/secretmanager.secretAccessor" --quiet
+  grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"
 done
 
 echo
