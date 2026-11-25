@@ -490,10 +490,10 @@ PUBLIC_JWK_METADATA_FIELDS = {
 
 def _structured_private_object_has_material(value) -> bool:
     """Detect nested private JWK material while preserving public metadata exceptions."""
-    # A root array under private_key has private scalar entries, but objects
-    # inside that array may be public JWKs. Do not propagate the array's scalar
-    # rule into unknown fields of those objects.
-    stack = [(value, isinstance(value, list), isinstance(value, dict))]
+    # A root array under private_key may contain public JWK objects with
+    # provider-specific private siblings. Keep private context for those object
+    # siblings, while the public JWK metadata allowlist prevents false positives.
+    stack = [(value, isinstance(value, list), isinstance(value, (dict, list)))]
     visited: set[tuple[int, bool, bool]] = set()
     visits = 0
     while stack:
