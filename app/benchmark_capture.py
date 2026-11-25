@@ -84,9 +84,6 @@ async def capture_strategy_prompt(
     """Persist a prompt/output pair only after explicit, per-request user consent."""
     if not prompt or not isinstance(prompt, str):
         return {"status": "SKIPPED_INVALID_PROMPT"}
-    permissions = await benchmark_capture_permissions(db)
-    if not permissions["can_select"] or not permissions["can_insert"]:
-        return {"status": "SKIPPED_STORAGE_UNAVAILABLE"}
     if contains_obvious_sensitive_text(prompt):
         return {"status": "SKIPPED_POSSIBLE_SENSITIVE_CONTENT"}
     try:
@@ -107,38 +104,44 @@ async def capture_strategy_prompt(
 
     now = datetime.now(timezone.utc)
     try:
-        # Serialize concurrent submissions per customer so the daily cap cannot be
-        # bypassed by two requests that both observe the same previous count.
-        if db.get_bind().dialect.name == "postgresql":
-            await db.execute(
-                text("SELECT pg_advisory_xact_lock(17012026, :customer_id)"),
-                {"customer_id": customer_id},
-            )
-        recent = int((await db.execute(
-            select(func.count(BenchmarkPromptCapture.id)).where(
-                BenchmarkPromptCapture.customer_id == customer_id,
-                BenchmarkPromptCapture.created_at >= now - timedelta(hours=24),
-                BenchmarkPromptCapture.expires_at > now,
-            )
-        )).scalar_one() or 0)
-        if recent >= MAX_CAPTURES_PER_24_HOURS:
-            return {"status": "SKIPPED_DAILY_LIMIT"}
-        row = BenchmarkPromptCapture(
-            customer_id=customer_id,
-            prompt_ciphertext=encrypted_prompt,
-            native_output_ciphertext=encrypted_output,
-            prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            consent_version=CONSENT_VERSION,
-            consented_at=now,
-            asset=asset,
-            symbol=symbol,
-            exchange=exchange,
-            timeframe=timeframe,
-            native_ai_version=str(settings.app_version or "")[:80],
-            created_at=now,
-            expires_at=now + timedelta(days=RETENTION_DAYS),
-        )
+        # Savepoint all database operations so capture failures cannot abort the
+        # caller's strategy-creation transaction. The advisory lock remains held
+        # until the outer transaction commits.
         async with db.begin_nested():
+            permissions = await benchmark_capture_permissions(db)
+            if not permissions["can_select"] or not permissions["can_insert"]:
+                return {"status": "SKIPPED_STORAGE_UNAVAILABLE"}
+            # Serialize concurrent submissions per customer so the daily cap
+            # cannot be bypassed by two requests observing the same count.
+            if db.get_bind().dialect.name == "postgresql":
+                await db.execute(
+                    text("SELECT pg_advisory_xact_lock(17012026, :customer_id)"),
+                    {"customer_id": customer_id},
+                )
+            recent = int((await db.execute(
+                select(func.count(BenchmarkPromptCapture.id)).where(
+                    BenchmarkPromptCapture.customer_id == customer_id,
+                    BenchmarkPromptCapture.created_at >= now - timedelta(hours=24),
+                    BenchmarkPromptCapture.expires_at > now,
+                )
+            )).scalar_one() or 0)
+            if recent >= MAX_CAPTURES_PER_24_HOURS:
+                return {"status": "SKIPPED_DAILY_LIMIT"}
+            row = BenchmarkPromptCapture(
+                customer_id=customer_id,
+                prompt_ciphertext=encrypted_prompt,
+                native_output_ciphertext=encrypted_output,
+                prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                consent_version=CONSENT_VERSION,
+                consented_at=now,
+                asset=asset,
+                symbol=symbol,
+                exchange=exchange,
+                timeframe=timeframe,
+                native_ai_version=str(settings.app_version or "")[:80],
+                created_at=now,
+                expires_at=now + timedelta(days=RETENTION_DAYS),
+            )
             db.add(row)
             await db.flush()
     except Exception:
