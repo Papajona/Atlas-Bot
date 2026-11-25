@@ -260,6 +260,68 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 ), '[]'::jsonb),
                 'prior_role_comment', role_comment
             );
+
+            IF EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements(
+                    role_state->'pre_validate_function_execute_acl'
+                ) AS grant_item
+                JOIN pg_roles grantor
+                  ON grantor.oid = (grant_item->>'grantor')::oid
+                WHERE grantor.oid <> (
+                    SELECT proowner
+                    FROM pg_proc
+                    WHERE oid = to_regprocedure(
+                        'public.atlas_validate_ledger_journal(integer)'
+                    )
+                )
+                  AND (
+                      grantor.rolcanlogin
+                      OR grantor.rolsuper
+                      OR grantor.rolcreatedb
+                      OR grantor.rolcreaterole
+                      OR grantor.rolreplication
+                      OR EXISTS (
+                          SELECT 1
+                          FROM pg_auth_members membership
+                          WHERE membership.roleid = grantor.oid
+                             OR membership.member = grantor.oid
+                      )
+                  )
+            ) THEN
+                RAISE EXCEPTION
+                    '0065 cannot preserve a pre-existing trigger-owner validation grant whose grantor is login-capable, privileged, or has role memberships; remove or isolate that grant before retrying';
+            END IF;
+
+            role_state := role_state || jsonb_build_object(
+                'preserved_validate_function_grantor_oids', coalesce((
+                    SELECT jsonb_agg(DISTINCT (grant_item->>'grantor')::oid)
+                    FROM jsonb_array_elements(
+                        role_state->'pre_validate_function_execute_acl'
+                    ) AS grant_item
+                    JOIN pg_roles grantor
+                      ON grantor.oid = (grant_item->>'grantor')::oid
+                    WHERE grantor.oid <> (
+                        SELECT proowner
+                        FROM pg_proc
+                        WHERE oid = to_regprocedure(
+                            'public.atlas_validate_ledger_journal(integer)'
+                        )
+                    )
+                      AND NOT grantor.rolcanlogin
+                      AND NOT grantor.rolsuper
+                      AND NOT grantor.rolcreatedb
+                      AND NOT grantor.rolcreaterole
+                      AND NOT grantor.rolreplication
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM pg_auth_members membership
+                          WHERE membership.roleid = grantor.oid
+                             OR membership.member = grantor.oid
+                      )
+                ), '[]'::jsonb)
+            );
+
             EXECUTE format(
                 'COMMENT ON ROLE %I IS %L',
                 role_name,
@@ -335,6 +397,20 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                           AND acl.privilege_type = 'EXECUTE'
                           AND acl.grantee <> p.proowner
                           AND grantee.rolname <> role_name
+                          AND NOT (
+                              p.oid = to_regprocedure(
+                                  'public.atlas_validate_ledger_journal(integer)'
+                              )
+                              AND grantee.oid IN (
+                                  SELECT grantor_oid::oid
+                                  FROM jsonb_array_elements_text(
+                                      coalesce(
+                                          role_state->'preserved_validate_function_grantor_oids',
+                                          '[]'::jsonb
+                                      )
+                                  ) AS preserved(grantor_oid)
+                              )
+                          )
                     LOOP
                         EXECUTE format(
                             'REVOKE EXECUTE ON FUNCTION %s FROM %I CASCADE',
@@ -494,7 +570,18 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                       AND acl.grantee <> p.proowner
                       AND NOT (
                           p.oid = to_regprocedure('public.atlas_validate_ledger_journal(integer)')
-                          AND acl.grantee = role_oid
+                          AND (
+                              acl.grantee = role_oid
+                              OR acl.grantee IN (
+                                  SELECT grantor_oid::oid
+                                  FROM jsonb_array_elements_text(
+                                      coalesce(
+                                          role_state->'preserved_validate_function_grantor_oids',
+                                          '[]'::jsonb
+                                      )
+                                  ) AS preserved(grantor_oid)
+                              )
+                          )
                       )
                 ) THEN
                     RAISE EXCEPTION
