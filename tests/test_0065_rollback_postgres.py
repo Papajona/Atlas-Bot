@@ -300,7 +300,9 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
                 # A separate grantor creates the direct ACL entries. This
                 # reproduces a reused trigger role whose privileges predate
                 # 0065 and were not granted by the migration identity.
-                await connection.execute("CREATE ROLE atlas_0065_acl_owner NOLOGIN")
+                await connection.execute(
+                    "CREATE ROLE atlas_0065_acl_owner NOLOGIN NOINHERIT"
+                )
                 await connection.execute(
                     "GRANT USAGE ON SCHEMA public TO atlas_0065_acl_owner WITH GRANT OPTION"
                 )
