@@ -1728,6 +1728,88 @@ async def list_open_customer_paper_orders(*, customer_id: int) -> list[dict[str,
         await engine.dispose()
 
 
+async def list_customer_paper_order_history(
+    *, customer_id: int, limit: int = 50
+) -> list[dict[str, Any]]:
+    """Return recent tenant-scoped paper orders with durable fill totals for test review."""
+    customer_id = _customer_id(customer_id)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+        raise ValueError("order history limit must be an integer between 1 and 100")
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await _set_tenant(conn, customer_id)
+            rows = (await conn.execute(text(
+                """
+                SELECT
+                    o.id AS order_id, o.client_order_id, o.venue, o.market_type,
+                    o.symbol, o.side, o.order_type, o.quantity, o.limit_price,
+                    o.currency, o.metadata_json, o.created_at::text AS created_at,
+                    COALESCE(e.event_type, 'UNKNOWN') AS status,
+                    e.created_at::text AS status_changed_at,
+                    COALESCE(f.filled_quantity, 0) AS filled_quantity,
+                    COALESCE(f.fill_count, 0) AS fill_count,
+                    f.average_fill_price
+                FROM customer_paper.orders AS o
+                LEFT JOIN LATERAL (
+                    SELECT event_type, created_at
+                    FROM customer_paper.order_events
+                    WHERE customer_id = o.customer_id AND order_id = o.id
+                    ORDER BY id DESC
+                    LIMIT 1
+                ) AS e ON true
+                LEFT JOIN LATERAL (
+                    SELECT
+                        SUM(quantity) AS filled_quantity,
+                        COUNT(*) AS fill_count,
+                        SUM(quantity * price) / NULLIF(SUM(quantity), 0) AS average_fill_price
+                    FROM customer_paper.fills
+                    WHERE customer_id = o.customer_id AND order_id = o.id
+                ) AS f ON true
+                WHERE o.customer_id = :customer_id
+                ORDER BY o.created_at DESC, o.client_order_id DESC
+                LIMIT :limit
+                """
+            ), {"customer_id": customer_id, "limit": limit})).mappings().all()
+        history: list[dict[str, Any]] = []
+        for row in rows:
+            raw_metadata = row["metadata_json"]
+            if isinstance(raw_metadata, str):
+                try:
+                    raw_metadata = json.loads(raw_metadata)
+                except ValueError:
+                    raw_metadata = {}
+            metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+            quantity = Decimal(row["quantity"])
+            filled = Decimal(row["filled_quantity"] or 0)
+            limit_price = row["limit_price"]
+            average_fill_price = row["average_fill_price"]
+            history.append({
+                "order_id": str(row["order_id"]),
+                "client_order_id": str(row["client_order_id"]),
+                "venue": str(row["venue"]).lower(),
+                "market_type": str(row["market_type"]),
+                "symbol": str(row["symbol"]),
+                "side": str(row["side"]),
+                "order_type": str(row["order_type"]),
+                "quantity": _fmt(quantity),
+                "filled_quantity": _fmt(filled),
+                "remaining_quantity": _fmt(max(Decimal("0"), quantity - filled)),
+                "limit_price": _fmt(Decimal(limit_price)) if limit_price is not None else None,
+                "average_fill_price": _fmt(Decimal(average_fill_price)) if average_fill_price is not None else None,
+                "fill_count": int(row["fill_count"] or 0),
+                "currency": str(row["currency"]),
+                "status": str(row["status"] or "UNKNOWN"),
+                "created_at": _canonical_timestamp_text(row["created_at"]),
+                "status_changed_at": _canonical_timestamp_text(row["status_changed_at"]),
+                "metadata": metadata,
+            })
+        return history
+    finally:
+        await engine.dispose()
+
+
 def _canonical_timestamp_text(value: Any) -> str:
     """Return persisted timestamps in a stable UTC ISO-8601 form across DB drivers."""
     raw = str(value or "")
