@@ -37,6 +37,7 @@ from .customer_paper_lifecycle import (
     get_customer_paper_order,
     get_customer_paper_positions,
     list_open_customer_paper_orders,
+    list_customer_paper_order_history,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
     verify_customer_paper_market_bar_provenance,
@@ -651,6 +652,28 @@ def build_customer_paper_router(
         await _guard()
         try:
             return {"virtual_only": True, "orders": await list_open_customer_paper_orders(customer_id=profile.id)}
+        except Exception as exc:
+            raise _handle_paper_error(exc) from exc
+
+    @router.get("/history")
+    async def customer_paper_order_history(
+        limit: int = 50,
+        authorization: str | None = Header(default=None),
+    ):
+        profile = await _profile(authorization)
+        await _guard()
+        if limit < 1 or limit > 100:
+            raise HTTPException(422, "Order history limit must be between 1 and 100")
+        try:
+            return {
+                "virtual_only": True,
+                "orders": await list_customer_paper_order_history(
+                    customer_id=profile.id,
+                    limit=limit,
+                ),
+            }
+        except HTTPException:
+            raise
         except Exception as exc:
             raise _handle_paper_error(exc) from exc
 
