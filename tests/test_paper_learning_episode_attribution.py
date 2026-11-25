@@ -449,3 +449,99 @@ def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
             assert outcomes[1].net_return_bps == pytest.approx(17.25 / 220 * 10000)
 
     asyncio.run(run())
+
+def test_zero_pnl_final_close_recomputes_completed_episode_fees():
+    from decimal import Decimal
+    from app import execution
+    from app.db import init_db, SessionLocal, Trade, Position, TradeLearningEpisode
+
+    suffix = uuid.uuid4().hex
+    symbol = f"EPISODE-ZERO-CLOSE-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"zero-close-entry-{suffix}",
+                client_order_id=f"zero-close-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=2.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=Decimal("0.20"), notional=200.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"zero-close-fees","asset":"crypto"}',
+            )
+            first_close = Trade(
+                signal_id=f"zero-close-partial-{suffix}",
+                client_order_id=f"zero-close-partial-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=110.0,
+                average_fill_price=0.0, fee=Decimal("0.10"), notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"zero-close-fees","asset":"crypto"}',
+            )
+            final_close = Trade(
+                signal_id=f"zero-close-final-{suffix}",
+                client_order_id=f"zero-close-final-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=100.0,
+                average_fill_price=0.0, fee=Decimal("0.30"), notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"zero-close-fees","asset":"crypto"}',
+            )
+            db.add_all([entry, first_close, final_close])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=2.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, entry_fee=Decimal("0.20"),
+                entry_fee_basis_known=True, strategy="zero-close-fees",
+                entry_regime="UNKNOWN", entry_trade_id=entry.id,
+            ))
+            episode = TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                symbol=symbol, timeframe="1h", side="buy",
+                strategy="zero-close-fees", status="OPEN",
+                entry_quantity=2.0, entry_price=100.0,
+            )
+            db.add(episode)
+            await db.commit()
+            entry_id = entry.id
+            first_close_id = first_close.id
+            final_close_id = final_close.id
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == first_close_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.10"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == final_close_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 100.0, current_fill_fee=Decimal("0.30"),
+                current_fill_fee_verified=True,
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            episode = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id == entry_id
+                )
+            )).scalar_one()
+            assert episode.status == "COMPLETED"
+            assert Decimal(str(episode.gross_pnl)) == Decimal("10.00000000")
+            assert Decimal(str(episode.total_fees)) == Decimal("0.60")
+            assert Decimal(str(episode.net_pnl)) == Decimal("9.40000000")
+
+    asyncio.run(run())
