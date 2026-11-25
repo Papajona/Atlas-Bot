@@ -372,3 +372,31 @@ def test_benchmark_output_contract_matches_application_title_risk_and_extra_fiel
     assert failures
     assert "unexpected_private_field" not in " ".join(failures)
     assert "do not report this" not in " ".join(failures)
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("asset", True),
+        ("asset", "equities"),
+        ("symbol", 1),
+        ("strategy_family", "SCALPING"),
+        ("direction", "SIDEWAYS"),
+        ("timeframes", "1h"),
+        ("timeframes", ["2h"]),
+        ("risk_per_trade", True),
+        ("risk_per_trade", 0.1),
+        ("stop_loss_atr", False),
+        ("take_profit_rr", 11),
+        ("sessions", "London"),
+    ],
+)
+def test_custom_benchmark_rejects_invalid_expected_label_types_and_domains(tmp_path, field, value):
+    dataset = tmp_path / "invalid-label.json"
+    dataset.write_text(json.dumps([{
+        "id": "invalid-label",
+        "prompt": "BTC breakout on 1h",
+        "expect": {field: value},
+    }]), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=f"invalid expected label for {field}"):
+        _EVAL._load_dataset(dataset)
