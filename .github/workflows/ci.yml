@@ -478,7 +478,40 @@ jobs:
           # Revision 0051 intentionally preserves the append-only research archive on downgrade.
           # Stopping here verifies 0052/0053 can roll back and reapply without deleting retained history.
           python -m alembic downgrade 0051_research_trial_archive
+          # Seed a delegated EXECUTE grant chain before 0065 is reapplied. The
+          # migration must revoke the grant-option holder with CASCADE so its
+          # downstream grantee cannot retain execution on an internal function.
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          CREATE ROLE atlas_ledger_acl_grantor NOLOGIN;
+          CREATE ROLE atlas_ledger_acl_delegate NOLOGIN;
+          GRANT EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable()
+              TO atlas_ledger_acl_grantor WITH GRANT OPTION;
+          SET ROLE atlas_ledger_acl_grantor;
+          GRANT EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable()
+              TO atlas_ledger_acl_delegate;
+          RESET ROLE;
+          SQL
           python -m alembic upgrade head
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $verify_delegated_internal_function_grants$
+          BEGIN
+              IF has_function_privilege(
+                  'atlas_ledger_acl_grantor',
+                  'public.atlas_research_trial_archive_immutable()',
+                  'EXECUTE'
+              ) OR has_function_privilege(
+                  'atlas_ledger_acl_delegate',
+                  'public.atlas_research_trial_archive_immutable()',
+                  'EXECUTE'
+              ) THEN
+                  RAISE EXCEPTION
+                      '0065 failed to cascade-revoke delegated internal function EXECUTE grants';
+              END IF;
+          END
+          $verify_delegated_internal_function_grants$;
+          DROP ROLE atlas_ledger_acl_delegate;
+          DROP ROLE atlas_ledger_acl_grantor;
+          SQL
           # Verify the app's narrow reader identity receives no access to any research table.
           # The paper-staging preflight permits only customer_profiles/app_state SELECT.
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
