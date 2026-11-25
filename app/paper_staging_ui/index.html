@@ -35,10 +35,10 @@
         <div><p class="eyebrow">01 · CUSTOMER ACCESS</p><h2 id="auth-heading">Sign in or create a test account</h2></div>
         <span class="step-state" id="auth-state">Not signed in</span>
       </div>
-      <form id="auth-form" autocomplete="on">
+      <form id="auth-form" autocomplete="off">
         <div class="field-grid">
-          <label>Email address<input id="email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>
-          <label>Password<input id="password" type="password" autocomplete="current-password" required minlength="8" maxlength="128" placeholder="Your account password"></label>
+          <label>Email address<input id="email" type="email" autocomplete="off" required maxlength="254" placeholder="you@example.com"></label>
+          <label>Password<input id="password" type="password" autocomplete="off" required minlength="8" maxlength="128" placeholder="Your account password"></label>
         </div>
         <div class="button-row">
           <button class="primary" id="login-button" type="button">Sign in</button>
@@ -61,7 +61,7 @@
           <label>Manual setup key<code id="totp-secret">—</code></label>
         </div>
         <div class="field-grid">
-          <label>6-digit authenticator code<input id="totp-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" placeholder="000000"></label>
+          <label>6-digit authenticator code<input id="totp-code" inputmode="numeric" autocomplete="off" pattern="[0-9]{6}" maxlength="6" placeholder="000000"></label>
         </div>
         <div class="button-row">
           <button class="secondary" id="enroll-button" type="button" hidden>Set up authenticator</button>
