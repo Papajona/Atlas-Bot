@@ -484,7 +484,6 @@ def _structured_private_object_has_material(value) -> bool:
                         private_context
                         and not public_metadata_mapping
                         and not field_is_public
-                        and not ambiguous_public_metadata_field
                         and _looks_like_private_key_material(item)
                     ):
                         return True
