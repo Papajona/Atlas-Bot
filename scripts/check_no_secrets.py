@@ -464,6 +464,7 @@ def _structured_private_object_has_material(value) -> bool:
                         if (
                             not ambiguous_public_metadata_field
                             or _looks_like_private_key_material(item)
+                            or _is_likely_recovery_phrase(item)
                         ):
                             return True
                     # Direct values in a recognized metadata mapping are public
