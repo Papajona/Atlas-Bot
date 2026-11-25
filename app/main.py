@@ -5014,9 +5014,16 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
     """
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     try:
         wallet_id = int(req.get("wallet_id"))
         amount = req.get("amount_usdt")
+        if isinstance(amount, bool) or not Decimal(str(amount)).is_finite():
+            raise ValueError("amount_usdt must be a finite number")
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise HTTPException(422, "wallet_id (integer) and a finite amount_usdt are required") from exc
+    try:
         async with SessionLocal() as db:
             # Read owner identity first, then acquire locks in the global customer-cash
             # order: ledger -> wallet. Re-check wallet status/owner after locking it.
@@ -5083,8 +5090,13 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
     """Record a signer/broadcaster result without exposing signing material to Atlas."""
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     txid = str(req.get("transaction_id") or "").strip()
     outcome = str(req.get("outcome") or "").strip().upper()
+    if txid and not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+        raise HTTPException(400, "transaction_id must be a 64-character hexadecimal TRON transaction hash")
+    txid = txid.lower()
     if outcome not in {"", "TIMEOUT", "REJECTED"}:
         raise HTTPException(400, "unsupported broadcast outcome")
     if not txid and not outcome:
@@ -5332,9 +5344,13 @@ async def admin_verify_audit_chain(authorization: str | None = Header(default=No
 async def admin_set_role(req: dict, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "ADMINISTRATOR")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     uid = str(req.get("auth_user_id") or "").strip()
     role = str(req.get("role") or "").strip().upper()
-    active = bool(req.get("active", True))
+    active = req.get("active", True)
+    if not isinstance(active, bool):
+        raise HTTPException(400, "active must be a JSON boolean (true or false)")
     if not uid or role not in ROLES:
         raise HTTPException(400, "auth_user_id and a valid role are required")
     row = await upsert_role(uid, role, active)
@@ -5567,9 +5583,13 @@ async def customer_otp_verify(req: OtpVerifyRequest, authorization: str | None =
 
 @app.post("/api/auth/password-reset")
 async def customer_password_reset(req: dict):
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     email = str(req.get("email") or "").strip()
     if not email:
         raise HTTPException(422, "Email is required")
+    if len(email) > 320 or "@" not in email:
+        raise HTTPException(422, "A valid email address is required")
     key = hashlib.sha256(email.lower().encode()).hexdigest()
     allowed, _ = await allow_rate_limit(f"password-reset:contact:{key}", max(1, settings.auth_rate_limit_per_minute))
     if not allowed:
