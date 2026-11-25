@@ -768,12 +768,12 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
         order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
     )
     if not fee_quality_is_verified(quality):
-        # Persist an unresolved denomination across broker snapshots. If a later
-        # snapshot omits fee data, its taker-rate estimate must not replace the
-        # previously reported-but-unverifiable fee or lose the reconciliation need.
-        if quality == UNVERIFIED:
-            trade.fee_reconciliation_pending = True
-        elif bool(getattr(trade, "fee_reconciliation_pending", False)):
+        # Every withheld fee needs another broker-history pass, including an
+        # estimated fallback. Preserve the stronger UNVERIFIED state when a
+        # prior snapshot already reported a fee with an unknown denomination.
+        was_pending = bool(getattr(trade, "fee_reconciliation_pending", False))
+        trade.fee_reconciliation_pending = True
+        if quality != UNVERIFIED and was_pending:
             quality = UNVERIFIED
             note = (
                 "previously reported fee still has an unresolved denomination; "
@@ -832,16 +832,17 @@ async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, 
     # The broker's authoritative denomination is now known and the fee delta
     # has been settled successfully (or was already settled by idempotency).
     # Resolve the matching incident in this same database transaction.
-    incident = (await db.execute(
-        select(Incident).where(
-            Incident.incident_key == f"LIVE_FEE_UNVERIFIED:{trade.id}"
-        ).with_for_update()
-    )).scalar_one_or_none()
-    if incident and str(incident.status or "").upper() not in {"RESOLVED", "CLOSED"}:
-        incident.status = "RESOLVED"
-        incident.resolved_at = utcnow()
-        incident.resolved_by = "system:broker-fee-reconciliation"
-        incident.updated_at = utcnow()
+    for incident_type in ("LIVE_FEE_UNVERIFIED", "LIVE_FEE_ESTIMATED"):
+        incident = (await db.execute(
+            select(Incident).where(
+                Incident.incident_key == f"{incident_type}:{trade.id}"
+            ).with_for_update()
+        )).scalar_one_or_none()
+        if incident and str(incident.status or "").upper() not in {"RESOLVED", "CLOSED"}:
+            incident.status = "RESOLVED"
+            incident.resolved_at = utcnow()
+            incident.resolved_by = "system:broker-fee-reconciliation"
+            incident.updated_at = utcnow()
 
 
 async def _refresh_live_customer_equity(db, customer_id: int) -> None:
@@ -1395,7 +1396,7 @@ async def _apply_fill_to_position(
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
-            if realized_decimal != 0:
+            if closing_decimal > 0:
                 episode.gross_pnl = (
                     Decimal(str(episode.gross_pnl or 0)) + realized_decimal
                 ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
