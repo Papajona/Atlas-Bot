@@ -343,11 +343,13 @@
       root.innerHTML = '<p class="empty">No open paper positions.</p>';
       return;
     }
-    root.innerHTML = '<table><thead><tr><th>Market</th><th>Quantity</th><th>Side</th><th>Average price</th></tr></thead><tbody>' +
-      positions.map((row) => '<tr><td>' + escapeHtml(row.symbol || row.market || "—") +
-        '</td><td>' + escapeHtml(numberText(row.quantity || row.net_quantity, 8)) +
-        '</td><td>' + escapeHtml(row.side || "—") +
-        '</td><td>' + escapeHtml(numberText(row.average_entry_price || row.entry_price, 6)) +
+    root.innerHTML = '<table><thead><tr><th>Market</th><th>Quantity</th><th>Average entry</th><th>Cost basis</th><th>Realized P&amp;L</th><th>Timeframe</th></tr></thead><tbody>' +
+      positions.map((row) => '<tr><td>' + escapeHtml(row.symbol || "—") +
+        '</td><td>' + escapeHtml(numberText(row.quantity, 8)) +
+        '</td><td>' + escapeHtml(numberText(row.average_entry_price, 6)) +
+        '</td><td>' + escapeHtml(numberText(row.cost_basis, 6)) +
+        '</td><td>' + escapeHtml(numberText(row.realized_pnl, 6)) +
+        '</td><td>' + escapeHtml(row.timeframe || "—") +
         '</td></tr>').join("") + '</tbody></table>';
   }
 
@@ -357,16 +359,81 @@
       root.innerHTML = '<p class="empty">No open paper orders.</p>';
       return;
     }
-    root.innerHTML = '<table><thead><tr><th>Market</th><th>Side</th><th>Quantity</th><th>Status</th><th>Action</th></tr></thead><tbody>' +
+    root.innerHTML = '<table><thead><tr><th>Market</th><th>Side</th><th>Filled</th><th>Requested</th><th>Status</th><th>Timeframe</th><th>Action</th></tr></thead><tbody>' +
       orders.map((row) => {
         const id = String(row.client_order_id || "");
+        const timeframe = row.metadata && row.metadata.timeframe ? row.metadata.timeframe : "—";
         return '<tr><td>' + escapeHtml(row.symbol || "—") +
           '</td><td>' + escapeHtml(row.side || "—") +
+          '</td><td>' + escapeHtml(numberText(row.filled_quantity, 8)) +
           '</td><td>' + escapeHtml(numberText(row.quantity, 8)) +
           '</td><td>' + escapeHtml(row.status || "—") +
+          '</td><td>' + escapeHtml(timeframe) +
           '</td><td><button class="mini" type="button" data-advance="' + escapeHtml(id) + '">Advance</button> ' +
           '<button class="mini muted-button" type="button" data-cancel="' + escapeHtml(id) + '">Cancel</button></td></tr>';
       }).join("") + '</tbody></table>';
+  }
+
+  function renderScannerResults(results) {
+    const root = $("scanner-results");
+    if (!results.length) {
+      root.innerHTML = '<p class="empty">The scanner returned no market rows.</p>';
+      return;
+    }
+    root.innerHTML = '<table><thead><tr><th>Market</th><th>Signal</th><th>Score</th><th>Last price</th><th>RSI</th><th>ATR</th><th>Volume ratio</th></tr></thead><tbody>' +
+      results.map((row) => {
+        const score = Number(row.score);
+        const scoreText = Number.isFinite(score) ? numberText(score * 100, 0) + "%" : "—";
+        return '<tr><td>' + escapeHtml(row.symbol || "—") +
+          '</td><td>' + escapeHtml(row.signal || "—") +
+          '</td><td>' + escapeHtml(scoreText) +
+          '</td><td>' + escapeHtml(numberText(row.price, 8)) +
+          '</td><td>' + escapeHtml(numberText(row.rsi, 2)) +
+          '</td><td>' + escapeHtml(numberText(row.atr, 8)) +
+          '</td><td>' + escapeHtml(numberText(row.volume_ratio, 2)) +
+          '</td></tr>';
+      }).join("") + '</tbody></table>';
+  }
+
+  async function runMarketScanner() {
+    const button = $("scanner-button");
+    if (!state.accessToken) {
+      setNotice("scanner-message", "Sign in and complete authenticator verification before scanning markets.", "error");
+      return;
+    }
+    const requested = $("scanner-symbols").value
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    const unique = [...new Set(requested)];
+    if (!unique.length || unique.length > 8 || unique.some((symbol) => symbol.length > 40 || /[\u0000-\u001f\u007f]/.test(symbol))) {
+      setNotice("scanner-message", "Enter between one and eight comma-separated market symbols (40 characters maximum each).", "error");
+      return;
+    }
+    setBusy(button, true, "Scanning…");
+    try {
+      const query = new URLSearchParams({
+        exchange: "binance",
+        symbols: unique.join(",")
+      });
+      const result = await api("/api/customer/market-scanner?" + query.toString());
+      const rows = Array.isArray(result.results) ? result.results : [];
+      renderScannerResults(rows);
+      const errors = rows.filter((row) => row.signal === "ERROR").length;
+      setNotice(
+        "scanner-message",
+        "Read-only " + String(result.exchange || "binance") + " scan completed on " +
+          String(result.timeframe || "15m") + " bars: " + rows.length + " market(s), " +
+          errors + " unavailable. Indicators are informational only.",
+        errors ? "info" : "success"
+      );
+    } catch (error) {
+      if (!handlePaperGateError(error)) {
+        setNotice("scanner-message", error.message, "error");
+      }
+    } finally {
+      setBusy(button, false);
+    }
   }
 
   async function initializePaperAccount() {
@@ -474,6 +541,7 @@
     try { await refreshData(); } finally { setBusy(button, false); }
   });
   $("initialize-button").addEventListener("click", initializePaperAccount);
+  $("scanner-button").addEventListener("click", runMarketScanner);
   $("order-form").addEventListener("submit", submitOrder);
   $("order-type").addEventListener("change", () => {
     $("limit-field").hidden = $("order-type").value !== "LIMIT";
