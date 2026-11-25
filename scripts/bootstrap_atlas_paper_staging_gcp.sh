@@ -35,14 +35,15 @@ verify_secret_accessor_binding() {
   local policy
   policy="$(gcloud secrets get-iam-policy "$secret_name" \
     --project="$PROJECT_ID" --format=json)"
-  if ! python - "$secret_name" "$principal" <<< "$policy" <<'PY'
+  if ! SECRET_IAM_POLICY="$policy" python - "$secret_name" "$principal" <<'PY'
 import json
+import os
 import sys
 
 secret_name, principal = sys.argv[1:3]
 try:
-    policy = json.load(sys.stdin)
-except (json.JSONDecodeError, TypeError) as exc:
+    policy = json.loads(os.environ["SECRET_IAM_POLICY"])
+except (json.JSONDecodeError, KeyError, TypeError) as exc:
     raise SystemExit(f"BLOCKED: could not verify Secret Manager IAM policy for {secret_name}: {exc}")
 if not any(
     binding.get("role") == "roles/secretmanager.secretAccessor"
