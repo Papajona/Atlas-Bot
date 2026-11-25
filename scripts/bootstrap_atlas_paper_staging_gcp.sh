@@ -2,10 +2,12 @@
 set -euo pipefail
 umask 077
 
-# One-time operator bootstrap for the paper-only staging service.
-# Run ONLY after both DB roles/schema have been provisioned and their passwords saved
-# securely. Passwords and the Supabase API key are read without echo and sent to
-# Secret Manager through stdin; they are never placed in command arguments or printed.
+# Operator bootstrap for the paper-only staging service.
+# Default mode requires both DB roles/schema to be provisioned first. Passwords and
+# the Supabase API key are read without echo and sent to Secret Manager through stdin;
+# they are never placed in command arguments or printed.
+# --repair-secret-access is an IAM-only recovery path for existing service accounts
+# and secrets; it does not require DB passwords or access secret version contents.
 
 PROJECT_ID="atlas-staging-510915"
 PROJECT_NUMBER="350896810949"
