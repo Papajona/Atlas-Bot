@@ -171,17 +171,46 @@ def test_0065_rollback_provenance_tracks_exact_direct_acl_deltas_and_identity():
     assert "acl.grantor" in migration
     assert "aclexplode(" in migration
     assert "GRANTED BY %I" not in migration
-    assert migration.count("EXECUTE format('SET ROLE %I', grantor_name)") == 4
-    assert migration.count("EXECUTE format('SET ROLE %I', migration_role)") == 4
-    assert migration.count("REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM %I") == 1
-    assert migration.count("REVOKE SELECT ON TABLE public.ledger_journals FROM %I") == 1
-    assert migration.count("REVOKE SELECT ON TABLE public.ledger_journal_lines FROM %I") == 1
-    assert migration.count("REVOKE USAGE ON SCHEMA public FROM %I") == 1
     assert "role_state->>'migration_identity'" in migration
     assert "grantee.rolname <> role_name" in migration
     assert "jsonb_array_length(role_state->'pre_validate_function_execute_acl') = 0" in migration
     assert "original migration identity" in migration
-    assert "pg_has_role(migration_role_oid, grantor_oid, 'MEMBER')" in migration
+    assert "pg_has_role(migration_role_oid, grantor_oid, 'SET')" in migration
+
+    # Check the data-driven ACL rollback loops semantically rather than pinning
+    # exact global string counts. Each recorded grantor loop must assume that
+    # grantor, perform only its corresponding REVOKE, and restore the migration
+    # identity before the loop continues.
+    def assert_grantor_revoke_loop(state_key: str, revoke_fragment: str) -> None:
+        key_marker = f"coalesce(role_state->'{state_key}'"
+        key_index = migration.index(key_marker)
+        loop_start = migration.rfind("FOR grantor_oid IN", 0, key_index)
+        loop_end = migration.index("END LOOP;", key_index) + len("END LOOP;")
+        assert loop_start >= 0
+        loop = migration[loop_start:loop_end]
+        assert "SELECT rolname INTO grantor_name FROM pg_roles WHERE oid = grantor_oid;" in loop
+        assert loop.count("IF grantor_oid <> migration_role_oid THEN") == 2
+        assume_grantor = loop.index("EXECUTE format('SET ROLE %I', grantor_name);")
+        revoke = loop.index(revoke_fragment)
+        restore_identity = loop.index("EXECUTE format('SET ROLE %I', migration_role);")
+        assert assume_grantor < revoke < restore_identity
+
+    assert_grantor_revoke_loop(
+        "introduced_validate_function_execute_grantors",
+        "REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM %I",
+    )
+    assert_grantor_revoke_loop(
+        "introduced_ledger_journals_select_grantors",
+        "REVOKE SELECT ON TABLE public.ledger_journals FROM %I",
+    )
+    assert_grantor_revoke_loop(
+        "introduced_ledger_journal_lines_select_grantors",
+        "REVOKE SELECT ON TABLE public.ledger_journal_lines FROM %I",
+    )
+    assert_grantor_revoke_loop(
+        "introduced_public_schema_usage_grantors",
+        "REVOKE USAGE ON SCHEMA public FROM %I",
+    )
 
     rollback_state = migration.split("role_state := jsonb_build_object", 1)[1].split(
         "'prior_role_comment', role_comment", 1
