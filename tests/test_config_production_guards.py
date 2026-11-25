@@ -22,6 +22,19 @@ def test_production_requires_admin_metrics_and_disables_api_docs():
         })._production_security_requirements()
 
 
+def test_paper_staging_market_scanner_is_staging_only_and_disabled_by_default():
+    assert _settings().paper_staging_market_scanner_enabled is False
+    _settings().model_copy(update={
+        "environment": "staging",
+        "paper_staging_market_scanner_enabled": True,
+    })._production_security_requirements()
+    with pytest.raises(ValueError, match="PAPER_STAGING_MARKET_SCANNER_ENABLED may only be true in staging"):
+        _settings().model_copy(update={
+            "environment": "production",
+            "paper_staging_market_scanner_enabled": True,
+        })._production_security_requirements()
+
+
 def test_request_body_limit_must_be_non_negative_and_enabled_in_staging_and_production():
     with pytest.raises(ValueError, match="MAX_REQUEST_BODY_BYTES must be >= 0"):
         _settings().model_copy(update={
