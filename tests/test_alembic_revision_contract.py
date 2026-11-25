@@ -148,6 +148,31 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
     ):
         assert expected in source
 
+def test_0065_rollback_provenance_tracks_direct_acl_grants_not_public_defaults():
+    migration = (
+        ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "'marker', 'atlas:0065:rollback-state:v2'" in migration
+    assert "'migration_grantor', migration_role" in migration
+    assert "'had_public_schema_usage_direct'" in migration
+    assert "'had_ledger_journals_select_direct'" in migration
+    assert "'had_ledger_journal_lines_select_direct'" in migration
+    assert "'had_validate_function_execute_direct'" in migration
+    assert "'had_public_schema_usage_from_migration_grantor'" in migration
+    assert "'had_ledger_journals_select_from_migration_grantor'" in migration
+    assert "'had_ledger_journal_lines_select_from_migration_grantor'" in migration
+    assert "'had_validate_function_execute_from_migration_grantor'" in migration
+    assert "acl.grantee = role_oid" in migration
+    assert "acl.grantor = migration_role_oid" in migration
+    assert "aclexplode(" in migration
+    assert "GRANTED BY %I" in migration
+    assert "has_schema_privilege(role_name, 'public', 'USAGE')" not in migration
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'SELECT')" not in migration
+    assert "has_table_privilege(role_name, 'public.ledger_journal_lines', 'SELECT')" not in migration
+    assert "has_function_privilege(" not in migration
+
+
 def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate_steps():
     runbook = (ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
 
