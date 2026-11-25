@@ -302,7 +302,7 @@ def _score_case(case: dict[str, Any], prediction: Any, *, check_contract: bool =
             else None if key == "symbol"
             else spec.get(key)
         )
-        passed = _close(actual, wanted) if isinstance(wanted, float) else actual == wanted
+        passed = _close(actual, wanted) if isinstance(wanted, (int, float)) else actual == wanted
         checks.append({"field": key, "passed": passed})
         if not passed:
             # Never include caller labels or model output: either can contain prompt text.
