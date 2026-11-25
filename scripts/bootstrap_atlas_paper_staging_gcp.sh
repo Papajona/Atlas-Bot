@@ -63,12 +63,12 @@ PY
 grant_secret_accessor() {
   local secret_name="$1"
   local principal="$2"
-  gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null
+  gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null || return $?
   gcloud secrets add-iam-policy-binding "$secret_name" \
     --project="$PROJECT_ID" \
     --member="serviceAccount:${principal}" \
-    --role="roles/secretmanager.secretAccessor" --quiet
-  verify_secret_accessor_binding "$secret_name" "$principal"
+    --role="roles/secretmanager.secretAccessor" --quiet || return $?
+  verify_secret_accessor_binding "$secret_name" "$principal" || return $?
 }
 
 repair_secret_access_only() {
@@ -76,7 +76,7 @@ repair_secret_access_only() {
     echo "BLOCKED: invalid secret-access repair invocation." >&2
     return 2
   fi
-  gcloud config set project "$PROJECT_ID" >/dev/null
+  gcloud config set project "$PROJECT_ID" >/dev/null || return $?
   local actual_project_number
   actual_project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
   if [[ "$actual_project_number" != "$PROJECT_NUMBER" ]]; then
@@ -85,8 +85,8 @@ repair_secret_access_only() {
   fi
   # This repair mode never reads or rotates secret versions and does not create
   # service accounts. It repairs only the five exact per-secret IAM bindings.
-  gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" >/dev/null
-  gcloud iam service-accounts describe "$PREFLIGHT_SA" --project="$PROJECT_ID" >/dev/null
+  gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" >/dev/null || return $?
+  gcloud iam service-accounts describe "$PREFLIGHT_SA" --project="$PROJECT_ID" >/dev/null || return $?
   local secret_name
   for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
     grant_secret_accessor "$secret_name" "$RUNTIME_SA" || return $?
