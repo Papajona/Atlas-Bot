@@ -50,6 +50,11 @@ class _CustomerQueryResult:
     def scalar_one_or_none(self):
         return self.profile
 
+    def all(self):
+        # _legacy_customer_email_conflict queries for other unmapped legacy users.
+        # This fixture represents the no-conflict case.
+        return []
+
 
 class _CustomerIdentityDatabase:
     def __init__(self, profile):
