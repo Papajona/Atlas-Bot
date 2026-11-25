@@ -174,7 +174,7 @@ def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access(
     )[1].split("# The read-only preflight identity", 1)[0]
     preflight_block = script.split(
         "# The read-only preflight identity may inspect the two DB URLs", 1
-    )[1].split('echo\\n"PASS: staging GCP identities', 1)[0]
+    )[1].split("\\necho\\n", 1)[0]
 
     assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do' in runtime_block
     assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in runtime_block
@@ -188,6 +188,7 @@ def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access(
     assert '--role="roles/secretmanager.secretAccessor"' in preflight_block
     assert "ANON_KEY_SECRET" not in preflight_block
     assert "gcloud projects add-iam-policy-binding" not in preflight_block
+
 
 def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
     schema = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
