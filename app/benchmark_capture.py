@@ -27,6 +27,21 @@ _SECRET_RE = re.compile(
 
 
 
+BENCHMARK_CAPTURE_ADVISORY_LOCK_NAMESPACE = 17012026
+
+
+async def lock_customer_benchmark_captures(db, customer_id: int) -> None:
+    """Serialize capture inserts and customer deletions in the same transaction."""
+    if db.get_bind().dialect.name == "postgresql":
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(:namespace, :customer_id)"),
+            {
+                "namespace": BENCHMARK_CAPTURE_ADVISORY_LOCK_NAMESPACE,
+                "customer_id": int(customer_id),
+            },
+        )
+
+
 async def benchmark_capture_permissions(db) -> dict[str, bool]:
     """Inspect effective permissions without touching benchmark data rows."""
     get_bind = getattr(db, "get_bind", None)
@@ -114,11 +129,7 @@ async def capture_strategy_prompt(
         async with db.begin_nested():
             # Serialize concurrent submissions per customer so the daily cap cannot
             # be bypassed by two requests that both observe the same previous count.
-            if db.get_bind().dialect.name == "postgresql":
-                await db.execute(
-                    text("SELECT pg_advisory_xact_lock(17012026, :customer_id)"),
-                    {"customer_id": customer_id},
-                )
+            await lock_customer_benchmark_captures(db, customer_id)
             recent = int((await db.execute(
                 select(func.count(BenchmarkPromptCapture.id)).where(
                     BenchmarkPromptCapture.customer_id == customer_id,
