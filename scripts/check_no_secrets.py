@@ -403,6 +403,18 @@ def _nonempty_private_scalar(value: str) -> bool:
     return True
 
 
+def _looks_like_private_key_material(value: str) -> bool:
+    """Recognize long key-like scalars in nested private objects."""
+    candidate = value.strip().strip('"').strip("'").strip()
+    return (
+        _nonempty_private_scalar(candidate)
+        and re.search(
+            r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+            candidate,
+        ) is not None
+    )
+
+
 PUBLIC_JWK_METADATA_FIELDS = {
     "n", "e", "x", "y", "crv", "kty", "keyops", "use", "alg", "kid",
     "x5c", "x5t", "x5tu", "x5ts256",
@@ -435,11 +447,21 @@ def _structured_private_object_has_material(value) -> bool:
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
                 field_is_private = normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
                 field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
-                if field_is_private:
-                    if isinstance(item, str) and _nonempty_private_scalar(item):
+                if isinstance(item, str):
+                    if field_is_private and _nonempty_private_scalar(item):
                         return True
-                    if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    # A nested object entered through an explicitly private field
+                    # can use provider-specific field names (for example "data").
+                    # Scan long key-like scalars there, but keep public JWK fields
+                    # excluded from this broader private-context check.
+                    if (
+                        private_context
+                        and not field_is_public
+                        and _looks_like_private_key_material(item)
+                    ):
                         return True
+                if field_is_private and isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    return True
                 if isinstance(item, (dict, list)):
                     # Preserve private traversal through containers entered by a
                     # recognized private field (or within an already-private object).
@@ -452,9 +474,15 @@ def _structured_private_object_has_material(value) -> bool:
         else:
             for item in current:
                 if isinstance(item, dict):
-                    # The containing array makes direct scalar entries sensitive,
-                    # not arbitrary metadata values inside an object element.
-                    stack.append((item, False, private_context))
+                    # Objects with public-JWK markers may carry arbitrary public
+                    # metadata; do not treat every unknown field as private merely
+                    # because the enclosing private-key value is an array.
+                    has_public_jwk_markers = any(
+                        re.sub(r"[^a-z0-9]", "", str(key).lower())
+                        in PUBLIC_JWK_METADATA_FIELDS
+                        for key in item
+                    )
+                    stack.append((item, False, private_context and not has_public_jwk_markers))
                 elif isinstance(item, list):
                     stack.append((item, scalar_items_are_private, private_context))
                 elif scalar_items_are_private:
