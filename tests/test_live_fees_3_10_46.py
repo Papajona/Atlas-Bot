@@ -1,6 +1,8 @@
 """Pure unit tests for app.live_fees (no database needed)."""
-import pytest
 from decimal import Decimal
+
+import pytest
+
 from app.live_fees import (
     extract_order_fee_quote, extract_order_fee_quote_decimal, split_symbol,
     fee_quality_is_verified, EXACT, CONVERTED, ESTIMATED, UNVERIFIED,
