@@ -903,6 +903,34 @@ def test_secret_scanner_bounds_nested_repeated_mnemonic_alias_expansion(
     )
 
 
+def test_secret_scanner_detects_unknown_nested_scalar_in_multiline_private_key_json(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_material = "0123456789abcdef" * 2
+    triple_quote = chr(34) * 3
+    source = (
+        "String " + private_key_field + " = " + triple_quote + "\\n"
+        + "{\\n"
+        + '  "private_key": {\\n'
+        + '    "data": "' + private_material + '"\\n'
+        + "  }\\n"
+        + "}\\n"
+        + triple_quote + ";\\n"
+    )
+    (tmp_path / "nested-private-data.java").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "nested-private-data.java:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_bounds_nested_repeated_private_key_alias_expansion(
     tmp_path, monkeypatch
 ):
