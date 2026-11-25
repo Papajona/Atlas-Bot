@@ -7,6 +7,7 @@ const { chromium } = require("playwright");
 const ROOT = process.cwd();
 const ADMIN_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
 const CUSTOMER_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+const PAPER_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 function send(res, status, type, body, headers = {}) {
   res.writeHead(status, { "content-type": type, "x-content-type-options": "nosniff", ...headers });
@@ -18,6 +19,24 @@ function json(route, value, status = 200) {
 
 const server = http.createServer((req, res) => {
   const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+  if (pathname === "/") {
+    return send(res, 200, "text/html; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/paper_staging_ui/index.html")), {
+      "content-security-policy": PAPER_CSP,
+      "cache-control": "no-store",
+    });
+  }
+  if (pathname === "/paper-staging.js") {
+    return send(res, 200, "application/javascript; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/paper_staging_ui/paper-staging.js")), {
+      "content-security-policy": PAPER_CSP,
+      "cache-control": "no-store",
+    });
+  }
+  if (pathname === "/paper-staging.css") {
+    return send(res, 200, "text/css; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/paper_staging_ui/paper-staging.css")), {
+      "content-security-policy": PAPER_CSP,
+      "cache-control": "no-store",
+    });
+  }
   if (pathname === "/admin" || pathname === "/admin/") {
     return send(res, 200, "text/html; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/templates/dashboard.html")), {
       "content-security-policy": ADMIN_CSP,
