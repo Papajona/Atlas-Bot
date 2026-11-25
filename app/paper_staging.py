@@ -675,6 +675,12 @@ async def paper_customer_market_scanner(
     authorization: str | None = Header(default=None),
 ):
     """Serve bounded, read-only public market signals to authenticated paper customers."""
+    # The shared Supabase paper role cannot read subscription entitlements. Keep
+    # this scanner disabled by default and expose it only through the explicit
+    # staging-only service flag; the full API retains its per-plan feature gate.
+    if not settings.paper_staging_market_scanner_enabled:
+        raise HTTPException(404, "Market scanner is not enabled in this environment")
+
     async with SessionLocal() as db:
         # Market data is customer-visible only after the same AAL2 profile check as
         # the paper portfolio; this route never creates or advances an order.
