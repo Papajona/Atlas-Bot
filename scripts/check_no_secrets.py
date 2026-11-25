@@ -460,15 +460,19 @@ def _structured_private_object_has_material(value) -> bool:
                 )
                 if isinstance(item, str):
                     if field_is_private and _nonempty_private_scalar(item):
-                        # "key" and "value" are common descriptive metadata
-                        # labels in public JWK metadata. Do not treat short labels
-                        # as key material, but continue to reject long key-like
-                        # values even inside this otherwise public mapping.
-                        if (
-                            not ambiguous_public_metadata_field
-                            or _looks_like_private_key_material(item)
-                            or _is_likely_recovery_phrase(item)
-                        ):
+                        if public_metadata_mapping:
+                            # Public JWK metadata can contain descriptive fields
+                            # such as key, value, or secret_label. Treat those as
+                            # labels unless the scalar has a strong secret signal:
+                            # contiguous key material or a complete BIP-39 phrase.
+                            # The broader six-word heuristic is intentionally not
+                            # used here because ordinary metadata prose is common.
+                            if (
+                                _looks_like_private_key_material(item)
+                                or _is_bip39_wordlist_phrase(item)
+                            ):
+                                return True
+                        else:
                             return True
                     # Public JWK metadata may contain provider-specific fields.
                     # Do not exempt the whole mapping: unknown nested values such as
@@ -488,7 +492,7 @@ def _structured_private_object_has_material(value) -> bool:
                     and isinstance(item, (int, float))
                     and not isinstance(item, bool)
                     and item != 0
-                    and not ambiguous_public_metadata_field
+                    and not public_metadata_mapping
                 ):
                     return True
                 if isinstance(item, (dict, list)):
