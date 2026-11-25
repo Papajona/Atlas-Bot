@@ -294,6 +294,53 @@ def test_zero_fill_snapshot_does_not_clear_pending_fee_or_close_incident():
     asyncio.run(with_database(check))
 
 
+
+
+def test_unverified_fee_state_survives_later_malformed_fee_records():
+    # Exercise both orderings for malformed numeric and non-finite fee entries.
+    # Once any fee component is unpriceable, later bad records must not downgrade
+    # the withholding decision to ESTIMATED (which could allow a fallback debit).
+    fee_permutations = (
+        (
+            {"currency": "BNB", "cost": "0.01"},
+            {"currency": "USDT", "cost": "not-a-number"},
+        ),
+        (
+            {"currency": "USDT", "cost": "not-a-number"},
+            {"currency": "BNB", "cost": "0.01"},
+        ),
+        (
+            {"currency": "BNB", "cost": "0.01"},
+            {"currency": "USDT", "cost": "NaN"},
+        ),
+        (
+            {"currency": "USDT", "cost": "NaN"},
+            {"currency": "BNB", "cost": "0.01"},
+        ),
+    )
+
+    for index, fee_entries in enumerate(fee_permutations, start=1):
+        trade = SimpleNamespace(
+            id=7800 + index,
+            customer_id=100 + index,
+            symbol="BTC/USDT",
+            fee=Decimal("0"),
+            fee_reconciliation_pending=True,
+        )
+        delta, cumulative, quality, note = execution._prepare_live_fee(
+            trade,
+            {"fees": list(fee_entries)},
+            filled=0.1,
+            fill_price=100,
+            taker_bps=5.5,
+        )
+
+        assert quality == UNVERIFIED, (index, quality, note)
+        assert delta == Decimal("0")
+        assert cumulative == Decimal("0.000000")
+        assert trade.fee == Decimal("0")
+        assert trade.fee_reconciliation_pending is True
+
 def test_terminal_fee_reconciliation_is_included_in_customer_scheduler_query():
     source = (Path(__file__).resolve().parents[1] / "app" / "main.py").read_text(
         encoding="utf-8"
