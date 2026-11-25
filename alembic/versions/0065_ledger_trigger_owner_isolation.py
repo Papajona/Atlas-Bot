@@ -745,9 +745,9 @@ def downgrade() -> None:
 
                 IF NOT migration_role_superuser
                    AND grantor_oid <> migration_role_oid
-                   AND NOT pg_has_role(migration_role_oid, grantor_oid, 'MEMBER') THEN
+                   AND NOT pg_has_role(migration_role_oid, grantor_oid, 'SET') THEN
                     RAISE EXCEPTION
-                        'cannot safely downgrade 0065: original migration identity % is no longer a member of ACL grantor %',
+                        'cannot safely downgrade 0065: original migration identity % cannot SET ROLE to ACL grantor %',
                         migration_role,
                         grantor_name;
                 END IF;
