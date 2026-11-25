@@ -249,6 +249,8 @@ esac
         "RUNTIME_SA_ID": "atlas-staging-runtime",
         "PREFLIGHT_SA_ID": "atlas-staging-preflight",
         "DEPLOY_SA_ID": "atlas-staging-deploy",
+        "RUNTIME_SA": "atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com",
+        "PREFLIGHT_SA": "atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com",
         "PRIMARY_SECRET": "atlas-staging-primary-db-url",
         "PAPER_SECRET": "atlas-staging-customer-paper-db-url",
         "ANON_KEY_SECRET": "atlas-staging-supabase-anon-key",
