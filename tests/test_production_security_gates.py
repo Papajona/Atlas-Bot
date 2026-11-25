@@ -930,7 +930,7 @@ def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles(
         ROOT / "alembic" / "versions" / "0051_research_trial_archive.py"
     ).read_text(encoding="utf-8")
     integrity = (
-        ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"
+        ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
     ).read_text(encoding="utf-8")
 
     assert "REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM PUBLIC" in archive
