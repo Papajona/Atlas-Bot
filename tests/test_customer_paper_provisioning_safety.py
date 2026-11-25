@@ -240,8 +240,8 @@ def test_project_iam_guard_rejects_unreviewed_or_dynamic_roles(unsafe_project_gr
 def test_project_iam_guard_rejects_whole_project_policy_replacement():
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
     unsafe = script.replace(
-        'gcloud projects add-iam-policy-binding "$PROJECT_ID" \\\\',
-        'gcloud projects set-iam-policy "$PROJECT_ID" policy.json \\\\',
+        'gcloud projects add-iam-policy-binding "$PROJECT_ID" \\',
+        'gcloud projects set-iam-policy "$PROJECT_ID" policy.json \\',
         1,
     )
     assert unsafe != script
@@ -252,7 +252,7 @@ def test_project_iam_guard_rejects_whole_project_policy_replacement():
 def test_project_iam_guard_rejects_unexpected_additional_project_grants():
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
     unsafe = script + (
-        '\\ngcloud projects add-iam-policy-binding "$PROJECT_ID" '
+        '\ngcloud projects add-iam-policy-binding "$PROJECT_ID" '
         '--member="allUsers" --role="roles/secretmanager.admin" --quiet\\n'
     )
     with pytest.raises(AssertionError):
@@ -411,11 +411,11 @@ def _assert_project_iam_commands_are_allowlisted(script: str) -> None:
     allowed_roles = {"roles/run.admin", "roles/run.viewer"}
     observed_roles: list[str] = []
     for command in commands:
-        assert re.match(r"^gcloud projects add-iam-policy-binding\\b", command), (
+        assert re.match(r"^gcloud projects add-iam-policy-binding\b", command), (
             "project-wide set-iam-policy is forbidden"
         )
         role_args = re.findall(
-            r"""--role(?:=|\\s+)(?:"([^"]+)"|'([^']+)'|([^\\s]+))""",
+            r"""--role(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))""",
             command,
         )
         assert len(role_args) == 1, "project-wide IAM role must be a single explicit literal"
