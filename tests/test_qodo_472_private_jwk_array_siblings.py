@@ -48,13 +48,13 @@ def test_secret_scanner_public_jwk_field_does_not_hide_private_sibling(
         + private_sibling + '"}}}'
     )
     (tmp_path / "public-jwk-metadata.yml").write_text(
-        "wallet:\\n  " + private_key_field + ": |\\n"
-        + "    " + public_metadata_jwk + "\\n",
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + public_metadata_jwk + "\n",
         encoding="utf-8",
     )
     (tmp_path / "nested-private-metadata.yml").write_text(
-        "wallet:\\n  " + private_key_field + ": |\\n"
-        + "    " + nested_private_metadata_jwk + "\\n",
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + nested_private_metadata_jwk + "\n",
         encoding="utf-8",
     )
     findings = check_no_secrets.scan()
