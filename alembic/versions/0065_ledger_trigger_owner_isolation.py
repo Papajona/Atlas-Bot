@@ -692,8 +692,8 @@ def downgrade() -> None:
                     'cannot safely downgrade 0065: rollback provenance marker or migration identity is malformed';
             END IF;
 
-            -- Require the same migration identity used at upgrade. GRANTED BY
-            -- must not be attempted from an unrelated administrator context.
+            -- Require the same migration identity used at upgrade. The identity
+            -- must retain the ability to assume each recorded ACL grantor role.
             IF migration_role IS DISTINCT FROM role_state->>'migration_identity' THEN
                 RAISE EXCEPTION
                     'cannot safely downgrade 0065: run Alembic as the original migration identity % (current identity: %)',
@@ -795,11 +795,16 @@ def downgrade() -> None:
                 ) AS grantors(grantor_text)
             LOOP
                 SELECT rolname INTO grantor_name FROM pg_roles WHERE oid = grantor_oid;
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', grantor_name);
+                END IF;
                 EXECUTE format(
-                    'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM %I GRANTED BY %I',
-                    role_name,
-                    grantor_name
+                    'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM %I',
+                    role_name
                 );
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', migration_role);
+                END IF;
             END LOOP;
 
             FOR grantor_oid IN
@@ -809,11 +814,16 @@ def downgrade() -> None:
                 ) AS grantors(grantor_text)
             LOOP
                 SELECT rolname INTO grantor_name FROM pg_roles WHERE oid = grantor_oid;
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', grantor_name);
+                END IF;
                 EXECUTE format(
-                    'REVOKE SELECT ON TABLE public.ledger_journals FROM %I GRANTED BY %I',
-                    role_name,
-                    grantor_name
+                    'REVOKE SELECT ON TABLE public.ledger_journals FROM %I',
+                    role_name
                 );
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', migration_role);
+                END IF;
             END LOOP;
 
             FOR grantor_oid IN
@@ -823,11 +833,16 @@ def downgrade() -> None:
                 ) AS grantors(grantor_text)
             LOOP
                 SELECT rolname INTO grantor_name FROM pg_roles WHERE oid = grantor_oid;
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', grantor_name);
+                END IF;
                 EXECUTE format(
-                    'REVOKE SELECT ON TABLE public.ledger_journal_lines FROM %I GRANTED BY %I',
-                    role_name,
-                    grantor_name
+                    'REVOKE SELECT ON TABLE public.ledger_journal_lines FROM %I',
+                    role_name
                 );
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', migration_role);
+                END IF;
             END LOOP;
 
             FOR grantor_oid IN
@@ -837,11 +852,16 @@ def downgrade() -> None:
                 ) AS grantors(grantor_text)
             LOOP
                 SELECT rolname INTO grantor_name FROM pg_roles WHERE oid = grantor_oid;
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', grantor_name);
+                END IF;
                 EXECUTE format(
-                    'REVOKE USAGE ON SCHEMA public FROM %I GRANTED BY %I',
-                    role_name,
-                    grantor_name
+                    'REVOKE USAGE ON SCHEMA public FROM %I',
+                    role_name
                 );
+                IF grantor_oid <> migration_role_oid THEN
+                    EXECUTE format('SET ROLE %I', migration_role);
+                END IF;
             END LOOP;
 
             IF coalesce((role_state->>'role_created_by_revision')::boolean, false)
