@@ -33,6 +33,18 @@
     }
   }
 
+  function resetPaperActionBusyState() {
+    // Session invalidation must also release controls owned by requests that
+    // will deliberately skip stale-session finally cleanup.
+    [
+      "refresh-button",
+      "initialize-button",
+      "scanner-button",
+      "submit-order",
+      "retry-preflight",
+    ].forEach((id) => setBusy($(id), false));
+  }
+
   function escapeHtml(value) {
     return String(value == null ? "" : value).replace(/[&<>"']/g, (char) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -130,6 +142,7 @@
     state.challengeId = "";
     state.profile = null;
     state.initialized = false;
+    resetPaperActionBusyState();
 
     $("email").value = "";
     $("password").value = "";
@@ -151,6 +164,7 @@
     $("valuation").textContent = "Waiting for account setup";
     $("position-count").textContent = "—";
     $("order-count").textContent = "—";
+    // The virtual account is uninitialized in every newly signed-out session.
     $("initialize-button").disabled = false;
     $("initialize-button").textContent = "Initialize virtual paper balance";
     $("mfa-panel").hidden = true;
