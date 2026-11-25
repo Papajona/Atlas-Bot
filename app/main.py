@@ -3888,7 +3888,7 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
         if dialect == "sqlite":
             statement = select(CustomerProfile.id).where(
                 CustomerProfile.auth_user_id != auth_user_id,
-                ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'")),
+                func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'")),
             ).limit(1)
             return (await db.execute(statement)).scalar_one_or_none() is not None
         legacy_ids = (await db.execute(
@@ -3948,7 +3948,7 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
         )
     elif dialect == "sqlite":
         statement = statement.where(
-            ~func.lower(CustomerProfile.auth_user_id).op("GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'"))
+            func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(literal_column(f"'{_CUSTOMER_UUID_GLOB}'"))
         )
     try:
         # The partial legacy-ID index bounds this lookup to unmapped identities;
