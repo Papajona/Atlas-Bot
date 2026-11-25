@@ -290,6 +290,8 @@ class Settings(BaseSettings):
     # Customer simulation remains unavailable until separate-DB or opt-in shared-schema ACL/RLS preflight passes.
     customer_paper_ledger_enabled: bool = False
     customer_paper_database_url: str = ""
+    # Public scanner data is opt-in for the isolated paper-staging ASGI service only.
+    paper_staging_market_scanner_enabled: bool = False
     # Opt-in for free single-project deployments; this is schema/ACL isolation, not a separate DB failure domain.
     customer_paper_shared_database_enabled: bool = False
     # Simulated starting capital only. It is credited solely to the isolated paper ledger.
@@ -648,6 +650,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.paper_staging_market_scanner_enabled and self.environment != "staging":
+            raise ValueError(
+                "PAPER_STAGING_MARKET_SCANNER_ENABLED may only be true in staging"
+            )
         if self.live_enable_request_ttl_minutes < 1:
             raise ValueError("LIVE_ENABLE_REQUEST_TTL_MINUTES must be >= 1")
         if self.environment == "production" and not self.admin_totp_required:
