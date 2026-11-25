@@ -159,6 +159,7 @@ def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate
     )
     assert schema_step < migration_step
     assert runbook.count("5. Apply the repository Alembic chain") == 1
+    assert runbook.count("Once the bucket retention policy is locked") == 1
     assert runbook.count(
         "Revision `0065_ledger_trigger_owner_isolation` creates the internal "
         "`atlas_ledger_trigger_owner` identity"
