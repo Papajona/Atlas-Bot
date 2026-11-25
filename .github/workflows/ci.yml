@@ -543,7 +543,17 @@ jobs:
       - name: Verify internal trigger ACLs with a restricted runtime role
         run: |
           set -euo pipefail
-          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          ACL_DATABASE="atlas_trigger_acl_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas "$ACL_DATABASE"
+          cleanup() {
+            PGPASSWORD=test_password dropdb --if-exists --force -h 127.0.0.1 -U atlas "$ACL_DATABASE" || true
+            PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d postgres \
+              -c 'DROP ROLE IF EXISTS atlas_runtime_trigger_probe' || true
+          }
+          trap cleanup EXIT
+          ACL_DATABASE_URL="postgresql+asyncpg://atlas:test_password@localhost:5432/${ACL_DATABASE}"
+          DATABASE_URL="$ACL_DATABASE_URL" ATLAS_POSTGRES_URL="$ACL_DATABASE_URL" python -m alembic upgrade head
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" <<'SQL'
           DO $create_runtime_trigger_probe$
           BEGIN
               IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'atlas_runtime_trigger_probe') THEN
@@ -611,7 +621,7 @@ jobs:
           $verify_internal_function_acl$;
           SQL
 
-          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c "
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             INSERT INTO public.ledger_journals
@@ -631,7 +641,7 @@ jobs:
           "
           echo "PASS: restricted runtime role committed a balanced journal without public function EXECUTE"
 
-          if unbalanced_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+          if unbalanced_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c "
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             INSERT INTO public.ledger_journals
@@ -654,7 +664,7 @@ jobs:
           fi
           echo "PASS: restricted runtime role could not commit an unbalanced journal"
 
-          if ledger_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+          if ledger_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c "
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             UPDATE public.ledger_journals
@@ -671,7 +681,7 @@ jobs:
           fi
           echo "PASS: ledger immutability trigger fired without caller EXECUTE privilege"
 
-          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c "
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             INSERT INTO public.research_trial_archive (trial_key, trial_label)
@@ -682,7 +692,7 @@ jobs:
             COMMIT;
           "
 
-          if archive_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+          if archive_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c "
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             UPDATE public.research_trial_archive
@@ -699,7 +709,7 @@ jobs:
           fi
           echo "PASS: research archive immutability trigger fired without caller EXECUTE privilege"
 
-          if holdout_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test -c "
+          if holdout_immutable_output="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c "
             BEGIN;
             SET LOCAL ROLE atlas_runtime_trigger_probe;
             UPDATE public.research_holdout_registry
@@ -716,7 +726,7 @@ jobs:
           fi
           echo "PASS: holdout registry immutability trigger fired without caller EXECUTE privilege"
 
-          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" <<'SQL'
           DROP OWNED BY atlas_runtime_trigger_probe;
           DROP ROLE atlas_runtime_trigger_probe;
           SQL
