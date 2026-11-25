@@ -4057,6 +4057,7 @@ async def get_customer(
         jwt_email_missing
         or profile is None
         or not str(profile.email or "").strip()
+        or not str(profile.display_name or "").strip()
     )
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
