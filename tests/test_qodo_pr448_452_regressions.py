@@ -24,7 +24,7 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "stale_legacy_quarantine" in block
     assert "or stale_legacy_quarantine" in block
     assert "if needs_auth_identity:" in block
-    assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in block
+    assert "identity_review_required = await _legacy_customer_email_conflict(db, uid, email)" in block
     assert "identity_review_required = await _legacy_customer_email_conflict(db, uid, email)" in block
     assert "await _customer_profile_effectively_active(db, profile, email)" in block
     assert "casefold()" in block
@@ -41,6 +41,8 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
     assert 'op("!~*")' in block
     assert 'op("GLOB")' in block
     assert "func.lower(CustomerProfile.auth_user_id)" in block
+    assert "_CUSTOMER_UUID_PATTERN" in block and "literal_column" in block
+    assert "_CUSTOMER_UUID_GLOB" in block and "literal_column" in block
     assert ".ilike(" not in block
 
 
