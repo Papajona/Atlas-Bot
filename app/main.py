@@ -4053,10 +4053,11 @@ async def get_customer(
     # backfill the email when the existing profile has no encrypted email.
     # A JWT that omits email must be checked against the current Auth identity,
     # even when the local profile has an older encrypted email value.
+    needs_email_backfill = profile is None or not str(profile.email or "").strip()
     needs_auth_identity = (
         jwt_email_missing
-        or profile is None
-        or not str(profile.email or "").strip()
+        or needs_email_backfill
+        or stale_legacy_quarantine
         or not str(profile.display_name or "").strip()
     )
     if needs_auth_identity:
@@ -4088,7 +4089,7 @@ async def get_customer(
         # Only a pending identity or an Auth-backed email backfill needs a
         # legacy comparison. Active profiles with an existing email must not be
         # blocked by other customers' unmapped legacy references.
-        if pending_review or needs_auth_identity:
+        if pending_review or needs_email_backfill:
             identity_review_required = (
                 await _legacy_customer_email_conflict(db, uid, email)
                 if email
