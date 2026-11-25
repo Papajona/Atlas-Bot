@@ -309,3 +309,54 @@ async def test_postgres_concurrent_benchmark_capture_enforces_twenty_per_24_hour
         raise primary_error.with_traceback(primary_error.__traceback__)
     if cleanup_error is not None:
         raise cleanup_error
+
+def test_capture_permission_probe_failure_is_rolled_back_to_a_savepoint(monkeypatch):
+    from types import SimpleNamespace
+    from app import benchmark_capture
+
+    class Savepoint:
+        async def __aenter__(self):
+            db.in_savepoint = True
+            return self
+
+        async def __aexit__(self, exc_type, _exc, _tb):
+            db.in_savepoint = False
+            db.savepoint_rolled_back = exc_type is not None
+            return False
+
+    class Database:
+        in_savepoint = False
+        savepoint_rolled_back = False
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        def begin_nested(self):
+            return Savepoint()
+
+        async def execute(self, statement, *_args, **_kwargs):
+            if "has_table_privilege" in str(statement):
+                assert self.in_savepoint
+                raise RuntimeError("permission probe failed")
+            return SimpleNamespace()
+
+    db = Database()
+    monkeypatch.setattr(benchmark_capture, "encrypt_text", lambda value: "enc:" + value)
+    result = asyncio.run(benchmark_capture.capture_strategy_prompt(
+        db,
+        customer_id=7,
+        prompt="Research BTC trend after a confirmed 1h breakout.",
+        native_output={"title": "Synthetic strategy"},
+        asset="crypto",
+        symbol="BTC/USDT",
+        exchange="binance",
+        timeframe="1h",
+    ))
+
+    assert result["status"] == "SKIPPED_STORAGE_ERROR"
+    assert db.savepoint_rolled_back is True
+    assert db.in_savepoint is False
+    assert awaitable_result(asyncio.run(db.execute("SELECT 1")))
+
+def awaitable_result(value):
+    return value is not None
