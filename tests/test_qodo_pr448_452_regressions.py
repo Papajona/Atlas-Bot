@@ -40,7 +40,7 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
     assert "CustomerProfile.auth_user_id, CustomerProfile.email" in block
     assert "uuid.UUID" in block
     assert 'op("!~*")' in block
-    assert 'op("GLOB")' in block
+    assert 'op("NOT GLOB")' in block
     assert "func.lower(CustomerProfile.auth_user_id)" in block
     assert "_CUSTOMER_UUID_PATTERN" in block and "literal_column" in block
     assert "_CUSTOMER_UUID_GLOB" in block and "literal_column" in block
