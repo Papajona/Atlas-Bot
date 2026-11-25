@@ -167,6 +167,28 @@ def test_gcp_bootstrap_reuses_provisioner_generated_paper_url_without_retyping_p
     assert 'db.${SUPABASE_PROJECT_REF}.supabase.co' not in script
 
 
+def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    runtime_block = script.split(
+        "# Cloud Run can read only its three explicitly referenced secret values.", 1
+    )[1].split("# The read-only preflight identity", 1)[0]
+    preflight_block = script.split(
+        "# The read-only preflight identity may inspect the two DB URLs", 1
+    )[1].split('echo\\n"PASS: staging GCP identities', 1)[0]
+
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do' in runtime_block
+    assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in runtime_block
+    assert '--member="serviceAccount:${RUNTIME_SA}"' in runtime_block
+    assert '--role="roles/secretmanager.secretAccessor"' in runtime_block
+    assert "gcloud projects add-iam-policy-binding" not in runtime_block
+
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do' in preflight_block
+    assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in preflight_block
+    assert '--member="serviceAccount:${PREFLIGHT_SA}"' in preflight_block
+    assert '--role="roles/secretmanager.secretAccessor"' in preflight_block
+    assert "ANON_KEY_SECRET" not in preflight_block
+    assert "gcloud projects add-iam-policy-binding" not in preflight_block
+
 def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
     schema = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
     expected_tables = {
