@@ -474,15 +474,11 @@ def _structured_private_object_has_material(value) -> bool:
         else:
             for item in current:
                 if isinstance(item, dict):
-                    # Objects with public-JWK markers may carry arbitrary public
-                    # metadata; do not treat every unknown field as private merely
-                    # because the enclosing private-key value is an array.
-                    has_public_jwk_markers = any(
-                        re.sub(r"[^a-z0-9]", "", str(key).lower())
-                        in PUBLIC_JWK_METADATA_FIELDS
-                        for key in item
-                    )
-                    stack.append((item, False, private_context and not has_public_jwk_markers))
+                    # Keep the enclosing private-key context for array objects.
+                    # Public JWK metadata is exempted field-by-field in the dict
+                    # branch above; it must not disable inspection of unknown
+                    # sibling fields that may contain private material.
+                    stack.append((item, False, private_context))
                 elif isinstance(item, list):
                     stack.append((item, scalar_items_are_private, private_context))
                 elif scalar_items_are_private:
