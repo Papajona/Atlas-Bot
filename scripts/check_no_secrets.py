@@ -417,7 +417,7 @@ def _looks_like_private_key_material(value: str) -> bool:
 
 PUBLIC_JWK_METADATA_FIELDS = {
     "n", "e", "x", "y", "crv", "kty", "keyops", "use", "alg", "kid",
-    "x5c", "x5t", "x5tu", "x5ts256",
+    "x5c", "x5t", "x5tu", "x5ts256", "metadata",
 }
 
 
