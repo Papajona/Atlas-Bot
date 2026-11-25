@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import hashlib
+import hmac
 import http.client
 import ipaddress
 import ssl
-import sys
+from pathlib import Path
 from urllib.parse import urlsplit
+
+
+_READINESS_PURPOSE = b"atlas-paper-staging-readiness-v1"
 
 
 def validate_base_url(value: str) -> str:
@@ -31,6 +37,27 @@ def validate_base_url(value: str) -> str:
     raise ValueError("base URL must use HTTPS, or HTTP on loopback only")
 
 
+def _read_secret_file(path: Path, label: str) -> str:
+    """Read an operator-provided secret without echoing its contents or path."""
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        raise ValueError(f"{label} file could not be read") from None
+    if not value:
+        raise ValueError(f"{label} file is empty")
+    return value
+
+
+def paper_readiness_token_from_file(path: Path) -> str:
+    """Derive the same purpose-bound token used by app.paper_staging /readyz."""
+    database_url = _read_secret_file(path, "paper database URL")
+    return hmac.new(
+        database_url.encode("utf-8"),
+        _READINESS_PURPOSE,
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def _connection(parsed):
     default_port = 443 if parsed.scheme == "https" else 80
     port = parsed.port if parsed.port is not None else default_port
@@ -44,15 +71,72 @@ def _connection(parsed):
     return http.client.HTTPConnection(parsed.hostname, port=port, timeout=5)
 
 
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Check Atlas liveness, authenticated readiness, and (optionally) metrics."
+    )
+    parser.add_argument(
+        "base_url",
+        nargs="?",
+        default="http://127.0.0.1:8000",
+        help="service base URL (HTTPS, or loopback HTTP only)",
+    )
+    parser.add_argument(
+        "--paper-database-url-file",
+        type=Path,
+        help="protected file containing CUSTOMER_PAPER_DATABASE_URL; derives the paper /readyz Bearer token",
+    )
+    parser.add_argument(
+        "--admin-token-file",
+        type=Path,
+        help="protected file containing the admin Bearer token used by /metrics",
+    )
+    parser.add_argument(
+        "--skip-metrics",
+        action="store_true",
+        help="skip /metrics (required for the restricted paper-only ASGI entrypoint)",
+    )
+    args = parser.parse_args(argv)
+    if args.skip_metrics and args.admin_token_file is not None:
+        parser.error("--admin-token-file cannot be combined with --skip-metrics")
+    return args
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    base = validate_base_url(args[0] if args else "http://127.0.0.1:8000")
+    args = _parse_args(argv)
+    try:
+        base = validate_base_url(args.base_url)
+        readiness_token = (
+            paper_readiness_token_from_file(args.paper_database_url_file)
+            if args.paper_database_url_file is not None
+            else None
+        )
+        admin_token = (
+            _read_secret_file(args.admin_token_file, "admin token")
+            if args.admin_token_file is not None
+            else None
+        )
+    except ValueError as exc:
+        raise SystemExit(f"BLOCKED: {exc}") from None
+
     parsed = urlsplit(base)
     prefix = parsed.path.rstrip("/")
-    for path in ("/healthz", "/readyz", "/metrics"):
+    checks: list[tuple[str, str | None]] = [
+        ("/healthz", None),
+        ("/readyz", readiness_token),
+    ]
+    if not args.skip_metrics:
+        checks.append(("/metrics", admin_token))
+
+    for path, bearer_token in checks:
         connection = _connection(parsed)
         try:
-            connection.request("GET", prefix + path)
+            headers = (
+                {"Authorization": f"Bearer {bearer_token}"}
+                if bearer_token is not None
+                else {}
+            )
+            connection.request("GET", prefix + path, headers=headers)
             response = connection.getresponse()
             body = response.read(200).decode(errors="replace")
             if 300 <= response.status < 400:
