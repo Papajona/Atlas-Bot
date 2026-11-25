@@ -829,6 +829,13 @@ def scan() -> list[str]:
                     if seed_match is None:
                         continue
                     raw_seed_value = seed_match.group("value").strip()
+                    # A shell continuation after an explicit angle placeholder is syntax,
+                    # not key material. Do not strip a trailing slash from any other value.
+                    if raw_seed_value.endswith("\\"):
+                        continuation_value = raw_seed_value[:-1].strip()
+                        placeholder_value = continuation_value.strip('"').strip("'").strip()
+                        if ANGLE_PLACEHOLDER.fullmatch(placeholder_value):
+                            raw_seed_value = continuation_value
                     yaml_block_scalar = (
                         path.suffix.lower() in {".yaml", ".yml"}
                         and raw_seed_value in {"|", "|-", "|+", ">", ">-", ">+"}

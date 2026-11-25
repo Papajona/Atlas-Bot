@@ -1546,3 +1546,15 @@ def test_secret_scanner_detects_mnemonic_embedded_in_quoted_dotenv_value(
         for item in findings
     )
 
+def test_secret_scanner_ignores_secret_manager_placeholder_with_shell_continuation(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "deployment.md").write_text(
+        "SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \\\n"
+        "  BACKUP_RECOVERY_URL=... \\\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    assert check_no_secrets.scan() == []
+
