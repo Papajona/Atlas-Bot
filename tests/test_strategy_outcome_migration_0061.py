@@ -91,7 +91,7 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
                     'CLOSED', '{"fill_price":"100"}', '2026-01-01 10:00:00'
                 ), (
                     2, 90001, NULL, 1, 42,
-                    12.5, 0, 12.5, 125.0, 125.0,
+                    12.5, 4.75, 12.5, 125.0, 125.0,
                     'CLOSED', '{}', CURRENT_TIMESTAMP
                 )
             """))
@@ -143,11 +143,12 @@ def test_revision_0061_makes_unknown_net_columns_nullable_before_backfill(monkey
             assert after["return_bps"]["nullable"] is True
 
             recovered = connection.execute(text("""
-                SELECT fee_basis_complete, return_bps, net_pnl, net_return_bps
+                SELECT fee_basis_complete, fee, return_bps, net_pnl, net_return_bps
                 FROM strategy_outcomes
                 WHERE id = 2
             """)).mappings().one()
             assert recovered["fee_basis_complete"] in (False, 0)
+            assert float(recovered["fee"]) == 4.75
             assert recovered["net_pnl"] is None
             assert recovered["net_return_bps"] is None
             assert recovered["return_bps"] is None
