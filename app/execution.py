@@ -3880,6 +3880,244 @@ async def _report_snapshot_rejection(trade_id, customer_id, exc: Exception) -> N
             exc_info=True,
         )
 
+def _merge_authoritative_trade_history_fee(
+    order: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    expected_order_id: str,
+    stored_filled_quantity: Any = None,
+) -> dict[str, Any] | None:
+    """Build a fee snapshot only from complete, order-matched exchange fills."""
+    order_id = str(order.get("id") or expected_order_id or "").strip()
+    if not order_id or not isinstance(history, list):
+        return None
+    try:
+        raw_filled = order.get("filled")
+        expected_filled = Decimal(str(
+            raw_filled if raw_filled is not None else stored_filled_quantity
+        ))
+    except (TypeError, ValueError, ArithmeticError):
+        return None
+    if not expected_filled.is_finite() or expected_filled <= 0:
+        return None
+
+    matched_quantity = Decimal("0")
+    total_fee = Decimal("0")
+    fee_currency = ""
+    seen_fill_ids: set[str] = set()
+    matched_fills = 0
+    for fill in history:
+        if not isinstance(fill, dict):
+            continue
+        info = fill.get("info") if isinstance(fill.get("info"), dict) else {}
+        fill_order_id = str(
+            fill.get("order")
+            or fill.get("orderId")
+            or info.get("orderId")
+            or ""
+        ).strip()
+        if fill_order_id != order_id:
+            continue
+        fill_id = str(fill.get("id") or "")
+        if fill_id and fill_id in seen_fill_ids:
+            continue
+        if fill_id:
+            seen_fill_ids.add(fill_id)
+        try:
+            raw_amount = fill.get("amount")
+            if raw_amount is None:
+                raw_amount = info.get("qty", info.get("executedQty", info.get("quantity")))
+            amount = Decimal(str(raw_amount))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not amount.is_finite() or amount <= 0:
+            return None
+
+        fee_rows = fill.get("fees")
+        if not isinstance(fee_rows, list) or not fee_rows:
+            fee = fill.get("fee")
+            fee_rows = [fee] if isinstance(fee, dict) else []
+        if not fee_rows and info.get("commission") is not None:
+            fee_rows = [{
+                "cost": info.get("commission"),
+                "currency": info.get("commissionAsset"),
+            }]
+        if not fee_rows:
+            return None
+
+        fill_fee = Decimal("0")
+        fill_currency = ""
+        for fee_row in fee_rows:
+            if not isinstance(fee_row, dict):
+                return None
+            try:
+                cost = Decimal(str(fee_row.get("cost")))
+            except (TypeError, ValueError, ArithmeticError):
+                return None
+            currency = str(fee_row.get("currency") or "").strip().upper()
+            if not cost.is_finite() or not currency:
+                return None
+            if fill_currency and fill_currency != currency:
+                return None
+            fill_currency = currency
+            # Rebates are not customer charges; do not net them against commissions.
+            if cost > 0:
+                fill_fee += cost
+        if fee_currency and fee_currency != fill_currency:
+            return None
+        fee_currency = fill_currency
+        matched_quantity += amount
+        total_fee += fill_fee
+        matched_fills += 1
+
+    if matched_fills == 0 or not fee_currency:
+        return None
+    if abs(matched_quantity - expected_filled) > Decimal("0.000000001"):
+        return None
+    enriched = dict(order)
+    # The fee parser prefers the list form; store the verified sum only once.
+    enriched.pop("fee", None)
+    enriched["fees"] = [{"cost": str(total_fee), "currency": fee_currency}]
+    return enriched
+
+
+async def _order_with_verified_trade_history_fee(
+    broker,
+    order: dict[str, Any],
+    *,
+    symbol: str,
+    expected_order_id: str,
+    stored_filled_quantity: Any = None,
+    created_at: Any = None,
+    page_limit: int = 100,
+    max_pages: int = 10,
+) -> dict[str, Any]:
+    """Use bounded trade-history pages without skipping fills at a timestamp boundary."""
+    if not order:
+        return order
+    fetch_my_trades = getattr(broker, "fetch_my_trades", None)
+    if not callable(fetch_my_trades):
+        return order
+
+    raw_timestamp = order.get("timestamp")
+    try:
+        since = int(raw_timestamp) if raw_timestamp is not None else None
+    except (TypeError, ValueError, OverflowError):
+        since = None
+    if since is None and created_at is not None:
+        try:
+            created = created_at
+            if getattr(created, "tzinfo", None) is None:
+                created = created.replace(tzinfo=timezone.utc)
+            since = int(created.timestamp() * 1000)
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            since = None
+    if since is not None:
+        since = max(0, since - 60_000)
+
+    order_id = str(expected_order_id or order.get("id") or "").strip()
+    exchange_id = str(
+        getattr(getattr(broker, "cfg", None), "exchange_id", "")
+        or getattr(getattr(broker, "config", None), "exchange_id", "")
+        or ""
+    ).lower()
+    params = {"orderId": order_id} if exchange_id == "binance" and order_id else {}
+    page_limit = max(1, min(int(page_limit), 100))
+    max_pages = max(1, min(int(max_pages), 10))
+    collected: list[dict[str, Any]] = []
+    seen_fill_ids: set[str] = set()
+    cursor = since
+    from_id_cursor: int | None = None
+
+    for _page in range(max_pages):
+        request_params = dict(params)
+        if from_id_cursor is not None:
+            request_params["fromId"] = str(from_id_cursor)
+        try:
+            page = await asyncio.to_thread(
+                fetch_my_trades, symbol, cursor, page_limit, request_params
+            )
+        except Exception:
+            # Some CCXT adapters do not expose Binance orderId/fromId filters.
+            # Fall back to time-bounded history only before ID pagination begins.
+            if not request_params or from_id_cursor is not None:
+                return order
+            params = {}
+            try:
+                page = await asyncio.to_thread(
+                    fetch_my_trades, symbol, cursor, page_limit, params
+                )
+            except Exception:
+                return order
+        if not isinstance(page, list) or not page:
+            break
+
+        page_ids: set[str] = set()
+        new_page_ids: set[str] = set()
+        page_numeric_ids: list[int] = []
+        page_has_missing_id = False
+        for fill in page:
+            if not isinstance(fill, dict):
+                continue
+            raw_id = fill.get("id")
+            fill_id = str(raw_id).strip() if raw_id is not None else ""
+            if not fill_id:
+                page_has_missing_id = True
+                continue
+            page_ids.add(fill_id)
+            if fill_id.isdigit():
+                page_numeric_ids.append(int(fill_id))
+            if fill_id not in seen_fill_ids:
+                collected.append(fill)
+                seen_fill_ids.add(fill_id)
+                new_page_ids.add(fill_id)
+
+        enriched = _merge_authoritative_trade_history_fee(
+            order,
+            collected,
+            expected_order_id=order_id,
+            stored_filled_quantity=stored_filled_quantity,
+        )
+        if enriched is not None:
+            return enriched
+        if len(page) < page_limit:
+            break
+
+        if exchange_id == "binance":
+            # Binance trade IDs are monotonically increasing and fetchMyTrades
+            # supports fromId. Keep the timestamp unchanged so same-ms fills remain.
+            if page_has_missing_id or len(page_numeric_ids) != len(page_ids):
+                break
+            next_from_id = max(page_numeric_ids) + 1 if page_numeric_ids else None
+            if next_from_id is None or (
+                from_id_cursor is not None and next_from_id <= from_id_cursor
+            ):
+                break
+            from_id_cursor = next_from_id
+            continue
+
+        # Other adapters may page inclusively by timestamp. Keep the boundary,
+        # deduplicate IDs, and stop safely if a full page repeats without progress.
+        if page_has_missing_id or not page_ids or not new_page_ids:
+            break
+        timestamps = []
+        for fill in page:
+            if not isinstance(fill, dict):
+                continue
+            try:
+                stamp = int(fill.get("timestamp"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if stamp >= 0:
+                timestamps.append(stamp)
+        if not timestamps:
+            break
+        next_cursor = max(timestamps)
+        if cursor is not None and next_cursor < cursor:
+            break
+        cursor = next_cursor
+    return order
+
 async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
     """Apply one broker snapshot without guessing an execution outcome.
 
@@ -4072,9 +4310,16 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
             Trade.exchange.in_(list(requested)),
         )
         trades = (await db.execute(query.order_by(Trade.updated_at).limit(200))).scalars().all()
-        snapshots = [(t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id, t.client_order_id) for t in trades]
+        snapshots = [
+            (
+                t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id,
+                t.client_order_id, bool(t.fee_reconciliation_pending),
+                t.filled_quantity, t.created_at,
+            )
+            for t in trades
+        ]
     results = []
-    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id in snapshots:
+    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id, fee_pending, stored_filled, trade_created_at in snapshots:
         try:
             if str(exchange).lower() != "binance":
                 raise RuntimeError("Customer live reconciliation is only enabled for Binance isolation")
@@ -4108,6 +4353,15 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                     )
                 results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "order_not_found"})
                 continue
+            if fee_pending:
+                order = await _order_with_verified_trade_history_fee(
+                    broker,
+                    order,
+                    symbol=symbol,
+                    expected_order_id=str(broker_order_id or order.get("id") or ""),
+                    stored_filled_quantity=stored_filled,
+                    created_at=trade_created_at,
+                )
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
@@ -4176,7 +4430,13 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
         )).scalars().all()
         terminal_fee_trade_ids = {trade.id for trade in terminal_fee_trades}
         trades = active_trades + terminal_fee_trades
-        snapshots = [(t.id, t.broker_order_id, t.symbol, t.client_order_id) for t in trades]
+        snapshots = [
+            (
+                t.id, t.broker_order_id, t.symbol, t.client_order_id,
+                bool(t.fee_reconciliation_pending), t.filled_quantity, t.created_at,
+            )
+            for t in trades
+        ]
     async def defer_terminal_fee_retry(trade_id: int) -> None:
         """Move an unresolved terminal fee to the back of the bounded retry queue."""
         try:
@@ -4232,7 +4492,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     cursor.last_sync_at = utcnow()
                     await db.commit()
                     raise
-    for trade_id, broker_order_id, trade_symbol, cid in snapshots:
+    for trade_id, broker_order_id, trade_symbol, cid, fee_pending, stored_filled, trade_created_at in snapshots:
         trade_broker = broker
         try:
             async with SessionLocal() as lookup_db:
@@ -4275,6 +4535,15 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 await defer_terminal_fee_retry(trade_id)
                 results.append({"trade_id": trade_id, "resolved": False})
                 continue
+            if fee_pending and not is_oanda:
+                order = await _order_with_verified_trade_history_fee(
+                    trade_broker,
+                    order,
+                    symbol=trade_symbol,
+                    expected_order_id=str(broker_order_id or order.get("id") or ""),
+                    stored_filled_quantity=stored_filled,
+                    created_at=trade_created_at,
+                )
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
