@@ -54,6 +54,7 @@ def test_paper_staging_asgi_exposes_only_explicit_health_auth_customer_and_paper
     assert len(routes) >= 3
     allowed = lambda path: (
         path in {
+            "/", "/paper-staging.js", "/paper-staging.css",
             "/healthz", "/livez", "/readyz",
             "/api/auth/signup", "/api/auth/login",
             "/api/auth/mfa/status", "/api/auth/mfa/enroll",
