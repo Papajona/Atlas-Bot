@@ -113,6 +113,24 @@ jobs:
           rm -f "$ATLAS_RELEASE_STORE_FILE"
           echo "PASS: optimized release APK retains the effective runtime backend resource."
 
+
+      - name: Create SHA-256 checksum for emulator debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          sha256sum "$APK" > "$APK.sha256"
+      - name: Publish emulator debug APK for testing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: atlas-android-debug-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/app-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   android-release:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))
     runs-on: ubuntu-latest
