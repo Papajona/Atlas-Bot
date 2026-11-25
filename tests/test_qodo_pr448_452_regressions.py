@@ -316,22 +316,28 @@ def test_paper_customer_summary_is_read_only_and_marks_identity_review():
     assert "status=effective_status" in access
 
 
-def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_or_persist_review():
+def test_customer_identity_backfill_does_not_quarantine_for_blank_display_name_alone():
     source = (ROOT / "app/main.py").read_text(encoding="utf-8")
     customer = source[
         source.index("async def get_customer("):
         source.index("def _funding_signature_valid")
     ]
-    assert "not str(profile.display_name or" not in customer
     assert "needs_auth_identity = (" in customer
     assert "jwt_email_missing" in customer
     assert "profile is None" in customer
     assert 'not str(profile.email or "").strip()' in customer
+    assert '(profile is not None and not str(profile.display_name or "").strip())' in customer
+    assert "if pending_review or needs_email_backfill:" in customer
     assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in customer
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in customer
-    assert "stale_legacy_quarantine" in customer
+    assert "pending_identity_review" in customer
+    legacy_gate = customer[
+        customer.index("if pending_review or needs_email_backfill:"):
+        customer.index("if profile is None:", customer.index("if pending_review or needs_email_backfill:"))
+    ]
+    assert "display_name" not in legacy_gate
 
 
 def test_edge_legacy_identity_offset_paging_has_a_stable_order():
