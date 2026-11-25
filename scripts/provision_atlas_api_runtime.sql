@@ -147,6 +147,40 @@ GRANT SELECT, INSERT, DELETE
 GRANT USAGE, SELECT
     ON SEQUENCE public.customer_benchmark_captures_id_seq TO atlas_api_runtime;
 
+DO $atlas_benchmark_capture_delete_guard$
+DECLARE
+    capture_rls_enabled boolean;
+    role_name text;
+BEGIN
+    SELECT relrowsecurity INTO capture_rls_enabled
+    FROM pg_class
+    WHERE oid = 'public.customer_benchmark_captures'::regclass;
+    IF capture_rls_enabled IS DISTINCT FROM true THEN
+        RAISE EXCEPTION 'benchmark capture DELETE exception requires row-level security';
+    END IF;
+    IF NOT has_table_privilege(
+        'atlas_api_runtime',
+        'public.customer_benchmark_captures',
+        'DELETE'
+    ) THEN
+        RAISE EXCEPTION 'atlas_api_runtime must retain the explicit owner-authorized benchmark capture DELETE grant';
+    END IF;
+    IF has_table_privilege(
+        'atlas_api_runtime',
+        'public.customer_benchmark_captures',
+        'TRUNCATE'
+    ) THEN
+        RAISE EXCEPTION 'atlas_api_runtime must not TRUNCATE benchmark captures';
+    END IF;
+    FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated', 'service_role'] LOOP
+        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name)
+           AND has_table_privilege(role_name, 'public.customer_benchmark_captures', 'DELETE') THEN
+            RAISE EXCEPTION 'role % must not DELETE benchmark captures', role_name;
+        END IF;
+    END LOOP;
+END
+$atlas_benchmark_capture_delete_guard$;
+
 DO $atlas_benchmark_capture_update_guard$
 BEGIN
     IF has_table_privilege(
