@@ -931,15 +931,25 @@ async def _apply_reconciled_live_fee_basis(
         and int(row.closing_trade_id) == int(trade.id)
     ]
 
+    compatible_customer_scope = (
+        Trade.customer_id.is_(None)
+        if trade.customer_id is None
+        else Trade.customer_id == trade.customer_id
+    )
     compatible_entry_ids = select(Trade.id).where(
         Trade.mode == trade.mode,
-        Trade.customer_id == trade.customer_id,
+        compatible_customer_scope,
+    )
+    position_customer_scope = (
+        Position.customer_id.is_(None)
+        if trade.customer_id is None
+        else Position.customer_id == trade.customer_id
     )
     positions = (await db.execute(
         select(Position).where(
             Position.symbol == trade.symbol,
             Position.exchange == trade.exchange,
-            Position.customer_id == trade.customer_id,
+            position_customer_scope,
             Position.entry_trade_id.in_(compatible_entry_ids),
         ).with_for_update()
     )).scalars().all()
