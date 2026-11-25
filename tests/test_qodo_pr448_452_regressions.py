@@ -544,8 +544,6 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
     assert "jwt_email_missing = not email" in customer
     normalized_customer = " ".join(customer.split())
     assert 'needs_auth_identity = ( jwt_email_missing or profile is None or not str(profile.email or "").strip() )' in normalized_customer
-    normalized_customer = " ".join(customer.split())
-    assert 'needs_auth_identity = ( jwt_email_missing or profile is None or not str(profile.email or "").strip() )' in normalized_customer
     quarantine = source[
         source.index("async def _quarantine_customer_identity_review("):
         source.index("async def get_customer(")
