@@ -231,3 +231,40 @@ def test_query_window_requires_timezone_and_provider_is_restricted():
         build_query("'; DROP TABLE withdrawals;--", start, end)
     with pytest.raises(ValueError, match="UTC offset"):
         parse_utc("2026-10-14T00:00:00", "start")
+
+
+def test_other_provider_and_out_of_window_withdrawals_do_not_fail_selected_journal_count():
+    matched, unresolved, failures = reconcile_rows(
+        [provider_row()],
+        [db_row()],
+        "sandbox-payout",
+        withdrawal_journal_count=1,
+        unattributed_withdrawal_journal_count=0,
+    )
+    assert matched == 1
+    assert unresolved == 0
+    assert not any("withdrawal journal" in failure for failure in failures)
+
+
+def test_orphan_journal_is_reported_once_even_with_scoped_journal_count():
+    _matched, _unresolved, failures = reconcile_rows(
+        [provider_row()],
+        [db_row()],
+        "sandbox-payout",
+        withdrawal_journal_count=0,
+        unattributed_withdrawal_journal_count=1,
+    )
+    orphan_failures = [
+        failure for failure in failures if "withdrawal journal" in failure
+    ]
+    assert orphan_failures == [
+        "withdrawal journals exist in the specified window without an attributable withdrawal record"
+    ]
+
+
+def test_zero_activity_statement_reports_one_independent_attestation_failure():
+    _matched, _unresolved, failures = reconcile_rows([], [], "sandbox-payout")
+    zero_activity_failures = [
+        failure for failure in failures if "zero activity" in failure
+    ]
+    assert len(zero_activity_failures) == 1
