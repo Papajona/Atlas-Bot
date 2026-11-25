@@ -649,15 +649,37 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
     const headers = req.headers();
     calls.push({ path: p, method, authorization: headers.authorization || "" });
 
+    if (p === "/api/auth/signup" && method === "POST") {
+      const body = req.postDataJSON();
+      assert.equal(body.email, "paper@example.invalid");
+      assert.equal(body.password, "test-only-password");
+      return json(route, { status: "CONFIRMATION_REQUIRED" });
+    }
     if (p === "/api/auth/login" && method === "POST") {
       return json(route, { access_token: "paper-aal1-token" });
     }
     if (p === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, verified
+        ? {
+            enabled: true,
+            aal: "aal2",
+            factor_count: 1,
+            factor_ids: ["paper-test-factor"],
+          }
+        : {
+            enabled: false,
+            aal: "aal1",
+            factor_count: 0,
+            factor_ids: [],
+          });
+    }
+    if (p === "/api/auth/mfa/enroll" && method === "POST") {
       return json(route, {
-        enabled: true,
-        aal: verified ? "aal2" : "aal1",
-        factor_count: 1,
-        factor_ids: ["paper-test-factor"],
+        id: "paper-test-factor",
+        totp: {
+          secret: "TEST-ONLY-TOTP-SECRET",
+          qr_code: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="black"/></svg>',
+        },
       });
     }
     if (p === "/api/auth/mfa/challenge" && method === "POST") {
@@ -802,8 +824,19 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
 
   await page.locator("#email").fill("paper@example.invalid");
   await page.locator("#password").fill("test-only-password");
+  await page.locator("#signup-button").click();
+  await waitUntil(async () => (await page.locator("#auth-message").innerText()).includes("Confirm the email"));
+  assert.equal(await page.locator("#workspace").isHidden(), true, "signup without a confirmed session must not open the paper workspace");
+
+  // Simulate returning after the test identity's Supabase confirmation email is verified.
   await page.locator("#login-button").click();
   await page.locator("#mfa-panel").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#enroll-button").isVisible(), true, "a customer without a TOTP factor must be offered enrollment");
+  await page.locator("#enroll-button").click();
+  await page.locator("#totp-setup").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#totp-secret").innerText(), "TEST-ONLY-TOTP-SECRET");
+  assert.equal(await page.locator("#totp-qr").isVisible(), true, "first-time TOTP enrollment must display the QR code");
+  assert.equal(await page.locator("#verify-button").isEnabled(), true);
   await page.locator("#totp-code").fill("123456");
   await page.locator("#verify-button").click();
 
