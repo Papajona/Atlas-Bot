@@ -16,7 +16,7 @@ def test_secret_scanner_public_jwk_field_does_not_hide_private_sibling(
         '[{"kty":"EC","crv":"P-256","x":"' + public_coordinate
         + '","y":"' + public_coordinate
         + '","provider_context":"external HSM",'
-        + '"private_blob":"' + private_sibling + '"}]'
+        + '"secretScalar":"' + private_sibling + '"}]'
     )
 
     (tmp_path / "public-only-jwk-array.yml").write_text(
