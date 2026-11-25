@@ -1799,17 +1799,21 @@ def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
     assert check_no_secrets.scan() == []
 
 @pytest.mark.parametrize("metadata_field", ["key", "value", "secret_label"])
-def test_secret_scanner_allows_short_but_detects_long_numeric_metadata_values(
+def test_secret_scanner_allows_short_but_detects_long_integer_and_decimal_metadata_values(
     tmp_path, monkeypatch, metadata_field
 ):
     private_key_field = "private" + "_key"
-    for label, numeric_value in (
-        ("short", 123456),
-        ("long", 123456789012345678901234567890),
+    for label, serialized_number in (
+        ("short", "123456"),
+        ("long", "123456789012345678901234567890"),
+        # json.loads() without parse_float=Decimal rounds this to a float whose
+        # repr is scientific notation with fewer than 20 mantissa digits.
+        ("decimal", "12345678901234567890.123456"),
     ):
-        jwk_json = json.dumps([
-            {"kty": "EC", "metadata": {metadata_field: numeric_value}}
-        ])
+        jwk_json = (
+            '[{"kty":"EC","metadata":{"' + metadata_field + '":'
+            + serialized_number + "}}]"
+        )
         source = (
             "wallet:\n  " + private_key_field + ": |\n"
             + "    " + jwk_json + "\n"
@@ -1826,6 +1830,11 @@ def test_secret_scanner_allows_short_but_detects_long_numeric_metadata_values(
     )
     assert any(
         f"numeric-private-jwk-metadata-{metadata_field}-long.yml:2: seed/private-key assignment"
+        in item
+        for item in findings
+    )
+    assert any(
+        f"numeric-private-jwk-metadata-{metadata_field}-decimal.yml:2: seed/private-key assignment"
         in item
         for item in findings
     )
