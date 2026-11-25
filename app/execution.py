@@ -1266,13 +1266,29 @@ async def _apply_reconciled_live_fee_basis(
                 )
 
         accounted_quantity = closed_lifecycle_quantity + current_lifecycle_quantity
-        if abs(accounted_quantity - trade_quantity) > Decimal("0.000001"):
+        expected_entry_side_quantity = trade_quantity - (
+            sum(closing_fill_quantities.values(), Decimal("0"))
+            if closing_rows else Decimal("0")
+        )
+        if (
+            not expected_entry_side_quantity.is_finite()
+            or expected_entry_side_quantity < 0
+            or abs(accounted_quantity - expected_entry_side_quantity)
+                > Decimal("0.000001")
+        ):
             raise ValueError(
                 f"cannot safely apportion recovered entry fee for trade {trade.id}: "
-                "closed and open lifecycle quantities do not reconcile to the order fills"
+                "closed and open lifecycle quantities do not reconcile to the entry-side fills"
             )
+        entry_side_lifecycle_quantity = accounted_quantity
+    else:
+        entry_side_lifecycle_quantity = None
 
-    reversal_quantity = reversal_lifecycle_quantity
+    reversal_quantity = (
+        entry_side_lifecycle_quantity
+        if entry_side_lifecycle_quantity is not None
+        else reversal_lifecycle_quantity
+    )
     if closing_rows:
         closed_quantity = sum(closing_fill_quantities.values(), Decimal("0"))
         if (
@@ -1285,7 +1301,8 @@ async def _apply_reconciled_live_fee_basis(
                 "closing and reversal quantities do not reconcile"
             )
         if (
-            reversal_quantity > 0
+            not entry_rows
+            and reversal_quantity > 0
             and position is not None
             and int(position.entry_trade_id or 0) == int(trade.id)
             and abs(remaining_quantity - reversal_quantity) > Decimal("0.000001")
