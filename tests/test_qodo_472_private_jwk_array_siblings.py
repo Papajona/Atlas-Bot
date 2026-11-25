@@ -38,3 +38,28 @@ def test_secret_scanner_public_jwk_field_does_not_hide_private_sibling(
         "jwk-private-sibling.yml:2: seed/private-key assignment" in item
         for item in findings
     )
+    public_metadata_jwk = (
+        '{"kty":"EC","crv":"P-256","x":"' + public_coordinate
+        + '","y":"' + public_coordinate
+        + '","metadata":{"provider":"acme-corp-production-signing"}}'
+    )
+    nested_private_metadata_jwk = (
+        '{"kty":"EC","crv":"P-256","metadata":{"details":{"secretScalar":"'
+        + private_sibling + '"}}}'
+    )
+    (tmp_path / "public-jwk-metadata.yml").write_text(
+        "wallet:\\n  " + private_key_field + ": |\\n"
+        + "    " + public_metadata_jwk + "\\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "nested-private-metadata.yml").write_text(
+        "wallet:\\n  " + private_key_field + ": |\\n"
+        + "    " + nested_private_metadata_jwk + "\\n",
+        encoding="utf-8",
+    )
+    findings = check_no_secrets.scan()
+    assert not any("public-jwk-metadata.yml" in item for item in findings)
+    assert any(
+        "nested-private-metadata.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
