@@ -42,11 +42,47 @@ def _load(path: Path):
 
 
 def _close(actual: Any, expected: Any) -> bool:
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return False
     try:
         left, right = float(actual), float(expected)
         return math.isfinite(left) and math.isfinite(right) and abs(left - right) < 1e-9
     except (TypeError, ValueError, OverflowError):
         return False
+
+
+def _valid_expected_label(field: str, value: Any) -> bool:
+    """Validate corpus labels against the public AIStrategySpec field types/domains."""
+    if field == "asset":
+        return isinstance(value, str) and value in ALLOWED_ASSETS
+    if field == "symbol":
+        return isinstance(value, str) and 0 < len(value.strip()) <= 80
+    if field == "strategy_family":
+        return isinstance(value, str) and value in ALLOWED_FAMILIES
+    if field == "direction":
+        return isinstance(value, str) and value in ALLOWED_DIRECTIONS
+    if field == "timeframes":
+        return (
+            isinstance(value, list)
+            and 1 <= len(value) <= 5
+            and all(isinstance(item, str) and item in ALLOWED_TIMEFRAMES for item in value)
+            and len(set(value)) == len(value)
+        )
+    if field in {"risk_per_trade", "stop_loss_atr", "take_profit_rr"}:
+        if value is None and field != "risk_per_trade":
+            return True
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            return False
+        if field == "risk_per_trade":
+            return 0 < value <= 0.05
+        return 0 < value <= 10
+    if field == "sessions":
+        return (
+            isinstance(value, list)
+            and len(value) <= 8
+            and all(isinstance(item, str) and item.strip() for item in value)
+        )
+    return False
 
 
 def _load_dataset(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
@@ -123,6 +159,9 @@ def _load_dataset(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any], str
             markers = expected.get(marker_field, [])
             if not isinstance(markers, list) or any(not isinstance(x, str) or not x for x in markers):
                 raise ValueError(f"Case {case_id} {marker_field} must be a list of non-empty strings.")
+        for field, value in expected.items():
+            if field not in WARNING_FIELDS and not _valid_expected_label(field, value):
+                raise ValueError(f"Case {case_id} has an invalid expected label for {field}.")
         has_field_label = any(key not in WARNING_FIELDS for key in expected)
         has_warning_label = any(bool(expected.get(key)) for key in WARNING_FIELDS)
         if not has_field_label and not has_warning_label:
