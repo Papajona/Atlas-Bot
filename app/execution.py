@@ -1740,12 +1740,15 @@ async def _apply_fill_to_position(
     current_fill_fee: Decimal | float | None = None,
     current_fill_fee_verified: bool = False,
 ):
+    previous_filled_quantity = Decimal(str(trade.filled_quantity or 0))
     delta = max(0.0, new_filled - trade.filled_quantity)
     if delta <= 0 or fill_price <= 0:
         if current_fill_fee_verified and Decimal(str(current_fill_fee or 0)) > 0:
             await _apply_reconciled_live_fee_basis(
                 db, trade, Decimal(str(current_fill_fee)),
-                include_verified_components=True,
+                include_verified_components=(
+                    Decimal(str(new_filled)) == previous_filled_quantity
+                ),
             )
         trade.filled_quantity = new_filled
         trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
@@ -3958,7 +3961,7 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
         await _apply_reconciled_live_fee_basis(
             db, trade, fee_delta,
             include_verified_components=(
-                Decimal(str(filled)) <= previous_filled_quantity
+                Decimal(str(filled)) == previous_filled_quantity
             ),
         )
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
