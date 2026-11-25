@@ -53,6 +53,7 @@ button.mini{padding:6px 8px;font-size:10px;border-radius:7px}.muted-button{color
 .scanner-label{display:flex;flex-direction:column;gap:7px;color:#bccbe0;font-size:12px;font-weight:650}
 .scanner-panel .table-wrap{margin-top:14px}
 .scanner-panel table{min-width:680px}
+.history-panel table{min-width:840px}
 .scanner-panel td:nth-child(2){font-weight:800;letter-spacing:.04em}
 .scanner-panel td:nth-child(2):is(:empty){color:var(--muted)}
 .data-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
