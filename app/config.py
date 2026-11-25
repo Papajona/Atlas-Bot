@@ -652,6 +652,8 @@ class Settings(BaseSettings):
             raise ValueError("LIVE_ENABLE_REQUEST_TTL_MINUTES must be >= 1")
         if self.environment == "production" and not self.admin_totp_required:
             raise ValueError("ADMIN_TOTP_REQUIRED must remain true in production")
+        if self.environment == "production" and not self.customer_totp_required:
+            raise ValueError("CUSTOMER_TOTP_REQUIRED must remain true in production")
         if self.environment == "production" and not self.metrics_require_admin:
             raise ValueError("METRICS_REQUIRE_ADMIN must remain true in production")
         if self.environment == "production" and self.docs_enabled:

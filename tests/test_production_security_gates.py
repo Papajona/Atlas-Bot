@@ -584,13 +584,21 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "actions: write" in deploy
 
 
+def _load_workflow(name: str) -> dict:
+    loaded = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+    )
+    assert isinstance(loaded, dict), f"{name} is not a YAML mapping"
+    return loaded
+
+
 def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
-    deploy = yaml.safe_load((ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8"))
-    preflight = yaml.safe_load((ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8"))
-    acceptance = yaml.safe_load((ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml").read_text(encoding="utf-8"))
-    assert "deploy-paper-staging" in deploy.get("jobs", {})
-    assert "verify-staging-identity" in preflight.get("jobs", {})
-    assert "customer-paper-acceptance" in acceptance.get("jobs", {})
+    deploy = _load_workflow("staging-paper-deploy.yml")
+    preflight = _load_workflow("staging-identity-preflight.yml")
+    acceptance = _load_workflow("customer-paper-staging-acceptance.yml")
+    assert "deploy-paper-staging" in deploy["jobs"], "paper staging deploy job missing"
+    assert "verify-staging-identity" in preflight["jobs"], "staging identity preflight job missing"
+    assert "customer-paper-acceptance" in acceptance["jobs"], "customer paper acceptance job missing"
 
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
@@ -676,17 +684,16 @@ def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: P
 
 
 def test_production_deploy_workflow_is_valid_yaml_with_unique_named_steps():
-    workflow_path = ROOT / ".github" / "workflows" / "production-deploy.yml"
-    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    workflow = _load_workflow("production-deploy.yml")
     steps = [
         step
-        for job in workflow.get("jobs", {}).values()
+        for job in workflow["jobs"].values()
         for step in job.get("steps", [])
     ]
     names = [step["name"] for step in steps if isinstance(step, dict) and step.get("name")]
     duplicates = sorted({name for name in names if names.count(name) > 1})
-    assert not duplicates, f"duplicate production deployment step names: {duplicates}"
-    assert "Require all release CI gates on this exact commit" in names
+    assert not duplicates, f"duplicate production deployment step names: {', '.join(duplicates)}"
+    assert "Require all release CI gates on this exact commit" in names, "exact staging identity job gate missing"
 
 
 
