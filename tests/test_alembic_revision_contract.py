@@ -178,3 +178,33 @@ def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate
     ) == 1
     assert "**Provenance evidence is now available from the source provider logs**" not in runbook
 
+
+
+def test_0065_downgrade_preserves_preexisting_trigger_role_and_policies():
+    migration = (
+        ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
+    ).read_text(encoding="utf-8")
+
+    # The role comment records whether each object/grant predated this revision.
+    # Downgrade must consult that state rather than deleting every matching name.
+    for state_key in (
+        "'role_created_by_revision'",
+        "'journals_policy_created_by_revision'",
+        "'lines_policy_created_by_revision'",
+        "'had_public_schema_usage'",
+        "'had_ledger_journals_select'",
+        "'had_ledger_journal_lines_select'",
+        "'had_validate_function_execute'",
+        "'prior_role_comment'",
+    ):
+        assert state_key in migration
+
+    downgrade = migration.split("def downgrade()", 1)[1]
+    assert "rollback provenance is missing" in downgrade
+    assert "DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journals" in downgrade
+    assert "DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journal_lines" in downgrade
+    assert "DROP ROLE atlas_ledger_trigger_owner" in downgrade
+    assert "role_created_by_revision" in downgrade
+    assert "journals_policy_created_by_revision" in downgrade
+    assert "lines_policy_created_by_revision" in downgrade
+    assert "COMMENT ON ROLE %I IS %L" in downgrade
