@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated server-side production API login. Run only after verified backup/restore
--- and Alembic head 0064_strategy_outcome_recent_index. Set its password separately with psql's hidden \password
+-- and Alembic head 0065_ledger_trigger_owner_isolation. Set its password separately with psql's hidden \password
 -- prompt; never store passwords in this file or place them in chat.
 BEGIN;
 
@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the production API login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0064_strategy_outcome_recent_index') THEN
-        RAISE EXCEPTION 'database must be at 0064_strategy_outcome_recent_index before API role provisioning';
+                   WHERE version_num = '0065_ledger_trigger_owner_isolation') THEN
+        RAISE EXCEPTION 'database must be at 0065_ledger_trigger_owner_isolation before API role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)
