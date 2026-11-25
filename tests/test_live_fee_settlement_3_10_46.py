@@ -1827,6 +1827,8 @@ def test_broker_snapshot_reconciles_verified_fee_increase_without_new_fill():
             assert Decimal(str(episode.net_pnl)) == Decimal("9.83")
             assert Decimal(str(entry.fee)) == Decimal("0.15")
             assert entry.fee_reconciliation_pending is False
+            assert entry.status == "FILLED"
+            assert Decimal(str(entry.filled_quantity)) == Decimal("1.0")
 
     asyncio.run(with_database(check))
 
