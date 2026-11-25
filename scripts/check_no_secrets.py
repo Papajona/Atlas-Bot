@@ -493,7 +493,14 @@ def _structured_private_object_has_material(value) -> bool:
                     and not isinstance(item, bool)
                     and item != 0
                 ):
-                    return True
+                    numeric_digits = re.sub(
+                        r"[^0-9]", "", str(item).lower().split("e", 1)[0]
+                    )
+                    if (
+                        not descriptive_metadata_field
+                        or len(numeric_digits) >= 20
+                    ):
+                        return True
                 if isinstance(item, (dict, list)):
                     if normalized_key == "metadata" and field_is_public:
                         child_private = private_context
