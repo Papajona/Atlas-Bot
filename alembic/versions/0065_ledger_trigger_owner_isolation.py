@@ -65,7 +65,8 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 role_created_by_revision := true;
             ELSE
                 role_comment := shobj_description(role_oid, 'pg_authid');
-                IF role_comment LIKE 'atlas:0065:rollback-state:v1:%' THEN
+                IF role_comment LIKE 'atlas:0065:rollback-state:v1:%'
+                   OR role_comment LIKE 'atlas:0065:rollback-state:v2:%' THEN
                     RAISE EXCEPTION
                         'atlas_ledger_trigger_owner already carries 0065 rollback metadata; inspect migration state before retrying';
                 END IF;
@@ -170,25 +171,117 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             -- this comment are transactional, so a failed upgrade cannot leave
             -- partial ownership markers. Reused roles retain their prior comment
             -- and grants when this revision is downgraded.
+            SELECT oid INTO migration_role_oid
+            FROM pg_roles
+            WHERE rolname = migration_role;
+            IF migration_role_oid IS NULL THEN
+                RAISE EXCEPTION
+                    '0065 migration identity is missing from pg_roles; cannot record rollback grant provenance';
+            END IF;
+
+            -- Record the direct ACL entries from the migration grantor, not
+            -- effective privileges. has_*_privilege() includes PUBLIC and
+            -- would make downgrade retain direct grants added by this revision.
             role_state := jsonb_build_object(
-                'marker', 'atlas:0065:rollback-state:v1',
+                'marker', 'atlas:0065:rollback-state:v2',
                 'role_created_by_revision', role_created_by_revision,
                 'journals_policy_created_by_revision', journals_policy_created_by_revision,
                 'lines_policy_created_by_revision', lines_policy_created_by_revision,
-                'had_public_schema_usage', has_schema_privilege(role_name, 'public', 'USAGE'),
-                'had_ledger_journals_select', has_table_privilege(role_name, 'public.ledger_journals', 'SELECT'),
-                'had_ledger_journal_lines_select', has_table_privilege(role_name, 'public.ledger_journal_lines', 'SELECT'),
-                'had_validate_function_execute', has_function_privilege(
-                    role_name,
-                    'public.atlas_validate_ledger_journal(integer)',
-                    'EXECUTE'
+                'migration_grantor', migration_role,
+                'had_public_schema_usage_direct', EXISTS (
+                    SELECT 1
+                    FROM pg_namespace n
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(n.nspacl, acldefault('n', n.nspowner))
+                    ) acl
+                    WHERE n.nspname = 'public'
+                      AND acl.grantee = role_oid
+                      AND acl.privilege_type = 'USAGE'
+                ),
+                'had_public_schema_usage_from_migration_grantor', EXISTS (
+                    SELECT 1
+                    FROM pg_namespace n
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(n.nspacl, acldefault('n', n.nspowner))
+                    ) acl
+                    WHERE n.nspname = 'public'
+                      AND acl.grantee = role_oid
+                      AND acl.grantor = migration_role_oid
+                      AND acl.privilege_type = 'USAGE'
+                ),
+                'had_ledger_journals_select_direct', EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(c.relacl, acldefault('r', c.relowner))
+                    ) acl
+                    WHERE c.oid = to_regclass('public.ledger_journals')
+                      AND acl.grantee = role_oid
+                      AND acl.privilege_type = 'SELECT'
+                ),
+                'had_ledger_journals_select_from_migration_grantor', EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(c.relacl, acldefault('r', c.relowner))
+                    ) acl
+                    WHERE c.oid = to_regclass('public.ledger_journals')
+                      AND acl.grantee = role_oid
+                      AND acl.grantor = migration_role_oid
+                      AND acl.privilege_type = 'SELECT'
+                ),
+                'had_ledger_journal_lines_select_direct', EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(c.relacl, acldefault('r', c.relowner))
+                    ) acl
+                    WHERE c.oid = to_regclass('public.ledger_journal_lines')
+                      AND acl.grantee = role_oid
+                      AND acl.privilege_type = 'SELECT'
+                ),
+                'had_ledger_journal_lines_select_from_migration_grantor', EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(c.relacl, acldefault('r', c.relowner))
+                    ) acl
+                    WHERE c.oid = to_regclass('public.ledger_journal_lines')
+                      AND acl.grantee = role_oid
+                      AND acl.grantor = migration_role_oid
+                      AND acl.privilege_type = 'SELECT'
+                ),
+                'had_validate_function_execute_direct', EXISTS (
+                    SELECT 1
+                    FROM pg_proc p
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(p.proacl, acldefault('f', p.proowner))
+                    ) acl
+                    WHERE p.oid = to_regprocedure(
+                        'public.atlas_validate_ledger_journal(integer)'
+                    )
+                      AND acl.grantee = role_oid
+                      AND acl.privilege_type = 'EXECUTE'
+                ),
+                'had_validate_function_execute_from_migration_grantor', EXISTS (
+                    SELECT 1
+                    FROM pg_proc p
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(p.proacl, acldefault('f', p.proowner))
+                    ) acl
+                    WHERE p.oid = to_regprocedure(
+                        'public.atlas_validate_ledger_journal(integer)'
+                    )
+                      AND acl.grantee = role_oid
+                      AND acl.grantor = migration_role_oid
+                      AND acl.privilege_type = 'EXECUTE'
                 ),
                 'prior_role_comment', role_comment
             );
             EXECUTE format(
                 'COMMENT ON ROLE %I IS %L',
                 role_name,
-                'atlas:0065:rollback-state:v1:' || role_state::text
+                'atlas:0065:rollback-state:v2:' || role_state::text
             );
 
             EXECUTE 'GRANT USAGE ON SCHEMA public TO atlas_ledger_trigger_owner';
@@ -414,16 +507,17 @@ def downgrade() -> None:
             END IF;
 
             role_comment := shobj_description(role_oid, 'pg_authid');
-            IF role_comment LIKE 'atlas:0065:rollback-state:v1:%' THEN
+            IF role_comment LIKE 'atlas:0065:rollback-state:v2:%' THEN
                 role_state := substring(
-                    role_comment FROM length('atlas:0065:rollback-state:v1:') + 1
+                    role_comment FROM length('atlas:0065:rollback-state:v2:') + 1
                 )::jsonb;
             ELSE
                 RAISE EXCEPTION
                     'cannot safely downgrade 0065: rollback provenance is missing; preserving the trigger role and policies';
             END IF;
 
-            IF role_state->>'marker' IS DISTINCT FROM 'atlas:0065:rollback-state:v1' THEN
+            IF role_state->>'marker' IS DISTINCT FROM 'atlas:0065:rollback-state:v2'
+               OR nullif(role_state->>'migration_grantor', '') IS NULL THEN
                 RAISE EXCEPTION
                     'cannot safely downgrade 0065: rollback provenance marker is malformed';
             END IF;
@@ -461,17 +555,36 @@ def downgrade() -> None:
                 EXECUTE 'DROP POLICY atlas_ledger_trigger_owner_select ON public.ledger_journal_lines';
             END IF;
 
-            IF NOT coalesce((role_state->>'had_validate_function_execute')::boolean, false) THEN
-                EXECUTE 'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM atlas_ledger_trigger_owner';
+            -- Revoke only ACL entries originally granted by this migration
+            -- identity. PUBLIC defaults no longer count as pre-existing direct
+            -- grants, and unrelated grants from other grantors are preserved.
+            IF NOT coalesce((role_state->>'had_validate_function_execute_from_migration_grantor')::boolean, false) THEN
+                EXECUTE format(
+                    'REVOKE EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) FROM %I GRANTED BY %I',
+                    role_name,
+                    role_state->>'migration_grantor'
+                );
             END IF;
-            IF NOT coalesce((role_state->>'had_ledger_journals_select')::boolean, false) THEN
-                EXECUTE 'REVOKE SELECT ON TABLE public.ledger_journals FROM atlas_ledger_trigger_owner';
+            IF NOT coalesce((role_state->>'had_ledger_journals_select_from_migration_grantor')::boolean, false) THEN
+                EXECUTE format(
+                    'REVOKE SELECT ON TABLE public.ledger_journals FROM %I GRANTED BY %I',
+                    role_name,
+                    role_state->>'migration_grantor'
+                );
             END IF;
-            IF NOT coalesce((role_state->>'had_ledger_journal_lines_select')::boolean, false) THEN
-                EXECUTE 'REVOKE SELECT ON TABLE public.ledger_journal_lines FROM atlas_ledger_trigger_owner';
+            IF NOT coalesce((role_state->>'had_ledger_journal_lines_select_from_migration_grantor')::boolean, false) THEN
+                EXECUTE format(
+                    'REVOKE SELECT ON TABLE public.ledger_journal_lines FROM %I GRANTED BY %I',
+                    role_name,
+                    role_state->>'migration_grantor'
+                );
             END IF;
-            IF NOT coalesce((role_state->>'had_public_schema_usage')::boolean, false) THEN
-                EXECUTE 'REVOKE USAGE ON SCHEMA public FROM atlas_ledger_trigger_owner';
+            IF NOT coalesce((role_state->>'had_public_schema_usage_from_migration_grantor')::boolean, false) THEN
+                EXECUTE format(
+                    'REVOKE USAGE ON SCHEMA public FROM %I GRANTED BY %I',
+                    role_name,
+                    role_state->>'migration_grantor'
+                );
             END IF;
 
             IF coalesce((role_state->>'role_created_by_revision')::boolean, false)
