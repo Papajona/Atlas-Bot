@@ -1799,25 +1799,34 @@ def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
     assert check_no_secrets.scan() == []
 
 @pytest.mark.parametrize("metadata_field", ["key", "value", "secret_label"])
-def test_secret_scanner_detects_numeric_private_jwk_metadata_values(
+def test_secret_scanner_allows_short_but_detects_long_numeric_metadata_values(
     tmp_path, monkeypatch, metadata_field
 ):
     private_key_field = "private" + "_key"
-    jwk_json = json.dumps([
-        {"kty": "EC", "metadata": {metadata_field: 987654321}}
-    ])
-    source = (
-        "wallet:\n  " + private_key_field + ": |\n"
-        + "    " + jwk_json + "\n"
-    )
-    filename = f"numeric-private-jwk-metadata-{metadata_field}.yml"
-    (tmp_path / filename).write_text(source, encoding="utf-8")
+    for label, numeric_value in (
+        ("short", 123456),
+        ("long", 123456789012345678901234567890),
+    ):
+        jwk_json = json.dumps([
+            {"kty": "EC", "metadata": {metadata_field: numeric_value}}
+        ])
+        source = (
+            "wallet:\n  " + private_key_field + ": |\n"
+            + "    " + jwk_json + "\n"
+        )
+        filename = f"numeric-private-jwk-metadata-{metadata_field}-{label}.yml"
+        (tmp_path / filename).write_text(source, encoding="utf-8")
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
     findings = check_no_secrets.scan()
 
+    assert not any(
+        f"numeric-private-jwk-metadata-{metadata_field}-short.yml" in item
+        for item in findings
+    )
     assert any(
-        f"{filename}:2: seed/private-key assignment" in item
+        f"numeric-private-jwk-metadata-{metadata_field}-long.yml:2: seed/private-key assignment"
+        in item
         for item in findings
     )
 
