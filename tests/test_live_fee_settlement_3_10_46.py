@@ -1829,3 +1829,157 @@ def test_broker_snapshot_reconciles_verified_fee_increase_without_new_fill():
             assert entry.fee_reconciliation_pending is False
 
     asyncio.run(with_database(check))
+
+
+def test_trade_history_fee_requires_complete_order_matched_fills_in_one_currency():
+    order = {"id": "broker-42", "filled": "0.3"}
+    history = [
+        {
+            "id": "fill-1",
+            "order": "broker-42",
+            "amount": "0.1",
+            "fee": {"cost": "0.02", "currency": "USDT"},
+        },
+        {
+            "id": "fill-2",
+            "info": {"orderId": "broker-42", "qty": "0.2"},
+            "fee": {"cost": "0.04", "currency": "USDT"},
+        },
+        {
+            "id": "other-order-fill",
+            "order": "broker-99",
+            "amount": "9",
+            "fee": {"cost": "5", "currency": "USDT"},
+        },
+    ]
+
+    enriched = execution._merge_authoritative_trade_history_fee(
+        order, history, expected_order_id="broker-42"
+    )
+    assert enriched is not None
+    assert enriched["fees"] == [{"cost": "0.06", "currency": "USDT"}]
+    assert "fee" not in enriched
+
+    incomplete = execution._merge_authoritative_trade_history_fee(
+        order, history[:1], expected_order_id="broker-42"
+    )
+    assert incomplete is None
+
+    mixed_currency = execution._merge_authoritative_trade_history_fee(
+        order,
+        [
+            history[0],
+            {
+                **history[1],
+                "fee": {"cost": "0.04", "currency": "BNB"},
+            },
+        ],
+        expected_order_id="broker-42",
+    )
+    assert mixed_currency is None
+
+
+def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    calls = []
+
+    class FakeBroker:
+        cfg = SimpleNamespace(exchange_id="bybit")
+
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            calls.append((symbol, since, limit, params))
+            if len(calls) == 1:
+                return [
+                    {
+                        "id": "old-order-fill-1",
+                        "order": "old-order",
+                        "timestamp": 100_000,
+                        "amount": "0.1",
+                        "fee": {"cost": "0.02", "currency": "USDT"},
+                    },
+                    {
+                        "id": "other-order-fill",
+                        "order": "different-order",
+                        "timestamp": 101_000,
+                        "amount": "0.5",
+                        "fee": {"cost": "9", "currency": "USDT"},
+                    },
+                ]
+            return [
+                {
+                    "id": "old-order-fill-2",
+                    "order": "old-order",
+                    "timestamp": 102_000,
+                    "amount": "0.2",
+                    "fee": {"cost": "0.04", "currency": "USDT"},
+                }
+            ]
+
+    async def run():
+        result = await execution._order_with_verified_trade_history_fee(
+            FakeBroker(),
+            {"id": "old-order", "timestamp": 100_000, "filled": "0.3"},
+            symbol="BTC/USDT",
+            expected_order_id="old-order",
+            stored_filled_quantity="0.3",
+            created_at=datetime.fromtimestamp(90, tz=timezone.utc),
+            page_limit=2,
+            max_pages=3,
+        )
+        assert result["fees"] == [{"cost": "0.06", "currency": "USDT"}]
+        assert len(calls) == 2
+        assert calls[0] == ("BTC/USDT", 40_000, 2, {})
+        assert calls[1] == ("BTC/USDT", 101_000, 2, {})
+
+    asyncio.run(run())
+
+
+def test_fee_history_uses_binance_trade_id_cursor_for_same_millisecond_pages():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    calls = []
+    pages = [
+        [
+            {"id": "1001", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+            {"id": "1002", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+        ],
+        [
+            {"id": "1003", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+            {"id": "1004", "order": "same-ms-order", "timestamp": 100_000,
+             "amount": "0.1", "fee": {"cost": "0.01", "currency": "USDT"}},
+        ],
+    ]
+
+    class FakeBroker:
+        cfg = SimpleNamespace(exchange_id="binance")
+
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            calls.append((symbol, since, limit, params))
+            return pages.pop(0) if pages else []
+
+    result = asyncio.run(
+        execution._order_with_verified_trade_history_fee(
+            FakeBroker(),
+            {"id": "same-ms-order", "timestamp": 100_000, "filled": "0.4"},
+            symbol="BTC/USDT",
+            expected_order_id="same-ms-order",
+            stored_filled_quantity="0.4",
+            created_at=datetime.fromtimestamp(90, tz=timezone.utc),
+            page_limit=2,
+            max_pages=3,
+        )
+    )
+
+    assert result["fees"] == [{"cost": "0.04", "currency": "USDT"}]
+    assert len(calls) == 2
+    assert calls[0] == ("BTC/USDT", 40_000, 2, {"orderId": "same-ms-order"})
+    assert calls[1] == (
+        "BTC/USDT", 40_000, 2,
+        {"orderId": "same-ms-order", "fromId": "1003"},
+    )
