@@ -394,6 +394,18 @@ def _load_comparison(path: Path, fingerprint: str, cases: list[dict[str, Any]]) 
     return system, predictions
 
 
+def _safe_exception_chain(exc: BaseException, *, limit: int = 5) -> str:
+    """Retain causal exception types without copying prompt-bearing messages."""
+    labels: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and len(labels) < limit and id(current) not in seen:
+        seen.add(id(current))
+        labels.append(type(current).__name__)
+        current = current.__cause__ or current.__context__
+    return " <- ".join(labels)
+
+
 def evaluate(module_path: Path, corpus_path: Path = CORPUS, comparison_path: Path | None = None) -> dict[str, Any]:
     module = _load(module_path)
     cases, metadata, fingerprint = _load_dataset(corpus_path)
@@ -407,7 +419,7 @@ def evaluate(module_path: Path, corpus_path: Path = CORPUS, comparison_path: Pat
         except Exception as exc:
             native_predictions[case["id"]] = None
             # Exception messages may contain submitted prompts or private annotations.
-            generation_failures[case["id"]] = type(exc).__name__
+            generation_failures[case["id"]] = _safe_exception_chain(exc)
     native = _score_predictions(cases, native_predictions)
     report: dict[str, Any] = {
         **native,
