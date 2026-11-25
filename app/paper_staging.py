@@ -36,8 +36,9 @@ from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
 # app is not mounted or served; its startup/lifespan is never executed in this process.
 from .main import (
     MarketRequest, _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
-    _customer_paper_group_mark_prices, _supabase_request, _supabase_user,
-    _trusted_client_ip, api_rate_limit, customer_claims, market_data,
+    _customer_paper_group_mark_prices,
+    _supabase_request, _supabase_user, _trusted_client_ip, api_rate_limit,
+    customer_claims, market_data,
 )
 
 
@@ -294,6 +295,43 @@ async def _paper_runtime_preflight() -> dict[str, Any]:
     }
 
 
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Check for one non-UUID legacy identity without materializing the profile table."""
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect == "postgresql":
+        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    if dialect == "sqlite":
+        uuid_glob = (
+            "[0-9a-fA-F]" * 8 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 12
+        )
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    # Unknown dialects retain a conservative compatibility path.
+    legacy_refs = (await db.execute(
+        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
+    )).scalars().all()
+    for reference in legacy_refs:
+        try:
+            uuid.UUID(str(reference))
+        except (ValueError, TypeError, AttributeError):
+            return True
+    return False
+
+
 async def get_existing_customer(
     authorization: str | None,
     db,
@@ -313,6 +351,9 @@ async def get_existing_customer(
                 CustomerProfile.id,
                 CustomerProfile.auth_user_id,
                 CustomerProfile.status,
+                (
+                    ~(CustomerProfile.email.is_(None) | (CustomerProfile.email == ""))
+                ).label("has_stored_email"),
             ).where(CustomerProfile.auth_user_id == uid)
         )
     ).one_or_none()
@@ -321,34 +362,29 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
-    # The legacy rows have non-UUID Auth references and blank encrypted PII.
-    # Until those identities are mapped, no UUID-linked paper account can be
-    # proven distinct from them. Do not allow trading against a potentially
-    # duplicate customer profile.
-    legacy_auth_refs = (
-        await db.execute(
-            select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
+    # Never select/decrypt email in this keyless service. SQL returns only a
+    # boolean presence expression; ciphertext is not materialized by the ORM.
+    # Pending identities remain pending until the key-bearing customer service
+    # makes a verified decision. Active profiles with no stored email fail closed
+    # when any unmapped legacy Auth identity remains.
+    status = str(row.status or "").upper()
+    has_stored_email = bool(getattr(row, "has_stored_email", False))
+    identity_review_required = status == "PENDING_IDENTITY_REVIEW"
+    if status == "ACTIVE" and not has_stored_email:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+    effective_status = row.status
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
         )
-    ).scalars().all()
-    identity_review_required = str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    for legacy_auth_ref in legacy_auth_refs:
-        try:
-            uuid.UUID(str(legacy_auth_ref))
-        except (ValueError, TypeError, AttributeError):
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                raise HTTPException(
-                    409,
-                    "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
-                )
-            break
 
     # Keep PII/encrypted columns out of the query: this service has no encryption
     # keyring and only needs the numeric tenant ID and active status.
     profile = SimpleNamespace(
         id=row.id,
         auth_user_id=row.auth_user_id,
-        status=row.status,
+        status=effective_status,
         identity_review_required=identity_review_required,
     )
     if str(getattr(profile, "status", "")).upper() != "ACTIVE" and not (
@@ -624,9 +660,11 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
 
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
-    await _paper_state_guard()
+    # Authenticate first so unauthenticated callers cannot probe preflight or
+    # kill-switch state. Keep the paper gate before any balance/portfolio read.
     async with SessionLocal() as db:
         profile, _claims = await get_existing_customer(authorization, db)
+    await _paper_state_guard()
     balances = await get_customer_paper_balances(customer_id=int(profile.id))
     positions = await get_customer_paper_positions(customer_id=int(profile.id))
     by_code = {

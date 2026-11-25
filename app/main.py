@@ -1782,6 +1782,9 @@ def _customer_paper_configuration_ready() -> bool:
         and settings.broker_sandbox
         and not getattr(settings, "deriv_live_enabled", False)
         and not settings.usdt_tron_enabled
+        and not getattr(settings, "usdt_tron_sweep_enabled", False)
+        and not getattr(settings, "forex_live_enabled", False)
+        and not getattr(settings, "binance_arbitrage_live_enabled", False)
         and settings.customer_paper_ledger_enabled
         and str(settings.customer_paper_database_url or "").strip()
     )
@@ -1816,7 +1819,7 @@ async def _adaptive_bot_runtime_gate(bot_id: int, customer_id: int, trading_acco
         state = await db.get(AppState, 1)
         if not bot or bot.status != "RUNNING":
             return False, True, "bot_stopped"
-        if not profile or profile.status != "ACTIVE":
+        if not profile or not await _customer_profile_effectively_active(db, profile):
             return False, True, "customer_inactive"
         if not account or account.status != "ACTIVE":
             return False, True, "trading_account_inactive"
@@ -2203,7 +2206,19 @@ async def _run_persisted_adaptive_bot_cycle(
         profile = await db.get(CustomerProfile, bot.customer_id)
         account = await db.get(TradingAccount, bot.trading_account_id)
         state = await db.get(AppState, 1)
-        if not profile or not account or account.status != "ACTIVE" or not state or state.kill_switch:
+        if not profile or not await _customer_profile_effectively_active(db, profile):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Customer identity is pending manual review or remains conflicted"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "customer_identity"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "customer_identity",
+                "reason": "Customer identity must be verified before another persisted bot cycle",
+            }
+        if not account or account.status != "ACTIVE" or not state or state.kill_switch:
             return {"decision": "NO_TRADE", "stage": "risk_state"}
         # Do not mask malformed or non-finite equity by clamping it to zero.
         # Customer-paper cycles replace this value with their isolated paper cash below.
@@ -2688,13 +2703,26 @@ async def _executor_controller_loop():
                         target = float(row.target_quantity or 0)
                         mode = str(row.mode or "PAPER").upper()
                         live_approved = bool(row.live_approved)
+                        profile = await db.get(CustomerProfile, cid) if cid is not None else None
+                        if cid is not None and (
+                            not profile
+                            or not await _customer_profile_effectively_active(db, profile)
+                        ):
+                            row.status = "STOPPED"
+                            row.next_run_at = None
+                            row.last_error = "Customer identity is pending manual review or remains conflicted"
+                            await db.commit()
+                            continue
                         if mode == "LIVE":
-                            profile = await db.get(CustomerProfile, cid)
                             account = await db.get(TradingAccount, row.trading_account_id)
                             state = await db.get(AppState, 1)
                             plan, _ = await _subscription_entitlements(db, cid)
+                            profile_active = bool(
+                                profile
+                                and await _customer_profile_effectively_active(db, profile)
+                            )
                             live_ok = bool(
-                                live_approved and profile and profile.status == "ACTIVE" and account and account.status == "ACTIVE"
+                                live_approved and profile_active and account and account.status == "ACTIVE"
                                 and state and not state.kill_switch and state.live_enabled
                                 and settings.customer_live_trading_enabled and settings.live_trading_enabled and not settings.paper_trading
                                 and not settings.broker_sandbox and bool(plan.get("live"))
@@ -3269,7 +3297,10 @@ async def _reconciliation_loop():
                 customer_exchanges = (await db.execute(
                     select(Trade.exchange).where(
                         Trade.customer_id.is_not(None),
-                        Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                        or_(
+                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                            Trade.fee_reconciliation_pending.is_(True),
+                        ),
                     ).distinct()
                 )).scalars().all()
             selected = [
@@ -3826,10 +3857,41 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     if not normalized:
         return False
     try:
-        rows = (await db.execute(
-            select(CustomerProfile.auth_user_id, CustomerProfile.email)
-            .where(CustomerProfile.auth_user_id != auth_user_id)
-        )).all()
+        bind_getter = getattr(db, "get_bind", None)
+        bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+        dialect = getattr(getattr(bind, "dialect", None), "name", "")
+        statement = select(
+            CustomerProfile.auth_user_id, CustomerProfile.email
+        ).where(CustomerProfile.auth_user_id != auth_user_id)
+        if dialect == "postgresql":
+            # Match revision 0060's partial-index predicate exactly. The fixed
+            # literal lets PostgreSQL prove the query implies the index predicate;
+            # a bind parameter may prevent partial-index selection.
+            from sqlalchemy import literal_column
+
+            uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+            statement = statement.where(
+                CustomerProfile.auth_user_id.op("!~*")(
+                    literal_column(f"'{uuid_pattern}'")
+                )
+            )
+        elif dialect == "sqlite":
+            # Match the SQLite partial index expression and predicate exactly.
+            from sqlalchemy import literal_column
+
+            uuid_glob = (
+                "[0-9a-f]" * 8 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 12
+            )
+            statement = statement.where(
+                func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
+                    literal_column(f"'{uuid_glob}'")
+                )
+            )
+        rows = (await db.execute(statement)).all()
     except Exception as exc:
         logger.exception("legacy_customer_identity_lookup_failed")
         raise HTTPException(503, "Customer identity verification is temporarily unavailable") from exc
@@ -3846,6 +3908,64 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
         if str(stored_email).strip().casefold() == normalized:
             return True
     return False
+
+
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Return whether any non-UUID legacy Auth reference remains unmapped."""
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect == "postgresql":
+        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    if dialect == "sqlite":
+        from sqlalchemy import literal_column
+
+        uuid_glob = (
+            "[0-9a-f]" * 8 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 4 + "-"
+            + "[0-9a-f]" * 12
+        )
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
+                literal_column(f"'{uuid_glob}'")
+            ),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    # Conservative fallback for a non-production/test dialect.
+    references = (await db.execute(
+        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
+    )).scalars().all()
+    for reference in references:
+        try:
+            uuid.UUID(str(reference))
+        except (ValueError, TypeError, AttributeError):
+            return True
+    return False
+
+
+async def _customer_profile_effectively_active(db, profile) -> bool:
+    """Resolve only this pending profile's legacy identity; preserve other inactive states."""
+    status = str(getattr(profile, "status", "") or "").upper()
+    if status == "ACTIVE":
+        return True
+    if status != "PENDING_IDENTITY_REVIEW":
+        return False
+    auth_user_id = str(getattr(profile, "auth_user_id", "") or "")
+    email = str(getattr(profile, "email", "") or "").strip()
+    conflict = (
+        await _legacy_customer_email_conflict(db, auth_user_id, email)
+        if email
+        else await _has_unmapped_legacy_customer_profile(db, auth_user_id)
+    )
+    return not conflict
 
 
 async def get_customer(
@@ -3866,49 +3986,62 @@ async def get_customer(
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
-    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
-    # verified Auth identity here, then let the ORM encrypt values on write.
-    if (profile is not None and (
-        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
-    )) or not email:
+    # Prefer already-persisted encrypted PII when the verified JWT omits a
+    # field. A missing display name is not a reason to call Supabase Auth:
+    # users without name metadata would otherwise trigger an Auth request on
+    # every customer endpoint.
+    if profile is not None:
+        email = email or str(profile.email or "").strip().lower()[:320]
+        name = name or str(profile.display_name or "").strip()[:160]
+
+    # Keyless Edge provisioning leaves encrypted PII empty. Verify Auth and
+    # backfill the email when the existing profile has no encrypted email; do
+    # not let a missing display name trigger a network call. Existing ACTIVE
+    # users are not newly required to reconfirm an email; new profiles are.
+    needs_auth_identity = profile is None or not str(profile.email or "").strip()
+    if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
-        if not user.get("email_confirmed_at"):
+        auth_email = str(user.get("email") or "").strip().lower()[:320]
+        if profile is None and (not auth_email or not user.get("email_confirmed_at")):
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or email).strip().lower()[:320]
+        email = auth_email or email
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
         name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    identity_review_required = (
-        profile is not None
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    )
-    if identity_review_required and not allow_identity_review_summary:
-        raise HTTPException(
-            409,
-            "This customer identity is pending manual review. Contact support before using the account.",
-        )
+    # New provisioning is paused while legacy non-UUID identities remain.
+    # Existing customers are evaluated per identity, not against a global legacy
+    # count that would incorrectly lock every unrelated customer account.
+    if profile is None:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+        if identity_review_required:
+            raise HTTPException(
+                409,
+                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+            )
+    else:
+        identity_review_required = False
+        pending_review = str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        # Only a pending identity or an Auth-backed email backfill needs a
+        # legacy comparison. Active profiles with an existing email must not be
+        # blocked by other customers' unmapped legacy references.
+        if pending_review or needs_auth_identity:
+            identity_review_required = (
+                await _legacy_customer_email_conflict(db, uid, email)
+                if email
+                else await _has_unmapped_legacy_customer_profile(db, uid)
+            )
+        profile.identity_review_required = identity_review_required
+        profile.auth_identity_email = email if identity_review_required else ""
 
-    # Check legacy non-UUID identities before inserting or activating a new
-    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
-    if profile is None or not str(profile.email or "").strip():
-        if await _legacy_customer_email_conflict(db, uid, email):
-            if profile is None:
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
-            profile.status = "PENDING_IDENTITY_REVIEW"
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                await db.commit()
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
+        if identity_review_required and not allow_identity_review_summary:
+            raise HTTPException(
+                409,
+                "This customer identity conflicts with an unmapped legacy profile. Manual identity review is required before using this account.",
+            )
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -3936,16 +4069,23 @@ async def get_customer(
                 profile.display_name = name
             await db.flush()
     else:
-        if not profile.email:
-            profile.email = email
-        if not profile.display_name:
-            profile.display_name = name
-        await db.flush()
+        # Never persist an email that matched an unmapped legacy identity; keeping
+        # it transient ensures the next request cannot bypass the manual review.
+        if not identity_review_required:
+            if not profile.email:
+                profile.email = email
+            if not profile.display_name:
+                profile.display_name = name
+            await db.flush()
 
-    if profile.status != "ACTIVE" and not (
-        allow_identity_review_summary
-        and identity_review_required
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    stale_legacy_quarantine = (
+        str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        and not identity_review_required
+    )
+    if str(profile.status or "").upper() != "ACTIVE" and not (
+        (allow_identity_review_summary and identity_review_required
+         and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW")
+        or stale_legacy_quarantine
     ):
         raise HTTPException(403, "Customer account is not active")
     if not identity_review_required:
@@ -4651,15 +4791,19 @@ async def _ensure_customer_subscription(db, profile: CustomerProfile, referral_c
     now = datetime.now(timezone.utc)
     from datetime import timedelta
     trial_end = now + timedelta(days=max(0, settings.billing_trial_days))
-    try:
-        async with db.begin_nested():
-            sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
-            db.add(sub)
-            await db.flush()
-    except IntegrityError:
-        sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
-        if not sub:
-            raise
+    # A lapsed trial is downgraded to an expired free row that keeps this stable key, so look it up
+    # first; blindly inserting would hit the unique key (and burn a sequence value) on every call.
+    sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
+    if sub is None:
+        try:
+            async with db.begin_nested():
+                sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
+                db.add(sub)
+                await db.flush()
+        except IntegrityError:
+            sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
+            if not sub:
+                raise
     code = (referral_code or "").strip().upper()
     if code:
         rc = (await db.execute(select(ReferralCode).where(ReferralCode.code == code, ReferralCode.active == True))).scalar_one_or_none()
@@ -5438,9 +5582,14 @@ async def customer_me(authorization: str | None = Header(default=None)):
         )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
-        return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status,
-                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+        return {"id": profile.id, "auth_user_id": profile.auth_user_id,
+                "email": getattr(profile, "auth_identity_email", "") or profile.email,
+                "display_name": profile.display_name, "status": (
+                    "PENDING_IDENTITY_REVIEW"
+                    if bool(getattr(profile, "identity_review_required", False))
+                    else ("ACTIVE" if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW" else profile.status)
+                ),
+                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
@@ -6324,7 +6473,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 current_state = await guard_db.get(AppState, 1)
                 latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                 if (
-                    not current_profile or current_profile.status != "ACTIVE"
+                    not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
                     or not current_account or current_account.status != "ACTIVE"
                     or not current_state or current_state.kill_switch
                     or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -6415,7 +6564,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 outcomes = []
                 if profile.id:
                     outcomes = list((await state_db.execute(
-                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED")
+                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED", StrategyOutcome.closing_notional > 0, StrategyOutcome.fee_basis_complete.is_(True))
                         .order_by(desc(StrategyOutcome.created_at)).limit(200)
                     )).scalars().all())
                 current_strategy = bot_row.active_strategy if bot_row else None
@@ -6647,7 +6796,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     current_state = await guard_db.get(AppState, 1)
                     latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                     if (
-                        not current_profile or current_profile.status != "ACTIVE"
+                        not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
                         or not current_account or current_account.status != "ACTIVE"
                         or not current_state or current_state.kill_switch
                         or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -7429,7 +7578,11 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             "in_sample_max_drawdown": float(selected.get("max_drawdown", -1.0)),
             "in_sample_note": "Selected-on data. Diagnostic only; never a pass criterion.",
         }
-        from .strategy_lab_validation import strategy_lab_candidate_passes
+        from .strategy_lab_validation import (
+            record_validation_unavailable_reason,
+            strategy_lab_candidate_passes,
+            uncompiled_candidate_safeguards,
+        )
         passed, oos_metrics = strategy_lab_candidate_passes(
             oos_gate,
             validation_available=not validation_unavailable,
@@ -7439,6 +7592,26 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             min_total_return=settings.adaptive_min_total_return,
         )
         gate["oos"] = oos_metrics
+        uncompiled_safeguards = uncompiled_candidate_safeguards(spec)
+        if uncompiled_safeguards:
+            # The current Strategy Lab backtest evaluates the supported family and
+            # stop/target configuration only. Do not let descriptive Native AI profile
+            # rules appear to have been validated when they were never executed.
+            passed = False
+            validation_unavailable = True
+            gate["validation_available"] = False
+            record_validation_unavailable_reason(
+                gate, "UNCOMPILED_STRATEGY_SAFEGUARDS"
+            )
+            gate["uncompiled_safeguards"] = uncompiled_safeguards
+            result["strategy_condition_validation"] = {
+                "status": "UNCOMPILED",
+                "blocked_conditions": uncompiled_safeguards,
+                "message": (
+                    "The Strategy Lab backtest did not execute these Native AI safeguards; "
+                    "this result is diagnostic only and cannot be VALIDATED."
+                ),
+            }
     except Exception as exc:
         result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True
     async with SessionLocal() as db:
@@ -7451,7 +7624,7 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         attempt=int(prior or 0)+1
         db.add(StrategyCandidateRun(candidate_id=candidate_id,attempt=attempt,backtest_json=json.dumps(result,default=str),oos_json=json.dumps(oos,default=str),gate_json=json.dumps(gate,default=str),passed=bool(passed)))
         await db.commit()
-    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
+    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family only; uncompiled Native AI profile safeguards block VALIDATED status and remain research specifications until the backtester executes them.","real_money_execution":False}
 
 @app.get("/api/customer/strategy-lab/candidates/{candidate_id}/runs")
 async def list_strategy_candidate_runs(candidate_id:int, authorization:str|None=Header(default=None)):
@@ -7946,6 +8119,21 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
         }
 
 
+async def _recent_closed_platform_outcome_returns(db):
+    """Read a bounded sample of one-row-per-trade completion summaries."""
+    return (await db.execute(
+        select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
+        .where(
+            StrategyOutcome.customer_id.is_(None),
+            StrategyOutcome.lifecycle_status == "CLOSED",
+            StrategyOutcome.closing_notional > 0,
+            StrategyOutcome.fee_basis_complete.is_(True),
+        )
+        .order_by(StrategyOutcome.created_at.desc())
+        .limit(100)
+    )).all()
+
+
 @app.get("/api/risk-dashboard/metrics")
 async def risk_dashboard_metrics(
     x_admin_token: str | None = Header(default=None),
@@ -7971,32 +8159,7 @@ async def risk_dashboard_metrics(
         worker_health = await _worker_health_snapshot(db)
 
         # Annualise only from the observed cadence of closed strategy outcomes.
-        latest_closed = (
-            select(
-                StrategyOutcome.trade_id.label("trade_id"),
-                func.max(StrategyOutcome.sequence).label("latest_sequence"),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .group_by(StrategyOutcome.trade_id)
-            .subquery()
-        )
-        rows = (await db.execute(
-            select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-            .join(
-                latest_closed,
-                (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .order_by(StrategyOutcome.created_at.desc())
-            .limit(100)
-        )).all()
+        rows = await _recent_closed_platform_outcome_returns(db)
         usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
         ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
         sharpe = ratios["sharpe"]
@@ -8111,32 +8274,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                latest_closed = (
-                    select(
-                        StrategyOutcome.trade_id.label("trade_id"),
-                        func.max(StrategyOutcome.sequence).label("latest_sequence"),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .group_by(StrategyOutcome.trade_id)
-                    .subquery()
-                )
-                rows = (await db.execute(
-                    select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-                    .join(
-                        latest_closed,
-                        (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                        & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .order_by(StrategyOutcome.created_at.desc())
-                    .limit(100)
-                )).all()
+                rows = await _recent_closed_platform_outcome_returns(db)
                 usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
                 ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
                 sharpe = ratios["sharpe"]
@@ -9466,6 +9604,24 @@ async def model_experiments_history(model_path: str | None = None, status: str |
         return out
 
 
+def _learning_episode_accounting_fields(episode, *, fee_basis_verified: bool = False):
+    """Expose fee-adjusted results only when all linked closing fees are authoritative."""
+    status = str(getattr(episode, "status", "") or "").upper()
+    verified = status == "COMPLETED" and bool(fee_basis_verified)
+    if verified:
+        fee_basis_status = "VERIFIED"
+    elif status == "FEE_PENDING" or status == "COMPLETED":
+        fee_basis_status = "PENDING_RECONCILIATION"
+    else:
+        fee_basis_status = "NOT_FINAL"
+    return {
+        "fee_basis_status": fee_basis_status,
+        "total_fees": episode.total_fees if verified else None,
+        "net_pnl": episode.net_pnl if verified else None,
+        "return_bps": episode.return_bps if verified else None,
+    }
+
+
 @app.get("/api/admin/learning/episodes")
 async def admin_learning_episodes(limit: int = 50, status: str | None = None, replay_status: str | None = None, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     """Operator view of Atlas trade memory and post-trade replay evidence."""
@@ -9479,18 +9635,33 @@ async def admin_learning_episodes(limit: int = 50, status: str | None = None, re
         if replay_status:
             q = q.where(TradeLearningEpisode.replay_status == replay_status)
         rows = (await db.execute(q.order_by(desc(TradeLearningEpisode.created_at)).limit(limit))).scalars().all()
+        entry_ids = [int(row.entry_trade_id) for row in rows]
+        fee_rows = (await db.execute(
+            select(StrategyOutcome.trade_id, StrategyOutcome.fee_basis_complete).where(
+                StrategyOutcome.trade_id.in_(entry_ids),
+                StrategyOutcome.closing_trade_id.is_not(None),
+            )
+        )).all() if entry_ids else []
+        fee_complete_by_entry: dict[int, bool] = {}
+        for trade_id, fee_complete in fee_rows:
+            key = int(trade_id)
+            fee_complete_by_entry[key] = fee_complete_by_entry.get(key, True) and bool(fee_complete)
         out = []
         for r in rows:
+            accounting = _learning_episode_accounting_fields(
+                r, fee_basis_verified=fee_complete_by_entry.get(int(r.entry_trade_id), False)
+            )
+            outcome_verified = accounting["fee_basis_status"] == "VERIFIED"
             out.append({
                 "id": r.id, "entry_trade_id": r.entry_trade_id, "closing_trade_id": r.closing_trade_id,
                 "customer_id": r.customer_id, "bot_id": r.bot_id, "symbol": r.symbol, "exchange": r.exchange,
                 "timeframe": r.timeframe, "strategy": r.strategy, "regime": r.regime, "side": r.side,
                 "status": r.status, "replay_status": r.replay_status, "replay_version": r.replay_version,
                 "entry_price": r.entry_price, "exit_price": r.exit_price, "gross_pnl": r.gross_pnl,
-                "total_fees": r.total_fees, "net_pnl": r.net_pnl, "return_bps": r.return_bps,
+                **accounting,
                 "bars_held": r.bars_held, "mfe_bps": r.mfe_bps, "mae_bps": r.mae_bps,
-                "market_flow": json.loads(r.market_flow_json or "{}"),
-                "memory": json.loads(r.learning_memory_json or "{}"),
+                "market_flow": json.loads(r.market_flow_json or "{}") if outcome_verified else {},
+                "memory": json.loads(r.learning_memory_json or "{}") if outcome_verified else {},
                 "created_at": r.created_at.isoformat(), "updated_at": r.updated_at.isoformat(),
             })
         return out
@@ -9504,19 +9675,32 @@ async def admin_learning_episode_detail(episode_id: int, x_admin_token: str | No
         ep = await db.get(TradeLearningEpisode, int(episode_id))
         if not ep:
             raise HTTPException(404, "Learning episode not found")
+        fee_rows = (await db.execute(
+            select(StrategyOutcome.fee_basis_complete).where(
+                StrategyOutcome.trade_id == int(ep.entry_trade_id),
+                StrategyOutcome.closing_trade_id.is_not(None),
+            )
+        )).scalars().all()
+        accounting = _learning_episode_accounting_fields(
+            ep, fee_basis_verified=bool(fee_rows) and all(bool(value) for value in fee_rows)
+        )
+        outcome_verified = accounting["fee_basis_status"] == "VERIFIED"
         replays = (await db.execute(select(TradeReplayResult).where(TradeReplayResult.episode_id == ep.id).order_by(TradeReplayResult.strategy))).scalars().all()
         return {
             "id": ep.id, "entry_trade_id": ep.entry_trade_id, "closing_trade_id": ep.closing_trade_id,
             "strategy": ep.strategy, "regime": ep.regime, "symbol": ep.symbol, "timeframe": ep.timeframe,
             "status": ep.status, "replay_status": ep.replay_status, "replay_error": ep.replay_error,
-            "gross_pnl": ep.gross_pnl, "total_fees": ep.total_fees, "net_pnl": ep.net_pnl,
-            "return_bps": ep.return_bps, "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
-            "market_flow": json.loads(ep.market_flow_json or "{}"),
-            "memory": json.loads(ep.learning_memory_json or "{}"),
-            "replays": [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
-                         "entry_decision_return_bps": x.entry_decision_return_bps,
-                         "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
-                         "comparison_scope": x.comparison_scope} for x in replays],
+            "gross_pnl": ep.gross_pnl, **accounting,
+            "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
+            "market_flow": json.loads(ep.market_flow_json or "{}") if outcome_verified else {},
+            "memory": json.loads(ep.learning_memory_json or "{}") if outcome_verified else {},
+            "replays": (
+                [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
+                  "entry_decision_return_bps": x.entry_decision_return_bps,
+                  "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
+                  "comparison_scope": x.comparison_scope} for x in replays]
+                if outcome_verified else []
+            ),
         }
 
 
