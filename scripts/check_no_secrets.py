@@ -472,10 +472,9 @@ def _structured_private_object_has_material(value) -> bool:
                         else:
                             return True
                     # Public JWK metadata may contain provider-specific fields.
-                    # Do not exempt the whole mapping: unknown nested values such as
-                    # metadata.private_blob still inherit private context and must be
-                    # checked. Only the ambiguous descriptive labels "key"/"value"
-                    # receive the narrow short-label exception above.
+                    # Preserve private context below nested private/secret entries so
+                    # their child objects are still inspected; scalar labels in the
+                    # metadata mapping use the strong-signal check above.
                     if (
                         private_context
                         and not public_metadata_mapping
