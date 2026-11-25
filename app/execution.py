@@ -3891,14 +3891,24 @@ def _merge_authoritative_trade_history_fee(
     order_id = str(order.get("id") or expected_order_id or "").strip()
     if not order_id or not isinstance(history, list):
         return None
-    try:
-        raw_filled = order.get("filled")
-        expected_filled = Decimal(str(
-            raw_filled if raw_filled is not None else stored_filled_quantity
-        ))
-    except (TypeError, ValueError, ArithmeticError):
+    observed_quantities: list[Decimal] = []
+    for raw_quantity in (order.get("filled"), stored_filled_quantity):
+        if raw_quantity is None:
+            continue
+        try:
+            quantity = Decimal(str(raw_quantity))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not quantity.is_finite() or quantity < 0:
+            return None
+        observed_quantities.append(quantity)
+    if not observed_quantities:
         return None
-    if not expected_filled.is_finite() or expected_filled <= 0:
+    # The persisted row and this broker snapshot are both lower bounds on the
+    # amount of execution the history must explain. A stale broker snapshot
+    # must not make an already-recorded fill disappear from fee reconciliation.
+    expected_filled = max(observed_quantities)
+    if expected_filled <= 0:
         return None
 
     matched_quantity = Decimal("0")
@@ -4186,30 +4196,37 @@ async def _apply_broker_snapshot(
     }
     if persisted_terminal_status in terminal_snapshot_statuses:
         snapshot_filled = Decimal(str(filled))
-        stale_terminal_snapshot = (
-            status not in terminal_snapshot_statuses[persisted_terminal_status]
-            or snapshot_filled + Decimal("0.000000001") < previous_filled_quantity
+        stale_status = status not in terminal_snapshot_statuses[persisted_terminal_status]
+        quantity_regressed = (
+            snapshot_filled + Decimal("0.000000001") < previous_filled_quantity
         )
-        if stale_terminal_snapshot:
-            if not verified_trade_history_fee:
-                # The broker lookup happened before this row was locked. Do not
-                # let that older snapshot regress terminal state or quantity.
-                # Refresh the retry cursor so other pending terminal fees progress.
-                trade.updated_at = utcnow()
-                return 0.0
+        if quantity_regressed and not verified_trade_history_fee:
+            # The broker lookup happened before this row was locked. Do not let
+            # an older snapshot reduce a terminal fill or settle its stale fee.
+            # Refresh the retry cursor so other pending terminal fees progress.
+            trade.updated_at = utcnow()
+            return 0.0
+        if stale_status or quantity_regressed:
+            # A stale status may still carry an authoritative cumulative fee
+            # when it reports the same (or a greater) filled quantity. Preserve
+            # the terminal status and its recorded remainder, but allow that
+            # fee true-up to settle. If quantity regressed, only complete,
+            # order-matched trade history may supply the missing fee basis.
             status = {
                 "FILLED": "closed",
                 "CANCELED": "canceled",
                 "REJECTED": "rejected",
             }[persisted_terminal_status]
-            filled = float(previous_filled_quantity)
-            stored_remaining = trade.remaining_quantity
-            remaining = (
-                float(stored_remaining)
-                if stored_remaining is not None
-                else max(0.0, requested - filled)
-            )
-            avg = float(trade.average_fill_price or avg)
+            if quantity_regressed:
+                filled = float(previous_filled_quantity)
+            if snapshot_filled <= previous_filled_quantity:
+                stored_remaining = trade.remaining_quantity
+                remaining = (
+                    float(stored_remaining)
+                    if stored_remaining is not None
+                    else max(0.0, requested - filled)
+                )
+                avg = float(trade.average_fill_price or avg)
             if not all(
                 Decimal(str(value)).is_finite()
                 for value in (filled, requested, remaining, avg)
