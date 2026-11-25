@@ -13,6 +13,8 @@ def test_paper_staging_serves_the_restricted_browser_workspace():
     assert "PAPER ONLY" in response.text
     assert "Live trading" in response.text
     assert "Live payouts" in response.text
+    assert 'id="retry-preflight"' in response.text
+    assert "Recheck staging readiness" in response.text
     assert "<script>" not in response.text
 
 
@@ -26,6 +28,9 @@ def test_paper_staging_browser_assets_are_same_origin_and_cache_restricted():
     assert script.headers["cache-control"] == "no-store"
     assert '"/api/customer/paper/orders"' in script.text
     assert '"/api/auth/mfa/verify"' in script.text
+    assert "handlePaperGateError" in script.text
+    assert '$("blocked-state").hidden = false' in script.text
+    assert '$("retry-preflight").addEventListener' in script.text
     assert "localStorage" not in script.text
     assert "sessionStorage" not in script.text
     assert "/api/customer/withdraw" not in script.text
