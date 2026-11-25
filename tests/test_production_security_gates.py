@@ -910,7 +910,14 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
         revision = re.search(r'(?m)^revision\s*=\s*["\'](\d{4})_', source)
         if not revision or int(revision.group(1)) <= 59:
             continue
-        if "rolbypassrls" in source and re.search(r"\bGRANT\b", source, re.IGNORECASE):
+        # Only flag migrations that select BYPASSRLS login roles for a grant
+        # loop. A defensive check that a dedicated NOLOGIN role is NOT BYPASSRLS
+        # is not such a loop and must not be mistaken for one.
+        selects_bypassrls_roles = re.search(
+            r"(?is)SELECT\s+.*?rolbypassrls.*?FROM\s+pg_roles",
+            source,
+        )
+        if selects_bypassrls_roles and re.search(r"\bGRANT\b", source, re.IGNORECASE):
             assert "atlas_audit_reader" in source, (
                 f"{path.name} grants privileges to BYPASSRLS roles but does not exclude atlas_audit_reader"
             )
@@ -945,7 +952,9 @@ def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles(
     ):
         assert f"public.{function_name}" in integrity
     assert "atlas_ledger_trigger_owner" in integrity
-    assert "NOLOGIN NOINHERIT BYPASSRLS" in integrity
+    assert "NOLOGIN NOINHERIT NOBYPASSRLS" in integrity
+    assert "CREATE POLICY atlas_ledger_trigger_owner_select" in integrity
+    assert "AND NOT rolbypassrls" in integrity
     assert "SECURITY DEFINER" in integrity
     assert "SET search_path = pg_catalog, public, pg_temp" in integrity
     assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner" in integrity
