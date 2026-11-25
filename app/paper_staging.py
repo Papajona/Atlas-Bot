@@ -684,7 +684,7 @@ async def paper_customer_market_scanner(
     async with SessionLocal() as db:
         # Market data is customer-visible only after the same AAL2 profile check as
         # the paper portfolio; this route never creates or advances an order.
-        await get_existing_customer(authorization, db)
+        await get_existing_customer(authorization, db, require_aal2=True)
 
     import ccxt
 
