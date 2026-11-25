@@ -33,6 +33,8 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             migration_role text := current_user;
             role_oid oid;
             trigger_function_owner oid;
+            migration_role_oid oid;
+            migration_role_superuser boolean;
             function_signature text;
             grantee_name text;
         BEGIN
@@ -142,16 +144,36 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             FROM pg_proc
             WHERE oid = to_regprocedure('public.atlas_ledger_journal_deferred_check()');
 
+            SELECT oid, rolsuper
+              INTO migration_role_oid, migration_role_superuser
+            FROM pg_roles
+            WHERE rolname = migration_role;
+
             IF trigger_function_owner <> role_oid THEN
                 IF migration_role = role_name THEN
                     RAISE EXCEPTION
                         'migration must use a separate administrative identity to assign the ledger trigger owner';
                 END IF;
 
-                -- Revoke all external EXECUTE grants while the migration actor
-                -- still owns the original functions. After OWNER TO is changed,
-                -- a non-superuser migration actor cannot revoke the new owner's
-                -- grants merely because it once held role membership.
+                IF NOT migration_role_superuser AND EXISTS (
+                    SELECT 1
+                    FROM pg_proc p
+                    WHERE p.oid IN (
+                        to_regprocedure('public.atlas_block_ledger_mutation()'),
+                        to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
+                        to_regprocedure('public.atlas_validate_ledger_journal(integer)'),
+                        to_regprocedure('public.atlas_research_trial_archive_immutable()'),
+                        to_regprocedure('public.atlas_research_holdout_registry_immutable()')
+                    )
+                      AND p.proowner <> migration_role_oid
+                ) THEN
+                    RAISE EXCEPTION
+                        'migration identity must own every internal ledger function before ACL hardening';
+                END IF;
+
+                -- Enumerate every explicit EXECUTE grantee, not only the known
+                -- application roles. The current function owner has grant
+                -- authority before ownership is transferred to the isolated role.
                 FOREACH function_signature IN ARRAY ARRAY[
                     'public.atlas_block_ledger_mutation()',
                     'public.atlas_ledger_journal_deferred_check()',
@@ -163,19 +185,23 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                         'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC',
                         function_signature
                     );
-                    FOREACH grantee_name IN ARRAY ARRAY[
-                        'anon', 'authenticated', 'service_role',
-                        'atlas_paper_reader', 'atlas_customer_paper',
-                        'atlas_api_runtime', 'atlas_audit_reader',
-                        'atlas_ledger_trigger_owner'
-                    ] LOOP
-                        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = grantee_name) THEN
-                            EXECUTE format(
-                                'REVOKE EXECUTE ON FUNCTION %s FROM %I',
-                                function_signature,
-                                grantee_name
-                            );
-                        END IF;
+
+                    FOR grantee_name IN
+                        SELECT DISTINCT grantee.rolname
+                        FROM pg_proc p
+                        CROSS JOIN LATERAL aclexplode(
+                            coalesce(p.proacl, acldefault('f', p.proowner))
+                        ) acl
+                        JOIN pg_roles grantee ON grantee.oid = acl.grantee
+                        WHERE p.oid = to_regprocedure(function_signature)
+                          AND acl.privilege_type = 'EXECUTE'
+                          AND acl.grantee <> p.proowner
+                    LOOP
+                        EXECUTE format(
+                            'REVOKE EXECUTE ON FUNCTION %s FROM %I',
+                            function_signature,
+                            grantee_name
+                        );
                     END LOOP;
                 END LOOP;
                 EXECUTE 'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner';
@@ -237,46 +263,19 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     CROSS JOIN LATERAL aclexplode(
                         coalesce(p.proacl, acldefault('f', p.proowner))
                     ) acl
-                    LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
                     WHERE p.oid = to_regprocedure(function_signature)
                       AND acl.privilege_type = 'EXECUTE'
-                      AND (
-                          acl.grantee = 0
-                          OR grantee.rolname = ANY(ARRAY[
-                              'anon', 'authenticated', 'service_role',
-                              'atlas_paper_reader', 'atlas_customer_paper',
-                              'atlas_api_runtime', 'atlas_audit_reader'
-                          ])
+                      AND acl.grantee <> p.proowner
+                      AND NOT (
+                          p.oid = to_regprocedure('public.atlas_validate_ledger_journal(integer)')
+                          AND acl.grantee = role_oid
                       )
                 ) THEN
                     RAISE EXCEPTION
-                        'internal function % retains an external EXECUTE grant after trigger-owner isolation',
+                        'internal function % retains an unapproved explicit EXECUTE grant after trigger-owner isolation',
                         function_signature;
                 END IF;
             END LOOP;
-
-            IF EXISTS (
-                SELECT 1
-                FROM pg_proc p
-                CROSS JOIN LATERAL aclexplode(
-                    coalesce(p.proacl, acldefault('f', p.proowner))
-                ) acl
-                WHERE p.oid IN (
-                    to_regprocedure('public.atlas_block_ledger_mutation()'),
-                    to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
-                    to_regprocedure('public.atlas_validate_ledger_journal(integer)'),
-                    to_regprocedure('public.atlas_research_trial_archive_immutable()'),
-                    to_regprocedure('public.atlas_research_holdout_registry_immutable()')
-                )
-                  AND acl.grantee = role_oid
-                  AND p.oid NOT IN (
-                      to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
-                      to_regprocedure('public.atlas_validate_ledger_journal(integer)')
-                  )
-            ) THEN
-                RAISE EXCEPTION
-                    'atlas_ledger_trigger_owner has an unexpected direct EXECUTE grant';
-            END IF;
 
             IF has_schema_privilege(role_name, 'public', 'CREATE')
                OR NOT has_schema_privilege(role_name, 'public', 'USAGE')
