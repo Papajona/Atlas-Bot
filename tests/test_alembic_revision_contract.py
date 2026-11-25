@@ -80,6 +80,7 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         assert f'down_revision = "{parent}"' in migration
     assert expected_alembic_heads(versions) == {"0065_ledger_trigger_owner_isolation"}
 
+
 def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer():
     migration = (
         ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
@@ -95,7 +96,9 @@ def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer(
     transfer = migration.index(
         "ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO atlas_ledger_trigger_owner"
     )
-    revoke_membership = migration.index("REVOKE %I FROM %I")
+    revoke_membership = migration.index(
+        "EXECUTE format('REVOKE %I FROM %I', role_name, migration_role)"
+    )
     assert revoke < transfer < revoke_membership
 
 
