@@ -89,10 +89,10 @@ repair_secret_access_only() {
   gcloud iam service-accounts describe "$PREFLIGHT_SA" --project="$PROJECT_ID" >/dev/null
   local secret_name
   for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
-    grant_secret_accessor "$secret_name" "$RUNTIME_SA"
+    grant_secret_accessor "$secret_name" "$RUNTIME_SA" || return $?
   done
   for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do
-    grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"
+    grant_secret_accessor "$secret_name" "$PREFLIGHT_SA" || return $?
   done
   echo "PASS: runtime and preflight Secret Manager access is present on only the required staging secrets."
 }
