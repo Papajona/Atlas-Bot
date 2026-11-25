@@ -455,26 +455,31 @@ def _structured_private_object_has_material(value) -> bool:
                     or normalized_key.startswith(("private", "secret"))
                 )
                 field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
+                descriptive_metadata_field = public_metadata_mapping and (
+                    normalized_key in {"key", "value"}
+                    or normalized_key.endswith("label")
+                )
                 if isinstance(item, str):
                     if field_is_private and _nonempty_private_scalar(item):
-                        if public_metadata_mapping:
-                            # Public JWK metadata can contain descriptive fields
-                            # such as key, value, or secret_label. Treat those as
-                            # labels unless the scalar has a strong secret signal:
-                            # contiguous key material or a complete BIP-39 phrase.
-                            # The broader six-word heuristic is intentionally not
-                            # used here because ordinary metadata prose is common.
+                        if descriptive_metadata_field:
+                            # Public JWK metadata key/value fields and *label
+                            # fields may contain descriptive prose. Only treat
+                            # them as secrets when they contain contiguous key
+                            # material or a complete BIP-39 phrase; the broader
+                            # six-word heuristic would flag ordinary prose.
                             if (
                                 _looks_like_private_key_material(item)
                                 or _is_bip39_wordlist_phrase(item)
                             ):
                                 return True
                         else:
+                            # Explicit secret/private metadata fields remain
+                            # sensitive even when their value is not key-shaped.
                             return True
                     # Public JWK metadata may contain provider-specific fields.
                     # Preserve private context below nested private/secret entries so
-                    # their child objects are still inspected; scalar labels in the
-                    # metadata mapping use the strong-signal check above.
+                    # their child objects are still inspected; only key/value and
+                    # *label scalar descriptions use the strong-signal check above.
                     if (
                         private_context
                         and not public_metadata_mapping
@@ -488,7 +493,7 @@ def _structured_private_object_has_material(value) -> bool:
                     and isinstance(item, (int, float))
                     and not isinstance(item, bool)
                     and item != 0
-                    and not public_metadata_mapping
+                    and not descriptive_metadata_field
                 ):
                     return True
                 if isinstance(item, (dict, list)):
