@@ -93,6 +93,43 @@ def test_missing_fee_data_is_estimated_but_withheld_and_flagged():
             assert flagged.severity == "HIGH"
     asyncio.run(with_database(check))
 
+def test_repeated_estimated_snapshots_do_not_invent_unknown_denomination_alert():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("1000")))
+            trade = _trade(status="FILLED")
+            db.add(trade)
+            await db.flush()
+
+            first = execution._prepare_live_fee(trade, {}, 0.1, 60000)
+            assert first[2] == "estimated"
+            assert trade.fee_reconciliation_pending is True
+            await execution._post_live_fee(db, trade, *first)
+            await db.flush()
+
+            second = execution._prepare_live_fee(trade, {}, 0.1, 60000)
+            assert second[2] == "estimated"
+            assert "unresolved denomination" not in second[3]
+            assert trade.fee_reconciliation_pending is True
+            await execution._post_live_fee(db, trade, *second)
+            await db.commit()
+
+            estimated = (await db.execute(
+                select(Incident).where(
+                    Incident.incident_key == f"LIVE_FEE_ESTIMATED:{trade.id}"
+                )
+            )).scalars().all()
+            unverified = (await db.execute(
+                select(Incident).where(
+                    Incident.incident_key == f"LIVE_FEE_UNVERIFIED:{trade.id}"
+                )
+            )).scalars().all()
+            assert len(estimated) == 1
+            assert unverified == []
+
+    asyncio.run(with_database(check))
+
+
 def test_fee_never_decreases_automatically():
     async def check(sessions):
         async with sessions():
