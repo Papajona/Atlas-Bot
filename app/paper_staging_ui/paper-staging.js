@@ -393,6 +393,7 @@
 
   async function refreshData() {
     if (!state.accessToken) return;
+    const version = state.sessionVersion;
     const button = $("refresh-button");
     setBusy(button, true, "Refreshing…");
     try {
@@ -403,6 +404,9 @@
         api("/api/customer/paper/orders"),
         api("/api/customer/paper/history?limit=50")
       ]);
+      // A previous customer's slow refresh must not repaint the page after sign-out
+      // or after a different session has signed in.
+      if (!sessionIsCurrent(version)) return;
       const portfolio = results[0] || {};
       const balances = Array.isArray(results[1].balances) ? results[1].balances : [];
       const positions = Array.isArray(results[2].positions) ? results[2].positions : [];
@@ -425,11 +429,11 @@
       showWorkspace(true);
       setNotice("order-message", state.initialized ? "Paper account is initialized. Orders remain virtual and are filled only by verified completed bars." : "Initialize the virtual account before submitting an order.", "info");
     } catch (error) {
-      if (!handlePaperGateError(error)) {
+      if (sessionIsCurrent(version) && !handlePaperGateError(error)) {
         setNotice("order-message", error.message, "error");
       }
     } finally {
-      setBusy(button, false);
+      if (sessionIsCurrent(version)) setBusy(button, false);
     }
   }
 
@@ -521,6 +525,7 @@
       setNotice("scanner-message", "Sign in and complete authenticator verification before scanning markets.", "error");
       return;
     }
+    const version = state.sessionVersion;
     const requested = $("scanner-symbols").value
       .split(",")
       .map((value) => value.trim())
@@ -537,6 +542,7 @@
         symbols: unique.join(",")
       });
       const result = await api("/api/customer/market-scanner?" + query.toString());
+      if (!sessionIsCurrent(version)) return;
       const rows = Array.isArray(result.results) ? result.results : [];
       renderScannerResults(rows);
       const errors = rows.filter((row) => row.signal === "ERROR").length;
@@ -548,11 +554,11 @@
         errors ? "info" : "success"
       );
     } catch (error) {
-      if (!handlePaperGateError(error)) {
+      if (sessionIsCurrent(version) && !handlePaperGateError(error)) {
         setNotice("scanner-message", error.message, "error");
       }
     } finally {
-      setBusy(button, false);
+      if (sessionIsCurrent(version)) setBusy(button, false);
     }
   }
 
