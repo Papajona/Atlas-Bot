@@ -297,6 +297,22 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
                 await connection.execute(
                     "COMMENT ON ROLE atlas_ledger_trigger_owner IS 'pre-existing-trigger-owner-comment'"
                 )
+                # A separate grantor creates the direct ACL entries. This
+                # reproduces a reused trigger role whose privileges predate
+                # 0065 and were not granted by the migration identity.
+                await connection.execute("CREATE ROLE atlas_0065_acl_owner NOLOGIN")
+                await connection.execute(
+                    "GRANT USAGE ON SCHEMA public TO atlas_0065_acl_owner WITH GRANT OPTION"
+                )
+                await connection.execute(
+                    "GRANT SELECT ON TABLE public.ledger_journals, "
+                    "public.ledger_journal_lines TO atlas_0065_acl_owner WITH GRANT OPTION"
+                )
+                await connection.execute(
+                    f"GRANT EXECUTE ON FUNCTION {VALIDATE_FUNCTION} "
+                    "TO atlas_0065_acl_owner WITH GRANT OPTION"
+                )
+                await connection.execute("SET ROLE atlas_0065_acl_owner")
                 await connection.execute(
                     "GRANT USAGE ON SCHEMA public TO atlas_ledger_trigger_owner"
                 )
@@ -308,6 +324,7 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
                     f"GRANT EXECUTE ON FUNCTION {VALIDATE_FUNCTION} "
                     "TO atlas_ledger_trigger_owner"
                 )
+                await connection.execute("RESET ROLE")
 
             elif stage in {"verify-upgrade", "verify-downgrade"}:
                 expected_revision = (
@@ -434,6 +451,18 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
                 await connection.execute(
                     "DROP ROLE IF EXISTS atlas_ledger_trigger_owner"
                 )
+                await connection.execute(
+                    "REVOKE USAGE ON SCHEMA public FROM atlas_0065_acl_owner"
+                )
+                await connection.execute(
+                    "REVOKE SELECT ON TABLE public.ledger_journals, "
+                    "public.ledger_journal_lines FROM atlas_0065_acl_owner"
+                )
+                await connection.execute(
+                    f"REVOKE EXECUTE ON FUNCTION {VALIDATE_FUNCTION} "
+                    "FROM atlas_0065_acl_owner"
+                )
+                await connection.execute("DROP ROLE IF EXISTS atlas_0065_acl_owner")
             finally:
                 await connection.close()
 
