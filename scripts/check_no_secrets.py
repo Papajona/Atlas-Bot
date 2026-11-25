@@ -455,9 +455,6 @@ def _structured_private_object_has_material(value) -> bool:
                     or normalized_key.startswith(("private", "secret"))
                 )
                 field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
-                ambiguous_public_metadata_field = (
-                    public_metadata_mapping and normalized_key in {"key", "value"}
-                )
                 if isinstance(item, str):
                     if field_is_private and _nonempty_private_scalar(item):
                         if public_metadata_mapping:
