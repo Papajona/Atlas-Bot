@@ -26,7 +26,8 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy import select, desc, or_, and_, exists, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -8319,16 +8320,34 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
 
 
 async def _recent_closed_platform_outcome_returns(db):
-    """Read a bounded sample of one-row-per-trade completion summaries."""
-    return (await db.execute(
-        select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-        .where(
+    """Read the latest closed outcome per platform trade from a bounded sample."""
+    candidate = aliased(StrategyOutcome)
+    has_newer_lifecycle = exists(
+        select(StrategyOutcome.id).where(
+            StrategyOutcome.trade_id == candidate.trade_id,
             StrategyOutcome.customer_id.is_(None),
             StrategyOutcome.lifecycle_status == "CLOSED",
             StrategyOutcome.closing_notional > 0,
             StrategyOutcome.fee_basis_complete.is_(True),
+            or_(
+                StrategyOutcome.created_at > candidate.created_at,
+                and_(
+                    StrategyOutcome.created_at == candidate.created_at,
+                    StrategyOutcome.id > candidate.id,
+                ),
+            ),
         )
-        .order_by(StrategyOutcome.created_at.desc())
+    )
+    return (await db.execute(
+        select(candidate.net_return_bps, candidate.created_at)
+        .where(
+            candidate.customer_id.is_(None),
+            candidate.lifecycle_status == "CLOSED",
+            candidate.closing_notional > 0,
+            candidate.fee_basis_complete.is_(True),
+            ~has_newer_lifecycle,
+        )
+        .order_by(candidate.created_at.desc(), candidate.id.desc())
         .limit(100)
     )).all()
 
