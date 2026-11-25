@@ -423,17 +423,22 @@ PUBLIC_JWK_METADATA_FIELDS = {
 
 def _structured_private_object_has_material(value) -> bool:
     """Detect nested private JWK material while preserving public metadata exceptions."""
-    # A root array under private_key has private scalar entries, but objects
-    # inside that array may be public JWKs. Do not propagate the array's scalar
-    # rule into unknown fields of those objects.
-    stack = [(value, isinstance(value, list), isinstance(value, dict))]
-    visited: set[tuple[int, bool, bool]] = set()
+    # A root array under private_key may contain public JWK objects with
+    # provider-specific private siblings. Keep private context for those object
+    # siblings, while the public JWK metadata allowlist prevents false positives.
+    stack = [(value, isinstance(value, list), isinstance(value, (dict, list)), False)]
+    visited: set[tuple[int, bool, bool, bool]] = set()
     visits = 0
     while stack:
-        current, scalar_items_are_private, private_context = stack.pop()
+        current, scalar_items_are_private, private_context, public_metadata_mapping = stack.pop()
         if not isinstance(current, (dict, list)):
             continue
-        identity = (id(current), scalar_items_are_private, private_context)
+        identity = (
+            id(current),
+            scalar_items_are_private,
+            private_context,
+            public_metadata_mapping,
+        )
         if identity in visited:
             continue
         visited.add(identity)
@@ -450,12 +455,12 @@ def _structured_private_object_has_material(value) -> bool:
                 if isinstance(item, str):
                     if field_is_private and _nonempty_private_scalar(item):
                         return True
-                    # A nested object entered through an explicitly private field
-                    # can use provider-specific field names (for example "data").
-                    # Scan long key-like scalars there, but keep public JWK fields
-                    # excluded from this broader private-context check.
+                    # Direct values in a recognized metadata mapping are public
+                    # descriptive metadata. Nested containers still inherit the
+                    # surrounding private context and are inspected recursively.
                     if (
                         private_context
+                        and not public_metadata_mapping
                         and not field_is_public
                         and _looks_like_private_key_material(item)
                     ):
@@ -463,14 +468,10 @@ def _structured_private_object_has_material(value) -> bool:
                 if field_is_private and isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                     return True
                 if isinstance(item, (dict, list)):
-                    # Public JWK coordinates/material metadata are not private
-                    # scalar values. The generic "metadata" container is special:
-                    # its direct scalar/list values are public labels, but nested
-                    # objects still inherit private context so private-looking
-                    # siblings (for example metadata.private_blob) are inspected.
                     if normalized_key == "metadata" and field_is_public:
                         child_private = private_context
                         child_scalar_items_private = False
+                        child_public_metadata_mapping = True
                     else:
                         child_private = False if field_is_public else (
                             private_context or field_is_private
@@ -478,28 +479,30 @@ def _structured_private_object_has_material(value) -> bool:
                         child_scalar_items_private = (
                             child_private and isinstance(item, list)
                         )
-                    stack.append((item, child_scalar_items_private, child_private))
+                        child_public_metadata_mapping = False
+                    stack.append((
+                        item,
+                        child_scalar_items_private,
+                        child_private,
+                        child_public_metadata_mapping,
+                    ))
         else:
             for item in current:
                 if isinstance(item, dict):
-                    # Keep the enclosing private-key context for array objects.
-                    # Public JWK metadata is exempted field-by-field in the dict
-                    # branch above; it must not disable inspection of unknown
-                    # sibling fields that may contain private material.
+                    stack.append((item, False, private_context, False))
+                elif isinstance(item, list):
                     stack.append((
                         item,
+                        scalar_items_are_private,
+                        private_context,
                         False,
-                        private_context or scalar_items_are_private,
                     ))
-                elif isinstance(item, list):
-                    stack.append((item, scalar_items_are_private, private_context))
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
     return False
-
 
 def _yaml_node_has_private_material(
     node,
