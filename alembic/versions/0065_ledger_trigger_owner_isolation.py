@@ -474,12 +474,21 @@ def downgrade() -> None:
                 EXECUTE 'REVOKE USAGE ON SCHEMA public FROM atlas_ledger_trigger_owner';
             END IF;
 
-            IF coalesce((role_state->>'role_created_by_revision')::boolean, false) THEN
-                -- DROP ROLE intentionally fails closed if another actor has
-                -- attached new dependencies/grants since upgrade. Never use
-                -- DROP OWNED, which could erase unrelated operator state.
+            IF coalesce((role_state->>'role_created_by_revision')::boolean, false)
+               AND NOT EXISTS (
+                    SELECT 1
+                    FROM pg_shdepend
+                    WHERE refclassid = 'pg_authid'::regclass
+                      AND refobjid = role_oid
+               ) THEN
+                -- Drop only a role created here that has no remaining shared
+                -- dependencies. If an operator added unrelated grants or
+                -- memberships after upgrade, preserve the role and complete
+                -- the downgrade without DROP OWNED or destructive revocation.
                 EXECUTE 'DROP ROLE atlas_ledger_trigger_owner';
             ELSE
+                -- Restore the original comment for reused roles and for
+                -- revision-created roles that acquired independent dependencies.
                 EXECUTE format(
                     'COMMENT ON ROLE %I IS %L',
                     role_name,
