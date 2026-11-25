@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from scripts import check_no_secrets
 
 
