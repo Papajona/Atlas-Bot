@@ -167,3 +167,46 @@ def test_active_profile_with_email_but_no_display_name_rejects_unconfirmed_auth_
 
     assert raised.value.status_code == 403
     assert "confirmed email" in raised.value.detail.lower()
+
+def test_active_profile_without_display_name_does_not_trigger_legacy_email_quarantine(monkeypatch):
+    auth_id = "11111111-2222-4333-8444-555555555555"
+    profile = SimpleNamespace(
+        auth_user_id=auth_id,
+        email="active@example.test",
+        display_name="",
+        status="ACTIVE",
+    )
+    db = _CustomerIdentityDatabase(profile)
+    auth_calls = []
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {"sub": auth_id, "email": "active@example.test"}
+
+    async def auth_user(_token):
+        auth_calls.append(_token)
+        return {
+            "id": auth_id,
+            "email": "active@example.test",
+            "email_confirmed_at": "2026-11-25T00:00:00Z",
+            "user_metadata": {"full_name": "Verified Customer"},
+        }
+
+    async def forbidden_legacy_check(*_args, **_kwargs):
+        raise AssertionError("blank display name must not trigger legacy-email quarantine")
+
+    async def ensure_subscription(_db, _profile):
+        return None
+
+    monkeypatch.setattr(main_module, "customer_claims", verified_claims)
+    monkeypatch.setattr(main_module, "_supabase_user", auth_user)
+    monkeypatch.setattr(main_module, "_bearer_token", lambda _authorization: "test-token")
+    monkeypatch.setattr(main_module, "_legacy_customer_email_conflict", forbidden_legacy_check)
+    monkeypatch.setattr(main_module, "_ensure_customer_subscription", ensure_subscription)
+
+    returned_profile, _claims = asyncio.run(
+        main_module.get_customer("Bearer test-token", db)
+    )
+
+    assert returned_profile is profile
+    assert returned_profile.display_name == "Verified Customer"
+    assert auth_calls == ["test-token"]
