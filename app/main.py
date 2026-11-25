@@ -5017,7 +5017,17 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
     if not isinstance(req, dict):
         raise HTTPException(422, "A JSON object body is required")
     try:
-        wallet_id = int(req.get("wallet_id"))
+        raw_wallet_id = req.get("wallet_id")
+        if isinstance(raw_wallet_id, bool):
+            raise ValueError("wallet_id must be an integer")
+        if isinstance(raw_wallet_id, int):
+            wallet_id = raw_wallet_id
+        elif isinstance(raw_wallet_id, str) and re.fullmatch(r"[0-9]+", raw_wallet_id.strip()):
+            wallet_id = int(raw_wallet_id.strip())
+        else:
+            raise ValueError("wallet_id must be an integer")
+        if wallet_id <= 0:
+            raise ValueError("wallet_id must be a positive integer")
         amount = req.get("amount_usdt")
         if isinstance(amount, bool) or not Decimal(str(amount)).is_finite():
             raise ValueError("amount_usdt must be a finite number")
@@ -5131,14 +5141,16 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
                                                   detail={"broadcast_outcome": "REJECTED"})
             await db.commit()
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
-        if sweep.transaction_id and sweep.transaction_id != txid:
+        stored_txid = str(sweep.transaction_id or "").strip().lower()
+        if stored_txid and stored_txid != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
-        if sweep.status == "SUBMITTED" and sweep.transaction_id == txid:
-            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id, "idempotent": True}
+        if sweep.status == "SUBMITTED" and stored_txid == txid:
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": txid, "idempotent": True}
         if sweep.status not in {"READY_FOR_SIGNER", "UNKNOWN", "SUBMITTED"}:
             raise HTTPException(409, f"Sweep is {sweep.status}; broadcast result cannot be recorded")
         duplicate = (await db.execute(select(TronSweep).where(
-            TronSweep.transaction_id == txid, TronSweep.id != sweep.id
+            func.lower(TronSweep.transaction_id) == txid,
+            TronSweep.id != sweep.id
         ).with_for_update())).scalar_one_or_none()
         if duplicate:
             raise HTTPException(409, "transaction id is already assigned to another sweep")
@@ -5581,6 +5593,40 @@ async def customer_otp_verify(req: OtpVerifyRequest, authorization: str | None =
     return {"ok": True, "purpose": "withdrawal", "step_up_token": token, "proposal_digest": expected_digest, "expires_in": settings.withdrawal_step_up_minutes * 60}
 
 
+def _is_valid_password_reset_email(email: str) -> bool:
+    """Accept a bounded dot-atom mailbox with a valid fully qualified domain."""
+    if not isinstance(email, str) or len(email) > 254 or email.count("@") != 1:
+        return False
+    local, domain = email.rsplit("@", 1)
+    if (
+        not local
+        or len(local) > 64
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not re.fullmatch(
+            r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*",
+            local,
+        )
+        or not domain
+    ):
+        return False
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(domain) > 253:
+        return False
+    labels = domain.split(".")
+    if len(labels) < 2 or len(labels[-1]) < 2:
+        return False
+    return all(
+        1 <= len(label) <= 63
+        and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+        for label in labels
+    )
+
+
 @app.post("/api/auth/password-reset")
 async def customer_password_reset(req: dict):
     if not isinstance(req, dict):
@@ -5588,7 +5634,7 @@ async def customer_password_reset(req: dict):
     email = str(req.get("email") or "").strip()
     if not email:
         raise HTTPException(422, "Email is required")
-    if len(email) > 320 or "@" not in email:
+    if not _is_valid_password_reset_email(email):
         raise HTTPException(422, "A valid email address is required")
     key = hashlib.sha256(email.lower().encode()).hexdigest()
     allowed, _ = await allow_rate_limit(f"password-reset:contact:{key}", max(1, settings.auth_rate_limit_per_minute))

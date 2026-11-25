@@ -531,7 +531,9 @@ def _structured_private_object_has_material(value) -> bool:
                         child_scalar_items_private = (
                             child_private and isinstance(item, list)
                         )
-                        child_public_metadata_mapping = False
+                        child_public_metadata_mapping = (
+                            descriptive_metadata_field and isinstance(item, list)
+                        )
                     stack.append((
                         item,
                         child_scalar_items_private,
@@ -547,17 +549,41 @@ def _structured_private_object_has_material(value) -> bool:
                         item,
                         scalar_items_are_private,
                         private_context,
-                        False,
+                        public_metadata_mapping,
                     ))
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
-                        return True
+                        if (
+                            not public_metadata_mapping
+                            or _looks_like_private_key_material(item)
+                            or _is_bip39_wordlist_phrase(item)
+                        ):
+                            return True
                     if (
                         isinstance(item, (int, float, Decimal))
                         and not isinstance(item, bool)
                         and item != 0
                     ):
-                        return True
+                        if public_metadata_mapping:
+                            if isinstance(item, Decimal):
+                                numeric_digits = (
+                                    len(item.as_tuple().digits)
+                                    if item.is_finite()
+                                    else 20
+                                )
+                            elif isinstance(item, int):
+                                numeric_digits = len(str(abs(item)))
+                            else:
+                                parsed_number = Decimal(str(item))
+                                numeric_digits = (
+                                    len(parsed_number.as_tuple().digits)
+                                    if parsed_number.is_finite()
+                                    else 20
+                                )
+                            if numeric_digits >= 20:
+                                return True
+                        else:
+                            return True
     return False
 
 def _yaml_node_has_private_material(

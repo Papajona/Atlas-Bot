@@ -1957,3 +1957,35 @@ def test_secret_scanner_detects_unrecognized_private_field_in_private_jwk_array(
         "private-jwk-array.yml:2: seed/private-key assignment" in item
         for item in findings
     )
+
+
+
+@pytest.mark.parametrize("metadata_field", ["key", "value", "secret_label"])
+def test_secret_scanner_allows_short_numeric_arrays_in_public_jwk_metadata_and_detects_long_values(
+    tmp_path, monkeypatch, metadata_field
+):
+    private_key_field = "private" + "_key"
+    short_value = '[{"kty":"EC","metadata":{"' + metadata_field + '":[1,2]}}]'
+    long_value = (
+        '[{"kty":"EC","metadata":{"' + metadata_field
+        + '":[123456789012345678901234567890]}}]'
+    )
+    (tmp_path / f"short-metadata-array-{metadata_field}.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + short_value + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / f"long-metadata-array-{metadata_field}.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + long_value + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any(f"short-metadata-array-{metadata_field}.yml:" in item for item in findings)
+    assert any(
+        f"long-metadata-array-{metadata_field}.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )

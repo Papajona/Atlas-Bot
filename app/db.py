@@ -1552,9 +1552,9 @@ class TronSweep(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_tron_sweep_idempotency"),
         Index("ix_tron_sweep_wallet_status", "wallet_id", "status"),
-        Index("uq_tron_sweep_transaction_id_nonempty", "transaction_id", unique=True,
+        Index("uq_tron_sweep_transaction_id_ci_nonempty", sa.text("lower(transaction_id)"), unique=True,
               postgresql_where=sa.text("transaction_id <> ''"),
-              sqlite_where=sa.text("transaction_id <> ''")),
+              sqlite_where=sa.text("transaction_id <> '')),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     wallet_id: Mapped[int] = mapped_column(ForeignKey("wallets.id", name="fk_tron_sweeps_wallet_id"), nullable=False)
