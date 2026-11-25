@@ -33,6 +33,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .paper_execution_model import configured_paper_execution_settings
+from .db import _UUID_AUTH_REFERENCE_PATTERN, _UUID_AUTH_REFERENCE_GLOB
 from .db import init_db, SessionLocal, IdentityQuarantineSessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, BenchmarkPromptCapture, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
@@ -3924,7 +3925,7 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
             # a bind parameter may prevent partial-index selection.
             from sqlalchemy import literal_column
 
-            uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+            uuid_pattern = _UUID_AUTH_REFERENCE_PATTERN
             statement = statement.where(
                 CustomerProfile.auth_user_id.op("!~*")(
                     literal_column(f"'{uuid_pattern}'")
@@ -3980,13 +3981,7 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     if dialect == "sqlite":
         from sqlalchemy import literal_column
 
-        uuid_glob = (
-            "[0-9a-f]" * 8 + "-"
-            + "[0-9a-f]" * 4 + "-"
-            + "[0-9a-f]" * 4 + "-"
-            + "[0-9a-f]" * 4 + "-"
-            + "[0-9a-f]" * 12
-        )
+        uuid_glob = _UUID_AUTH_REFERENCE_GLOB
         statement = select(CustomerProfile.id).where(
             CustomerProfile.auth_user_id != auth_user_id,
             func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
