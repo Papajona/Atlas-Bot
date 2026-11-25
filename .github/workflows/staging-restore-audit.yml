@@ -61,6 +61,7 @@ jobs:
       BACKUP_REFERENCE: ${{ inputs.backup_reference }}
       SOURCE_BACKUP_REFERENCE: ${{ inputs.source_backup_reference }}
       SANITIZED_BACKUP_REFERENCE: ${{ inputs.sanitized_backup_reference }}
+      SOURCE_PREPARED_SQL_CANONICAL_SHA256: ${{ vars.ATLAS_CLOUD_SQL_SOURCE_PREPARED_CANONICAL_SHA256 }}
       RESTORE_EVIDENCE_URI: ${{ inputs.restore_evidence_uri }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -102,6 +103,11 @@ jobs:
           elif [[ "$RESTORE_TARGET_KIND" == "cloud_sql" ]]; then
             : "${SOURCE_BACKUP_REFERENCE:?Cloud SQL audit requires the original generation-pinned source backup reference}"
             : "${SANITIZED_BACKUP_REFERENCE:?Cloud SQL audit requires the generation-pinned sanitized SQL candidate reference}"
+            : "${SOURCE_PREPARED_SQL_CANONICAL_SHA256:?Cloud SQL audit requires the protected source SQL fingerprint variable}"
+            [[ "$SOURCE_PREPARED_SQL_CANONICAL_SHA256" =~ ^[a-f0-9]{64}$ ]] || {
+              echo "BLOCKED: source prepared SQL fingerprint must be a reviewed lowercase SHA-256" >&2
+              exit 1
+            }
             [[ "$SANITIZED_BACKUP_REFERENCE" =~ ^gs://atlas-staging-510915-db-backups/sanitized-imports/[^#]+[.]sql#[1-9][0-9]*$ ]] || {
               echo "BLOCKED: sanitized candidate must be generation-pinned under sanitized-imports/" >&2
               exit 1
@@ -232,6 +238,7 @@ jobs:
           PYTHONPATH=. python scripts/verify_cloud_sql_sanitized_artifacts.py \
             --source-backup-reference "$SOURCE_BACKUP_REFERENCE" \
             --source-prepared-sql "$RUNNER_TEMP/cloud-sql-source-prepared.sql" \
+            --expected-source-prepared-canonical-sha256 "$SOURCE_PREPARED_SQL_CANONICAL_SHA256" \
             --sanitized-backup-reference "$SANITIZED_BACKUP_REFERENCE" \
             --sanitized-sql "$RUNNER_TEMP/sanitized-candidate.sql" \
             --imported-sql "$RUNNER_TEMP/cloud-sql-import-source" \
