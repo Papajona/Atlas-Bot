@@ -90,8 +90,10 @@ def test_risk_dashboard_queries_bounded_completed_trade_summaries():
         source.index("async def _recent_closed_platform_outcome_returns"):
         source.index("async def risk_dashboard_metrics")
     ]
-    assert "StrategyOutcome.closing_notional > 0" in helper
-    assert ".order_by(StrategyOutcome.created_at.desc())" in helper
+    assert "candidate.closing_notional > 0" in helper
+    assert ".order_by(candidate.created_at.desc(), candidate.id.desc())" in helper
+    assert "has_newer_lifecycle = exists(" in helper
+    assert "StrategyOutcome.trade_id == candidate.trade_id" in helper
     assert ".limit(100)" in helper
     model = (ROOT / "app/db.py").read_text(encoding="utf-8")
     assert 'Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at")' in model
@@ -99,6 +101,120 @@ def test_risk_dashboard_queries_bounded_completed_trade_summaries():
     ratios = (ROOT / "app/risk_metrics.py").read_text(encoding="utf-8")
     assert "MIN_ANNUALIZATION_SPAN_SECONDS = 30 * 86400" in ratios
     assert "interval_count = len(times) - 1" in ratios
+
+
+
+def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(
+    tmp_path, monkeypatch
+):
+    from datetime import datetime, timezone
+
+    from cryptography.fernet import Fernet
+    from sqlalchemy import event
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.config import settings
+    from app.db import StrategyOutcome
+    from app.main import _recent_closed_platform_outcome_returns
+
+    monkeypatch.setattr(
+        settings,
+        "app_encryption_keys_json",
+        json.dumps({"v1": Fernet.generate_key().decode("ascii")}),
+    )
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
+
+    async def run():
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        try:
+            captured = []
+
+            def capture_query(conn, cursor, statement, parameters, context, executemany):
+                sql_upper = statement.upper()
+                if (
+                    "STRATEGY_OUTCOMES" in sql_upper
+                    and ("NOT EXISTS" in sql_upper or "NOT (EXISTS" in sql_upper)
+                ):
+                    captured.append((statement, parameters))
+
+            event.listen(engine.sync_engine, "before_cursor_execute", capture_query)
+            async with engine.begin() as connection:
+                await connection.run_sync(StrategyOutcome.__table__.create)
+
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            async with sessions() as db:
+                db.add_all(
+                    [
+                        StrategyOutcome(
+                            trade_id=10,
+                            sequence=1,
+                            customer_id=None,
+                            strategy="native",
+                            regime="UNKNOWN",
+                            asset="crypto",
+                            symbol="BTC/USDT",
+                            lifecycle_status="CLOSED",
+                            closing_notional=100,
+                            fee_basis_complete=True,
+                            net_return_bps=100,
+                            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                        ),
+                        StrategyOutcome(
+                            trade_id=10,
+                            sequence=2,
+                            customer_id=None,
+                            strategy="native",
+                            regime="UNKNOWN",
+                            asset="crypto",
+                            symbol="BTC/USDT",
+                            lifecycle_status="CLOSED",
+                            closing_notional=100,
+                            fee_basis_complete=True,
+                            net_return_bps=250,
+                            created_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+                        ),
+                        StrategyOutcome(
+                            trade_id=11,
+                            sequence=1,
+                            customer_id=None,
+                            strategy="native",
+                            regime="UNKNOWN",
+                            asset="crypto",
+                            symbol="ETH/USDT",
+                            lifecycle_status="CLOSED",
+                            closing_notional=100,
+                            fee_basis_complete=True,
+                            net_return_bps=300,
+                            created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+                        ),
+                    ]
+                )
+                await db.commit()
+
+                rows = await _recent_closed_platform_outcome_returns(db)
+
+                assert len(rows) == 2
+                assert {int(row.net_return_bps) for row in rows} == {250, 300}
+                assert captured, "risk query SQL was not captured"
+                sql, parameters = captured[-1]
+                assert "ROW_NUMBER" not in sql.upper()
+                assert "LIMIT" in sql.upper()
+
+                connection = await db.connection()
+                plan = (
+                    await connection.exec_driver_sql(
+                        "EXPLAIN QUERY PLAN " + sql, parameters
+                    )
+                ).all()
+                plan_text = " ".join(str(row[-1]) for row in plan)
+                assert "ix_strategy_outcome_platform_closed_recent" in plan_text
+                assert "ix_strategy_outcome_platform_closed_trade_time" in plan_text
+
+            event.remove(engine.sync_engine, "before_cursor_execute", capture_query)
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 
 def test_partial_closing_fills_aggregate_to_one_complete_trade_return():
