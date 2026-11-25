@@ -177,6 +177,28 @@ def test_0065_rollback_provenance_tracks_exact_direct_acl_deltas_and_identity():
     assert "original migration identity" in migration
     assert "pg_has_role(migration_role_oid, grantor_oid, 'SET')" in migration
 
+    # The PostgreSQL membership regression proves an INHERIT-only membership
+    # is not sufficient for SET ROLE. Keep the downgrade's complete grantor
+    # preflight ahead of the first ownership or membership mutation so an
+    # un-settable grantor fails closed without partially changing the schema.
+    downgrade = migration.split("def downgrade()", 1)[1]
+    validation_loop = downgrade.index("FOR grantor_oid IN")
+    set_option_guard = downgrade.index(
+        "NOT pg_has_role(migration_role_oid, grantor_oid, 'SET')",
+        validation_loop,
+    )
+    validation_loop_end = downgrade.index("END LOOP;", set_option_guard)
+    first_membership_mutation = downgrade.index(
+        "EXECUTE format('GRANT %I TO %I', role_name, migration_role);",
+        validation_loop_end,
+    )
+    ownership_mutation = downgrade.index(
+        "ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO %I",
+        first_membership_mutation,
+    )
+    assert validation_loop < set_option_guard < validation_loop_end
+    assert validation_loop_end < first_membership_mutation < ownership_mutation
+
     # Check the data-driven ACL rollback loops semantically rather than pinning
     # exact global string counts. Each recorded grantor loop must assume that
     # grantor, perform only its corresponding REVOKE, and restore the migration
