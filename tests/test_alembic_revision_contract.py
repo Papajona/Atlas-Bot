@@ -209,3 +209,5 @@ def test_0065_downgrade_preserves_preexisting_trigger_role_and_policies():
     assert "journals_policy_created_by_revision" in downgrade
     assert "lines_policy_created_by_revision" in downgrade
     assert "COMMENT ON ROLE %I IS %L" in downgrade
+    assert "FROM pg_shdepend" in downgrade
+    assert "AND NOT EXISTS (" in downgrade
