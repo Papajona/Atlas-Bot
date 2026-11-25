@@ -64,32 +64,12 @@ export default {
       });
     }
 
-    // Existing legacy profiles have non-UUID Auth references and blank encrypted
-    // email fields. No safe comparison can establish that a new Auth user is a
-    // different person. Fail closed for new identities until support completes
-    // the legacy identity mapping; existing UUID-linked users remain unaffected.
-    const pageSize = 500;
-    for (let offset = 0; ; offset += pageSize) {
-      const { data: profilePage, error: legacyLookupError } = await ctx.supabaseAdmin
-        .from("customer_profiles")
-        .select("auth_user_id")
-        // Stable ordering is required for deterministic offset pagination.
-        .order("id", { ascending: true })
-        .range(offset, offset + pageSize - 1);
-      if (legacyLookupError || !Array.isArray(profilePage)) {
-        return response({ error: "Legacy customer identity verification is unavailable; manual review is required" }, 503);
-      }
-      const hasUnmappedLegacyIdentity = profilePage.some((profile: { auth_user_id?: unknown }) => {
-        const reference = String(profile.auth_user_id ?? "").trim();
-        return !/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(reference);
-      });
-      if (hasUnmappedLegacyIdentity) {
-        return response({
-          error: "New customer provisioning is paused until legacy customer identities complete manual identity review. Contact support.",
-        }, 409);
-      }
-      if (profilePage.length < pageSize) break;
-    }
+    // This Edge Function has no application encryption key and cannot compare
+    // legacy customer email values safely. Do not block every new identity just
+    // because an unrelated non-UUID record exists. The API performs the
+    // per-identity check after revalidating the confirmed Auth email and
+    // decrypting legacy email values through the application ORM; it never
+    // auto-links or rewrites a legacy record.
 
     // Atlas stores customer_profiles.email and display_name with application-layer
     // Fernet encryption. This Edge Function intentionally has no encryption key,
