@@ -89,7 +89,7 @@ def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer(
     assert "NOLOGIN NOINHERIT NOBYPASSRLS" in migration
     assert "AND NOT rolbypassrls" in migration
     assert "CREATE POLICY atlas_ledger_trigger_owner_select" in migration
-    assert "atlas_ledger_trigger_owner SELECT policies are missing" in migration
+    assert "ledger trigger owner SELECT policies are missing or have an unexpected definition" in migration
     assert "migration identity must own every internal ledger function" in migration
     assert "grantee.rolname" in migration
     assert "acl.grantee <> p.proowner" in migration
