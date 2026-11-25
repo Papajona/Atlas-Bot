@@ -15,6 +15,9 @@ def test_paper_staging_serves_the_restricted_browser_workspace():
     assert "Live payouts" in response.text
     assert 'id="retry-preflight"' in response.text
     assert "Recheck staging readiness" in response.text
+    assert "Market scanner" in response.text
+    assert 'id="scanner-symbols"' in response.text
+    assert 'id="scanner-results"' in response.text
     assert 'id="blocked-state" hidden' in response.text
     assert "<script>" not in response.text
 
@@ -29,6 +32,13 @@ def test_paper_staging_browser_assets_are_same_origin_and_cache_restricted():
     assert script.headers["cache-control"] == "no-store"
     assert '"/api/customer/paper/orders"' in script.text
     assert '"/api/auth/mfa/verify"' in script.text
+    assert '"/api/customer/market-scanner?"' in script.text
+    assert "renderScannerResults" in script.text
+    assert "runMarketScanner" in script.text
+    assert "average_entry_price" in script.text
+    assert "realized_pnl" in script.text
+    assert "filled_quantity" in script.text
+    assert "row.side ||" in script.text
     assert "handlePaperGateError" in script.text
     assert '$("blocked-state").hidden = false' in script.text
     assert '$("retry-preflight").addEventListener' in script.text
