@@ -83,8 +83,6 @@ PLACEHOLDERS = {
     "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz",
     "fixture_signing_key_camel_abcdefghijklmnopqrstuvwxyz",
     "fixture_encryption_key_camel_abcdefghijklmnopqrstuvwxyz",
-    # Synthetic token used only by the Java/Kotlin multiline scanner regression.
-    "a4v8n2k6p9q3x7m1r5t0w4y8b2c6d9f3",
     "upgraded-test-refresh",
     "mock-customer-aal1-token",
     "ci-only-keystore-password",
