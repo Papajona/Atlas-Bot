@@ -167,10 +167,16 @@ def test_0065_rollback_provenance_tracks_direct_acl_grants_not_public_defaults()
     assert "acl.grantor = migration_role_oid" in migration
     assert "aclexplode(" in migration
     assert "GRANTED BY %I" in migration
-    assert "has_schema_privilege(role_name, 'public', 'USAGE')" not in migration
-    assert "has_table_privilege(role_name, 'public.ledger_journals', 'SELECT')" not in migration
-    assert "has_table_privilege(role_name, 'public.ledger_journal_lines', 'SELECT')" not in migration
-    assert "has_function_privilege(" not in migration
+    assert "n.nspacl" in migration
+    assert "c.relacl" in migration
+    assert "p.proacl" in migration
+
+    rollback_state = migration.split("role_state := jsonb_build_object", 1)[1].split(
+        "EXECUTE format(\\n                'COMMENT ON ROLE", 1
+    )[0]
+    assert "has_schema_privilege(" not in rollback_state
+    assert "has_table_privilege(" not in rollback_state
+    assert "has_function_privilege(" not in rollback_state
 
 
 def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate_steps():
