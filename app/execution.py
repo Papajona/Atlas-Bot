@@ -4021,7 +4021,8 @@ async def _order_with_verified_trade_history_fee(
         or getattr(getattr(broker, "config", None), "exchange_id", "")
         or ""
     ).lower()
-    params = {"orderId": order_id} if exchange_id == "binance" and order_id else {}
+    binance_id_pagination = exchange_id == "binance"
+    binance_order_id_filter = binance_id_pagination and bool(order_id)
     page_limit = max(1, min(int(page_limit), 100))
     max_pages = max(1, min(int(max_pages), 10))
     collected: list[dict[str, Any]] = []
@@ -4030,22 +4031,33 @@ async def _order_with_verified_trade_history_fee(
     from_id_cursor: int | None = None
 
     for _page in range(max_pages):
-        request_params = dict(params)
-        if from_id_cursor is not None:
+        request_params: dict[str, Any] = {}
+        request_since = cursor
+        if binance_id_pagination and from_id_cursor is not None:
+            if order_id:
+                request_params["orderId"] = order_id
             request_params["fromId"] = str(from_id_cursor)
+            request_since = None
+        elif binance_order_id_filter:
+            request_params["orderId"] = order_id
+            request_since = None
         try:
             page = await asyncio.to_thread(
-                fetch_my_trades, symbol, cursor, page_limit, request_params
+                fetch_my_trades, symbol, request_since, page_limit, request_params
             )
         except Exception:
-            # Some CCXT adapters do not expose Binance orderId/fromId filters.
-            # Fall back to time-bounded history only before ID pagination begins.
-            if not request_params or from_id_cursor is not None:
+            # Binance orderId filters can be unavailable in some adapters.
+            # Retry from the time boundary without mixing since with orderId/fromId.
+            if not binance_order_id_filter or from_id_cursor is not None:
                 return order
-            params = {}
+            binance_order_id_filter = False
+            binance_id_pagination = False
+            cursor = since
+            request_since = cursor
+            request_params = {}
             try:
                 page = await asyncio.to_thread(
-                    fetch_my_trades, symbol, cursor, page_limit, params
+                    fetch_my_trades, symbol, request_since, page_limit, request_params
                 )
             except Exception:
                 return order
@@ -4083,9 +4095,9 @@ async def _order_with_verified_trade_history_fee(
         if len(page) < page_limit:
             break
 
-        if exchange_id == "binance":
+        if binance_id_pagination:
             # Binance trade IDs are monotonically increasing and fetchMyTrades
-            # supports fromId. Keep the timestamp unchanged so same-ms fills remain.
+            # supports fromId. ID-paginated requests deliberately omit since.
             if page_has_missing_id or len(page_numeric_ids) != len(page_ids):
                 break
             next_from_id = max(page_numeric_ids) + 1 if page_numeric_ids else None
@@ -4118,7 +4130,13 @@ async def _order_with_verified_trade_history_fee(
         cursor = next_cursor
     return order
 
-async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
+async def _apply_broker_snapshot(
+    db,
+    trade: Trade,
+    order: dict[str, Any],
+    *,
+    verified_trade_history_fee: bool = False,
+):
     """Apply one broker snapshot without guessing an execution outcome.
 
     Broker state is authoritative, but malformed/incomplete snapshots fail closed.
@@ -4156,6 +4174,56 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"Broker filled quantity exceeds requested quantity for trade {trade.id}: "
             f"filled={filled} requested={requested}"
         )
+
+    previous_filled_quantity = Decimal(str(trade.filled_quantity or 0))
+    if not previous_filled_quantity.is_finite() or previous_filled_quantity < 0:
+        raise ValueError(f"Invalid persisted fill quantity for trade {trade.id}")
+    persisted_terminal_status = str(trade.status or "").strip().upper()
+    terminal_snapshot_statuses = {
+        "FILLED": {"closed", "filled"},
+        "CANCELED": {"canceled", "cancelled", "expired"},
+        "REJECTED": {"rejected"},
+    }
+    if persisted_terminal_status in terminal_snapshot_statuses:
+        snapshot_filled = Decimal(str(filled))
+        stale_terminal_snapshot = (
+            status not in terminal_snapshot_statuses[persisted_terminal_status]
+            or snapshot_filled + Decimal("0.000000001") < previous_filled_quantity
+        )
+        if stale_terminal_snapshot:
+            if not verified_trade_history_fee:
+                # The broker lookup happened before this row was locked. Do not
+                # let that older snapshot regress terminal state or quantity.
+                # Refresh the retry cursor so other pending terminal fees progress.
+                trade.updated_at = utcnow()
+                return 0.0
+            status = {
+                "FILLED": "closed",
+                "CANCELED": "canceled",
+                "REJECTED": "rejected",
+            }[persisted_terminal_status]
+            filled = float(previous_filled_quantity)
+            stored_remaining = trade.remaining_quantity
+            remaining = (
+                float(stored_remaining)
+                if stored_remaining is not None
+                else max(0.0, requested - filled)
+            )
+            avg = float(trade.average_fill_price or avg)
+            if not all(
+                Decimal(str(value)).is_finite()
+                for value in (filled, requested, remaining, avg)
+            ):
+                raise ValueError(
+                    f"Invalid persisted terminal quantities for trade {trade.id}"
+                )
+            if filled < 0 or remaining < 0 or (
+                requested > 0 and abs((filled + remaining) - requested) > 1e-9
+            ):
+                raise ValueError(
+                    f"Persisted terminal quantity conservation failed for trade {trade.id}"
+                )
+
     # Some venues report a terminal order as "closed" with both filled=0 and
     # remaining=0 when the order never executed. That response is ambiguous:
     # keep the trade UNKNOWN and preserve the full requested remainder.
@@ -4176,7 +4244,6 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"filled={filled} remaining={remaining} requested={requested}"
         )
 
-    previous_filled_quantity = Decimal(str(trade.filled_quantity or 0))
     fee_was_pending = bool(trade.fee_reconciliation_pending)
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
     fee_is_verified = fee_quality_is_verified(fee_quality)
@@ -4353,7 +4420,9 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                     )
                 results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "order_not_found"})
                 continue
+            verified_trade_history_fee = False
             if fee_pending:
+                original_order = order
                 order = await _order_with_verified_trade_history_fee(
                     broker,
                     order,
@@ -4362,12 +4431,16 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                     stored_filled_quantity=stored_filled,
                     created_at=trade_created_at,
                 )
+                verified_trade_history_fee = order is not original_order
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
                     results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "trade_missing"})
                     continue
-                await _apply_broker_snapshot(db, t, order)
+                await _apply_broker_snapshot(
+                    db, t, order,
+                    verified_trade_history_fee=verified_trade_history_fee,
+                )
                 command_row = (await db.execute(select(OrderCommand).where(OrderCommand.trade_id == t.id).with_for_update())).scalar_one_or_none()
                 if command_row:
                     command_row.status = "RECONCILED"
@@ -4535,7 +4608,9 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 await defer_terminal_fee_retry(trade_id)
                 results.append({"trade_id": trade_id, "resolved": False})
                 continue
+            verified_trade_history_fee = False
             if fee_pending and not is_oanda:
+                original_order = order
                 order = await _order_with_verified_trade_history_fee(
                     trade_broker,
                     order,
@@ -4544,6 +4619,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     stored_filled_quantity=stored_filled,
                     created_at=trade_created_at,
                 )
+                verified_trade_history_fee = order is not original_order
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
@@ -4551,7 +4627,10 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     continue
                 if not t.broker_order_id and order.get("id"):
                     t.broker_order_id = str(order["id"])
-                await _apply_broker_snapshot(db, t, order)
+                await _apply_broker_snapshot(
+                    db, t, order,
+                    verified_trade_history_fee=verified_trade_history_fee,
+                )
                 command_row = (await db.execute(select(OrderCommand).where(OrderCommand.trade_id == t.id).with_for_update())).scalar_one_or_none()
                 if command_row:
                     command_row.status = "RECONCILED"
