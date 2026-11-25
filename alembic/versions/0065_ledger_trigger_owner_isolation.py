@@ -43,7 +43,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
             END IF;
 
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
-                EXECUTE 'CREATE ROLE atlas_ledger_trigger_owner NOLOGIN NOINHERIT BYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION';
+                EXECUTE 'CREATE ROLE atlas_ledger_trigger_owner NOLOGIN NOINHERIT NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION';
             END IF;
 
             SELECT oid INTO role_oid
@@ -56,7 +56,7 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                 WHERE oid = role_oid
                   AND NOT rolcanlogin
                   AND NOT rolinherit
-                  AND rolbypassrls
+                  AND NOT rolbypassrls
                   AND NOT rolsuper
                   AND NOT rolcreatedb
                   AND NOT rolcreaterole
@@ -84,9 +84,59 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     'atlas_ledger_trigger_owner must not own tables, sequences, or other relations';
             END IF;
 
+            -- This role must work on managed PostgreSQL services that do not
+            -- permit application migration identities to create BYPASSRLS roles.
+            -- Its read access is granted narrowly by SELECT policies on the two
+            -- ledger tables; no other RLS boundary is bypassed.
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_class
+                WHERE oid = to_regclass('public.ledger_journals')
+                  AND relrowsecurity
+            ) OR NOT EXISTS (
+                SELECT 1 FROM pg_class
+                WHERE oid = to_regclass('public.ledger_journal_lines')
+                  AND relrowsecurity
+            ) THEN
+                RAISE EXCEPTION
+                    'ledger journal tables must have row-level security enabled before trigger-owner provisioning';
+            END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_policy
+                WHERE polrelid = to_regclass('public.ledger_journals')
+                  AND polname = 'atlas_ledger_trigger_owner_select'
+            ) THEN
+                EXECUTE 'CREATE POLICY atlas_ledger_trigger_owner_select ON public.ledger_journals FOR SELECT TO atlas_ledger_trigger_owner USING (true)';
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_policy
+                WHERE polrelid = to_regclass('public.ledger_journal_lines')
+                  AND polname = 'atlas_ledger_trigger_owner_select'
+            ) THEN
+                EXECUTE 'CREATE POLICY atlas_ledger_trigger_owner_select ON public.ledger_journal_lines FOR SELECT TO atlas_ledger_trigger_owner USING (true)';
+            END IF;
+
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_policy
+                WHERE polrelid = to_regclass('public.ledger_journals')
+                  AND polname = 'atlas_ledger_trigger_owner_select'
+                  AND polcmd = 'r'
+                  AND role_oid = ANY(polroles)
+                  AND pg_get_expr(polqual, polrelid) = 'true'
+            ) OR NOT EXISTS (
+                SELECT 1 FROM pg_policy
+                WHERE polrelid = to_regclass('public.ledger_journal_lines')
+                  AND polname = 'atlas_ledger_trigger_owner_select'
+                  AND polcmd = 'r'
+                  AND role_oid = ANY(polroles)
+                  AND pg_get_expr(polqual, polrelid) = 'true'
+            ) THEN
+                RAISE EXCEPTION
+                    'ledger trigger owner SELECT policies are missing or have an unexpected definition';
+            END IF;
+
             EXECUTE 'GRANT USAGE ON SCHEMA public TO atlas_ledger_trigger_owner';
             EXECUTE 'GRANT SELECT ON TABLE public.ledger_journals, public.ledger_journal_lines TO atlas_ledger_trigger_owner';
-            EXECUTE 'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner';
 
             SELECT proowner INTO trigger_function_owner
             FROM pg_proc
@@ -98,9 +148,39 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                         'migration must use a separate administrative identity to assign the ledger trigger owner';
                 END IF;
 
-                -- Configure the wrapper while the migration actor still owns
-                -- it. The helper's explicit pg_temp-last path prevents temporary
-                -- relation shadowing during its read-only ledger validation.
+                -- Revoke all external EXECUTE grants while the migration actor
+                -- still owns the original functions. After OWNER TO is changed,
+                -- a non-superuser migration actor cannot revoke the new owner's
+                -- grants merely because it once held role membership.
+                FOREACH function_signature IN ARRAY ARRAY[
+                    'public.atlas_block_ledger_mutation()',
+                    'public.atlas_ledger_journal_deferred_check()',
+                    'public.atlas_validate_ledger_journal(integer)',
+                    'public.atlas_research_trial_archive_immutable()',
+                    'public.atlas_research_holdout_registry_immutable()'
+                ] LOOP
+                    EXECUTE format(
+                        'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC',
+                        function_signature
+                    );
+                    FOREACH grantee_name IN ARRAY ARRAY[
+                        'anon', 'authenticated', 'service_role',
+                        'atlas_paper_reader', 'atlas_customer_paper',
+                        'atlas_api_runtime', 'atlas_audit_reader',
+                        'atlas_ledger_trigger_owner'
+                    ] LOOP
+                        IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = grantee_name) THEN
+                            EXECUTE format(
+                                'REVOKE EXECUTE ON FUNCTION %s FROM %I',
+                                function_signature,
+                                grantee_name
+                            );
+                        END IF;
+                    END LOOP;
+                END LOOP;
+                EXECUTE 'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner';
+
+                -- Configure the wrapper while the migration actor still owns it.
                 EXECUTE 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SECURITY DEFINER';
                 EXECUTE 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() SET search_path = pg_catalog, public, pg_temp';
                 EXECUTE 'ALTER FUNCTION public.atlas_validate_ledger_journal(integer) SET search_path = pg_catalog, public, pg_temp';
@@ -114,8 +194,8 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     migration_role
                 );
                 EXECUTE 'ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO atlas_ledger_trigger_owner';
-                EXECUTE format('REVOKE %I FROM %I', role_name, migration_role);
                 EXECUTE 'REVOKE CREATE ON SCHEMA public FROM atlas_ledger_trigger_owner';
+                EXECUTE format('REVOKE %I FROM %I', role_name, migration_role);
             END IF;
 
             -- A downgrade/upgrade round-trip re-enters this function with the
@@ -137,8 +217,9 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     'ledger validation functions must use their fixed pg_catalog/public/pg_temp search_path';
             END IF;
 
-            -- Explicitly revoke the built-in PUBLIC EXECUTE grant and any
-            -- direct grants inherited from managed/default object creators.
+            -- Re-upgrades must prove the previous ACL hardening is still in
+            -- place; they must not attempt REVOKE as a caller that no longer
+            -- owns the deferred trigger function.
             FOREACH function_signature IN ARRAY ARRAY[
                 'public.atlas_block_ledger_mutation()',
                 'public.atlas_ledger_journal_deferred_check()',
@@ -150,28 +231,52 @@ def _secure_ledger_journal_trigger_owner(bind) -> None:
                     RAISE EXCEPTION 'required internal trigger function is missing: %', function_signature;
                 END IF;
 
-                EXECUTE format(
-                    'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC',
-                    function_signature
-                );
-
-                FOREACH grantee_name IN ARRAY ARRAY[
-                    'anon', 'authenticated', 'service_role',
-                    'atlas_paper_reader', 'atlas_customer_paper',
-                    'atlas_api_runtime', 'atlas_audit_reader'
-                ] LOOP
-                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = grantee_name) THEN
-                        EXECUTE format(
-                            'REVOKE EXECUTE ON FUNCTION %s FROM %I',
-                            function_signature,
-                            grantee_name
-                        );
-                    END IF;
-                END LOOP;
+                IF EXISTS (
+                    SELECT 1
+                    FROM pg_proc p
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(p.proacl, acldefault('f', p.proowner))
+                    ) acl
+                    LEFT JOIN pg_roles grantee ON grantee.oid = acl.grantee
+                    WHERE p.oid = to_regprocedure(function_signature)
+                      AND acl.privilege_type = 'EXECUTE'
+                      AND (
+                          acl.grantee = 0
+                          OR grantee.rolname = ANY(ARRAY[
+                              'anon', 'authenticated', 'service_role',
+                              'atlas_paper_reader', 'atlas_customer_paper',
+                              'atlas_api_runtime', 'atlas_audit_reader'
+                          ])
+                      )
+                ) THEN
+                    RAISE EXCEPTION
+                        'internal function % retains an external EXECUTE grant after trigger-owner isolation',
+                        function_signature;
+                END IF;
             END LOOP;
 
-            -- Only the internal trigger owner may call the validator helper.
-            EXECUTE 'GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner';
+            IF EXISTS (
+                SELECT 1
+                FROM pg_proc p
+                CROSS JOIN LATERAL aclexplode(
+                    coalesce(p.proacl, acldefault('f', p.proowner))
+                ) acl
+                WHERE p.oid IN (
+                    to_regprocedure('public.atlas_block_ledger_mutation()'),
+                    to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
+                    to_regprocedure('public.atlas_validate_ledger_journal(integer)'),
+                    to_regprocedure('public.atlas_research_trial_archive_immutable()'),
+                    to_regprocedure('public.atlas_research_holdout_registry_immutable()')
+                )
+                  AND acl.grantee = role_oid
+                  AND p.oid NOT IN (
+                      to_regprocedure('public.atlas_ledger_journal_deferred_check()'),
+                      to_regprocedure('public.atlas_validate_ledger_journal(integer)')
+                  )
+            ) THEN
+                RAISE EXCEPTION
+                    'atlas_ledger_trigger_owner has an unexpected direct EXECUTE grant';
+            END IF;
 
             IF has_schema_privilege(role_name, 'public', 'CREATE')
                OR NOT has_schema_privilege(role_name, 'public', 'USAGE')
@@ -227,6 +332,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # This is a forward-only privilege hardening revision. Reversing it would
-    # restore direct/public EXECUTE privileges and weaken the ledger boundary.
-    pass
+    # Reverting ownership here would let an older migration drop the deferred
+    # trigger function only if it could safely reclaim the former owner role.
+    # The migration actor is intentionally not left as a member of that role.
+    # Fail at this revision with a precise message rather than silently leave
+    # the owner changed and allow a later legacy DROP FUNCTION to fail mid-rollback.
+    raise RuntimeError(
+        "downgrade past 0065_ledger_trigger_owner_isolation is blocked: "
+        "restore ledger trigger ownership through a separately reviewed migration"
+    )
