@@ -941,6 +941,8 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
 
 
 def test_bypassrls_guard_detects_from_before_where_future_grant_query(tmp_path):
+    import pytest
+
     (tmp_path / "0066_future_role_grant.py").write_text(
         '''
 revision = "0066_future_role_grant"
