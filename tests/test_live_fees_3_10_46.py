@@ -77,3 +77,26 @@ def test_fee_cost_without_currency_is_unverified_and_not_estimated():
     assert quality == UNVERIFIED
     assert not fee_quality_is_verified(quality)
     assert "customer charge withheld" in note
+
+
+
+def test_zero_cost_and_rebate_fee_entries_without_currency_do_not_quarantine():
+    from decimal import Decimal
+
+    cases = (
+        ([{"cost": "0"}], Decimal("0")),
+        ([{"cost": "-0.01"}], Decimal("0")),
+        ([{"cost": "0"}, {"currency": "USDT", "cost": "0.05"}], Decimal("0.05")),
+        ([{"cost": "-0.01"}, {"currency": "USDT", "cost": "0.05"}], Decimal("0.05")),
+    )
+    for entries, expected in cases:
+        fee, quality, note = extract_order_fee_quote_decimal(
+            {"fees": entries},
+            "BTC/USDT",
+            "60000",
+            "0.1",
+            fallback_taker_bps="5.5",
+        )
+        assert fee == expected
+        assert quality == EXACT
+        assert note == ""
