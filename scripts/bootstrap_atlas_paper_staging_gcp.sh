@@ -47,13 +47,14 @@ try:
     policy = json.loads(os.environ["SECRET_IAM_POLICY"])
 except (json.JSONDecodeError, KeyError, TypeError) as exc:
     raise SystemExit(f"BLOCKED: could not verify Secret Manager IAM policy for {secret_name}: {exc}")
+iam_member = f"serviceAccount:{principal}"
 if not any(
     binding.get("role") == "roles/secretmanager.secretAccessor"
-    and principal in binding.get("members", [])
+    and iam_member in binding.get("members", [])
     and not binding.get("condition")
     for binding in policy.get("bindings", [])
 ):
-    raise SystemExit(f"BLOCKED: {principal} is missing unconditional Secret Accessor on {secret_name}")
+    raise SystemExit(f"BLOCKED: {iam_member} is missing unconditional Secret Accessor on {secret_name}")
 PY
   then
     return 1
