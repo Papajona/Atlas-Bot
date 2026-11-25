@@ -209,7 +209,7 @@ def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(
                 ).all()
                 plan_text = " ".join(str(row[-1]) for row in plan)
                 assert "ix_strategy_outcome_platform_completed" in plan_text
-                assert "ix_strategy_outcomes_trade_id" in plan_text
+                assert "ix_strategy_outcome_platform_closed_trade_time" in plan_text
 
             event.remove(engine.sync_engine, "before_cursor_execute", capture_query)
         finally:
