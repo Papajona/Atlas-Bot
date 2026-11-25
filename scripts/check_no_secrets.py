@@ -552,7 +552,7 @@ def _structured_private_object_has_material(value) -> bool:
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
-                    if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    if isinstance(item, (int, float, Decimal)) and not isinstance(item, bool) and item != 0:
                         return True
     return False
 
