@@ -193,7 +193,7 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
         source.index("async def _legacy_customer_email_conflict"):
         source.index("async def get_customer")
     ]
-    assert 'if not str(stored_email or "").strip():\n            continue' in helper
+    assert 'if not str(stored_email or "").strip():\n            return True' in helper
 
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
     provisioning = edge[
@@ -207,7 +207,7 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
 
 
 
-def test_blank_legacy_email_does_not_block_unrelated_new_identity_but_matching_email_does():
+def test_legacy_email_check_allows_known_different_email_and_fails_closed_on_unknown():
     class Result:
         def __init__(self, rows):
             self.rows = rows
@@ -239,8 +239,16 @@ def test_blank_legacy_email_does_not_block_unrelated_new_identity_but_matching_e
             "new@example.invalid",
         )
     )
-    assert unknown_legacy_email is False
+    different_legacy_email = asyncio.run(
+        main._legacy_customer_email_conflict(
+            Database([("legacy-tron-reference", "other@example.invalid")]),
+            "new-supabase-uuid",
+            "new@example.invalid",
+        )
+    )
+    assert unknown_legacy_email is True
     assert matching_legacy_email is True
+    assert different_legacy_email is False
 
 
 def test_existing_profile_identity_review_is_scoped_to_confirmed_legacy_email():
