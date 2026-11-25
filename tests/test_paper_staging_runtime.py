@@ -103,11 +103,10 @@ def test_paper_customer_market_scanner_requires_aal2_and_returns_bounded_public_
         async def __aexit__(self, *_args):
             return False
 
-    async def fake_customer(authorization, db):
+    async def fake_customer(authorization, db, *, require_aal2=True):
         assert authorization == "Bearer verified-customer-token"
         assert isinstance(db, FakeSession)
-        # get_existing_customer defaults to require_aal2=True; the endpoint must
-        # not weaken that requirement when adding this read-only customer route.
+        assert require_aal2 is True
         return SimpleNamespace(id=42), {"sub": "customer-42", "aal": "aal2"}
 
     def fake_market_data(request):
@@ -164,7 +163,8 @@ def test_paper_customer_market_scanner_rejects_customer_without_aal2(monkeypatch
         async def __aexit__(self, *_args):
             return False
 
-    async def reject_customer(_authorization, _db):
+    async def reject_customer(_authorization, _db, *, require_aal2=True):
+        assert require_aal2 is True
         raise HTTPException(403, "AAL2 MFA verification is required for paper trading")
 
     def unexpected_scan(*_args, **_kwargs):
