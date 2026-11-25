@@ -414,3 +414,27 @@ def test_numeric_benchmark_label_does_not_match_boolean_prediction(tmp_path):
 
     assert checks == [{"field": "risk_per_trade", "passed": False}]
     assert failures == ["field mismatch: risk_per_trade"]
+
+def test_evaluator_preserves_causal_error_types_without_reporting_exception_messages(tmp_path, monkeypatch):
+    secret = "private prompt text and source"
+    dataset = tmp_path / "causal-errors.json"
+    dataset.write_text(json.dumps([{
+        "id": "causal-case",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"asset": "crypto"},
+    }]), encoding="utf-8")
+
+    class BrokenComposer:
+        @staticmethod
+        def compose_strategy_spec(**_kwargs):
+            try:
+                raise RuntimeError(secret)
+            except RuntimeError as cause:
+                raise ValueError(secret) from cause
+
+    monkeypatch.setattr(_EVAL, "_load", lambda _path: BrokenComposer)
+    report = _EVAL.evaluate(Path("unused-module"), dataset)
+    rendered = json.dumps(report)
+
+    assert report["generation_failures"] == {"causal-case": "ValueError <- RuntimeError"}
+    assert secret not in rendered
