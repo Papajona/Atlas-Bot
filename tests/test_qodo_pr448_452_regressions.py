@@ -21,7 +21,10 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
     assert "PENDING_IDENTITY_REVIEW" in block
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in block
+    assert "needs_auth_identity = (" in block
+    assert "jwt_email_missing" in block
+    assert "profile is None" in block
+    assert 'not str(profile.email or "").strip()' in block
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in block
     assert "casefold()" in block
 
@@ -320,8 +323,10 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
         source.index("def _funding_signature_valid")
     ]
     assert "not str(profile.display_name or" not in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
+    assert "needs_auth_identity = (" in customer
+    assert "jwt_email_missing" in customer
+    assert "profile is None" in customer
+    assert 'not str(profile.email or "").strip()' in customer
     assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in customer
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer

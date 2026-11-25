@@ -577,6 +577,13 @@ def _yaml_value_is_sensitive(key: str, value_node) -> bool:
     return False
 
 
+def _yaml_fallback_key_is_structural(line: str, key_start: int) -> bool:
+    """Only treat a recovery label as a YAML key, not words embedded in a scalar."""
+    prefix = line[:key_start]
+    prefix = re.sub(r"^\\s*-\\s*", "", prefix).strip()
+    return not prefix or prefix.endswith(("{", ","))
+
+
 def _find_yaml_sensitive_assignments(text: str) -> dict[int, str]:
     """Parse YAML mappings with iterative, bounded traversal of alias graphs."""
     try:
@@ -880,11 +887,20 @@ def scan() -> list[str]:
                 if seed_assignment_found:
                     continue
             is_yaml = path.suffix.lower() in {".yaml", ".yml"}
-            seed_matches = (
-                list(TRON_SEED_IN_SOURCE.finditer(line))
-                if source_code
-                else ([TRON_SEED.search(line)] if not is_yaml or not yaml_parsed else [])
-            )
+            if source_code:
+                seed_matches = list(TRON_SEED_IN_SOURCE.finditer(line))
+            elif is_yaml and not yaml_parsed:
+                fallback_match = TRON_SEED.search(line)
+                seed_matches = (
+                    [fallback_match]
+                    if fallback_match is not None
+                    and _yaml_fallback_key_is_structural(line, fallback_match.start("key"))
+                    else []
+                )
+            elif is_yaml:
+                seed_matches = []
+            else:
+                seed_matches = [TRON_SEED.search(line)]
             if "re.compile" not in line:
                 # A source object can contain several credential properties on
                 # one physical line. Inspect every match so an innocuous first
@@ -982,12 +998,17 @@ def scan() -> list[str]:
             if seed_assignment_found:
                 continue
             for match in ASSIGNMENT.finditer(line):
-                if is_yaml and yaml_parsed:
+                if is_yaml:
                     yaml_key = _credential_key_kind(match.group("key"))
                     if yaml_key in {"mnemonic", "seed", "seedphrase", "recoveryphrase", "privatekey"}:
-                        # These keys are validated against YAML mapping structure above.
-                        # Do not reinterpret the same words inside block-scalar prose.
-                        continue
+                        if yaml_parsed:
+                            # These keys are validated against YAML mapping structure above.
+                            # Do not reinterpret the same words inside block-scalar prose.
+                            continue
+                        if not _yaml_fallback_key_is_structural(line, match.start("key")):
+                            # A malformed YAML prose scalar such as
+                            # "description: mnemonic: ..." is not a mapping key.
+                            continue
                 value = match.group("value").lower()
                 remainder = line[match.end():].lstrip()
                 source_code = path.suffix.lower() in SOURCE_CODE_SUFFIXES

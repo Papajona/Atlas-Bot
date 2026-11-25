@@ -1434,7 +1434,7 @@ def test_later_verified_cumulative_fee_restores_open_position_fee_basis():
             assert trade.fee_reconciliation_pending is False
             assert Decimal(str(trade.fee)) == Decimal("0.200000")
             assert position.quantity == pytest.approx(0.2)
-            assert position.entry_fee == Decimal("0.200000")
+            assert Decimal(str(position.entry_fee)) == Decimal("0.200000")
             assert position.entry_fee_basis_known is True
 
     asyncio.run(with_database(check))

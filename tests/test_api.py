@@ -94,7 +94,7 @@ def test_existing_active_profile_email_backfill_rejects_unconfirmed_auth_email(m
     assert "confirmed email" in raised.value.detail.lower()
 
 
-def test_active_profile_with_persisted_email_does_not_trigger_auth_backfill(monkeypatch):
+def test_active_profile_with_persisted_email_verifies_missing_jwt_email_with_auth(monkeypatch):
     auth_id = "11111111-2222-4333-8444-555555555555"
     profile = SimpleNamespace(
         auth_user_id=auth_id,
@@ -107,18 +107,27 @@ def test_active_profile_with_persisted_email_does_not_trigger_auth_backfill(monk
     async def verified_claims(_authorization, *, require_aal2=True):
         return {"sub": auth_id, "email": ""}
 
-    async def unexpected_auth_call(_token):
-        pytest.fail("an active profile with a stored email must not require an Auth backfill")
+    auth_calls = []
+
+    async def auth_user(_token):
+        auth_calls.append(_token)
+        return {
+            "id": auth_id,
+            "email": "existing@example.test",
+            "email_confirmed_at": "2026-11-25T00:00:00Z",
+            "user_metadata": {"full_name": "Existing customer"},
+        }
 
     async def ensure_subscription(_db, _profile):
         return None
 
     monkeypatch.setattr(main_module, "customer_claims", verified_claims)
-    monkeypatch.setattr(main_module, "_supabase_user", unexpected_auth_call)
+    monkeypatch.setattr(main_module, "_supabase_user", auth_user)
     monkeypatch.setattr(main_module, "_ensure_customer_subscription", ensure_subscription)
 
     returned_profile, _claims = asyncio.run(
         main_module.get_customer("Bearer test-token", db)
     )
 
+    assert auth_calls == ["test-token"]
     assert returned_profile is profile
