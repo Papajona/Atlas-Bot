@@ -1798,17 +1798,42 @@ def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
 
     assert check_no_secrets.scan() == []
 
+@pytest.mark.parametrize("metadata_field", ["key", "value", "secret_label"])
+def test_secret_scanner_detects_numeric_private_jwk_metadata_values(
+    tmp_path, monkeypatch, metadata_field
+):
+    private_key_field = "private" + "_key"
+    jwk_json = json.dumps([
+        {"kty": "EC", "metadata": {metadata_field: 987654321}}
+    ])
+    source = (
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + jwk_json + "\n"
+    )
+    filename = f"numeric-private-jwk-metadata-{metadata_field}.yml"
+    (tmp_path / filename).write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        f"{filename}:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_ignores_secret_manager_placeholder_with_shell_continuation(
     tmp_path, monkeypatch
 ):
     (tmp_path / "deployment.md").write_text(
-        "SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \\\n"
-        "  BACKUP_RECOVERY_URL=... \\\n",
+        "private_key=<v> \\\n"
+        "  backup_recovery_url=... \\\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
     assert check_no_secrets.scan() == []
+
 
 def test_secret_scanner_fallback_detects_list_item_phrase_in_malformed_yaml(
     tmp_path, monkeypatch
