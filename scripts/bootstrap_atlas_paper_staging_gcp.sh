@@ -78,7 +78,7 @@ repair_secret_access_only() {
   fi
   gcloud config set project "$PROJECT_ID" >/dev/null || return $?
   local actual_project_number
-  actual_project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+  actual_project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')" || return $?
   if [[ "$actual_project_number" != "$PROJECT_NUMBER" ]]; then
     echo "BLOCKED: unexpected Google Cloud project number." >&2
     return 1
