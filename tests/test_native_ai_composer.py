@@ -400,3 +400,17 @@ def test_custom_benchmark_rejects_invalid_expected_label_types_and_domains(tmp_p
 
     with pytest.raises(ValueError, match=f"invalid expected label for {field}"):
         _EVAL._load_dataset(dataset)
+
+def test_numeric_benchmark_label_does_not_match_boolean_prediction(tmp_path):
+    case = {
+        "id": "numeric-bool",
+        "prompt": "BTC breakout on 1h",
+        "expect": {"risk_per_trade": 1},
+    }
+    prediction = compose_strategy_spec(prompt="BTC breakout on 1h", name="Boolean numeric")
+    prediction["risk_per_trade"] = True
+
+    checks, failures = _EVAL._score_case(case, prediction, check_contract=False)
+
+    assert checks == [{"field": "risk_per_trade", "passed": False}]
+    assert failures == ["field mismatch: risk_per_trade"]
