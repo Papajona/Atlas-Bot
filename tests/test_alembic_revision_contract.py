@@ -90,6 +90,10 @@ def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer(
     assert "AND NOT rolbypassrls" in migration
     assert "CREATE POLICY atlas_ledger_trigger_owner_select" in migration
     assert "atlas_ledger_trigger_owner SELECT policies are missing" in migration
+    assert "migration identity must own every internal ledger function" in migration
+    assert "grantee.rolname" in migration
+    assert "acl.grantee <> p.proowner" in migration
+    assert "unapproved explicit EXECUTE grant" in migration
     assert "aclexplode(" in migration
 
     revoke = migration.index("'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC'")
