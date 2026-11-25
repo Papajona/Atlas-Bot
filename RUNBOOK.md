@@ -329,6 +329,10 @@ The preflight must pass end-to-end; a successful authentication step alone is no
 
 The paper staging entrypoint exposes `/livez` for the public staging liveness probe, retains `/healthz` for local/container health-check compatibility, and exposes `/readyz` plus `/api/customer/paper/*`; customer routes require Supabase-authenticated AAL2 and an already-active customer profile. It never self-registers a customer or creates a subscription. Keep `CUSTOMER_PAPER_LEDGER_ENABLED=false` in every other deployment until separate review authorizes the isolated paper path. Passing this preflight still does not count as a restore drill, provider-ledger reconciliation, production approval, or evidence that simulated costs are venue-calibrated.
 
+The same restricted service serves a browser testing workspace at `/` with same-origin, no-store HTML/CSS/JavaScript. Use a synthetic test identity: confirm its email, sign in, enroll/verify TOTP to reach AAL2, then initialize the **virtual** paper balance before submitting spot paper orders. The workspace supports balance/position/order reads, completed-bar advancement and cancellation; it does not expose withdrawals, broker credentials, live order routes, or payout APIs. It keeps the bearer token in page memory only. If readiness or the paper kill switch blocks account operations, the workspace hides order controls and presents the staging safety gate with a retry action.
+
+The read-only customer market scanner is disabled by default in application settings. The paper staging deploy workflow opts it in only for `ENVIRONMENT=staging` through `PAPER_STAGING_MARKET_SCANNER_ENABLED=true`; configuration rejects that flag in development, test and production. It requires AAL2, uses the bounded public-market scanner and has a separate per-customer rate limit. The normal API's subscription entitlement check is unchanged.
+
 
 ## Legacy ownerless customer-paper order reconciliation
 
