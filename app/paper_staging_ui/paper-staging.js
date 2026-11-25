@@ -563,21 +563,26 @@
   }
 
   async function initializePaperAccount() {
+    if (!state.accessToken) return;
+    const version = state.sessionVersion;
     const button = $("initialize-button");
     setBusy(button, true, "Initializing…");
     try {
       const result = await api("/api/customer/paper/account/initialize", { method: "POST", body: {} });
+      if (!sessionIsCurrent(version)) return;
       setNotice("order-message", (result.status || "INITIALIZED") + ": " +
         String(result.note || "Virtual paper balance created.") + " Starting cash: " +
         numberText(result.starting_cash, 6) + " " + String(result.currency || "USDT") + ".", "success");
       await refreshData();
     } catch (error) {
-      if (!handlePaperGateError(error)) {
+      if (sessionIsCurrent(version) && !handlePaperGateError(error)) {
         setNotice("order-message", error.message, "error");
       }
     } finally {
-      setBusy(button, false);
-      button.disabled = state.initialized;
+      if (sessionIsCurrent(version)) {
+        setBusy(button, false);
+        button.disabled = state.initialized;
+      }
     }
   }
 
@@ -607,10 +612,12 @@
       timeframe: $("timeframe").value
     };
     if (orderType === "LIMIT") payload.limit_price = String(limitPrice);
+    const version = state.sessionVersion;
     const button = $("submit-order");
     setBusy(button, true, "Submitting…");
     try {
       const result = await api("/api/customer/paper/orders", { method: "POST", body: payload });
+      if (!sessionIsCurrent(version)) return;
       const status = result.status || (result.order && result.order.status) || "SUBMITTED";
       setNotice("order-message", "Paper order " + status + ". " +
         String(result.fill_note || "Advance only against a later verified completed bar."), "success");
@@ -618,38 +625,42 @@
       if (orderType === "LIMIT") $("limit-price").value = "";
       await refreshData();
     } catch (error) {
-      if (!handlePaperGateError(error)) {
+      if (sessionIsCurrent(version) && !handlePaperGateError(error)) {
         setNotice("order-message", error.message, "error");
       }
     } finally {
-      setBusy(button, false);
+      if (sessionIsCurrent(version)) setBusy(button, false);
     }
   }
 
   async function advanceOrder(id) {
-    if (!id) return;
+    if (!id || !state.accessToken) return;
+    const version = state.sessionVersion;
     try {
       const result = await api("/api/customer/paper/orders/" + encodeURIComponent(id) + "/advance", { method: "POST", body: {} });
+      if (!sessionIsCurrent(version)) return;
       setNotice("order-message", "Paper order advancement: " + String(result.status || "processed") + ". No exchange order was placed.", "success");
       await refreshData();
     } catch (error) {
-      if (!handlePaperGateError(error)) {
+      if (sessionIsCurrent(version) && !handlePaperGateError(error)) {
         setNotice("order-message", error.message, "error");
       }
     }
   }
 
   async function cancelOrder(id) {
-    if (!id || !window.confirm("Cancel this open virtual paper order?")) return;
+    if (!id || !window.confirm("Cancel this open virtual paper order?") || !state.accessToken) return;
+    const version = state.sessionVersion;
     try {
       await api("/api/customer/paper/orders/" + encodeURIComponent(id) + "/cancel", {
         method: "POST",
         body: { idempotency_key: "paper-ui-cancel-" + ((window.crypto && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now())) }
       });
+      if (!sessionIsCurrent(version)) return;
       setNotice("order-message", "Paper order cancellation submitted.", "success");
       await refreshData();
     } catch (error) {
-      if (!handlePaperGateError(error)) {
+      if (sessionIsCurrent(version) && !handlePaperGateError(error)) {
         setNotice("order-message", error.message, "error");
       }
     }
