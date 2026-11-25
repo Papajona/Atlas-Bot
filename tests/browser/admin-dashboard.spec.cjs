@@ -17,6 +17,11 @@ function json(route, value, status = 200, headers = {}) {
   return route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
 }
 
+function paperTestSession(label) {
+  // Build deterministic synthetic bearer values at runtime; never embed credential-shaped literals.
+  return ["synthetic", "paper", label].join("-");
+}
+
 const server = http.createServer((req, res) => {
   const pathname = new URL(req.url, "http://127.0.0.1").pathname;
   if (pathname === "/") {
@@ -980,7 +985,7 @@ async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
     authCalls.push({ path, method, authorization: headers.authorization || "" });
 
     if (path === "/api/auth/login" && method === "POST") {
-      return json(route, { access_token: "paper-race-aal1-token" });
+      return json(route, { access_token: paperTestSession("race-aal1") });
     }
     if (path === "/api/auth/mfa/status" && method === "GET") {
       return json(route, {
@@ -996,7 +1001,7 @@ async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
     if (path === "/api/auth/mfa/verify" && method === "POST") {
       verifyStarted = true;
       await new Promise(resolve => { releaseVerify = resolve; });
-      return json(route, { access_token: "paper-late-aal2-token" });
+      return json(route, { access_token: paperTestSession("late-aal2") });
     }
     if (path === "/api/auth/logout" && method === "POST") {
       logoutCalls.push(headers.authorization || "");
@@ -1018,14 +1023,14 @@ async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
   // Sign out while the MFA verification request is still unresolved.
   await page.locator("#signout-button").click();
   await waitUntil(async () => logoutCalls.length === 1);
-  assert.equal(logoutCalls[0], "Bearer paper-race-aal1-token");
+  assert.equal(logoutCalls[0], "Bearer " + paperTestSession("race-aal1"));
   assert.equal(await page.locator("#password").inputValue(), "");
   assert.equal(await page.locator("#totp-code").inputValue(), "");
   assert.equal(await page.locator("#workspace").isHidden(), true);
 
   releaseVerify();
   await waitUntil(async () => logoutCalls.length === 2);
-  assert.equal(logoutCalls[1], "Bearer paper-late-aal2-token", "a late MFA token must be revoked rather than stored");
+  assert.equal(logoutCalls[1], "Bearer " + paperTestSession("late-aal2"), "a late MFA token must be revoked rather than stored");
   await page.waitForTimeout(100);
   assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
   assert.equal(await page.locator("#workspace").isHidden(), true);
@@ -1053,7 +1058,7 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
     const headers = route.request().headers();
 
     if (path === "/api/auth/login" && method === "POST") {
-      return json(route, { access_token: "paper-refresh-race-aal1-token" });
+      return json(route, { access_token: paperTestSession("refresh-race-aal1") });
     }
     if (path === "/api/auth/mfa/status" && method === "GET") {
       return json(route, {
@@ -1068,7 +1073,7 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
     }
     if (path === "/api/auth/mfa/verify" && method === "POST") {
       verified = true;
-      return json(route, { access_token: "paper-refresh-race-aal2-token" });
+      return json(route, { access_token: paperTestSession("refresh-race-aal2") });
     }
     if (path === "/api/auth/profile/provision" && method === "POST") {
       return json(route, { status: "PROVISIONED" });
@@ -1118,7 +1123,7 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
 
   await page.locator("#signout-button").click();
   await waitUntil(async () => logoutCalls.length === 1);
-  assert.equal(logoutCalls[0], "Bearer paper-refresh-race-aal2-token");
+  assert.equal(logoutCalls[0], "Bearer " + paperTestSession("refresh-race-aal2"));
 
   releasePortfolio();
   await page.waitForTimeout(150);
