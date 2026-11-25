@@ -80,18 +80,17 @@ def extract_order_fee_quote_decimal(
             note = "exchange returned a non-finite fee cost"
             quality = ESTIMATED
             continue
+        if not cur:
+            # A zero-cost fee still needs a denomination before it can be certified.
+            note = "exchange fee currency missing; customer charge withheld pending reconciliation"
+            quality = UNVERIFIED
+            continue
         if cost <= 0:
             # Negative provider values are maker rebates; do not credit them.
             continue
         with localcontext() as context:
             context.prec = 50
-            if not cur:
-                # A reported fee with no asset denomination cannot be charged as
-                # quote currency or replaced by a larger taker-rate estimate. Hold it
-                # until a later broker snapshot supplies the authoritative currency.
-                note = "exchange fee currency missing; customer charge withheld pending reconciliation"
-                quality = UNVERIFIED
-            elif cur == quote:
+            if cur == quote:
                 total = total + cost
             elif cur == base:
                 total = total + cost * fill_price_d

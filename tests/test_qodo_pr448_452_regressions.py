@@ -21,7 +21,10 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
     assert "PENDING_IDENTITY_REVIEW" in block
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in block
+    assert "needs_auth_identity = (" in block
+    assert "jwt_email_missing" in block
+    assert "profile is None" in block
+    assert 'not str(profile.email or "").strip()' in block
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in block
     assert "casefold()" in block
 
@@ -89,7 +92,7 @@ def test_risk_dashboard_queries_bounded_completed_trade_summaries():
         source.index("async def risk_dashboard_metrics")
     ]
     assert "StrategyOutcome.closing_notional > 0" in helper
-    assert ".order_by(StrategyOutcome.created_at.desc())" in helper
+    assert ".order_by(candidate.created_at.desc(), candidate.id.desc())" in helper
     assert ".limit(100)" in helper
     model = (ROOT / "app/db.py").read_text(encoding="utf-8")
     assert 'Index("ix_strategy_outcome_platform_completed", "customer_id", "lifecycle_status", "created_at")' in model
@@ -320,8 +323,10 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
         source.index("def _funding_signature_valid")
     ]
     assert "not str(profile.display_name or" not in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
+    assert "needs_auth_identity = (" in customer
+    assert "jwt_email_missing" in customer
+    assert "profile is None" in customer
+    assert 'not str(profile.email or "").strip()' in customer
     assert "profile.status = \"PENDING_IDENTITY_REVIEW\"" not in customer
     assert "profile.identity_review_required = identity_review_required" in customer
     assert "profile.status = \"ACTIVE\"" not in customer
@@ -675,12 +680,19 @@ def test_customer_without_jwt_email_must_verify_confirmed_auth_even_when_profile
     assert auth_calls == ["lookup"]
 
 
-def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tmp_path):
+def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tmp_path, monkeypatch):
     from datetime import datetime, timezone
     from sqlalchemy import event
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
     from app.db import StrategyOutcome
     from app.main import _recent_closed_platform_outcome_returns
+    from app.config import settings
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setattr(settings, "app_encryption_keys_json", json.dumps({
+        "v1": Fernet.generate_key().decode("ascii")
+    }))
+    monkeypatch.setattr(settings, "app_encryption_active_key_id", "v1")
 
     async def run():
         engine = create_async_engine("sqlite+aiosqlite:///:memory:")

@@ -342,7 +342,7 @@ def test_verified_cumulative_fee_repairs_first_partial_fill_fee_quarantine():
             )
             await db.flush()
 
-            assert position.entry_fee == Decimal("0.200000")
+            assert Decimal(str(position.entry_fee)) == Decimal("0.200000")
             assert position.entry_fee_basis_known is True
             assert Decimal(str(trade.fee)).quantize(Decimal("0.000001")) == position.entry_fee
 
@@ -1029,7 +1029,7 @@ def test_old_completed_return_ignores_pending_fee_from_newer_independent_positio
             assert old_outcome.fee_basis_complete is True
             assert Decimal(str(old_outcome.net_pnl)) == Decimal("9.98")
             assert old_outcome.net_return_bps == pytest.approx(998.0)
-            assert current_position.entry_fee == pytest.approx(0.10)
+            assert Decimal(str(current_position.entry_fee)) == Decimal("0.10")
 
     asyncio.run(with_database(check))
 
@@ -1425,9 +1425,9 @@ def test_later_verified_cumulative_fee_restores_open_position_fee_basis():
             await db.refresh(trade)
 
             assert trade.fee_reconciliation_pending is False
-            assert trade.fee == Decimal("0.200000")
+            assert Decimal(str(trade.fee)) == Decimal("0.200000")
             assert position.quantity == pytest.approx(0.2)
-            assert position.entry_fee == Decimal("0.200000")
+            assert Decimal(str(position.entry_fee)) == Decimal("0.200000")
             assert position.entry_fee_basis_known is True
 
     asyncio.run(with_database(check))
@@ -1616,11 +1616,11 @@ def test_cumulative_fee_true_up_changes_only_unverified_partial_fill_rows():
             for row in rows:
                 await db.refresh(row)
 
-            assert rows[0].fee == Decimal("0.04")
+            assert Decimal(str(rows[0].fee)) == Decimal("0.04")
             assert rows[0].fee_basis_complete is True
-            assert rows[1].fee == Decimal("0.05")
+            assert Decimal(str(rows[1].fee)) == Decimal("0.05")
             assert rows[1].fee_basis_complete is True
-            assert rows[2].fee == Decimal("0.14")
+            assert Decimal(str(rows[2].fee)) == Decimal("0.14")
             assert json.loads(rows[2].metadata_json)["closing_fee"] == "0.02"
             assert rows[2].fee_basis_complete is True
             assert rows[0].metadata_json
