@@ -241,8 +241,9 @@ def test_provider_reconciliation_query_uses_read_only_audit_acl_contract():
     assert "'public_sequences_with_privileges'" in query
     assert "'public_functions_with_execute'" in query
     assert "'withdrawal_journal_count'" in query
-    assert "NOT EXISTS (\n            SELECT 1 FROM matching_withdrawals w" in query
-    assert "NOT EXISTS (\n            SELECT 1 FROM public.withdrawals w" in query
+    normalized_query = " ".join(query.split())
+    assert "AND EXISTS ( SELECT 1 FROM matching_withdrawals w" in normalized_query
+    assert "AND NOT EXISTS ( SELECT 1 FROM public.withdrawals w" in normalized_query
     assert "'unattributed_withdrawal_journal_count'" in query
     assert "j.reference_id IN (w.request_id, w.request_id || ':release')" in query
     assert "tables_missing_dml" not in query

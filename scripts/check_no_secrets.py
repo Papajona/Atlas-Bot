@@ -36,7 +36,7 @@ SOURCE_CODE_SUFFIXES = {
 }
 HELPER_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PRIVATE_KEY = re.compile(r"^\s*-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----\s*$")
-TRON_SEED = re.compile(r"""(?i)(?:^\s*|\{\s*|,\s*|\[\s*)(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
+TRON_SEED = re.compile(r"""(?i)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:-\s*)?(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<value>"[^"\r\n]*"|'[^'\r\n]*'|[^#\r\n]+)""")
 EMBEDDED_RECOVERY_ASSIGNMENT = re.compile(
     r"""(?i)(?<![A-Za-z0-9_])(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase)\s*[:=]\s*(?P<value>[^#\r\n]+)"""
 )
@@ -764,7 +764,7 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
 
 JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
 MULTILINE_TEMPLATE_CREDENTIAL_ASSIGNMENT = re.compile(
-    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\\.)*(?:export\\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\\s*[:=]\\s*\\x60(?P<value>(?:\\\\.|[^\\x60\\\\]){0,65536}?)\\x60"""
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*\x60(?P<value>(?:\\.|[^\x60\\]){0,65536}?)\x60"""
 )
 
 
@@ -865,6 +865,9 @@ def scan() -> list[str]:
                         .rstrip(";,:")
                         .strip()
                     )
+                    # Config values may end with an escaped newline sequence inside their quotes.
+                    # Remove only a terminal escape before trimming the value delimiters.
+                    embedded_value = re.sub(r"(?:\\[rn])+$", "", embedded_value).strip()
                     if _is_likely_recovery_phrase(embedded_value):
                         findings.append(
                             f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment"
@@ -888,6 +891,13 @@ def scan() -> list[str]:
                     if seed_match is None:
                         continue
                     raw_seed_value = seed_match.group("value").strip()
+                    # A shell continuation after an explicit angle placeholder is syntax,
+                    # not key material. Do not strip a trailing slash from any other value.
+                    if raw_seed_value.endswith("\\"):
+                        continuation_value = raw_seed_value[:-1].strip()
+                        placeholder_value = continuation_value.strip('"').strip("'").strip()
+                        if ANGLE_PLACEHOLDER.fullmatch(placeholder_value):
+                            raw_seed_value = continuation_value
                     yaml_block_scalar = (
                         path.suffix.lower() in {".yaml", ".yml"}
                         and raw_seed_value in {"|", "|-", "|+", ">", ">-", ">+"}

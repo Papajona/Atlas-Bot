@@ -4037,6 +4037,7 @@ async def get_customer(
     )).scalar_one_or_none()
 
     email = str(claims.get("email") or "").strip().lower()[:320]
+    jwt_email_missing = not email
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
@@ -4052,7 +4053,7 @@ async def get_customer(
     # backfill the email when the existing profile has no encrypted email.
     # Every Auth-backed identity lookup or email backfill requires a confirmed
     # Auth email; active profiles with an already-persisted email avoid this call.
-    needs_auth_identity = profile is None or not str(profile.email or "").strip()
+    needs_auth_identity = (\n        jwt_email_missing\n        or profile is None\n        or not str(profile.email or "").strip()\n    )
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:

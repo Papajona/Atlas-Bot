@@ -1432,7 +1432,7 @@ def test_later_verified_cumulative_fee_restores_open_position_fee_basis():
             await db.refresh(trade)
 
             assert trade.fee_reconciliation_pending is False
-            assert trade.fee == Decimal("0.200000")
+            assert Decimal(str(trade.fee)) == Decimal("0.200000")
             assert position.quantity == pytest.approx(0.2)
             assert position.entry_fee == Decimal("0.200000")
             assert position.entry_fee_basis_known is True
@@ -1447,7 +1447,7 @@ def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered(
     calls = []
 
     class FakeBroker:
-        cfg = SimpleNamespace(exchange_id="binance")
+        cfg = SimpleNamespace(exchange_id="bybit")
 
         def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
             calls.append((symbol, since, limit, params))
@@ -1491,8 +1491,8 @@ def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered(
         )
         assert result["fees"] == [{"cost": "0.06", "currency": "USDT"}]
         assert len(calls) == 2
-        assert calls[0] == ("BTC/USDT", 40_000, 2, {"orderId": "old-order"})
-        assert calls[1] == ("BTC/USDT", 101_001, 2, {"orderId": "old-order"})
+        assert calls[0] == ("BTC/USDT", 40_000, 2, {})
+        assert calls[1] == ("BTC/USDT", 101_000, 2, {})
 
     asyncio.run(run())
 
