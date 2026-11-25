@@ -186,8 +186,23 @@ def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access(
     assert '--member="serviceAccount:${principal}"' in grant_helper
     assert '--role="roles/secretmanager.secretAccessor"' in grant_helper
     assert 'gcloud secrets get-iam-policy "$secret_name"' in verify_helper
+    assert 'iam_member = f"serviceAccount:{principal}"' in verify_helper
+    assert 'iam_member in binding.get("members", [])' in verify_helper
     assert "binding.get(\"condition\")" in verify_helper
     assert "gcloud projects add-iam-policy-binding" not in grant_helper
+
+    # Inspect the complete bootstrap source, not only the two expected grant loops:
+    # a project-wide Secret Accessor grant anywhere else must make this test fail.
+    accessor_mentions = [
+        line for line in script.splitlines()
+        if "roles/secretmanager.secretAccessor" in line
+    ]
+    assert len(accessor_mentions) == 2
+    assert all(
+        line in grant_helper or line in verify_helper
+        for line in accessor_mentions
+    )
+    assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in grant_helper
 
 
 def test_gcp_bootstrap_secret_access_repair_is_idempotent_and_never_reads_or_rotates_secrets():
