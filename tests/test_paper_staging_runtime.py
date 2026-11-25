@@ -56,7 +56,7 @@ def test_paper_staging_asgi_exposes_only_explicit_health_auth_customer_and_paper
         path in {
             "/", "/paper-staging.js", "/paper-staging.css",
             "/healthz", "/livez", "/readyz",
-            "/api/auth/signup", "/api/auth/login",
+            "/api/auth/signup", "/api/auth/login", "/api/auth/logout",
             "/api/auth/mfa/status", "/api/auth/mfa/enroll",
             "/api/auth/mfa/challenge", "/api/auth/mfa/verify",
             "/api/auth/profile/provision",
@@ -661,3 +661,67 @@ def test_customer_paper_runtime_gate_rejects_each_unsafe_money_path(monkeypatch,
 
     monkeypatch.setattr(settings, flag, enabled)
     assert _customer_paper_configuration_ready() is False
+
+
+def test_paper_customer_logout_revokes_only_the_authenticated_supabase_session(monkeypatch):
+    calls = {"user": [], "logout": []}
+
+    async def fake_supabase_user(token):
+        calls["user"].append(token)
+        return {"id": "auth-user-42"}
+
+    async def fake_supabase_request(path, payload=None, method="POST", access_token=None):
+        calls["logout"].append({
+            "path": path,
+            "payload": payload,
+            "method": method,
+            "access_token": access_token,
+        })
+        return {}
+
+    monkeypatch.setattr(paper_staging, "_supabase_user", fake_supabase_user)
+    monkeypatch.setattr(paper_staging, "_supabase_request", fake_supabase_request)
+    client = TestClient(paper_staging.app)
+
+    response = client.post(
+        "/api/auth/logout",
+        headers={"Authorization": "Bearer test-paper-session-token"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"status": "SIGNED_OUT"}
+    assert calls["user"] == ["test-paper-session-token"]
+    assert calls["logout"] == [{
+        "path": "/auth/v1/logout",
+        "payload": {},
+        "method": "POST",
+        "access_token": "test-paper-session-token",
+    }]
+
+    unauthorized = client.post("/api/auth/logout")
+    assert unauthorized.status_code == 401
+    assert calls["logout"] == [{
+        "path": "/auth/v1/logout",
+        "payload": {},
+        "method": "POST",
+        "access_token": "test-paper-session-token",
+    }]
+
+
+def test_paper_runtime_preflight_gate_uses_explicit_gate_header(monkeypatch):
+    from fastapi import FastAPI
+
+    async def blocked_preflight():
+        return {"status": "BLOCKED", "reason": "PAPER_LEDGER_PREFLIGHT_FAILED"}
+
+    monkeypatch.setattr(paper_staging, "_cached_paper_runtime_preflight", blocked_preflight)
+    gate_app = FastAPI()
+
+    @gate_app.get("/guard")
+    async def guard():
+        await paper_staging._paper_state_guard()
+        return {"status": "PASS"}
+
+    response = TestClient(gate_app).get("/guard")
+    assert response.status_code == 503
+    assert response.headers["x-atlas-paper-gate"] == "blocked"
+    assert "PAPER_LEDGER_PREFLIGHT_FAILED" in response.json()["detail"]
