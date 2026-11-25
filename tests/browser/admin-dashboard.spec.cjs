@@ -622,6 +622,191 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   await page.close();
 }
 
+async function testPaperStagingWorkspace(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  let verified = false;
+  let ready = false;
+  let initialized = false;
+  let paperOrders = [];
+  let orderPost = null;
+  let advanceCalls = 0;
+  let cancelRequest = null;
+  const calls = [];
+  await page.addInitScript(() => {
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => {
+      window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI);
+    });
+  });
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const p = url.pathname;
+    const method = req.method();
+    const headers = req.headers();
+    calls.push({ path: p, method, authorization: headers.authorization || "" });
+
+    if (p === "/api/auth/login" && method === "POST") {
+      return json(route, { access_token: "paper-aal1-token" });
+    }
+    if (p === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: verified ? "aal2" : "aal1",
+        factor_count: 1,
+        factor_ids: ["paper-test-factor"],
+      });
+    }
+    if (p === "/api/auth/mfa/challenge" && method === "POST") {
+      return json(route, { id: "paper-test-challenge" });
+    }
+    if (p === "/api/auth/mfa/verify" && method === "POST") {
+      const body = req.postDataJSON();
+      assert.equal(body.factor_id, "paper-test-factor");
+      assert.equal(body.challenge_id, "paper-test-challenge");
+      assert.equal(body.code, "123456");
+      verified = true;
+      return json(route, { access_token: "paper-aal2-token" });
+    }
+    if (p === "/api/auth/profile/provision" && method === "POST") {
+      return json(route, { status: "PROVISIONED" });
+    }
+    if (p === "/api/customer/me" && method === "GET") {
+      return json(route, { id: 42, display_name: "Paper Test Customer", email: "paper@example.invalid", status: "ACTIVE" });
+    }
+    if (p === "/api/customer/portfolio" && method === "GET") {
+      if (!ready) return json(route, { detail: "PAPER_LEDGER_PREFLIGHT_BLOCKED" }, 503);
+      return json(route, {
+        equity: initialized ? 10000 : 0,
+        cash_equity: initialized ? 10000 : 0,
+        positions: [],
+        virtual_only: true,
+        valuation_status: "CASH_ONLY",
+      });
+    }
+    if (p === "/api/customer/paper/balances" && method === "GET") {
+      return json(route, {
+        balances: initialized ? [{
+          account_code: "PAPER_CASH",
+          currency: "USDT",
+          balance: "10000",
+        }] : [],
+      });
+    }
+    if (p === "/api/customer/paper/positions" && method === "GET") {
+      return json(route, { positions: [] });
+    }
+    if (p === "/api/customer/paper/orders" && method === "GET") {
+      return json(route, { orders: paperOrders.slice() });
+    }
+    if (p === "/api/customer/paper/account/initialize" && method === "POST") {
+      initialized = true;
+      return json(route, {
+        status: "INITIALIZED",
+        starting_cash: 10000,
+        currency: "USDT",
+        note: "Virtual test balance initialized.",
+      });
+    }
+    if (p === "/api/customer/paper/orders" && method === "POST") {
+      orderPost = { body: req.postDataJSON(), authorization: headers.authorization || "" };
+      paperOrders = [{
+        client_order_id: orderPost.body.client_order_id,
+        symbol: orderPost.body.symbol,
+        side: orderPost.body.side,
+        quantity: orderPost.body.quantity,
+        status: "OPEN",
+      }];
+      return json(route, { status: "SUBMITTED", fill_note: "Awaiting a verified completed bar." });
+    }
+    if (p === "/api/customer/paper/orders/mock-paper-order-1/advance" && method === "POST") {
+      advanceCalls += 1;
+      return json(route, { status: "ADVANCED" });
+    }
+    if (p === "/api/customer/paper/orders/mock-paper-order-1/cancel" && method === "POST") {
+      cancelRequest = { body: req.postDataJSON(), authorization: headers.authorization || "" };
+      paperOrders = [];
+      return json(route, { status: "CANCELLED" });
+    }
+    return json(route, { detail: "Unexpected paper-staging test request" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200, "paper-staging browser workspace should load");
+  const csp = response.headers()["content-security-policy"];
+  assert.match(csp, /script-src 'self';/);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
+
+  await page.locator("#email").fill("paper@example.invalid");
+  await page.locator("#password").fill("test-only-password");
+  await page.locator("#login-button").click();
+  await page.locator("#mfa-panel").waitFor({ state: "visible", timeout: 10000 });
+  await page.locator("#totp-code").fill("123456");
+  await page.locator("#verify-button").click();
+
+  await page.locator("#blocked-state").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#workspace").isHidden(), true, "paper actions must stay hidden while readiness is blocked");
+  assert.match(await page.locator("#auth-message").innerText(), /PAPER_LEDGER_PREFLIGHT_BLOCKED/);
+  assert.equal(verified, true, "the browser must complete TOTP before customer paper access");
+
+  ready = true;
+  await page.locator("#retry-preflight").click();
+  await page.locator("#workspace").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#blocked-state").isHidden(), true, "successful readiness retry should restore the workspace");
+
+  await page.locator("#initialize-button").click();
+  await waitUntil(async () => initialized && (await page.locator("#cash-balance").innerText()).includes("10,000"));
+  assert.equal(await page.locator("#initialize-button").isDisabled(), true, "initialized virtual account must not offer duplicate initialization");
+
+  await page.locator("#quantity").fill("0.001");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => orderPost !== null && (await page.locator("#order-count").innerText()) === "1");
+  assert.equal(orderPost.body.symbol, "BTC/USDT");
+  assert.equal(orderPost.body.side, "BUY");
+  assert.equal(orderPost.body.order_type, "MARKET");
+  assert.equal(orderPost.body.quantity, "0.001");
+  assert.equal(orderPost.body.timeframe, "1h");
+  assert.equal("price" in orderPost.body, false, "the browser must not supply a fill or market price");
+  assert.equal(orderPost.authorization, "Bearer paper-aal2-token");
+
+  await page.locator('[data-advance="mock-paper-order-1"]').click();
+  await waitUntil(async () => advanceCalls === 1);
+  assert.equal(await page.locator("#order-count").innerText(), "1");
+
+  let confirmation = "";
+  page.once("dialog", async dialog => { confirmation = dialog.message(); await dialog.accept(); });
+  await page.locator('[data-cancel="mock-paper-order-1"]').click();
+  await waitUntil(async () => cancelRequest !== null && (await page.locator("#order-count").innerText()) === "0");
+  assert.match(confirmation, /Cancel this open virtual paper order/);
+  assert.match(cancelRequest.body.idempotency_key, /^paper-ui-cancel-/);
+  assert.equal(cancelRequest.authorization, "Bearer paper-aal2-token");
+
+  const forbiddenCalls = calls.filter(call =>
+    call.path.includes("/withdraw") || call.path.includes("/broker/") || call.path.includes("/payout")
+  );
+  assert.deepEqual(forbiddenCalls, [], "paper-only workspace must never call live-money endpoints");
+  assert.ok(
+    calls.filter(call => call.path.startsWith("/api/customer/paper/")).every(call => call.authorization === "Bearer paper-aal2-token"),
+    "all paper ledger routes must use the verified AAL2 token"
+  );
+  assert.deepEqual(
+    await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })),
+    { local: 0, session: 0 },
+    "customer tokens must not be persisted in browser storage"
+  );
+  const mobileLayout = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    document: document.documentElement.scrollWidth,
+  }));
+  assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "paper staging workspace must fit mobile screens: " + JSON.stringify(mobileLayout));
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "paper staging workspace must have no CSP violations");
+  assert.deepEqual(pageErrors, [], "paper staging browser flow must not throw JavaScript errors");
+  await page.close();
+}
+
+
 (async () => {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -639,7 +824,8 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
     await testCustomerMfaEnrollmentQr(browser, baseUrl);
     await testCustomerHostileData(browser, baseUrl);
     await testCustomerMfaOtpWithdrawalFlow(browser, baseUrl);
-    console.log("PASS: supplied v27 hostile-data regressions, logged-out polling, admin/customer MFA QR under strict CSP, payout confirmation, 12x100-row refresh stress, and mocked customer MFA/OTP/withdrawal flow.");
+    await testPaperStagingWorkspace(browser, baseUrl);
+    console.log("PASS: admin/customer browser regressions, strict CSP, hostile-data rendering, 12x100-row refresh stress, customer MFA/OTP flow, and mocked paper-staging MFA/readiness/order lifecycle.");
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
