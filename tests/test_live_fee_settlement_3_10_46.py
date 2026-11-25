@@ -1656,7 +1656,6 @@ def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
                     "filled": 0.1,
                     "remaining": 0.1,
                     "average": 100,
-                    "fee": {"cost": "0"},
                 },
             )
             await db.commit()
