@@ -148,28 +148,34 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
     ):
         assert expected in source
 
-def test_0065_rollback_provenance_tracks_direct_acl_grants_not_public_defaults():
+def test_0065_rollback_provenance_tracks_exact_direct_acl_deltas_and_identity():
     migration = (
         ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
     ).read_text(encoding="utf-8")
 
-    assert "'marker', 'atlas:0065:rollback-state:v2'" in migration
-    assert "'migration_grantor', migration_role" in migration
-    assert "'had_public_schema_usage_direct'" in migration
-    assert "'had_ledger_journals_select_direct'" in migration
-    assert "'had_ledger_journal_lines_select_direct'" in migration
-    assert "'had_validate_function_execute_direct'" in migration
-    assert "'had_public_schema_usage_from_migration_grantor'" in migration
-    assert "'had_ledger_journals_select_from_migration_grantor'" in migration
-    assert "'had_ledger_journal_lines_select_from_migration_grantor'" in migration
-    assert "'had_validate_function_execute_from_migration_grantor'" in migration
+    assert "'marker', 'atlas:0065:rollback-state:v3'" in migration
+    assert "'migration_identity', migration_role" in migration
+    for key in (
+        "pre_public_schema_usage_acl",
+        "pre_ledger_journals_select_acl",
+        "pre_ledger_journal_lines_select_acl",
+        "pre_validate_function_execute_acl",
+        "introduced_public_schema_usage_grantors",
+        "introduced_ledger_journals_select_grantors",
+        "introduced_ledger_journal_lines_select_grantors",
+        "introduced_validate_function_execute_grantors",
+    ):
+        assert f"'{key}'" in migration
+
     assert "acl.grantee = role_oid" in migration
-    assert "acl.grantor = migration_role_oid" in migration
+    assert "acl.grantor" in migration
     assert "aclexplode(" in migration
     assert "GRANTED BY %I" in migration
-    assert "n.nspacl" in migration
-    assert "c.relacl" in migration
-    assert "p.proacl" in migration
+    assert "role_state->>'migration_identity'" in migration
+    assert "grantee.rolname <> role_name" in migration
+    assert "jsonb_array_length(role_state->'pre_validate_function_execute_acl') = 0" in migration
+    assert "original migration identity" in migration
+    assert "pg_has_role(migration_role_oid, grantor_oid, 'MEMBER')" in migration
 
     rollback_state = migration.split("role_state := jsonb_build_object", 1)[1].split(
         "'prior_role_comment', role_comment", 1
@@ -177,6 +183,7 @@ def test_0065_rollback_provenance_tracks_direct_acl_grants_not_public_defaults()
     assert "has_schema_privilege(" not in rollback_state
     assert "has_table_privilege(" not in rollback_state
     assert "has_function_privilege(" not in rollback_state
+
 
 
 def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate_steps():
