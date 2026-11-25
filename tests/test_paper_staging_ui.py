@@ -15,6 +15,7 @@ def test_paper_staging_serves_the_restricted_browser_workspace():
     assert "Live payouts" in response.text
     assert 'id="retry-preflight"' in response.text
     assert "Recheck staging readiness" in response.text
+    assert 'id="blocked-state" hidden' in response.text
     assert "<script>" not in response.text
 
 
