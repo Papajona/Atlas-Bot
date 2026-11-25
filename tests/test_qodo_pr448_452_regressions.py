@@ -193,7 +193,7 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
         source.index("async def _legacy_customer_email_conflict"):
         source.index("async def get_customer")
     ]
-    assert 'if not str(stored_email or "").strip():\n            return True' in helper
+    assert 'if not str(stored_email or "").strip():\n            continue' in helper
 
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
     provisioning = edge[
@@ -201,13 +201,13 @@ def test_unmapped_legacy_identity_fails_closed_for_new_profiles():
         edge.index("const now = new Date().toISOString()")
     ]
     assert "ALREADY_PROVISIONED" in provisioning
-    assert "hasUnmappedLegacyIdentity" in provisioning
-    assert "New customer provisioning is paused" in provisioning
-    assert "}, 409)" in provisioning
+    assert "per-identity check" in provisioning
+    assert ".range(" not in provisioning
+    assert "New customer provisioning is paused" not in provisioning
 
 
 
-def test_unmapped_legacy_profile_with_blank_email_blocks_new_identity():
+def test_blank_legacy_email_does_not_block_unrelated_new_identity_but_matching_email_does():
     class Result:
         def __init__(self, rows):
             self.rows = rows
@@ -222,22 +222,22 @@ def test_unmapped_legacy_profile_with_blank_email_blocks_new_identity():
         async def execute(self, _statement):
             return Result(self.rows)
 
-    legacy = asyncio.run(
+    unknown_legacy_email = asyncio.run(
         main._legacy_customer_email_conflict(
             Database([("legacy-tron-reference", "")]),
             "new-supabase-uuid",
             "new@example.invalid",
         )
     )
-    unrelated_uuid = asyncio.run(
+    matching_legacy_email = asyncio.run(
         main._legacy_customer_email_conflict(
-            Database([("8e9c7e76-f8b6-4caa-96c4-0e451f4e2fb7", "")]),
+            Database([("legacy-tron-reference", "new@example.invalid")]),
             "new-supabase-uuid",
             "new@example.invalid",
         )
     )
-    assert legacy is True
-    assert unrelated_uuid is False
+    assert unknown_legacy_email is False
+    assert matching_legacy_email is True
 
 
 def test_existing_profile_identity_review_is_scoped_to_confirmed_legacy_email():
