@@ -4,7 +4,11 @@ import signal
 # Test suite must choose an explicit safe environment rather than relying on
 # Settings' production/staging fail-closed behavior.
 os.environ.setdefault("ENVIRONMENT", "development")
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///./test_trading.db")
+# Each pytest-xdist worker needs its own throw-away SQLite file; sharing one lets a worker
+# delete it while another worker is creating tables.
+_XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "")
+_DEFAULT_TEST_DB = f"test_trading_{_XDIST_WORKER}.db" if _XDIST_WORKER else "test_trading.db"
+os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///./{_DEFAULT_TEST_DB}")
 os.environ.setdefault("BACKGROUND_RECONCILIATION_ENABLED", "false")
 # Disable process-local readiness caching in tests unless a test explicitly opts in.
 os.environ.setdefault("READYZ_CACHE_SECONDS", "0")
@@ -44,7 +48,7 @@ def pytest_runtest_call(item):
 @pytest.fixture(scope="session", autouse=True)
 def _fresh_default_test_db():
     """Remove only the default throw-away SQLite DB before a pytest session."""
-    if os.environ.get("DATABASE_URL", "").endswith("///./test_trading.db"):
+    if os.environ.get("DATABASE_URL", "").endswith(f"///./{_DEFAULT_TEST_DB}"):
         for suffix in ("", "-wal", "-shm", "-journal"):
-            pathlib.Path("test_trading.db" + suffix).unlink(missing_ok=True)
+            pathlib.Path(_DEFAULT_TEST_DB + suffix).unlink(missing_ok=True)
     yield

@@ -64,6 +64,8 @@ from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, 
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
 from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay, verify_customer_ledger_balances_match_journals
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
+from .market_scanner import MAX_CONCURRENT_FETCHES as _SCANNER_MAX_CONCURRENT_FETCHES, normalize_symbols as _scanner_normalize_symbols, scan_symbols as _scanner_scan_symbols
+from .request_limits import read_limited_body
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
@@ -1444,12 +1446,19 @@ async def app_lifespan(app: FastAPI):
         await shutdown()
 
 
+_CUSTOMER_WEBHOOK_MAX_BODY_BYTES = 64 * 1024
+
+
 app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url, lifespan=app_lifespan)
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
 # Keep telemetry outside the body limiter so 413 responses receive the normal security headers.
-app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=settings.max_request_body_bytes,
+    path_prefix_limits={"/api/webhooks/": _CUSTOMER_WEBHOOK_MAX_BODY_BYTES},
+)
 app.add_middleware(TelemetryMiddleware)
 
 _instance_id = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:12]
@@ -4349,7 +4358,13 @@ def _strategy_router_validation_gate(
     }
 
 
-def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
+def _market_data_quality(
+    df,
+    timeframe: str,
+    asset: str = "crypto",
+    *,
+    completed_bar_close: bool = False,
+) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if df is None or len(df) < settings.min_bars:
         reasons.append("insufficient_bars")
@@ -4378,15 +4393,51 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
         reasons.append("duplicate_timestamps")
     last = df.index[-1]
     try:
-        age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
-        tf = pd.Timedelta(timeframe).total_seconds()
-        # Completed-bar data is expected to be no older than 3 bars or the configured hard ceiling.
-        allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf * 3.5))
-        if age > allowed:
-            reasons.append("stale_market_data")
+        timeframe_delta = pd.Timedelta(timeframe)
+        tf_seconds = timeframe_delta.total_seconds()
+        if not math.isfinite(tf_seconds) or tf_seconds <= 0:
+            raise ValueError("invalid timeframe")
+        if completed_bar_close:
+            # OHLCV indices label candle opens. Use the completed close boundary so
+            # fresh 4-hour and daily candles are not rejected because their open is old.
+            last_open = pd.Timestamp(last)
+            if last_open.tzinfo is None:
+                raise ValueError("naive market timestamp")
+            last_close = last_open + timeframe_delta
+            close_age = (pd.Timestamp(datetime.now(timezone.utc)) - last_close).total_seconds()
+            if close_age < 0:
+                reasons.append("incomplete_latest_bar")
+            elif close_age > _customer_paper_max_bar_age_seconds(tf_seconds):
+                reasons.append("stale_market_data")
+        else:
+            age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
+            # Preserve the legacy open-time freshness rule for other consumers.
+            allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf_seconds * 3.5))
+            if age > allowed:
+                reasons.append("stale_market_data")
     except Exception:
         reasons.append("invalid_market_timestamp")
     return not reasons, reasons
+
+
+def _require_strategy_market_data_quality(df, req) -> None:
+    passed, reasons = _market_data_quality(
+        df, req.timeframe, req.asset, completed_bar_close=True
+    )
+    if not passed:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Market data failed the strategy quality gate", "reasons": reasons},
+        )
+
+
+def _customer_paper_router_taker_bps(
+    *, needs_customer_paper: bool, asset: str
+) -> float:
+    """Keep customer-paper crypto-spot routing cost assumptions aligned with fills."""
+    if needs_customer_paper and str(asset or "").strip().lower() == "crypto":
+        return float(settings.customer_paper_spot_taker_bps)
+    return float(settings.research_taker_bps)
 
 
 def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
@@ -6272,7 +6323,9 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 build_research_execution_cost_context,
                 df,
                 settings=settings,
-                taker_bps=float(settings.research_taker_bps),
+                taker_bps=_customer_paper_router_taker_bps(
+                    needs_customer_paper=needs_customer_paper, asset=req.asset
+                ),
                 base_slippage_bps=float(settings.research_slippage_bps),
                 cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
                 asset=req.asset,
@@ -7215,7 +7268,9 @@ async def list_customer_webhooks(authorization:str|None=Header(default=None)):
 
 @app.post("/api/webhooks/{endpoint_id}")
 async def receive_customer_webhook(endpoint_id:int, request:Request, x_atlas_webhook_token: str | None = Header(default=None), x_atlas_event_id:str|None=Header(default=None)):
-    raw=await request.body()
+    # Stream the payload and stop at the route-specific limit; never buffer an
+    # oversized webhook body before rejecting it.
+    raw = await read_limited_body(request, _CUSTOMER_WEBHOOK_MAX_BODY_BYTES)
     async with SessionLocal() as db:
         endpoint=(await db.execute(select(WebhookEndpoint).where(WebhookEndpoint.id==endpoint_id,WebhookEndpoint.status=="ACTIVE"))).scalar_one_or_none()
         if not endpoint: raise HTTPException(404,"Webhook endpoint not found")
@@ -7263,19 +7318,26 @@ def _scanner_metrics(df):
     return {"price":last,"rsi":rsi,"ema20":float(ema20),"ema50":float(ema50),"atr":float(atr),"volume_ratio":vol_ratio,"score":float(score),"signal":"LONG" if score>=0.35 else "SHORT" if score<=-0.35 else "WATCH"}
 
 
+# Process-wide bound on concurrent scanner fetch threads (each builds its own CCXT client).
+_SCANNER_SEMAPHORE = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT_FETCHES)
+
+
 @app.get("/api/customer/market-scanner")
 async def customer_market_scanner(exchange: str="binance", symbols: str="BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT", authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
         profile,_=await get_customer(authorization,db,require_aal2=False)
         await _require_feature(db,profile.id,"market_scanner")
-    requested=[x.strip() for x in symbols.split(",") if x.strip()][:20]
-    async def one(sym):
-        try:
-            df=await asyncio.to_thread(fetch_crypto,sym,exchange,"15m",30,True)
-            return {"symbol":sym,**_scanner_metrics(df)}
-        except Exception as exc:
-            return {"symbol":sym,"signal":"ERROR","error":str(exc)[:180]}
-    results=await asyncio.gather(*(one(s) for s in requested))
+    import ccxt
+    if exchange not in ccxt.exchanges:
+        raise HTTPException(422,"Unsupported exchange")
+    requested=_scanner_normalize_symbols(symbols)
+    results=await _scanner_scan_symbols(
+        requested,
+        fetch=lambda sym: fetch_crypto(sym,exchange,"15m",30,True),
+        metrics=_scanner_metrics,
+        semaphore=_SCANNER_SEMAPHORE,
+        logger=logging.getLogger(__name__),
+    )
     return {"exchange":exchange,"timeframe":"15m","results":sorted(results,key=lambda x: abs(float(x.get("score",0))),reverse=True)}
 
 
@@ -9190,6 +9252,7 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         raise HTTPException(403, "Strategy engine is disabled")
     try:
         df = await asyncio.to_thread(market_data, req)
+        _require_strategy_market_data_quality(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -9200,6 +9263,8 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         result = await asyncio.to_thread(strategy_signal, df, cfg, req.asset)
         result.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
 
@@ -9314,6 +9379,7 @@ async def research_review(req: ResearchMarketRequest, x_admin_token: str | None 
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        _require_strategy_market_data_quality(df, req)
         df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
@@ -9330,6 +9396,8 @@ async def research_review(req: ResearchMarketRequest, x_admin_token: str | None 
         review.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         review["trial_archive_write"] = trial_archive_write
         return review
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
 

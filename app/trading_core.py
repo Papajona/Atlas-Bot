@@ -4,7 +4,10 @@ from collections.abc import Mapping
 from pathlib import Path
 import hashlib
 import json
-from datetime import datetime, timezone
+import os
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import TimeSeriesSplit
@@ -16,7 +19,14 @@ from .research_validation import (
     deflated_sharpe_report, cost_breakeven_report, purged_walk_forward_splits,
     newey_west_mean_inference, oos_benchmark_comparison,
 )
-from .model_registry import sha256_file, artifact_signature, verify_artifact_signature
+from .model_registry import (
+    sha256_file,
+    artifact_signature,
+    verify_artifact_signature,
+    read_model_manifest,
+    resolve_model_artifact,
+    model_artifact_lock,
+)
 from .execution_aware_research import simulate_execution_aware_strategy
 
 
@@ -35,6 +45,18 @@ PROFILES = {
     "crypto": Profile(8760, 5.5, 2.0, 0.125, 12, 0.30, 3.0),
     "forex": Profile(6240, 0.5, 0.5, 0.0, 24, 0.10, 10.0),
 }
+
+
+def _model_manifest_signature(digest: str) -> str:
+    """Return a configured model signature or fail before publishing an unsigned artifact."""
+    configured = bool(settings.model_signing_private_key or settings.model_signing_key)
+    signature = artifact_signature(digest) if configured else ""
+    if configured and not signature:
+        raise RuntimeError(
+            "Model signing is configured but the artifact signature could not be produced; "
+            "check MODEL_SIGNING_PRIVATE_KEY (Ed25519 PEM)"
+        )
+    return signature
 
 FEATURE_COLUMNS = [
     "ret_1", "ret_4", "ret_12", "ret_24", "ret_72",
@@ -410,6 +432,188 @@ def _model_paths(model_path: str):
     return p, p.with_suffix(p.suffix + ".meta.json")
 
 
+def _model_versions_directory(model_file: Path) -> Path:
+    return model_file.with_name(model_file.name + ".versions")
+
+
+
+_MODEL_VERSION_GRACE_PERIOD = timedelta(hours=24)
+_MODEL_VERSION_EXTRA_RETAIN = 2
+
+
+def _pointer_artifact_references(model_file: Path, pointer_file: Path) -> set[Path] | None:
+    """Return artifact paths in a pointer; None signals unsafe-to-collect state."""
+    try:
+        raw = pointer_file.read_bytes()
+    except FileNotFoundError:
+        return set()
+    except OSError:
+        return None
+    if not raw.startswith(b"{"):
+        return set()
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    if manifest.get("artifact_pointer_schema") != 1:
+        return set()
+    try:
+        return {resolve_model_artifact(model_file, manifest).resolve(strict=False)}
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def prune_model_versions(
+    model_path: str | Path,
+    *,
+    now: datetime | None = None,
+    grace_period: timedelta = _MODEL_VERSION_GRACE_PERIOD,
+    retain_unreferenced: int = _MODEL_VERSION_EXTRA_RETAIN,
+) -> int:
+    """Reclaim aged model artifacts while preserving live, rollback and recent versions.
+
+    Readers hold the same inter-process lock until artifact bytes are in memory, so
+    collection cannot remove an artifact between pointer capture and file open. Any
+    unreadable live or rollback pointer disables collection rather than risking data loss.
+    """
+    model_file = Path(model_path)
+    versions_dir = _model_versions_directory(model_file)
+    if not versions_dir.is_dir():
+        return 0
+    try:
+        keep_count = max(0, int(retain_unreferenced))
+        grace_seconds = max(0.0, float(grace_period.total_seconds()))
+        reference_time = now or datetime.now(timezone.utc)
+        if reference_time.tzinfo is None:
+            reference_time = reference_time.replace(tzinfo=timezone.utc)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return 0
+
+    try:
+        with model_artifact_lock(model_file):
+            if not versions_dir.is_dir():
+                return 0
+            if versions_dir.resolve().parent != model_file.parent.resolve():
+                return 0
+            referenced: set[Path] = set()
+            rollback_pointer = model_file.with_name(model_file.name + ".previous")
+            for pointer_file in (model_file, rollback_pointer):
+                refs = _pointer_artifact_references(model_file, pointer_file)
+                if refs is None:
+                    return 0
+                referenced.update(refs)
+
+            candidates: list[tuple[float, Path]] = []
+            for artifact in versions_dir.iterdir():
+                if (
+                    artifact.is_symlink()
+                    or not artifact.is_file()
+                    or not re.fullmatch(r"[0-9a-f]{64}\.[0-9a-f]{32}(?:\..+)?", artifact.name)
+                ):
+                    continue
+                try:
+                    candidates.append((artifact.stat().st_mtime, artifact))
+                except OSError:
+                    continue
+            candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
+
+            retained_extra = 0
+            removed = 0
+            for modified_at, artifact in candidates:
+                try:
+                    if artifact.resolve(strict=False) in referenced:
+                        continue
+                except OSError:
+                    continue
+                age_seconds = (
+                    reference_time - datetime.fromtimestamp(modified_at, tz=timezone.utc)
+                ).total_seconds()
+                if age_seconds < grace_seconds:
+                    continue
+                if retained_extra < keep_count:
+                    retained_extra += 1
+                    continue
+                try:
+                    artifact.unlink()
+                    removed += 1
+                except FileNotFoundError:
+                    pass
+            return removed
+    except (OSError, TypeError, ValueError):
+        # Cleanup is best-effort and must never invalidate a published champion.
+        return 0
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory sync after publishing an immutable file or pointer."""
+    if not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        # Some local/test filesystems do not support directory fsync.
+        pass
+
+
+def _publish_versioned_model_pointer(
+    model_file: Path,
+    meta_file: Path,
+    staged_model: Path,
+    metadata: dict,
+    model_hash: str,
+) -> Path:
+    """Publish immutable model bytes, then atomically replace the single live pointer.
+
+    If pointer publication fails, remove the newly installed artifact immediately.
+    """
+    versions_dir = _model_versions_directory(model_file)
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    artifact_name = f"{model_hash}.{uuid.uuid4().hex}{model_file.suffix or '.joblib'}"
+    artifact_file = versions_dir / artifact_name
+    staged_pointer = model_file.with_name(
+        f"{model_file.name}.{uuid.uuid4().hex}.pointer"
+    )
+    published = False
+    try:
+        os.replace(staged_model, artifact_file)
+        _fsync_directory(versions_dir)
+
+        pointer = dict(metadata)
+        pointer.update({
+            "artifact_pointer_schema": 1,
+            "artifact_file": f"{versions_dir.name}/{artifact_name}",
+            "model_sha256": model_hash,
+        })
+        with staged_pointer.open("x", encoding="utf-8") as handle:
+            json.dump(pointer, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        with model_artifact_lock(model_file):
+            os.replace(staged_pointer, model_file)
+            published = True
+            _fsync_directory(model_file.parent)
+            try:
+                meta_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except Exception:
+        if not published:
+            artifact_file.unlink(missing_ok=True)
+        raise
+    finally:
+        staged_pointer.unlink(missing_ok=True)
+
+    prune_model_versions(model_file)
+    return artifact_file
+
+
 def _aligned_log_loss(y_true, probabilities: np.ndarray, model_classes) -> float:
     """Score encoded {-1, 0, 1} labels even when a chronological train fold omits a class."""
     y = np.asarray(y_true, dtype=int)
@@ -503,37 +707,120 @@ def train_model(df: pd.DataFrame, model_path: str, min_train: int = 800, folds: 
     final_model.fit(X, encoded.to_numpy(dtype=int))
     model_file, meta_file = _model_paths(model_path)
     model_file.parent.mkdir(parents=True, exist_ok=True)
+    versions_dir = _model_versions_directory(model_file)
+    versions_dir.mkdir(parents=True, exist_ok=True)
     import joblib
-    joblib.dump(final_model, model_file)
-    model_hash = sha256_file(model_file)
-    manifest_signature = artifact_signature(model_hash) if (settings.model_signing_private_key or settings.model_signing_key) else ""
-    meta = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "samples": int(len(X)),
-        "features": FEATURE_COLUMNS,
-        "classes": [int(cls) for cls in final_model.classes_],
-        "class_mapping": {"0": -1, "1": 0, "2": 1},
-        "validation": scores,
-        "model_sha256": model_hash,
-        "manifest_signature": manifest_signature,
-        "training_start": X.index.min().isoformat(),
-        "training_end": X.index.max().isoformat(),
-        "asset": asset,
-        "max_hold": profile.max_hold,
-    }
-    meta_file.write_text(json.dumps(meta, indent=2))
+    staged_model = versions_dir / f".{model_file.name}.{uuid.uuid4().hex}.training"
+    try:
+        joblib.dump(final_model, staged_model, compress=3)
+        model_hash = sha256_file(staged_model)
+        manifest_signature = _model_manifest_signature(model_hash)
+        meta = {
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "samples": int(len(X)),
+            "features": FEATURE_COLUMNS,
+            "classes": [int(cls) for cls in final_model.classes_],
+            "class_mapping": {"0": -1, "1": 0, "2": 1},
+            "validation": scores,
+            "model_sha256": model_hash,
+            "manifest_signature": manifest_signature,
+            "training_start": X.index.min().isoformat(),
+            "training_end": X.index.max().isoformat(),
+            "asset": asset,
+            "max_hold": profile.max_hold,
+        }
+        _publish_versioned_model_pointer(
+            model_file, meta_file, staged_model, meta, model_hash
+        )
+    finally:
+        staged_model.unlink(missing_ok=True)
     return {"samples": len(X), "features": len(FEATURE_COLUMNS), "folds": len(scores), "validation": scores, "model_sha256": model_hash}
+
+
+def promote_model_artifact(source_model_path: str, target_model_path: str) -> str:
+    """Copy a validated candidate into a new immutable bundle and atomically switch target."""
+    source_file, _source_meta_file = _model_paths(source_model_path)
+    with model_artifact_lock(source_file):
+        if not source_file.is_file():
+            raise FileNotFoundError(source_file)
+        source_manifest = read_model_manifest(source_file)
+        if not source_manifest:
+            raise RuntimeError("Candidate model manifest is missing or invalid")
+        source_artifact = resolve_model_artifact(source_file, source_manifest)
+        if not source_artifact.is_file():
+            raise FileNotFoundError(source_artifact)
+        model_bytes = source_artifact.read_bytes()
+    model_hash = hashlib.sha256(model_bytes).hexdigest()
+    expected_hash = str(source_manifest.get("model_sha256") or "")
+    if expected_hash and expected_hash != model_hash:
+        raise RuntimeError("Candidate model artifact hash mismatch")
+    signature = str(source_manifest.get("manifest_signature") or "")
+    if settings.environment in {"staging", "production"}:
+        if not (settings.model_signing_public_key or settings.model_signing_key) or not signature:
+            raise RuntimeError("Candidate model artifact signature is required in staging/production")
+        if not verify_artifact_signature(model_hash, signature):
+            raise RuntimeError("Candidate model artifact signature mismatch")
+
+    target_file, target_meta_file = _model_paths(target_model_path)
+    target_file.parent.mkdir(parents=True, exist_ok=True)
+    versions_dir = _model_versions_directory(target_file)
+    versions_dir.mkdir(parents=True, exist_ok=True)
+    staged_model = versions_dir / f".{target_file.name}.{uuid.uuid4().hex}.promotion"
+    try:
+        with staged_model.open("xb") as handle:
+            handle.write(model_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _publish_versioned_model_pointer(
+            target_file,
+            target_meta_file,
+            staged_model,
+            source_manifest,
+            model_hash,
+        )
+        return model_hash
+    finally:
+        staged_model.unlink(missing_ok=True)
 
 
 def load_model(model_path: str):
     import joblib
     model_file, meta_file = _model_paths(model_path)
-    if not model_file.exists() or not meta_file.exists():
-        raise FileNotFoundError(model_file)
-    meta = json.loads(meta_file.read_text())
-    # Read the artifact ONCE: hash, verify and deserialize the same bytes so the file cannot be
-    # swapped between verification and joblib.load (joblib is pickle -> code execution on load).
-    model_bytes = model_file.read_bytes()
+
+    # Keep pointer and artifact capture under the same lock used by version collection.
+    with model_artifact_lock(model_file):
+        if not model_file.is_file():
+            raise FileNotFoundError(model_file)
+        pointer_bytes = model_file.read_bytes()
+        try:
+            pointer_value = (
+                json.loads(pointer_bytes.decode("utf-8"))
+                if pointer_bytes.startswith(b"{") else None
+            )
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pointer_value = None
+
+        is_atomic_pointer = (
+            isinstance(pointer_value, dict)
+            and pointer_value.get("artifact_pointer_schema") == 1
+        )
+        if is_atomic_pointer:
+            meta = pointer_value
+            try:
+                artifact_file = resolve_model_artifact(model_file, meta)
+            except (OSError, TypeError, ValueError) as exc:
+                raise RuntimeError("Invalid model artifact pointer") from exc
+            model_bytes = artifact_file.read_bytes()
+        else:
+            if not meta_file.is_file():
+                raise FileNotFoundError(meta_file)
+            meta = read_model_manifest(model_file)
+            try:
+                artifact_file = resolve_model_artifact(model_file, meta)
+            except (OSError, TypeError, ValueError) as exc:
+                raise RuntimeError("Invalid model artifact pointer") from exc
+            model_bytes = pointer_bytes if artifact_file == model_file else artifact_file.read_bytes()
+
     digest = hashlib.sha256(model_bytes).hexdigest()
     if digest != meta.get("model_sha256"):
         raise RuntimeError("Model artifact hash mismatch")

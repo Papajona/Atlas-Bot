@@ -2,7 +2,9 @@ import os
 import pytest
 pytest.importorskip("aiosqlite")
 os.environ["ENVIRONMENT"] = "development"
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///./test_trading.db"
+# Keep the forced throw-away SQLite URL but isolate each pytest-xdist worker.
+_worker = os.environ.get("PYTEST_XDIST_WORKER", "")
+os.environ["DATABASE_URL"] = f"sqlite+aiosqlite:///./test_trading{'_' + _worker if _worker else ''}.db"
 os.environ["BACKGROUND_RECONCILIATION_ENABLED"] = "false"
 os.environ.setdefault("ADMIN_TOKEN", "test-admin-token-for-pytest-only")
 

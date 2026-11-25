@@ -8,7 +8,7 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-async def _drive(mw, *, headers=(), chunks=(b"",), http_version="1.1"):
+async def _drive(mw, *, headers=(), chunks=(b"",), http_version="1.1", path="/x"):
     sent = []
     queue = list(chunks)
 
@@ -21,7 +21,7 @@ async def _drive(mw, *, headers=(), chunks=(b"",), http_version="1.1"):
     async def send(message):
         sent.append(message)
 
-    scope = {"type": "http", "http_version": http_version, "headers": list(headers), "path": "/x", "method": "POST"}
+    scope = {"type": "http", "http_version": http_version, "headers": list(headers), "path": path, "method": "POST"}
     await mw(scope, receive, send)
     return sent
 
@@ -135,3 +135,35 @@ def test_http3_oversize_rejection_omits_connection_header():
     ))
     assert sent[0]["status"] == 413
     assert all(name != b"connection" for name, _value in sent[0]["headers"])
+
+
+def test_webhook_path_limit_is_applied_before_framework_body_buffering():
+    called = []
+
+    async def downstream(scope, receive, send):
+        called.append(scope["path"])
+        await _reader_app()(scope, receive, send)
+
+    middleware = BodySizeLimitMiddleware(
+        downstream,
+        max_bytes=2_097_152,
+        path_prefix_limits={"/api/webhooks/": 64},
+    )
+    sent = _run(_drive(
+        middleware,
+        chunks=[b"x" * 40, b"y" * 25],
+        path="/api/webhooks/123",
+    ))
+    assert sent[0]["status"] == 413
+    assert called == []
+
+
+def test_path_specific_limit_does_not_change_other_routes():
+    middleware = BodySizeLimitMiddleware(
+        _reader_app(),
+        max_bytes=100,
+        path_prefix_limits={"/api/webhooks/": 10},
+    )
+    sent = _run(_drive(middleware, chunks=[b"x" * 11], path="/api/customer/profile"))
+    assert sent[0]["status"] == 200
+    assert sent[1]["body"] == b"11"

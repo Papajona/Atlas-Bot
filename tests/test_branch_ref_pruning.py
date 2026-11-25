@@ -946,6 +946,8 @@ def test_native_ai_retirement_preserves_descendant_with_unmerged_migration_edit(
 def test_native_ai_branch_retirement_gate_accepts_committed_migration_safeguards():
     """Read the real committed tree; the success path must not mock git show."""
     repository_root = Path(__file__).resolve().parents[1]
+    if not (repository_root / ".git").exists():
+        pytest.skip("requires a git checkout (source archives have no .git directory)")
     verified_main_sha = _git(repository_root, "rev-parse", "HEAD")
 
     assert pruning._main_has_verified_native_ai_migration(verified_main_sha)
