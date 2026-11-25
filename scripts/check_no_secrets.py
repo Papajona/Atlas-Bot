@@ -64,7 +64,7 @@ SOURCE_STRING_LITERAL = re.compile(
 # Match complete Python-style triple-quoted credential assignments before the
 # line-oriented scanner sees only the opening pair of quotes.
 TRIPLE_QUOTED_SOURCE_ASSIGNMENT = re.compile(
-    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key|api[_-]?key|api[_-]?secret|secret[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token))["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
 )
 
 PLACEHOLDERS = {
@@ -816,7 +816,9 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
                     ) is not None
                 )
         else:
-            sensitive = False
+            # Generic API keys, passwords and tokens need the same literal-token
+            # check as private-key assignments; placeholders remain exempt.
+            sensitive = _contains_unapproved_private_key_material(value)
         if sensitive:
             findings.add(source.count("\n", 0, match.start()) + 1)
     return findings
