@@ -126,6 +126,10 @@ def test_benchmark_capture_runtime_role_has_only_required_table_access():
     assert "ON SEQUENCE public.customer_benchmark_captures_id_seq TO atlas_api_runtime" in provision
     assert "'customer_benchmark_captures'" in provision
     assert "benchmark_capture_update" in provision
+    assert "atlas_benchmark_capture_delete_guard" in provision
+    assert "requires row-level security" in provision
+    assert "must not TRUNCATE benchmark captures" in provision
+    assert "must retain the explicit owner-authorized benchmark capture DELETE grant" in provision
     assert "atlas_api_runtime must not UPDATE benchmark consent" in provision
     for forbidden in ("anon", "authenticated", "service_role", "PUBLIC"):
         assert f"GRANT SELECT, INSERT, DELETE ON TABLE public.customer_benchmark_captures TO {forbidden}" not in migration
