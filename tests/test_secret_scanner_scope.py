@@ -1851,8 +1851,8 @@ def test_secret_scanner_detects_decimal_scalars_in_private_key_json_arrays(
     ):
         jwk_json = "[" + serialized_decimal + "]"
         source = (
-            "wallet:\\n  " + private_key_field + ": |\\n"
-            + "    " + jwk_json + "\\n"
+            "wallet:\n  " + private_key_field + ": |\n"
+            + "    " + jwk_json + "\n"
         )
         (tmp_path / f"decimal-private-array-{label}.yml").write_text(
             source, encoding="utf-8"
@@ -1869,7 +1869,6 @@ def test_secret_scanner_detects_decimal_scalars_in_private_key_json_arrays(
         "decimal-private-array-long.yml:2: seed/private-key assignment" in item
         for item in findings
     )
-
 
 
 def test_secret_scanner_ignores_private_key_angle_placeholder_with_shell_continuation(
