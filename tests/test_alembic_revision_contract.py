@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0064_strategy_outcome_recent_index"
+        "0065_ledger_trigger_owner_isolation"
     }
 
 
@@ -72,9 +72,10 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         "0062_customer_benchmark_capture": "0061_strategy_outcome_fill_aggregation",
         "0063_webhook_events_created_at_index": "0062_customer_benchmark_capture",
         "0064_strategy_outcome_recent_index": "0063_webhook_events_created_at_index",
+        "0065_ledger_trigger_owner_isolation": "0064_strategy_outcome_recent_index",
     }
     for revision, parent in expected.items():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
-    assert expected_alembic_heads(versions) == {"0064_strategy_outcome_recent_index"}
+    assert expected_alembic_heads(versions) == {"0065_ledger_trigger_owner_isolation"}
