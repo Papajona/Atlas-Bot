@@ -1710,3 +1710,39 @@ def test_source_literal_private_key_scanner_allows_exact_fixture_but_flags_unapp
     assert not check_no_secrets._source_literal_contains_sensitive_assignment(allowed)
     assert check_no_secrets._source_literal_contains_sensitive_assignment(unapproved)
 
+
+
+
+def test_source_literal_private_key_scanner_checks_every_token_after_fixture():
+    allowed = (
+        'const config = "privateKey: '
+        'fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz";'
+    )
+    mixed = (
+        'const config = "privateKey: '
+        'fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz '
+        'unapproved_private_key_literal_abcdefghijklmnopqrstuvwxyz";'
+    )
+
+    assert not check_no_secrets._source_literal_contains_sensitive_assignment(allowed)
+    assert check_no_secrets._source_literal_contains_sensitive_assignment(mixed)
+
+
+def test_multiline_template_private_key_scanner_honors_only_exact_fixture_tokens():
+    fixture = (
+        "const config = {\n"
+        "  private_key: " + chr(96)
+        + "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz" + chr(96) + "\n"
+        "};\n"
+    )
+    mixed = (
+        "const config = {\n"
+        "  private_key: " + chr(96)
+        + "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz "
+        + "unapproved_private_key_literal_abcdefghijklmnopqrstuvwxyz" + chr(96) + "\n"
+        "};\n"
+    )
+
+    assert check_no_secrets._find_multiline_template_literal_assignments(fixture) == {}
+    findings = check_no_secrets._find_multiline_template_literal_assignments(mixed)
+    assert findings == {2: "private_key"}

@@ -129,6 +129,21 @@ ANGLE_PLACEHOLDER = re.compile(
     r"not[-_ ]set|secret|private[-_ ]key|api[-_ ]key|token|value|version|ref|v)>$"
 )
 
+_PRIVATE_KEY_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])"
+)
+
+
+def _contains_unapproved_private_key_material(value: str) -> bool:
+    """Detect PEM material or any non-placeholder long private-key token."""
+    if PRIVATE_KEY.search(value):
+        return True
+    return any(
+        match.group(0).lower() not in PLACEHOLDERS
+        and not ANGLE_PLACEHOLDER.fullmatch(match.group(0))
+        for match in _PRIVATE_KEY_TOKEN.finditer(value)
+    )
+
 
 def _is_helper_call(value: str, remainder: str) -> bool:
     """Recognize a call expression without exempting a literal with a parenthesized note."""
@@ -772,15 +787,7 @@ def _source_literal_contains_sensitive_assignment(line: str) -> bool:
                 if _is_likely_recovery_phrase(candidate):
                     return True
             elif key_kind == "privatekey":
-                token_match = re.search(
-                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
-                    candidate,
-                )
-                if PRIVATE_KEY.search(candidate) or (
-                    token_match is not None
-                    and token_match.group(0).lower() not in PLACEHOLDERS
-                    and not ANGLE_PLACEHOLDER.fullmatch(token_match.group(0))
-                ):
+                if _contains_unapproved_private_key_material(candidate):
                     return True
     return False
 
@@ -857,13 +864,7 @@ def _find_multiline_template_literal_assignments(source: str) -> dict[int, str]:
         if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
             sensitive = _is_likely_recovery_phrase(value)
         else:
-            sensitive = (
-                re.search(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----", value) is not None
-                or re.search(
-                    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
-                    value,
-                ) is not None
-            )
+            sensitive = _contains_unapproved_private_key_material(value)
         if sensitive:
             findings[source.count("\n", 0, match.start("key")) + 1] = key
     return findings

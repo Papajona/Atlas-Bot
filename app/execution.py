@@ -901,7 +901,8 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
 
 
 async def _apply_reconciled_live_fee_basis(
-    db, trade: Trade, fee_delta: Decimal | float
+    db, trade: Trade, fee_delta: Decimal | float, *,
+    include_verified_components: bool = False,
 ) -> None:
     """Apply an authoritative fee correction to every affected fill and aggregate.
 
@@ -1184,8 +1185,20 @@ async def _apply_reconciled_live_fee_basis(
     )
     unresolved_entry_ids = {int(row.id) for row in unresolved_entry_rows}
     unresolved_closing_ids = {int(row.id) for row in unresolved_closing_rows}
+    # Ordinary reconciliation allocates only to components whose provenance is
+    # unresolved. A later authoritative cumulative-fee correction must also be
+    # apportioned over components that were already verified.
+    allocation_entry_ids = (
+        set(entry_fill_quantities) if include_verified_components else unresolved_entry_ids
+    )
+    allocation_closing_ids = (
+        set(closing_fill_quantities) if include_verified_components else unresolved_closing_ids
+    )
     remaining_quantity = Decimal("0")
-    if position is not None and int(position.entry_trade_id or 0) == int(trade.id):
+    has_entry_position = bool(
+        position is not None and int(position.entry_trade_id or 0) == int(trade.id)
+    )
+    if has_entry_position:
         remaining_quantity = abs(Decimal(str(position.quantity or 0)))
         if not remaining_quantity.is_finite():
             raise ValueError(
@@ -1194,24 +1207,69 @@ async def _apply_reconciled_live_fee_basis(
             )
 
     if entry_rows:
-        episode = reversal_episode
-        lifecycle_quantity = Decimal(str(
-            episode.entry_quantity if episode is not None else trade_quantity
-        ))
-        if not lifecycle_quantity.is_finite() or lifecycle_quantity <= 0:
-            raise ValueError(
-                f"cannot safely apportion recovered entry fee for trade {trade.id}: "
-                "position lifecycle quantity is unavailable"
-            )
-        closed_quantity = sum(entry_fill_quantities.values(), Decimal("0"))
-        if (
-            abs((closed_quantity + remaining_quantity) - lifecycle_quantity)
-                > Decimal("0.000001")
-            or lifecycle_quantity > trade_quantity + Decimal("0.000001")
+        # A reused partially-filled entry order can span several position
+        # lifecycles. CLOSED groups are historical; only the trailing group and
+        # current position belong to the current learning episode.
+        closed_lifecycle_quantity = Decimal("0")
+        current_lifecycle_rows: list[StrategyOutcome] = []
+        for outcome in sorted(
+            entry_rows, key=lambda row: (int(row.sequence or 0), int(row.id or 0))
         ):
+            current_lifecycle_rows.append(outcome)
+            if str(outcome.lifecycle_status or "").upper() == "CLOSED":
+                lifecycle_fill_quantity = sum(
+                    (
+                        entry_fill_quantities[int(item.id)]
+                        for item in current_lifecycle_rows
+                    ),
+                    Decimal("0"),
+                )
+                if not lifecycle_fill_quantity.is_finite() or lifecycle_fill_quantity <= 0:
+                    raise ValueError(
+                        f"cannot safely allocate recovered fee for trade {trade.id}: "
+                        "a closed position lifecycle has invalid fill quantity"
+                    )
+                closed_lifecycle_quantity += lifecycle_fill_quantity
+                current_lifecycle_rows = []
+
+        current_lifecycle_closed_quantity = sum(
+            (
+                entry_fill_quantities[int(item.id)]
+                for item in current_lifecycle_rows
+            ),
+            Decimal("0"),
+        )
+        if current_lifecycle_rows and not has_entry_position:
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "an open outcome lifecycle has no matching position"
+            )
+        current_lifecycle_quantity = (
+            current_lifecycle_closed_quantity + remaining_quantity
+            if has_entry_position else Decimal("0")
+        )
+        if has_entry_position:
+            expected_lifecycle_quantity = Decimal(str(
+                reversal_episode.entry_quantity
+                if reversal_episode is not None
+                else trade_quantity - closed_lifecycle_quantity
+            ))
+            if (
+                not expected_lifecycle_quantity.is_finite()
+                or expected_lifecycle_quantity <= 0
+                or abs(current_lifecycle_quantity - expected_lifecycle_quantity)
+                    > Decimal("0.000001")
+            ):
+                raise ValueError(
+                    f"cannot safely apportion recovered entry fee for trade {trade.id}: "
+                    "current open lifecycle quantities do not reconcile"
+                )
+
+        accounted_quantity = closed_lifecycle_quantity + current_lifecycle_quantity
+        if abs(accounted_quantity - trade_quantity) > Decimal("0.000001"):
             raise ValueError(
                 f"cannot safely apportion recovered entry fee for trade {trade.id}: "
-                "closed and open lifecycle quantities do not reconcile"
+                "closed and open lifecycle quantities do not reconcile to the order fills"
             )
 
     reversal_quantity = reversal_lifecycle_quantity
@@ -1238,44 +1296,42 @@ async def _apply_reconciled_live_fee_basis(
             )
 
     if entry_rows or closing_rows:
-        unresolved_entry_quantity = sum(
-            (entry_fill_quantities[row_id] for row_id in unresolved_entry_ids),
+        allocation_entry_quantity = sum(
+            (entry_fill_quantities[row_id] for row_id in allocation_entry_ids),
             Decimal("0"),
         )
-        unresolved_closing_quantity = sum(
-            (closing_fill_quantities[row_id] for row_id in unresolved_closing_ids),
+        allocation_closing_quantity = sum(
+            (closing_fill_quantities[row_id] for row_id in allocation_closing_ids),
             Decimal("0"),
         )
-        unresolved_open_quantity = (
-            remaining_quantity
-            if position is not None and int(position.entry_trade_id or 0) == int(trade.id)
-            else Decimal("0")
+        allocation_open_quantity = (
+            remaining_quantity if has_entry_position else Decimal("0")
         )
-        unresolved_total_quantity = (
-            unresolved_entry_quantity
-            + unresolved_closing_quantity
-            + unresolved_open_quantity
+        allocation_total_quantity = (
+            allocation_entry_quantity
+            + allocation_closing_quantity
+            + allocation_open_quantity
         )
-        if unresolved_total_quantity <= Decimal("0.000000000001"):
+        if allocation_total_quantity <= Decimal("0.000000000001"):
             raise ValueError(
                 f"cannot safely allocate recovered fee for trade {trade.id}: "
-                "no unresolved fill quantity can be established"
+                "no eligible fill quantity can be established"
             )
-        if not unresolved_total_quantity.is_finite():
+        if not allocation_total_quantity.is_finite():
             raise ValueError(
                 f"cannot safely allocate recovered fee for trade {trade.id}: "
-                "unresolved fill quantity is invalid"
+                "eligible fill quantity is invalid"
             )
 
-        for row_id in unresolved_entry_ids:
+        for row_id in allocation_entry_ids:
             quantity = entry_fill_quantities[row_id]
-            entry_fee_by_row[row_id] = delta_fee * quantity / unresolved_total_quantity
-        for row_id in unresolved_closing_ids:
+            entry_fee_by_row[row_id] = delta_fee * quantity / allocation_total_quantity
+        for row_id in allocation_closing_ids:
             quantity = closing_fill_quantities[row_id]
-            closing_fee_by_row[row_id] = delta_fee * quantity / unresolved_total_quantity
-        if unresolved_open_quantity > 0:
+            closing_fee_by_row[row_id] = delta_fee * quantity / allocation_total_quantity
+        if allocation_open_quantity > 0:
             position_entry_fee_delta = (
-                delta_fee * unresolved_open_quantity / unresolved_total_quantity
+                delta_fee * allocation_open_quantity / allocation_total_quantity
             )
 
     add_on_fee_only = False
@@ -1671,7 +1727,8 @@ async def _apply_fill_to_position(
     if delta <= 0 or fill_price <= 0:
         if current_fill_fee_verified and Decimal(str(current_fill_fee or 0)) > 0:
             await _apply_reconciled_live_fee_basis(
-                db, trade, Decimal(str(current_fill_fee))
+                db, trade, Decimal(str(current_fill_fee)),
+                include_verified_components=True,
             )
         trade.filled_quantity = new_filled
         trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
@@ -3861,6 +3918,7 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"filled={filled} remaining={remaining} requested={requested}"
         )
 
+    previous_filled_quantity = Decimal(str(trade.filled_quantity or 0))
     fee_was_pending = bool(trade.fee_reconciliation_pending)
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
     fee_is_verified = fee_quality_is_verified(fee_quality)
@@ -3880,7 +3938,12 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
         current_fill_fee_verified=fee_is_verified and not reconciled_prior_fee,
     )
     if reconciled_prior_fee:
-        await _apply_reconciled_live_fee_basis(db, trade, fee_delta)
+        await _apply_reconciled_live_fee_basis(
+            db, trade, fee_delta,
+            include_verified_components=(
+                Decimal(str(filled)) <= previous_filled_quantity
+            ),
+        )
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
 
     if status in {"closed", "filled"} and remaining <= 0:

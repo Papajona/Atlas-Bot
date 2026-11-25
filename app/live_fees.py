@@ -72,13 +72,17 @@ def extract_order_fee_quote_decimal(
         try:
             cost = Decimal(str(entry.get("cost")))
         except (TypeError, ValueError, ArithmeticError):
-            note = "exchange returned an unparsable fee cost"
-            quality = ESTIMATED
+            # UNVERIFIED is a withholding decision, not a weak estimate. A later
+            # malformed record must not re-enable a customer charge.
+            if quality != UNVERIFIED:
+                note = "exchange returned an unparsable fee cost"
+                quality = ESTIMATED
             continue
         cur = str(entry.get("currency") or "").upper()
         if not cost.is_finite():
-            note = "exchange returned a non-finite fee cost"
-            quality = ESTIMATED
+            if quality != UNVERIFIED:
+                note = "exchange returned a non-finite fee cost"
+                quality = ESTIMATED
             continue
         if cost <= 0:
             # A zero fee without an asset denomination is not authoritative:

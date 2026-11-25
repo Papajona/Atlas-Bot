@@ -1,5 +1,6 @@
 """Pure unit tests for app.live_fees (no database needed)."""
 import pytest
+from decimal import Decimal
 from app.live_fees import (
     extract_order_fee_quote, extract_order_fee_quote_decimal, split_symbol,
     fee_quality_is_verified, EXACT, CONVERTED, ESTIMATED, UNVERIFIED,
@@ -74,6 +75,31 @@ def test_fee_cost_without_currency_is_unverified_and_not_estimated():
         fallback_taker_bps="5.5",
     )
     assert fee == __import__("decimal").Decimal("0")
+    assert quality == UNVERIFIED
+    assert not fee_quality_is_verified(quality)
+    assert "customer charge withheld" in note
+
+
+
+@pytest.mark.parametrize(
+    "fees",
+    [
+        [{"cost": "0"}, {"currency": "USDT", "cost": "NaN"}],
+        [{"currency": "USDT", "cost": "NaN"}, {"cost": "0"}],
+        [{"cost": "0"}, {"currency": "USDT", "cost": "not-a-number"}],
+        [{"currency": "USDT", "cost": "not-a-number"}, {"cost": "0"}],
+    ],
+)
+def test_unverified_missing_currency_fee_stays_withheld_with_later_invalid_record(fees):
+    fee, quality, note = extract_order_fee_quote_decimal(
+        {"fees": fees},
+        "BTC/USDT",
+        "60000",
+        "0.1",
+        fallback_taker_bps="100",
+    )
+
+    assert fee == Decimal("0")
     assert quality == UNVERIFIED
     assert not fee_quality_is_verified(quality)
     assert "customer charge withheld" in note
