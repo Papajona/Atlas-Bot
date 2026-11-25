@@ -50,6 +50,11 @@ button.mini{padding:6px 8px;font-size:10px;border-radius:7px}.muted-button{color
 .metric{padding:16px;border:1px solid #2b405d;border-radius:13px;background:linear-gradient(145deg,#1a2c47,#14233a)}
 .metric span,.metric small{display:block;color:var(--muted);font-size:11px}.metric strong{display:block;margin:8px 0 5px;font-size:clamp(18px,2.5vw,26px);letter-spacing:-.03em}.metric small{font-size:10px}
 .order-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.scanner-label{display:flex;flex-direction:column;gap:7px;color:#bccbe0;font-size:12px;font-weight:650}
+.scanner-panel .table-wrap{margin-top:14px}
+.scanner-panel table{min-width:680px}
+.scanner-panel td:nth-child(2){font-weight:800;letter-spacing:.04em}
+.scanner-panel td:nth-child(2):is(:empty){color:var(--muted)}
 .data-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
 .data-grid .panel{min-width:0}
 .table-wrap{overflow:auto;min-height:70px}
