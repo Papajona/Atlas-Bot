@@ -867,7 +867,10 @@ def scan() -> list[str]:
                     )
                     # Config values may end with an escaped newline sequence inside their quotes.
                     # Remove only a terminal escape before trimming the value delimiters.
-                    embedded_value = re.sub(r"(?:\\[rn])+$", "", embedded_value).strip()
+                    embedded_value = (
+                        re.sub(r"(?:\\[rn])+$", "", embedded_value)
+                        .strip().strip('"').strip("'").strip().rstrip(";,").strip()
+                    )
                     if _is_likely_recovery_phrase(embedded_value):
                         findings.append(
                             f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment"

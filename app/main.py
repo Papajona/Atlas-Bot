@@ -4051,9 +4051,13 @@ async def get_customer(
 
     # Keyless Edge provisioning leaves encrypted PII empty. Verify Auth and
     # backfill the email when the existing profile has no encrypted email.
-    # Every Auth-backed identity lookup or email backfill requires a confirmed
-    # Auth email; active profiles with an already-persisted email avoid this call.
-    needs_auth_identity = (\n        jwt_email_missing\n        or profile is None\n        or not str(profile.email or "").strip()\n    )
+    # A JWT that omits email must be checked against the current Auth identity,
+    # even when the local profile has an older encrypted email value.
+    needs_auth_identity = (
+        jwt_email_missing
+        or profile is None
+        or not str(profile.email or "").strip()
+    )
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
