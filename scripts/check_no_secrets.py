@@ -492,7 +492,6 @@ def _structured_private_object_has_material(value) -> bool:
                     and isinstance(item, (int, float))
                     and not isinstance(item, bool)
                     and item != 0
-                    and not descriptive_metadata_field
                 ):
                     return True
                 if isinstance(item, (dict, list)):
