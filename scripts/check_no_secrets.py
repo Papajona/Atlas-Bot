@@ -463,13 +463,21 @@ def _structured_private_object_has_material(value) -> bool:
                 if field_is_private and isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                     return True
                 if isinstance(item, (dict, list)):
-                    # Preserve private traversal through containers entered by a
-                    # recognized private field (or within an already-private object).
-                    # Public JWK members always reset that context.
-                    child_private = False if field_is_public else (
-                        private_context or field_is_private
-                    )
-                    child_scalar_items_private = child_private and isinstance(item, list)
+                    # Public JWK coordinates/material metadata are not private
+                    # scalar values. The generic "metadata" container is special:
+                    # its direct scalar/list values are public labels, but nested
+                    # objects still inherit private context so private-looking
+                    # siblings (for example metadata.private_blob) are inspected.
+                    if normalized_key == "metadata" and field_is_public:
+                        child_private = private_context
+                        child_scalar_items_private = False
+                    else:
+                        child_private = False if field_is_public else (
+                            private_context or field_is_private
+                        )
+                        child_scalar_items_private = (
+                            child_private and isinstance(item, list)
+                        )
                     stack.append((item, child_scalar_items_private, child_private))
         else:
             for item in current:
