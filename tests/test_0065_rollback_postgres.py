@@ -508,7 +508,7 @@ def test_0065_downgrade_rejects_a_different_administrator_before_mutating():
     env["DATABASE_URL"] = alembic_url
 
     alternate_user = "atlas_0065_downgrade_alt"
-    alternate_password = "temporary-0065-alt-admin-password"
+    role_nonce = os.urandom(16).hex()
 
     async def create_alternate_admin() -> None:
         connection = await asyncpg.connect(dsn=dsn)
@@ -516,7 +516,7 @@ def test_0065_downgrade_rejects_a_different_administrator_before_mutating():
             await connection.execute(f"DROP ROLE IF EXISTS {alternate_user}")
             await connection.execute(
                 f"CREATE ROLE {alternate_user} LOGIN SUPERUSER "
-                f"PASSWORD '{alternate_password}'"
+                f"PASSWORD '{role_nonce}'"
             )
         finally:
             await connection.close()
@@ -561,7 +561,7 @@ def test_0065_downgrade_rejects_a_different_administrator_before_mutating():
         asyncio.run(create_alternate_admin())
         alternate_env = env.copy()
         alternate_env["DATABASE_URL"] = _url_for_identity(
-            alembic_url, alternate_user, alternate_password
+            alembic_url, alternate_user, role_nonce
         )
         _run_alembic_expect_failure(
             alternate_env,
