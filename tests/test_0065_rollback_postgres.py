@@ -340,66 +340,80 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
                 )
                 assert role_oid is not None, "0065 discarded a role that predated the migration"
 
+                # Each existing ACL must still be owned by the original
+                # grantor, with no duplicate grant attributed to migration_role.
                 schema_direct = await connection.fetchval(
                     """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_namespace n
-                        CROSS JOIN LATERAL aclexplode(
-                            coalesce(n.nspacl, acldefault('n', n.nspowner))
-                        ) acl
-                        WHERE n.nspname = 'public'
-                          AND acl.grantee = $1
-                          AND acl.privilege_type = 'USAGE'
+                    SELECT count(*) = 1 AND bool_and(
+                        acl.grantor = (
+                            SELECT oid FROM pg_roles WHERE rolname = $2
+                        )
                     )
+                    FROM pg_namespace n
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(n.nspacl, acldefault('n', n.nspowner))
+                    ) acl
+                    WHERE n.nspname = 'public'
+                      AND acl.grantee = $1
+                      AND acl.privilege_type = 'USAGE'
                     """,
                     role_oid,
+                    "atlas_0065_acl_owner",
                 )
                 journals_direct = await connection.fetchval(
                     """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_class c
-                        CROSS JOIN LATERAL aclexplode(
-                            coalesce(c.relacl, acldefault('r', c.relowner))
-                        ) acl
-                        WHERE c.oid = to_regclass('public.ledger_journals')
-                          AND acl.grantee = $1
-                          AND acl.privilege_type = 'SELECT'
+                    SELECT count(*) = 1 AND bool_and(
+                        acl.grantor = (
+                            SELECT oid FROM pg_roles WHERE rolname = $2
+                        )
                     )
+                    FROM pg_class c
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(c.relacl, acldefault('r', c.relowner))
+                    ) acl
+                    WHERE c.oid = to_regclass('public.ledger_journals')
+                      AND acl.grantee = $1
+                      AND acl.privilege_type = 'SELECT'
                     """,
                     role_oid,
+                    "atlas_0065_acl_owner",
                 )
                 lines_direct = await connection.fetchval(
                     """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_class c
-                        CROSS JOIN LATERAL aclexplode(
-                            coalesce(c.relacl, acldefault('r', c.relowner))
-                        ) acl
-                        WHERE c.oid = to_regclass('public.ledger_journal_lines')
-                          AND acl.grantee = $1
-                          AND acl.privilege_type = 'SELECT'
+                    SELECT count(*) = 1 AND bool_and(
+                        acl.grantor = (
+                            SELECT oid FROM pg_roles WHERE rolname = $2
+                        )
                     )
+                    FROM pg_class c
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(c.relacl, acldefault('r', c.relowner))
+                    ) acl
+                    WHERE c.oid = to_regclass('public.ledger_journal_lines')
+                      AND acl.grantee = $1
+                      AND acl.privilege_type = 'SELECT'
                     """,
                     role_oid,
+                    "atlas_0065_acl_owner",
                 )
                 function_direct = await connection.fetchval(
                     """
-                    SELECT EXISTS (
-                        SELECT 1
-                        FROM pg_proc p
-                        CROSS JOIN LATERAL aclexplode(
-                            coalesce(p.proacl, acldefault('f', p.proowner))
-                        ) acl
-                        WHERE p.oid = to_regprocedure($1)
-                          AND acl.grantee = $2
-                          AND acl.privilege_type = 'EXECUTE'
+                    SELECT count(*) = 1 AND bool_and(
+                        acl.grantor = (
+                            SELECT oid FROM pg_roles WHERE rolname = $3
+                        )
                     )
+                    FROM pg_proc p
+                    CROSS JOIN LATERAL aclexplode(
+                        coalesce(p.proacl, acldefault('f', p.proowner))
+                    ) acl
+                    WHERE p.oid = to_regprocedure($1)
+                      AND acl.grantee = $2
+                      AND acl.privilege_type = 'EXECUTE'
                     """,
                     VALIDATE_FUNCTION,
                     role_oid,
+                    "atlas_0065_acl_owner",
                 )
                 assert schema_direct
                 assert journals_direct
