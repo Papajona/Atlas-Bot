@@ -3880,7 +3880,6 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     dialect = getattr(getattr(bind, "dialect", None), "name", "")
     try:
         if dialect == "postgresql":
-            uuid_pattern = _CUSTOMER_UUID_PATTERN
             statement = select(CustomerProfile.id).where(
                 CustomerProfile.auth_user_id != auth_user_id,
                 CustomerProfile.auth_user_id.op("!~*")(literal_column(f"'{_CUSTOMER_UUID_PATTERN}'")),
@@ -3944,7 +3943,6 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     ).where(CustomerProfile.auth_user_id != auth_user_id)
     legacy_ids_filtered_in_sql = dialect in {"postgresql", "sqlite"}
     if dialect == "postgresql":
-        uuid_pattern = _CUSTOMER_UUID_PATTERN
         statement = statement.where(
             CustomerProfile.auth_user_id.op("!~*")(literal_column(f"'{_CUSTOMER_UUID_PATTERN}'"))
         )
