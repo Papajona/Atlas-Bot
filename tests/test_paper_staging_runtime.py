@@ -120,6 +120,7 @@ def test_paper_customer_market_scanner_requires_aal2_and_returns_bounded_public_
         assert frame is frames[symbols[0]]
         return [{"symbol": symbols[0], **metrics(frame)}]
 
+    monkeypatch.setattr(paper_staging.settings, "paper_staging_market_scanner_enabled", True)
     monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
     monkeypatch.setattr(paper_staging, "get_existing_customer", fake_customer)
     monkeypatch.setattr(
@@ -169,6 +170,7 @@ def test_paper_customer_market_scanner_rejects_customer_without_aal2(monkeypatch
     def unexpected_scan(*_args, **_kwargs):
         raise AssertionError("market data must not be fetched before customer AAL2")
 
+    monkeypatch.setattr(paper_staging.settings, "paper_staging_market_scanner_enabled", True)
     monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
     monkeypatch.setattr(paper_staging, "get_existing_customer", reject_customer)
     monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", unexpected_scan)
@@ -410,6 +412,12 @@ def test_customer_middleware_separates_read_and_order_quotas_and_normalizes_toke
         "/api/customer/paper/orders",
         headers={"Authorization": "bearer  stable-token "},
     ).status_code == 429
+
+
+def test_paper_customer_market_scanner_is_disabled_by_default(monkeypatch):
+    monkeypatch.setattr(paper_staging.settings, "paper_staging_market_scanner_enabled", False)
+    response = TestClient(paper_staging.app).get("/api/customer/market-scanner")
+    assert response.status_code == 404
 
 
 def test_customer_middleware_applies_a_separate_per_customer_market_scanner_quota(monkeypatch):
