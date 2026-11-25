@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import subprocess
@@ -211,6 +212,94 @@ def test_gcp_bootstrap_secret_access_repair_is_idempotent_and_never_reads_or_rot
     assert "repair_secret_access_only \"$@\"" in dispatch
 
 
+
+def _run_secret_access_repair_with_fake_gcloud(tmp_path: Path, iam_policy: dict):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    helpers = "\\n".join(
+        _extract_shell_function(script, name)
+        for name in (
+            "verify_secret_accessor_binding",
+            "grant_secret_accessor",
+            "repair_secret_access_only",
+        )
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gcloud_log = tmp_path / "gcloud.log"
+    stub = fake_bin / "gcloud"
+    stub.write_text(
+        "#!/usr/bin/env bash\\n"
+        "set -euo pipefail\\n"
+        "printf '%s\\\\n' \\\"$*\\\" >> \\\"$GCLOUD_LOG\\\"\\n"
+        "case \\\"$1 $2\\\" in\\n"
+        "  'projects describe') printf '%s' 350896810949 ;;\\n"
+        "  'secrets get-iam-policy') printf '%s' \\\"$IAM_POLICY_JSON\\\" ;;\\n"
+        "esac\\n",
+        encoding="utf-8",
+    )
+    os.chmod(stub, 0o755)
+    env = os.environ.copy()
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+        "GCLOUD_LOG": str(gcloud_log),
+        "IAM_POLICY_JSON": json.dumps(iam_policy),
+        "PROJECT_ID": "atlas-staging-510915",
+        "PROJECT_NUMBER": "350896810949",
+        "RUNTIME_SA_ID": "atlas-staging-runtime",
+        "PREFLIGHT_SA_ID": "atlas-staging-preflight",
+        "DEPLOY_SA_ID": "atlas-staging-deploy",
+        "PRIMARY_SECRET": "atlas-staging-primary-db-url",
+        "PAPER_SECRET": "atlas-staging-customer-paper-db-url",
+        "ANON_KEY_SECRET": "atlas-staging-supabase-anon-key",
+    })
+    completed = subprocess.run(
+        ["bash", "-c", helpers + "\\nrepair_secret_access_only --repair-secret-access"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    return completed, gcloud_log
+
+
+def test_gcp_secret_access_repair_applies_exact_five_bindings_without_secret_io(tmp_path: Path):
+    runtime = "serviceAccount:atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com"
+    preflight = "serviceAccount:atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com"
+    policy = {"bindings": [{
+        "role": "roles/secretmanager.secretAccessor",
+        "members": [runtime, preflight],
+    }]}
+    completed, gcloud_log = _run_secret_access_repair_with_fake_gcloud(tmp_path, policy)
+
+    assert completed.returncode == 0, completed.stderr
+    calls = gcloud_log.read_text(encoding="utf-8").splitlines()
+    grants = [line for line in calls if line.startswith("secrets add-iam-policy-binding ")]
+    assert len(grants) == 5
+    assert sum(runtime in line for line in grants) == 3
+    assert sum(preflight in line for line in grants) == 2
+    assert any("atlas-staging-primary-db-url" in line and runtime in line for line in grants)
+    assert any("atlas-staging-customer-paper-db-url" in line and runtime in line for line in grants)
+    assert any("atlas-staging-supabase-anon-key" in line and runtime in line for line in grants)
+    assert not any("atlas-staging-supabase-anon-key" in line and preflight in line for line in grants)
+    assert all("--project=atlas-staging-510915" in line for line in grants)
+    assert all("--role=roles/secretmanager.secretAccessor" in line for line in grants)
+    assert any("secrets get-iam-policy" in line for line in calls)
+    assert not any("secrets versions" in line for line in calls)
+    assert "PASS: runtime and preflight Secret Manager access" in completed.stdout
+
+
+def test_gcp_secret_access_repair_fails_closed_on_conditional_accessor_binding(tmp_path: Path):
+    runtime = "serviceAccount:atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com"
+    preflight = "serviceAccount:atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com"
+    policy = {"bindings": [{
+        "role": "roles/secretmanager.secretAccessor",
+        "members": [runtime, preflight],
+        "condition": {"title": "temporary", "expression": "request.time < timestamp('2030-01-01T00:00:00Z')"},
+    }]}
+    completed, gcloud_log = _run_secret_access_repair_with_fake_gcloud(tmp_path, policy)
+
+    assert completed.returncode != 0
+    assert "missing unconditional Secret Accessor" in completed.stderr
+    calls = gcloud_log.read_text(encoding="utf-8").splitlines()
+    assert sum(line.startswith("secrets add-iam-policy-binding ") for line in calls) == 1
+    assert not any("secrets versions" in line for line in calls)
 
 def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
     schema = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
