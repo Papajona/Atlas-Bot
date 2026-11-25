@@ -1734,9 +1734,9 @@ def test_secret_scanner_detects_unrecognized_private_field_in_private_jwk_array(
     private_key_field = "private" + "_key"
     private_material = "0123456789abcdef" * 2
     source = (
-        "wallet:\\n"
+        "wallet:\n"
         + "  " + private_key_field + ": '[{\\"kty\\":\\"RSA\\","
-        + "\\"private_blob\\":\\"" + private_material + "\\"}]'\\n"
+        + "\\"private_blob\\":\\"" + private_material + "\\"}]'\n"
     )
     (tmp_path / "private-jwk-array.yml").write_text(source, encoding="utf-8")
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
