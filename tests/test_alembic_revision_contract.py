@@ -60,7 +60,7 @@ def test_integrated_alembic_chain_has_the_expected_single_head():
     assert 'revision = "0064_strategy_outcome_recent_index"' in migration
     assert 'down_revision = "0063_webhook_events_created_at_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0064_strategy_outcome_recent_index"
+        "0065_ledger_trigger_owner_isolation"
     }
 
 
@@ -79,3 +79,60 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
     assert expected_alembic_heads(versions) == {"0065_ledger_trigger_owner_isolation"}
+
+def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer():
+    migration = (
+        ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "NOLOGIN NOINHERIT NOBYPASSRLS" in migration
+    assert "AND NOT rolbypassrls" in migration
+    assert "CREATE POLICY atlas_ledger_trigger_owner_select" in migration
+    assert "atlas_ledger_trigger_owner SELECT policies are missing" in migration
+    assert "aclexplode(" in migration
+
+    revoke = migration.index("'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC'")
+    transfer = migration.index(
+        "ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO atlas_ledger_trigger_owner"
+    )
+    revoke_membership = migration.index("REVOKE %I FROM %I")
+    assert revoke < transfer < revoke_membership
+
+
+def test_0065_blocks_unsafe_legacy_downgrades_and_all_recovery_gates_expect_head():
+    migration = (
+        ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
+    ).read_text(encoding="utf-8")
+    assert 'raise RuntimeError(' in migration
+    assert "downgrade past 0065_ledger_trigger_owner_isolation is blocked" in migration
+
+    api_provisioner = (
+        ROOT / "scripts" / "provision_atlas_api_runtime.sql"
+    ).read_text(encoding="utf-8")
+    audit_provisioner = (
+        ROOT / "scripts" / "provision_atlas_audit_reader.sql"
+    ).read_text(encoding="utf-8")
+    restore_verifier = (
+        ROOT / "scripts" / "verify_staging_restore.py"
+    ).read_text(encoding="utf-8")
+    reconciliation_verifier = (
+        ROOT / "scripts" / "verify_provider_ledger_reconciliation.py"
+    ).read_text(encoding="utf-8")
+    restore_workflow = (
+        ROOT / ".github" / "workflows" / "staging-restore-audit.yml"
+    ).read_text(encoding="utf-8")
+    reconciliation_workflow = (
+        ROOT / ".github" / "workflows" / "provider-ledger-reconciliation.yml"
+    ).read_text(encoding="utf-8")
+
+    expected = "0065_ledger_trigger_owner_isolation"
+    for source in (
+        api_provisioner,
+        audit_provisioner,
+        restore_verifier,
+        reconciliation_verifier,
+        restore_workflow,
+        reconciliation_workflow,
+    ):
+        assert expected in source
+
