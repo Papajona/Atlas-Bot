@@ -60,6 +60,7 @@ def test_paper_staging_asgi_exposes_only_explicit_health_auth_customer_and_paper
             "/api/auth/mfa/challenge", "/api/auth/mfa/verify",
             "/api/auth/profile/provision",
             "/api/customer/me", "/api/customer/portfolio",
+            "/api/customer/market-scanner",
         }
         or path.startswith("/api/customer/paper/")
     )
@@ -83,6 +84,100 @@ def test_paper_staging_liveness_endpoint_returns_paper_only_status():
     response = TestClient(paper_staging.app).get("/livez")
     assert response.status_code == 200
     assert response.json() == {"status": "ok", "mode": "paper-only"}
+
+
+def test_paper_staging_exposes_market_scanner_only_as_customer_read_route():
+    routes = _concrete_dispatch_routes(paper_staging.app)
+    scanner = next(route for route in routes if route.path == "/api/customer/market-scanner")
+    assert scanner.methods == {"GET"}
+
+
+def test_paper_customer_market_scanner_requires_aal2_and_returns_bounded_public_signals(monkeypatch):
+    requests = []
+    frames = {"BTC/USDT:USDT": object()}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def fake_customer(authorization, db):
+        assert authorization == "Bearer verified-customer-token"
+        assert isinstance(db, FakeSession)
+        # get_existing_customer defaults to require_aal2=True; the endpoint must
+        # not weaken that requirement when adding this read-only customer route.
+        return SimpleNamespace(id=42), {"sub": "customer-42", "aal": "aal2"}
+
+    def fake_market_data(request):
+        requests.append(request)
+        return frames[request.symbol]
+
+    async def fake_scan(symbols, *, fetch, metrics, semaphore, logger):
+        assert symbols == ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+        frame = fetch(symbols[0])
+        assert frame is frames[symbols[0]]
+        return [{"symbol": symbols[0], **metrics(frame)}]
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", fake_customer)
+    monkeypatch.setattr(
+        paper_staging,
+        "_scanner_normalize_symbols",
+        lambda raw: ["BTC/USDT:USDT", "ETH/USDT:USDT"],
+    )
+    monkeypatch.setattr(paper_staging, "market_data", fake_market_data)
+    monkeypatch.setattr(paper_staging, "_scanner_metrics", lambda _frame: {
+        "price": 65000.25, "signal": "WATCH"
+    })
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", fake_scan)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?exchange=binance&symbols=BTC%2FUSDT%3AUSDT%2CETH%2FUSDT%3AUSDT",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "exchange": "binance",
+        "timeframe": "15m",
+        "results": [{
+            "symbol": "BTC/USDT:USDT",
+            "price": 65000.25,
+            "signal": "WATCH",
+        }],
+    }
+    assert len(requests) == 1
+    assert requests[0].asset == "crypto"
+    assert requests[0].exchange == "binance"
+    assert requests[0].timeframe == "15m"
+    assert requests[0].days == 30
+
+
+def test_paper_customer_market_scanner_rejects_customer_without_aal2(monkeypatch):
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def reject_customer(_authorization, _db):
+        raise HTTPException(403, "AAL2 MFA verification is required for paper trading")
+
+    def unexpected_scan(*_args, **_kwargs):
+        raise AssertionError("market data must not be fetched before customer AAL2")
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", reject_customer)
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", unexpected_scan)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner",
+        headers={"Authorization": "Bearer aal1-customer-token"},
+    )
+    assert response.status_code == 403
 
 
 @pytest.mark.postgres
@@ -315,6 +410,30 @@ def test_customer_middleware_separates_read_and_order_quotas_and_normalizes_toke
         "/api/customer/paper/orders",
         headers={"Authorization": "bearer  stable-token "},
     ).status_code == 429
+
+
+def test_customer_middleware_applies_a_separate_per_customer_market_scanner_quota(monkeypatch):
+    paper_staging._paper_api_request_times.clear()
+    monkeypatch.setattr(paper_staging, "_PAPER_MARKET_SCANNER_RATE_LIMIT_PER_MINUTE", 1)
+    monkeypatch.setattr(paper_staging, "_PAPER_API_IP_RATE_LIMIT_PER_MINUTE", 100)
+    monkeypatch.setattr(paper_staging, "_trusted_client_ip", lambda _request: "shared-cloud-run-peer")
+
+    test_app = FastAPI()
+    test_app.middleware("http")(paper_staging._paper_customer_api_rate_limit)
+
+    @test_app.get("/api/customer/market-scanner")
+    async def market_scanner():
+        return {"results": []}
+
+    client = TestClient(test_app)
+    headers = {"Authorization": "Bearer stable-market-token"}
+    assert client.get("/api/customer/market-scanner", headers=headers).status_code == 200
+    limited = client.get(
+        "/api/customer/market-scanner",
+        headers={"Authorization": "bearer  stable-market-token "},
+    )
+    assert limited.status_code == 429
+    assert limited.headers["Retry-After"] == "60"
 
 
 def test_paper_customer_auth_rejects_aal1_before_querying_database(monkeypatch):
