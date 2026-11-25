@@ -80,14 +80,13 @@ def extract_order_fee_quote_decimal(
             note = "exchange returned a non-finite fee cost"
             quality = ESTIMATED
             continue
+        if cost <= 0:
+            # Zero-cost records and negative maker rebates carry no customer charge;
+            # their missing denomination must not poison otherwise verified fees.
+            continue
         if not cur:
-            # Even an explicitly reported zero fee needs an asset denomination.
-            # Withhold it until a later snapshot supplies the authoritative currency.
             note = "exchange fee currency missing; customer charge withheld pending reconciliation"
             quality = UNVERIFIED
-            continue
-        if cost <= 0:
-            # Negative provider values are maker rebates; do not credit them.
             continue
         with localcontext() as context:
             context.prec = 50
