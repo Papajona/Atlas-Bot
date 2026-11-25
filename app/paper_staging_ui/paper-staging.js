@@ -82,6 +82,25 @@
     $("blocked-state").hidden = true;
   }
 
+  function handlePaperGateError(error) {
+    if (error && (error.status === 409 || error.status === 503)) {
+      $("workspace").hidden = true;
+      $("blocked-state").hidden = false;
+      setNotice(
+        "auth-message",
+        "Paper access is blocked by staging readiness or risk controls: " +
+          String(error.message || "The server is not ready."),
+        "error"
+      );
+      return true;
+    }
+    if (error && (error.status === 401 || error.status === 403)) {
+      signOut("Your authenticated paper session expired or no longer meets AAL2. Sign in again.");
+      return true;
+    }
+    return false;
+  }
+
   function signOut(message) {
     state.accessToken = "";
     state.factorId = "";
@@ -307,11 +326,11 @@
       $("initialize-button").textContent = state.initialized ? "Virtual account initialized" : "Initialize virtual paper balance";
       renderPositions(positions);
       renderOrders(orders);
+      showWorkspace(true);
       setNotice("order-message", state.initialized ? "Paper account is initialized. Orders remain virtual and are filled only by verified completed bars." : "Initialize the virtual account before submitting an order.", "info");
     } catch (error) {
-      setNotice("order-message", error.message, "error");
-      if (error.status === 401 || error.status === 403) {
-        signOut("Your authenticated paper session expired or no longer meets AAL2. Sign in again.");
+      if (!handlePaperGateError(error)) {
+        setNotice("order-message", error.message, "error");
       }
     } finally {
       setBusy(button, false);
@@ -360,7 +379,9 @@
         numberText(result.starting_cash, 6) + " " + String(result.currency || "USDT") + ".", "success");
       await refreshData();
     } catch (error) {
-      setNotice("order-message", error.message, "error");
+      if (!handlePaperGateError(error)) {
+        setNotice("order-message", error.message, "error");
+      }
     } finally {
       setBusy(button, false);
     }
@@ -403,7 +424,9 @@
       if (orderType === "LIMIT") $("limit-price").value = "";
       await refreshData();
     } catch (error) {
-      setNotice("order-message", error.message, "error");
+      if (!handlePaperGateError(error)) {
+        setNotice("order-message", error.message, "error");
+      }
     } finally {
       setBusy(button, false);
     }
@@ -416,7 +439,9 @@
       setNotice("order-message", "Paper order advancement: " + String(result.status || "processed") + ". No exchange order was placed.", "success");
       await refreshData();
     } catch (error) {
-      setNotice("order-message", error.message, "error");
+      if (!handlePaperGateError(error)) {
+        setNotice("order-message", error.message, "error");
+      }
     }
   }
 
@@ -430,7 +455,9 @@
       setNotice("order-message", "Paper order cancellation submitted.", "success");
       await refreshData();
     } catch (error) {
-      setNotice("order-message", error.message, "error");
+      if (!handlePaperGateError(error)) {
+        setNotice("order-message", error.message, "error");
+      }
     }
   }
 
@@ -440,6 +467,11 @@
   $("enroll-button").addEventListener("click", enrollMfa);
   $("verify-button").addEventListener("click", verifyMfa);
   $("refresh-button").addEventListener("click", refreshData);
+  $("retry-preflight").addEventListener("click", async () => {
+    const button = $("retry-preflight");
+    setBusy(button, true, "Checking…");
+    try { await refreshData(); } finally { setBusy(button, false); }
+  });
   $("initialize-button").addEventListener("click", initializePaperAccount);
   $("order-form").addEventListener("submit", submitOrder);
   $("order-type").addEventListener("change", () => {
