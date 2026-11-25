@@ -1497,7 +1497,7 @@ def test_fee_history_pages_from_order_time_until_full_order_quantity_is_covered(
     asyncio.run(run())
 
 
-def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
+def test_zero_fee_without_currency_keeps_open_position_basis_known():
     async def check(sessions):
         async with sessions() as db:
             trade = _trade(
@@ -1526,9 +1526,12 @@ def test_zero_fee_authoritative_snapshot_restores_open_position_basis():
                 },
             )
             await db.commit()
-            assert trade.fee_reconciliation_pending is True
+            # Zero is a complete fee fact even when a venue omits denomination:
+            # there is no amount to convert or withhold from the customer.
+            assert trade.fee_reconciliation_pending is False
             position = (await db.execute(select(Position))).scalar_one()
-            assert position.entry_fee_basis_known is False
+            assert position.entry_fee == Decimal("0")
+            assert position.entry_fee_basis_known is True
 
             await execution._apply_broker_snapshot(
                 db,
