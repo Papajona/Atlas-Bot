@@ -632,6 +632,7 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
   let orderPost = null;
   let advanceCalls = 0;
   let cancelRequest = null;
+  let scannerRequest = null;
   const calls = [];
   await page.addInitScript(() => {
     window.__cspViolations = [];
@@ -684,6 +685,37 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
         positions: [],
         virtual_only: true,
         valuation_status: "CASH_ONLY",
+      });
+    }
+    if (p === "/api/customer/market-scanner" && method === "GET") {
+      scannerRequest = {
+        authorization: headers.authorization || "",
+        exchange: url.searchParams.get("exchange"),
+        symbols: url.searchParams.get("symbols"),
+      };
+      return json(route, {
+        exchange: "binance",
+        timeframe: "15m",
+        results: [
+          {
+            symbol: "BTC/USDT",
+            signal: "WATCH",
+            score: 0.65,
+            price: 65000.25,
+            rsi: 61.5,
+            atr: 425.75,
+            volume_ratio: 1.25,
+          },
+          {
+            symbol: "ETH/USDT",
+            signal: "LONG <img src=x onerror=alert(1)>",
+            score: 0.4,
+            price: 3200.5,
+            rsi: 58,
+            atr: 30.25,
+            volume_ratio: 1.1,
+          },
+        ],
       });
     }
     if (p === "/api/customer/paper/balances" && method === "GET") {
@@ -755,6 +787,20 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
   await page.locator("#retry-preflight").click();
   await page.locator("#workspace").waitFor({ state: "visible", timeout: 10000 });
   assert.equal(await page.locator("#blocked-state").isHidden(), true, "successful readiness retry should restore the workspace");
+
+  await page.locator("#scanner-button").click();
+  await waitUntil(async () => scannerRequest !== null && (await page.locator("#scanner-results tbody tr").count()) === 2);
+  assert.equal(scannerRequest.authorization, "Bearer paper-aal2-token");
+  assert.equal(scannerRequest.exchange, "binance");
+  assert.equal(scannerRequest.symbols, "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT");
+  assert.match(await page.locator("#scanner-results").innerText(), /BTC\/USDT/);
+  assert.match(await page.locator("#scanner-results").innerText(), /65%/);
+  assert.match(await page.locator("#scanner-results").innerText(), /LONG <img src=x onerror=alert\(1\)>/);
+  assert.equal(await page.locator("#scanner-results img").count(), 0, "scanner values must be rendered as text");
+  await page.locator("#scanner-symbols").fill("BTC/USDT,".repeat(9));
+  await page.locator("#scanner-button").click();
+  assert.match(await page.locator("#scanner-message").innerText(), /between one and eight/);
+  assert.equal(calls.filter(call => call.path === "/api/customer/market-scanner").length, 1, "invalid symbol lists must be rejected before a network request");
 
   await page.locator("#initialize-button").click();
   await waitUntil(async () => initialized && (await page.locator("#cash-balance").innerText()).includes("10,000"));
