@@ -95,6 +95,7 @@ def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer(
     assert "acl.grantee <> p.proowner" in migration
     assert "unapproved explicit EXECUTE grant" in migration
     assert "aclexplode(" in migration
+    assert "'REVOKE EXECUTE ON FUNCTION %s FROM %I CASCADE'" in migration
 
     revoke = migration.index("'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC'")
     transfer = migration.index(
@@ -106,12 +107,15 @@ def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer(
     assert revoke < transfer < revoke_membership
 
 
-def test_0065_blocks_unsafe_legacy_downgrades_and_all_recovery_gates_expect_head():
+def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_expect_head():
     migration = (
         ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
     ).read_text(encoding="utf-8")
-    assert 'raise RuntimeError(' in migration
-    assert "downgrade past 0065_ledger_trigger_owner_isolation is blocked" in migration
+    assert "Restore the original migration owner" in migration
+    assert "ALTER FUNCTION public.atlas_ledger_journal_deferred_check() OWNER TO %I" in migration
+    assert "DROP POLICY IF EXISTS atlas_ledger_trigger_owner_select" in migration
+    assert "DROP ROLE atlas_ledger_trigger_owner" in migration
+    assert "downgrade past 0065_ledger_trigger_owner_isolation is blocked" not in migration
 
     api_provisioner = (
         ROOT / "scripts" / "provision_atlas_api_runtime.sql"
