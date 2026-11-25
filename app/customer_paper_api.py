@@ -53,6 +53,16 @@ _TIMEFRAME_SECONDS = {
 _PAPER_MARKET_IMPACT_RETURN_LOOKBACK = 20
 
 
+def _manual_customer_paper_fee_bps() -> Decimal:
+    """Use the shared customer spot-paper fee for affordability and fill accounting."""
+    from .customer_paper_flow import _cost_inputs
+
+    fee_bps, _slippage_bps, _status = _cost_inputs()
+    return max(Decimal("0"), fee_bps)
+
+
+
+
 def _paper_market_bar_key(*, venue: str, symbol: str, timeframe: str, bar_at: datetime) -> str:
     """Reproduce the durable market-bar key without registering its shared budget."""
     stamp = bar_at.astimezone(timezone.utc)
@@ -1021,7 +1031,7 @@ def build_customer_paper_router(
                         raise HTTPException(409, "Paper cost model produced a non-positive fill price")
 
                     price_text = _decimal_text(final_price)
-                    fee_bps = max(Decimal("0"), Decimal(str(execution_profile.taker_bps)))
+                    fee_bps = _manual_customer_paper_fee_bps()
                     if side == "BUY":
                         balances = await get_customer_paper_balances(customer_id=profile.id)
                         cash = sum(

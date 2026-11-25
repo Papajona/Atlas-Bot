@@ -372,11 +372,16 @@ def online_strategy_scores(
             strategy = row.get("strategy") if isinstance(row, dict) else getattr(row, "strategy", "")
             if strategy not in STRATEGIES:
                 continue
-            value = None
-            for field in ("net_return_bps", "return_bps"):
-                value = row.get(field) if isinstance(row, dict) else getattr(row, field, None)
-                if value is not None:
-                    break
+            # An explicit NULL net return means fee evidence is incomplete.
+            # Never promote that observation using its gross return; preserve
+            # the gross fallback only for legacy callers without a net field.
+            missing = object()
+            if isinstance(row, dict):
+                net_value = row.get("net_return_bps", missing)
+                value = row.get("return_bps") if net_value is missing else net_value
+            else:
+                net_value = getattr(row, "net_return_bps", missing)
+                value = getattr(row, "return_bps", None) if net_value is missing else net_value
             if value is None:
                 continue
             try:

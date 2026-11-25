@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import sys
-import xml.etree.ElementTree as ET
 from pathlib import Path
+
+import defusedxml.ElementTree as ET
+from defusedxml.common import DefusedXmlException
 
 
 def main(paths: list[str]) -> int:
@@ -19,8 +21,10 @@ def main(paths: list[str]) -> int:
             print(f"ERROR: missing JUnit report: {path}", file=sys.stderr)
             return 2
         try:
-            root = ET.parse(path).getroot()
-        except ET.ParseError as exc:
+            root = ET.parse(
+                path, forbid_dtd=True, forbid_entities=True, forbid_external=True
+            ).getroot()
+        except (ET.ParseError, DefusedXmlException) as exc:
             print(f"ERROR: invalid JUnit XML {path}: {exc}", file=sys.stderr)
             return 2
         skipped = sum(int(suite.attrib.get("skipped", "0")) for suite in root.iter("testsuite"))

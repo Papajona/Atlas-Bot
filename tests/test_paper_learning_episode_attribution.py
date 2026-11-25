@@ -81,7 +81,8 @@ def test_closing_paper_order_episode_is_not_replayed_as_position_entry():
                 mark_price=100.0,
                 realized_pnl=0.0,
                 unrealized_pnl=0.0,
-                reserved_capital=0.0,
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True,
                 strategy="regression-test",
                 entry_regime="UNKNOWN",
                 entry_trade_id=entry.id,
@@ -119,7 +120,10 @@ def test_closing_paper_order_episode_is_not_replayed_as_position_entry():
             closing = (await db.execute(
                 select(Trade).where(Trade.id == closing_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, closing, 1.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, closing, 1.0, 99.0,
+                current_fill_fee=0.1, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -186,7 +190,8 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
                 customer_id=None, trading_account_id=None, exchange="binance",
                 symbol=symbol, quantity=1.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
-                reserved_capital=0.0, strategy="old-strategy",
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True, strategy="old-strategy",
                 entry_regime="OLD", entry_trade_id=entry.id,
             ))
             db.add_all([
@@ -216,14 +221,20 @@ def test_reopening_flat_position_starts_a_new_learning_episode():
             close_trade = (await db.execute(
                 select(Trade).where(Trade.id == close_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, close_trade, 1.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, close_trade, 1.0, 99.0,
+                current_fill_fee=0.1, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
             new_trade = (await db.execute(
                 select(Trade).where(Trade.id == reopen_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, new_trade, 1.0, 101.0)
+            await execution._apply_fill_to_position(
+                db, new_trade, 1.0, 101.0,
+                current_fill_fee=0.1, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -286,7 +297,8 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
                 customer_id=None, trading_account_id=None, exchange="binance",
                 symbol=symbol, quantity=1.0, average_entry_price=100.0,
                 mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
-                reserved_capital=0.0, strategy="old-strategy",
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True, strategy="old-strategy",
                 entry_regime="OLD", entry_trade_id=entry.id,
             ))
             db.add_all([
@@ -310,7 +322,10 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
             order = (await db.execute(
                 select(Trade).where(Trade.id == reversal_id)
             )).scalar_one()
-            await execution._apply_fill_to_position(db, order, 1.0, 99.0)
+            await execution._apply_fill_to_position(
+                db, order, 1.0, 99.0,
+                current_fill_fee=0.0, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -318,7 +333,10 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
                 select(Trade).where(Trade.id == reversal_id)
             )).scalar_one()
             assert order.filled_quantity == pytest.approx(1.0)
-            await execution._apply_fill_to_position(db, order, 2.0, 98.0)
+            await execution._apply_fill_to_position(
+                db, order, 2.0, 98.0,
+                current_fill_fee=0.0, current_fill_fee_verified=True,
+            )
             await db.commit()
 
         async with SessionLocal() as db:
@@ -344,3 +362,357 @@ def test_partial_reversal_order_reopens_learning_episode_after_flattening_old_po
             assert reopened.closing_trade_id is None
 
     asyncio.run(run())
+
+
+def test_partial_closes_allocate_only_current_fill_and_remaining_entry_fees():
+    from decimal import Decimal
+    from app import execution
+    from app.db import (
+        init_db, SessionLocal, Trade, Position, StrategyOutcome,
+    )
+
+    suffix = uuid.uuid4().hex
+    symbol = f"FEE-BASIS-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"fee-entry-{suffix}", client_order_id=f"fee-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=2.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=2.0, notional=200.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"fee-regression","asset":"crypto"}',
+            )
+            first_close = Trade(
+                signal_id=f"fee-close-1-{suffix}", client_order_id=f"fee-close-1-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=110.0,
+                average_fill_price=0.0, fee=1.5, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"fee-regression","asset":"crypto"}',
+            )
+            second_close = Trade(
+                signal_id=f"fee-close-2-{suffix}", client_order_id=f"fee-close-2-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=110.0,
+                average_fill_price=0.0, fee=0.25, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"fee-regression","asset":"crypto"}',
+            )
+            db.add_all([entry, first_close, second_close])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=2.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, entry_fee=Decimal("2.00"),
+                    entry_fee_basis_known=True,
+                strategy="fee-regression", entry_regime="UNKNOWN",
+                entry_trade_id=entry.id,
+            ))
+            await db.commit()
+            first_id, second_id = first_close.id, second_close.id
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == first_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.50"),
+                current_fill_fee_verified=True
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            position = (await db.execute(
+                select(Position).where(Position.symbol == symbol)
+            )).scalar_one()
+            assert position.quantity == pytest.approx(1.0)
+            assert Decimal(str(position.entry_fee)) == Decimal("1.00")
+            first_outcome = (await db.execute(
+                select(StrategyOutcome).where(StrategyOutcome.closing_trade_id == first_id)
+            )).scalar_one()
+            assert Decimal(str(first_outcome.fee)) == Decimal("1.50")
+            assert Decimal(str(first_outcome.net_pnl)) == Decimal("8.50")
+            assert first_outcome.lifecycle_status == "OPEN"
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == second_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 110.0, current_fill_fee=Decimal("0.25"),
+                current_fill_fee_verified=True
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            outcomes = (await db.execute(
+                select(StrategyOutcome)
+                .where(StrategyOutcome.trade_id == entry.id)
+                .order_by(StrategyOutcome.sequence)
+            )).scalars().all()
+            assert len(outcomes) == 2
+            assert outcomes[0].lifecycle_status == "PARTIAL_CLOSED"
+            assert outcomes[1].lifecycle_status == "CLOSED"
+            assert Decimal(str(outcomes[1].closing_quantity)) == Decimal("2")
+            assert Decimal(str(outcomes[1].closing_notional)) == Decimal("220")
+            assert Decimal(str(outcomes[1].fee)) == Decimal("2.75")
+            assert Decimal(str(outcomes[1].net_pnl)) == Decimal("17.25")
+            assert outcomes[1].net_return_bps == pytest.approx(17.25 / 220 * 10000)
+
+    asyncio.run(run())
+
+
+def test_single_fill_reversal_episode_records_only_new_opposite_leg():
+    from app import execution
+    from app.db import (
+        init_db, SessionLocal, Trade, Position, TradeLearningEpisode, StrategyOutcome,
+    )
+
+    suffix = uuid.uuid4().hex
+    symbol = f"EPISODE-SINGLE-FLIP-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"single-flip-old-entry-{suffix}",
+                client_order_id=f"single-flip-old-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=0.1, notional=100.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"old-strategy","regime":"OLD"}',
+            )
+            reversal = Trade(
+                signal_id=f"single-flip-reversal-{suffix}",
+                client_order_id=f"single-flip-reversal-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=2.0, requested_quantity=2.0, filled_quantity=0.0,
+                remaining_quantity=2.0, requested_price=99.0,
+                average_fill_price=0.0, fee=0.0, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"reversal-strategy","regime":"NEW_DOWN"}',
+            )
+            db.add_all([entry, reversal])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=1.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, entry_fee=0.1,
+                entry_fee_basis_known=True, strategy="old-strategy",
+                entry_regime="OLD", entry_trade_id=entry.id,
+            ))
+            db.add_all([
+                TradeLearningEpisode(
+                    entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                    symbol=symbol, timeframe="1h", side="buy",
+                    strategy="old-strategy", status="OPEN",
+                    entry_quantity=1.0, entry_price=100.0,
+                ),
+                TradeLearningEpisode(
+                    entry_trade_id=reversal.id, customer_id=None, exchange="binance",
+                    symbol=symbol, timeframe="1h", side="sell",
+                    strategy="reversal-strategy", status="OPEN",
+                    entry_quantity=0.0, entry_price=0.0,
+                ),
+            ])
+            await db.commit()
+            old_entry_id, reversal_id = entry.id, reversal.id
+
+        async with SessionLocal() as db:
+            order = (await db.execute(
+                select(Trade).where(Trade.id == reversal_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, order, 2.0, 99.0,
+                current_fill_fee=0.0, current_fill_fee_verified=True,
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            position = (await db.execute(
+                select(Position).where(Position.symbol == symbol)
+            )).scalar_one()
+            episodes = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id.in_([old_entry_id, reversal_id])
+                )
+            )).scalars().all()
+            by_entry = {row.entry_trade_id: row for row in episodes}
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == old_entry_id,
+                    StrategyOutcome.closing_trade_id == reversal_id,
+                )
+            )).scalar_one()
+
+            old_episode = by_entry[old_entry_id]
+            new_episode = by_entry[reversal_id]
+            assert position.quantity == pytest.approx(-1.0)
+            assert position.entry_trade_id == reversal_id
+            assert old_episode.status == "COMPLETED"
+            assert old_episode.gross_pnl == pytest.approx(-1.0)
+            assert old_episode.total_fees == pytest.approx(0.1)
+            assert old_episode.net_pnl == pytest.approx(-1.1)
+            assert new_episode.status == "OPEN"
+            assert new_episode.entry_quantity == pytest.approx(1.0)
+            assert new_episode.gross_pnl == pytest.approx(0.0)
+            assert new_episode.exit_at is None
+            assert new_episode.closing_trade_id is None
+            assert new_episode.total_fees == pytest.approx(0.0)
+            assert outcome.lifecycle_status == "CLOSED"
+            assert outcome.closing_quantity == pytest.approx(1.0)
+
+    asyncio.run(run())
+
+@pytest.mark.parametrize(
+    "entry_basis_known,close_fee_verified,expected_status",
+    [
+        (True, True, "COMPLETED"),
+        (False, False, "FEE_PENDING"),
+    ],
+)
+def test_breakeven_close_records_fees_and_gates_learning_replay(
+    entry_basis_known, close_fee_verified, expected_status
+):
+    from decimal import Decimal
+    from app import execution
+    from app.db import (
+        init_db, SessionLocal, Trade, Position, TradeLearningEpisode,
+        StrategyOutcome,
+    )
+
+    suffix = uuid.uuid4().hex
+    symbol = f"EPISODE-BREAKEVEN-{suffix[:10]}"
+
+    async def run():
+        await init_db()
+        async with SessionLocal() as db:
+            entry = Trade(
+                signal_id=f"breakeven-entry-{suffix}",
+                client_order_id=f"breakeven-entry-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="buy",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=1.0,
+                remaining_quantity=0.0, requested_price=100.0,
+                average_fill_price=100.0, fee=0.10, notional=100.0,
+                mode="PAPER", status="FILLED",
+                reason='{"strategy":"breakeven-regression","asset":"crypto"}',
+            )
+            closing = Trade(
+                signal_id=f"breakeven-close-{suffix}",
+                client_order_id=f"breakeven-close-{suffix}",
+                exchange="binance", symbol=symbol, timeframe="1h", side="sell",
+                quantity=1.0, requested_quantity=1.0, filled_quantity=0.0,
+                remaining_quantity=1.0, requested_price=100.0,
+                average_fill_price=0.0, fee=0.25, notional=0.0,
+                mode="PAPER", status="OPEN",
+                reason='{"strategy":"breakeven-regression","asset":"crypto"}',
+            )
+            db.add_all([entry, closing])
+            await db.flush()
+            db.add(Position(
+                customer_id=None, trading_account_id=None, exchange="binance",
+                symbol=symbol, quantity=1.0, average_entry_price=100.0,
+                mark_price=100.0, realized_pnl=0.0, unrealized_pnl=0.0,
+                reserved_capital=0.0, entry_fee=Decimal("0.10"),
+                entry_fee_basis_known=entry_basis_known, strategy="breakeven-regression",
+                entry_regime="UNKNOWN", entry_trade_id=entry.id,
+            ))
+            db.add(TradeLearningEpisode(
+                entry_trade_id=entry.id, customer_id=None, exchange="binance",
+                symbol=symbol, timeframe="1h", side="buy",
+                strategy="breakeven-regression", status="OPEN",
+                entry_quantity=1.0, entry_price=100.0,
+                gross_pnl=Decimal("0"), total_fees=Decimal("0.10"),
+                net_pnl=Decimal("-0.10"),
+            ))
+            await db.commit()
+            entry_id, close_id = entry.id, closing.id
+
+        async with SessionLocal() as db:
+            close = (await db.execute(
+                select(Trade).where(Trade.id == close_id)
+            )).scalar_one()
+            await execution._apply_fill_to_position(
+                db, close, 1.0, 100.0,
+                current_fill_fee=Decimal("0.25"),
+                current_fill_fee_verified=close_fee_verified,
+            )
+            await db.commit()
+
+        async with SessionLocal() as db:
+            episode = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id == entry_id
+                )
+            )).scalar_one()
+            outcome = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry_id,
+                    StrategyOutcome.closing_trade_id == close_id,
+                )
+            )).scalar_one()
+
+            assert episode.status == expected_status
+            assert episode.gross_pnl == pytest.approx(0.0)
+            assert Decimal(str(episode.total_fees)) == Decimal("0.35")
+            if expected_status == "COMPLETED":
+                assert Decimal(str(episode.net_pnl)) == Decimal("-0.35")
+                assert outcome.fee_basis_complete is True
+                assert Decimal(str(outcome.fee)) == Decimal("0.35")
+                assert Decimal(str(outcome.net_pnl)) == Decimal("-0.35")
+            else:
+                assert outcome.fee_basis_complete is False
+                assert outcome.net_pnl is None
+                assert outcome.net_return_bps is None
+
+    asyncio.run(run())
+
+def test_learning_episode_api_hides_unverified_fee_adjusted_results():
+    from decimal import Decimal
+    from types import SimpleNamespace
+    from app.main import _learning_episode_accounting_fields
+
+    pending = SimpleNamespace(
+        status="FEE_PENDING",
+        total_fees=Decimal("0.35"),
+        net_pnl=Decimal("-0.35"),
+        return_bps=-35.0,
+    )
+    assert _learning_episode_accounting_fields(pending) == {
+        "fee_basis_status": "PENDING_RECONCILIATION",
+        "total_fees": None,
+        "net_pnl": None,
+        "return_bps": None,
+    }
+
+    completed = SimpleNamespace(
+        status="COMPLETED",
+        total_fees=Decimal("0.35"),
+        net_pnl=Decimal("-0.35"),
+        return_bps=-35.0,
+    )
+    assert _learning_episode_accounting_fields(completed) == {
+        "fee_basis_status": "PENDING_RECONCILIATION",
+        "total_fees": None,
+        "net_pnl": None,
+        "return_bps": None,
+    }
+    assert _learning_episode_accounting_fields(
+        completed, fee_basis_verified=True
+    ) == {
+        "fee_basis_status": "VERIFIED",
+        "total_fees": Decimal("0.35"),
+        "net_pnl": Decimal("-0.35"),
+        "return_bps": -35.0,
+    }
+

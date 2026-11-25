@@ -493,3 +493,31 @@ def test_strategy_ranking_and_selector_expose_calibration_evidence(monkeypatch):
     assert selection["execution_cost_calibration_evidence_id"] == "venue-calibration-router-002"
     assert selection["execution_cost_venue"] == "example-exchange"
     assert selection["execution_cost_model_fingerprint"] == "d" * 64
+
+
+def test_online_scores_exclude_gross_returns_when_net_fee_evidence_is_null():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    now = datetime.now(timezone.utc)
+    unknown_fee_rows = [
+        SimpleNamespace(
+            strategy="breakout",
+            net_return_bps=None,
+            return_bps=500.0,
+            created_at=now,
+            regime="TREND_UP",
+            timeframe="1h",
+        )
+        for _ in range(10)
+    ]
+    scores = online_strategy_scores(unknown_fee_rows, min_observations=10)
+    assert scores["breakout"] == 0.0
+
+    # Older callers with no net-return field may still provide gross returns.
+    legacy_rows = [
+        {"strategy": "breakout", "return_bps": 20.0, "created_at": now}
+        for _ in range(10)
+    ]
+    legacy_scores = online_strategy_scores(legacy_rows, min_observations=10)
+    assert legacy_scores["breakout"] > 0.0

@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     # Customer authentication and funding. Supabase Auth is authoritative for customer identity.
     supabase_url: str = ""
     supabase_anon_key: str = ""
+    # Optional server-only Auth Admin API key for encrypted-profile email lookups.
+    supabase_auth_admin_key: str = ""
     supabase_jwks_url: str = ""
     supabase_auth_audience: str = "authenticated"
     funding_webhook_secret: str = ""
@@ -73,6 +75,67 @@ class Settings(BaseSettings):
         if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
             raise ValueError("paper participation and probabilities must be finite values between 0 and 1")
         return float(value)
+
+    @field_validator("max_slippage_bps", "max_spread_bps")
+    @classmethod
+    def _validate_market_quality_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError(
+                "MAX_SLIPPAGE_BPS and MAX_SPREAD_BPS must be finite and non-negative"
+            )
+        return parsed
+
+    @field_validator("initial_equity")
+    @classmethod
+    def _validate_initial_equity(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed <= 0.0:
+            raise ValueError("INITIAL_EQUITY must be finite and positive")
+        return parsed
+
+    @field_validator("max_leverage", "risk_per_trade")
+    @classmethod
+    def _validate_position_sizing_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError("MAX_LEVERAGE and RISK_PER_TRADE must be finite and non-negative")
+        return parsed
+
+    @field_validator("max_drawdown", "daily_loss_limit")
+    @classmethod
+    def _validate_loss_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or not 0.0 <= parsed < 1.0:
+            raise ValueError("MAX_DRAWDOWN and DAILY_LOSS_LIMIT must be finite fractions in [0, 1)")
+        return parsed
+
+    @field_validator(
+        "max_notional_usd",
+        "max_position_notional_usd",
+        "max_total_exposure_usd",
+    )
+    @classmethod
+    def _validate_exposure_limits(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or parsed < 0.0:
+            raise ValueError("exposure limits must be finite and non-negative")
+        return parsed
+
+    @field_validator("max_open_positions")
+    @classmethod
+    def _validate_max_open_positions(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("MAX_OPEN_POSITIONS must be non-negative")
+        return value
+
+    @field_validator("discipline_risk_tolerance")
+    @classmethod
+    def _validate_discipline_risk_tolerance(cls, value: float) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed) or not 0.0 <= parsed <= 0.10:
+            raise ValueError("DISCIPLINE_RISK_TOLERANCE must be finite and between 0 and 0.10")
+        return parsed
 
     @field_validator("paper_market_impact_coefficient", "paper_max_market_impact_bps")
     @classmethod
@@ -191,6 +254,9 @@ class Settings(BaseSettings):
     research_yahoo_period: str = "3y"
     research_taker_bps: float = 5.5
     research_slippage_bps: float = 2.0
+    # Customer paper is spot-only; keep its default fee separate from derivatives research.
+    # This is an unverified assumption, not a venue-specific calibration.
+    customer_paper_spot_taker_bps: float = 10.0
     # Optional immediate-fill cost model inputs are retained for the standalone
     # estimator/tests; the active executor remains bar-driven and does not use them.
     paper_impact_max_participation_rate: float | None = None
