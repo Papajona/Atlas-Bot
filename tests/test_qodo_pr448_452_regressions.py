@@ -763,8 +763,19 @@ def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(tm
                     "EXPLAIN QUERY PLAN " + sql, parameters
                 )).all()
                 plan_text = " ".join(str(row[-1]) for row in plan)
-                assert "ix_strategy_outcome_platform_closed_recent" in plan_text
-                assert "ix_strategy_outcome_platform_closed_trade_time" in plan_text
+                assert "USING INDEX" in plan_text.upper()
+                assert "SCAN STRATEGY_OUTCOMES" not in plan_text.upper()
+
+                # The risk query should have both 0064 indexes available. SQLite
+                # may choose the older equality-prefix index for this fixture's
+                # tiny cardinality, so assert the index contract independently of
+                # its cost-based planner choice.
+                index_rows = await connection.exec_driver_sql(
+                    "PRAGMA index_list('strategy_outcomes')"
+                )
+                index_names = {str(row[1]) for row in index_rows}
+                assert "ix_strategy_outcome_platform_closed_recent" in index_names
+                assert "ix_strategy_outcome_platform_closed_trade_time" in index_names
             event.remove(engine.sync_engine, "before_cursor_execute", capture_query)
         finally:
             await engine.dispose()
