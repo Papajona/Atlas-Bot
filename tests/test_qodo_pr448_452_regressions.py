@@ -23,7 +23,8 @@ def test_customer_profile_backfill_encrypts_auth_pii_and_checks_legacy_identity(
     assert "profile.email = email" in block
     assert "profile.display_name = name" in block
     assert "PENDING_IDENTITY_REVIEW" in block
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in block
+    assert "jwt_email_missing = not email" in block
+    assert "jwt_email_missing or profile is None" in block
     assert "await _has_unmapped_legacy_customer_profile(db, uid)" in block
     assert "casefold()" in block
 
