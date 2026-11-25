@@ -183,7 +183,10 @@ def test_0065_rollback_provenance_tracks_exact_direct_acl_deltas_and_identity():
     # identity before the loop continues.
     def assert_grantor_revoke_loop(state_key: str, revoke_fragment: str) -> None:
         key_marker = f"coalesce(role_state->'{state_key}'"
-        key_index = migration.index(key_marker)
+        revoke_section_start = migration.index(
+            "-- Revoke only entries proven by the pre/post snapshots"
+        )
+        key_index = migration.index(key_marker, revoke_section_start)
         loop_start = migration.rfind("FOR grantor_oid IN", 0, key_index)
         loop_end = migration.index("END LOOP;", key_index) + len("END LOOP;")
         assert loop_start >= 0
