@@ -1136,6 +1136,176 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
   await page.close();
 }
 
+async function testPaperStagingSignOutReleasesPendingPaperControls(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  let loginCount = 0;
+  let releaseFirstScan;
+  let releaseSecondScan;
+  let firstScanStarted = false;
+  let secondScanStarted = false;
+  let firstScanResponded = false;
+  let secondScanResponded = false;
+  let releaseSecondSessionOrder;
+  let releaseThirdSessionOrder;
+  let secondOrderStarted = false;
+  let thirdOrderStarted = false;
+  let secondOrderResponded = false;
+  let thirdOrderResponded = false;
+  const tokens = [];
+  const logoutCalls = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const path = url.pathname;
+    const method = req.method();
+    const headers = req.headers();
+    const authorization = headers.authorization || "";
+
+    if (path === "/api/auth/login" && method === "POST") {
+      loginCount += 1;
+      const token = paperTestSession("busy-session-" + loginCount);
+      tokens.push(token);
+      return json(route, { access_token: token });
+    }
+    if (path === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: "aal2",
+        factor_count: 1,
+        factor_ids: ["paper-busy-factor"],
+      });
+    }
+    if (path === "/api/auth/profile/provision" && method === "POST") {
+      return json(route, { status: "PROVISIONED" });
+    }
+    if (path === "/api/customer/me" && method === "GET") {
+      return json(route, {
+        id: 81 + loginCount,
+        display_name: "Paper Busy-State Customer",
+        email: "busy-state@example.invalid",
+      });
+    }
+    if (path === "/api/customer/portfolio" && method === "GET") {
+      return json(route, { equity: 10000, cash_equity: 10000, positions: [], valuation_status: "CASH_ONLY" });
+    }
+    if (path === "/api/customer/paper/balances" && method === "GET") {
+      return json(route, { balances: [{ account_code: "PAPER_CASH", currency: "USDT", balance: "10000" }] });
+    }
+    if (path === "/api/customer/paper/positions" && method === "GET") {
+      return json(route, { positions: [] });
+    }
+    if (path === "/api/customer/paper/orders" && method === "GET") {
+      return json(route, { orders: [] });
+    }
+    if (path === "/api/customer/paper/history" && method === "GET") {
+      return json(route, { virtual_only: true, orders: [] });
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push(authorization);
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    if (path === "/api/customer/market-scanner" && method === "GET") {
+      if (authorization === "Bearer " + tokens[0]) {
+        firstScanStarted = true;
+        await new Promise(resolve => { releaseFirstScan = resolve; });
+        await json(route, { exchange: "binance", timeframe: "15m", results: [] });
+        firstScanResponded = true;
+        return;
+      }
+      if (authorization === "Bearer " + tokens[1]) {
+        secondScanStarted = true;
+        await new Promise(resolve => { releaseSecondScan = resolve; });
+        await json(route, { exchange: "binance", timeframe: "15m", results: [] });
+        secondScanResponded = true;
+        return;
+      }
+      return json(route, { detail: "Unexpected scanner session" }, 401);
+    }
+    if (path === "/api/customer/paper/orders" && method === "POST") {
+      if (authorization === "Bearer " + tokens[1]) {
+        secondOrderStarted = true;
+        await new Promise(resolve => { releaseSecondSessionOrder = resolve; });
+        await json(route, { status: "SUBMITTED", fill_note: "Mocked paper order." });
+        secondOrderResponded = true;
+        return;
+      }
+      if (authorization === "Bearer " + tokens[2]) {
+        thirdOrderStarted = true;
+        await new Promise(resolve => { releaseThirdSessionOrder = resolve; });
+        await json(route, { status: "SUBMITTED", fill_note: "Mocked paper order." });
+        thirdOrderResponded = true;
+        return;
+      }
+      return json(route, { detail: "Unexpected order session" }, 401);
+    }
+    return json(route, { detail: "Unexpected paper busy-state test request" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200);
+  await page.locator("#email").fill("busy-state@example.invalid");
+  await page.locator("#password").fill("busy-state-password");
+  await page.locator("#login-button").click();
+  await page.locator("#workspace").waitFor({ state: "visible" });
+  assert.equal(loginCount, 1);
+
+  // Session 1 holds a scanner request open while the customer signs out.
+  await page.locator("#scanner-button").click();
+  await waitUntil(async () => firstScanStarted && typeof releaseFirstScan === "function");
+  assert.equal(await page.locator("#scanner-button").isDisabled(), true);
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0], "Bearer " + tokens[0]);
+  for (const id of ["#refresh-button", "#initialize-button", "#scanner-button", "#submit-order"]) {
+    assert.equal(await page.locator(id).isEnabled(), true, "sign-out must release stale busy state on " + id);
+  }
+
+  // Session 2 starts a new scan before the old response is released. The stale
+  // session's finally block must not unlock the control owned by session 2.
+  await page.locator("#email").fill("busy-state@example.invalid");
+  await page.locator("#password").fill("busy-state-password");
+  await page.locator("#login-button").click();
+  await page.locator("#workspace").waitFor({ state: "visible" });
+  await page.locator("#scanner-button").click();
+  await waitUntil(async () => secondScanStarted && typeof releaseSecondScan === "function");
+  releaseFirstScan();
+  await waitUntil(async () => firstScanResponded);
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator("#scanner-button").isDisabled(), true, "a stale scan must not unlock the newer session's active scan");
+  releaseSecondScan();
+  await waitUntil(async () => secondScanResponded && await page.locator("#scanner-button").isEnabled());
+
+  // Hold a session-2 order, sign out, then start a session-3 order. Releasing
+  // the stale order must not clear the newer order's busy state.
+  await page.locator("#quantity").fill("0.001");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => secondOrderStarted && typeof releaseSecondSessionOrder === "function");
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 2);
+  assert.equal(await page.locator("#submit-order").isEnabled(), true, "sign-out must re-enable the pending order control");
+
+  await page.locator("#email").fill("busy-state@example.invalid");
+  await page.locator("#password").fill("busy-state-password");
+  await page.locator("#login-button").click();
+  await page.locator("#workspace").waitFor({ state: "visible" });
+  await page.locator("#quantity").fill("0.002");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => thirdOrderStarted && typeof releaseThirdSessionOrder === "function");
+  releaseSecondSessionOrder();
+  await waitUntil(async () => secondOrderResponded);
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator("#submit-order").isDisabled(), true, "a stale order must not unlock the newer session's active order");
+  releaseThirdSessionOrder();
+  await waitUntil(async () => thirdOrderResponded && await page.locator("#submit-order").isEnabled());
+
+  assert.equal(loginCount, 3);
+  assert.deepEqual(pageErrors, [], "sign-out during paper actions must not throw browser errors");
+  await page.close();
+}
+
 
 (async () => {
   await new Promise((resolve, reject) => {
@@ -1156,7 +1326,8 @@ async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
     await testCustomerMfaOtpWithdrawalFlow(browser, baseUrl);
     await testPaperStagingWorkspace(browser, baseUrl);
     await testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl);
-    console.log("PASS: admin/customer browser regressions, strict CSP, hostile-data rendering, 12x100-row refresh stress, customer MFA/OTP flow, and mocked paper-staging MFA/readiness/order lifecycle.");
+    await testPaperStagingSignOutReleasesPendingPaperControls(browser, baseUrl);
+    console.log("PASS: admin/customer browser regressions, strict CSP, hostile-data rendering, 12x100-row refresh stress, customer MFA/OTP flow, paper staging readiness/order lifecycle, stale-session races, and paper-action busy-state recovery.");
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));
