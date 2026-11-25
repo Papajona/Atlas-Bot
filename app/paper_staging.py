@@ -2,8 +2,8 @@
 
 This app deliberately does not run app.main's lifespan: that startup initializes the
 general application schema and writes billing state in the primary public schema.
-Only explicit health/readiness, Supabase customer Auth, customer summary, and
-customer-paper ledger routes are exposed by this ASGI app.
+Only explicit health/readiness, Supabase customer Auth, customer summary, read-only
+market scanning, and customer-paper ledger routes are exposed by this ASGI app.
 """
 from __future__ import annotations
 
@@ -703,6 +703,10 @@ async def paper_customer_market_scanner(
         metrics=_scanner_metrics,
         semaphore=_PAPER_SCANNER_SEMAPHORE,
         logger=logging.getLogger(__name__),
+    )
+    results.sort(
+        key=lambda row: abs(float(row.get("score", 0.0) or 0.0)),
+        reverse=True,
     )
     return {"exchange": exchange, "timeframe": "15m", "results": results}
 
