@@ -298,6 +298,14 @@ It verifies that the existing workload identity provider is restricted to `Papaj
 
 The database URLs use the session pooler host `aws-0-eu-west-1.pooler.supabase.com:5432/postgres` for this Free-tier project, with usernames `atlas_paper_reader.wauaelzyugjuepmrewaw` and `atlas_customer_paper.wauaelzyugjuepmrewaw`, different URL-encoded passwords, TLS required, and the SQLAlchemy asyncpg driver. Supavisor requires the project-ref suffix on each pooler username. The script fails if role passwords match or any required prompt is empty. Run it only after both exact roles exist and their passwords are saved correctly.
 
+If Cloud Run revision creation later reports `Permission denied on secret` for one of these three secrets, repair only the IAM bindings without re-entering credentials or rotating secret versions:
+
+```bash
+bash scripts/bootstrap_atlas_paper_staging_gcp.sh --repair-secret-access
+```
+
+This mode verifies the exact staging project number, requires the existing runtime and preflight service accounts and all three existing secrets, applies the runtime accessor binding to only the three referenced secrets and the preflight accessor binding to only the two database secrets, then reads back and verifies each IAM policy. It never reads, prints, adds, or rotates secret versions and does not create or modify database roles or schema.
+
 ### 3. Set GitHub's protected `staging` environment variables
 
 Open [Atlas-Bot staging environment settings](https://github.com/Papajona/Atlas-Bot/settings/environments) and add these variables using the values printed at the end of the bootstrap script:
