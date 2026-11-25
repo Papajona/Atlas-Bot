@@ -1678,3 +1678,23 @@ def test_secret_scanner_detects_multiline_template_recovery_phrases_for_all_sour
         f"wallet{suffix}:1: seed/private-key assignment" in item
         for item in findings
     )
+
+@pytest.mark.parametrize("suffix", [".java", ".kt"])
+def test_secret_scanner_detects_multiline_java_and_kotlin_token_literals(tmp_path, monkeypatch, suffix):
+    credential_value = "0123456789abcdef" * 2
+    key_name = "to" + "ken"
+    opening = chr(34) * 3
+    if suffix == ".java":
+        assignment = "final String " + key_name + " = "
+    else:
+        assignment = "val " + key_name + " = "
+    source = assignment + opening + "\n    " + credential_value + "\n    " + opening + ";\n"
+    (tmp_path / f"Wallet{suffix}").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        f"Wallet{suffix}:1: seed/private-key assignment" in item
+        for item in findings
+    )
