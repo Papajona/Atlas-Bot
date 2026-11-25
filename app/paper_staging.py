@@ -598,7 +598,7 @@ async def paper_customer_logout(authorization: str | None = Header(default=None)
     # Auth-service relay. Supabase invalidates the session associated with this JWT.
     await _supabase_user(token)
     await _supabase_request(
-        "/auth/v1/logout",
+        "/auth/v1/logout?scope=local",
         payload={},
         access_token=token,
     )
