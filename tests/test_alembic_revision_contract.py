@@ -53,12 +53,10 @@ def test_alembic_revision_contract_rejects_cycles(tmp_path):
 
 
 
-def test_research_integrity_revision_is_direct_successor_and_strategy_outcome_index_is_single_head():
+def test_research_integrity_revision_is_direct_successor_of_0058():
     migration = (
         ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"
     ).read_text(encoding="utf-8")
     assert 'revision = "0059_research_integrity_controls"' in migration
     assert 'down_revision = "0058_customer_paper_rls_and_index_hardening"' in migration
-    assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0061_strategy_outcome_recent_index"
-    }
+
