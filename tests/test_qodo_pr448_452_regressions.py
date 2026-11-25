@@ -540,8 +540,9 @@ def test_customer_identity_backfill_avoids_name_only_auth_and_persists_review_qu
         source.index("def _funding_signature_valid")
     ]
     assert "not str(profile.display_name or" not in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or" in customer
-    assert "needs_auth_identity = profile is None or not str(profile.email or \"\").strip()" in customer
+    assert "jwt_email_missing = not email" in customer
+    assert "jwt_email_missing or profile is None" in customer
+    assert "jwt_email_missing or profile is None" in customer
     quarantine = source[
         source.index("async def _quarantine_customer_identity_review("):
         source.index("async def get_customer(")
