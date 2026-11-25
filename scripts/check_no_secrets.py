@@ -452,9 +452,20 @@ def _structured_private_object_has_material(value) -> bool:
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
                 field_is_private = normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
                 field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
+                ambiguous_public_metadata_field = (
+                    public_metadata_mapping and normalized_key in {"key", "value"}
+                )
                 if isinstance(item, str):
                     if field_is_private and _nonempty_private_scalar(item):
-                        return True
+                        # "key" and "value" are common descriptive metadata
+                        # labels in public JWK metadata. Do not treat short labels
+                        # as key material, but continue to reject long key-like
+                        # values even inside this otherwise public mapping.
+                        if (
+                            not ambiguous_public_metadata_field
+                            or _looks_like_private_key_material(item)
+                        ):
+                            return True
                     # Direct values in a recognized metadata mapping are public
                     # descriptive metadata. Nested containers still inherit the
                     # surrounding private context and are inspected recursively.
@@ -465,7 +476,13 @@ def _structured_private_object_has_material(value) -> bool:
                         and _looks_like_private_key_material(item)
                     ):
                         return True
-                if field_is_private and isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                if (
+                    field_is_private
+                    and isinstance(item, (int, float))
+                    and not isinstance(item, bool)
+                    and item != 0
+                    and not ambiguous_public_metadata_field
+                ):
                     return True
                 if isinstance(item, (dict, list)):
                     if normalized_key == "metadata" and field_is_public:
