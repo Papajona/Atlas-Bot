@@ -1401,8 +1401,8 @@ def test_secret_scanner_detects_private_blob_nested_in_public_jwk_metadata(
         + '"}}]'
     )
     source = (
-        "wallet:\\n  " + private_key_field + ": |\\n"
-        + "    " + jwk_json + "\\n"
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + jwk_json + "\n"
     )
     (tmp_path / "private-jwk-metadata-blob.yml").write_text(
         source, encoding="utf-8"
