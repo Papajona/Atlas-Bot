@@ -228,19 +228,30 @@ def test_0065_downgrade_preserves_preexisting_trigger_role_and_policies():
         ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
     ).read_text(encoding="utf-8")
 
-    # The role comment records whether each object/grant predated this revision.
-    # Downgrade must consult that state rather than deleting every matching name.
+    # The v3 comment marker records exact direct ACL snapshots and only the
+    # introduced grantors. It also permits a narrowly isolated non-login
+    # grantor to retain a pre-existing trigger-owner EXECUTE dependency.
     for state_key in (
         "'role_created_by_revision'",
         "'journals_policy_created_by_revision'",
         "'lines_policy_created_by_revision'",
-        "'had_public_schema_usage'",
-        "'had_ledger_journals_select'",
-        "'had_ledger_journal_lines_select'",
-        "'had_validate_function_execute'",
+        "'pre_public_schema_usage_acl'",
+        "'pre_ledger_journals_select_acl'",
+        "'pre_ledger_journal_lines_select_acl'",
+        "'pre_validate_function_execute_acl'",
+        "'introduced_public_schema_usage_grantors'",
+        "'introduced_ledger_journals_select_grantors'",
+        "'introduced_ledger_journal_lines_select_grantors'",
+        "'introduced_validate_function_execute_grantors'",
+        "'preserved_validate_function_grantor_oids'",
         "'prior_role_comment'",
     ):
         assert state_key in migration
+
+    assert "grantor.rolcanlogin" in migration
+    assert "grantor.rolsuper" in migration
+    assert "membership.roleid = grantor.oid" in migration
+    assert "membership.member = grantor.oid" in migration
 
     downgrade = migration.split("def downgrade()", 1)[1]
     assert "rollback provenance is missing" in downgrade
@@ -253,3 +264,5 @@ def test_0065_downgrade_preserves_preexisting_trigger_role_and_policies():
     assert "COMMENT ON ROLE %I IS %L" in downgrade
     assert "FROM pg_shdepend" in downgrade
     assert "AND NOT EXISTS (" in downgrade
+
+
