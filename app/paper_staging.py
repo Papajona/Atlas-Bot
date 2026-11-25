@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 import time
 import uuid
 from decimal import Decimal
@@ -35,7 +36,9 @@ from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
 # Import only the existing Auth/JWT helpers and market-data adapter. The main ASGI
 # app is not mounted or served; its startup/lifespan is never executed in this process.
 from .main import (
-    MarketRequest, _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
+    MarketRequest, _SCANNER_MAX_CONCURRENT_FETCHES, _scanner_metrics,
+    _scanner_normalize_symbols, _scanner_scan_symbols,
+    _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
     _customer_paper_group_mark_prices,
     _supabase_request, _supabase_user, _trusted_client_ip, api_rate_limit,
     customer_claims, market_data,
@@ -54,12 +57,14 @@ _PAPER_API_RATE_WINDOW_SECONDS = 60.0
 _PAPER_API_RATE_LIMIT_PER_MINUTE = 60
 _PAPER_API_IP_RATE_LIMIT_PER_MINUTE = 600
 _PAPER_ORDER_RATE_LIMIT_PER_MINUTE = 12
+_PAPER_MARKET_SCANNER_RATE_LIMIT_PER_MINUTE = 12
 _PAPER_READINESS_RATE_LIMIT_PER_MINUTE = 30
 _PAPER_API_RATE_MAX_BUCKETS = 8192
 _paper_preflight_cache_result: dict[str, Any] | None = None
 _paper_preflight_cache_at = 0.0
 _paper_preflight_cache_lock = asyncio.Lock()
 _paper_api_request_times: dict[str, list[float]] = {}
+_PAPER_SCANNER_SEMAPHORE = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT_FETCHES)
 
 
 # Test fixture for the PostgreSQL membership regression tests. The production preflight
@@ -428,12 +433,15 @@ app.middleware("http")(api_rate_limit)
 @app.middleware("http")
 async def _paper_customer_api_rate_limit(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/api/customer/paper/"):
-        request_class = (
-            "order"
-            if request.method.upper() == "POST" and "/orders" in path
-            else "general"
-        )
+    if path.startswith("/api/customer/paper/") or path == "/api/customer/market-scanner":
+        if path == "/api/customer/market-scanner":
+            request_class = "market"
+        else:
+            request_class = (
+                "order"
+                if request.method.upper() == "POST" and "/orders" in path
+                else "general"
+            )
         raw_authorization = str(request.headers.get("authorization") or "").strip()
         if raw_authorization.lower().startswith("bearer "):
             # Match _bearer_token exactly: case-insensitive scheme, split once, trim token.
@@ -446,6 +454,8 @@ async def _paper_customer_api_rate_limit(request: Request, call_next):
         limit = (
             _PAPER_ORDER_RATE_LIMIT_PER_MINUTE
             if request_class == "order"
+            else _PAPER_MARKET_SCANNER_RATE_LIMIT_PER_MINUTE
+            if request_class == "market"
             else _PAPER_API_RATE_LIMIT_PER_MINUTE
         )
         if not _allow_paper_api_request(
@@ -656,6 +666,45 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
         "status": profile.status,
         "identity_review_required": bool(profile.identity_review_required),
     }
+
+
+@app.get("/api/customer/market-scanner")
+async def paper_customer_market_scanner(
+    exchange: str = "binance",
+    symbols: str = "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT",
+    authorization: str | None = Header(default=None),
+):
+    """Serve bounded, read-only public market signals to authenticated paper customers."""
+    async with SessionLocal() as db:
+        # Market data is customer-visible only after the same AAL2 profile check as
+        # the paper portfolio; this route never creates or advances an order.
+        await get_existing_customer(authorization, db)
+
+    import ccxt
+
+    if exchange not in ccxt.exchanges:
+        raise HTTPException(422, "Unsupported exchange")
+
+    requested = _scanner_normalize_symbols(symbols)
+    if not requested:
+        raise HTTPException(422, "At least one valid market symbol is required")
+
+    results = await _scanner_scan_symbols(
+        requested,
+        fetch=lambda symbol: market_data(
+            MarketRequest(
+                asset="crypto",
+                symbol=symbol,
+                exchange=exchange,
+                timeframe="15m",
+                days=30,
+            )
+        ),
+        metrics=_scanner_metrics,
+        semaphore=_PAPER_SCANNER_SEMAPHORE,
+        logger=logging.getLogger(__name__),
+    )
+    return {"exchange": exchange, "timeframe": "15m", "results": results}
 
 
 @app.get("/api/customer/portfolio")
