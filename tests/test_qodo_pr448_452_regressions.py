@@ -321,7 +321,9 @@ def test_core_customer_summary_can_show_own_auth_pii_during_review_without_unloc
     ]
     assert "if identity_review_required and not allow_identity_review_summary" in get_customer
     assert "if profile is None:" in get_customer
-    assert "identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)" in get_customer
+    assert "async def _has_unmapped_legacy_customer_profile" not in source
+    assert "_has_unmapped_legacy_customer_profile" not in get_customer
+    assert "identity_review_required = await _legacy_customer_email_conflict(db, uid, email)" in get_customer
     assert "if stale_legacy_quarantine:" in get_customer
     assert "identity_review_required = await _legacy_customer_email_conflict(db, uid, email)" in get_customer
     assert "profile.status = \"ACTIVE\"" in get_customer
