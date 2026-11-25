@@ -383,6 +383,7 @@ async def get_existing_customer(
         raise HTTPException(
             409,
             "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
+            headers={"X-Atlas-Paper-Gate": "blocked"},
         )
 
     # Keep PII/encrypted columns out of the query: this service has no encryption
@@ -405,14 +406,27 @@ async def get_existing_customer(
 async def _paper_state_guard() -> None:
     """Check database and paper-ledger gates, then honor the persisted kill switch."""
     result = await _cached_paper_runtime_preflight()
+    gate_headers = {"X-Atlas-Paper-Gate": "blocked"}
     if result.get("status") != "PASS":
-        raise HTTPException(503, "Paper-only staging preflight is blocked: " + str(result.get("reason") or "UNKNOWN"))
+        raise HTTPException(
+            503,
+            "Paper-only staging preflight is blocked: " + str(result.get("reason") or "UNKNOWN"),
+            headers=gate_headers,
+        )
     async with SessionLocal() as db:
         state = await db.get(AppState, 1)
     if state is None:
-        raise HTTPException(503, "Paper-only staging risk state has not been provisioned")
+        raise HTTPException(
+            503,
+            "Paper-only staging risk state has not been provisioned",
+            headers=gate_headers,
+        )
     if state.kill_switch:
-        raise HTTPException(409, "Customer paper trading is halted by platform risk state")
+        raise HTTPException(
+            409,
+            "Customer paper trading is halted by platform risk state",
+            headers=gate_headers,
+        )
 
 
 app = FastAPI(
@@ -574,6 +588,21 @@ async def paper_customer_login(req: CustomerCredentials):
         "/auth/v1/token?grant_type=password",
         payload={"email": req.email.strip().lower(), "password": req.password},
     )
+
+
+@app.post("/api/auth/logout")
+async def paper_customer_logout(authorization: str | None = Header(default=None)):
+    """Revoke the caller's current Supabase Auth session during browser sign-out."""
+    token = _bearer_token(authorization)
+    # Resolve the user first so this endpoint cannot be used as an unauthenticated
+    # Auth-service relay. Supabase invalidates the session associated with this JWT.
+    await _supabase_user(token)
+    await _supabase_request(
+        "/auth/v1/logout",
+        payload={},
+        access_token=token,
+    )
+    return {"status": "SIGNED_OUT"}
 
 
 @app.get("/api/auth/mfa/status")
