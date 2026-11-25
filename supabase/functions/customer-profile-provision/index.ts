@@ -73,6 +73,7 @@ export default {
       const { data: profilePage, error: legacyLookupError } = await ctx.supabaseAdmin
         .from("customer_profiles")
         .select("auth_user_id")
+        .order("id", { ascending: true })
         .range(offset, offset + pageSize - 1);
       if (legacyLookupError || !Array.isArray(profilePage)) {
         return response({ error: "Legacy customer identity verification is unavailable; manual review is required" }, 503);
