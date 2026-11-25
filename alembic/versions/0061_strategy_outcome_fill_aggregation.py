@@ -623,7 +623,7 @@ def upgrade() -> None:
                 "closing_quantity": valid_quantity,
                 "closing_notional": valid_notional,
                 "realized_pnl": total_realized,
-                "fee": total_fee,
+                "fee": total_fee if fee_basis_complete else final["fee"],
                 "net_pnl": total_net,
                 "return_bps": gross_return_bps if valid_notional > 0 else None,
                 "net_return_bps": net_return_bps,
