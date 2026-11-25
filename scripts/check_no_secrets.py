@@ -450,7 +450,10 @@ def _structured_private_object_has_material(value) -> bool:
         if isinstance(current, dict):
             for key, item in current.items():
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
-                field_is_private = normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
+                field_is_private = (
+                    normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
+                    or normalized_key.startswith(("private", "secret"))
+                )
                 field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
                 ambiguous_public_metadata_field = (
                     public_metadata_mapping and normalized_key in {"key", "value"}
@@ -474,6 +477,7 @@ def _structured_private_object_has_material(value) -> bool:
                     # receive the narrow short-label exception above.
                     if (
                         private_context
+                        and not public_metadata_mapping
                         and not field_is_public
                         and not ambiguous_public_metadata_field
                         and _looks_like_private_key_material(item)
