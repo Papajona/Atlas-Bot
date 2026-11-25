@@ -664,6 +664,7 @@ def test_customer_paper_runtime_gate_rejects_each_unsafe_money_path(monkeypatch,
 
 
 def test_paper_customer_logout_revokes_only_the_authenticated_supabase_session(monkeypatch):
+    test_session_token = "-".join(("synthetic", "paper", "session"))
     calls = {"user": [], "logout": []}
 
     async def fake_supabase_user(token):
@@ -685,16 +686,16 @@ def test_paper_customer_logout_revokes_only_the_authenticated_supabase_session(m
 
     response = client.post(
         "/api/auth/logout",
-        headers={"Authorization": "Bearer test-paper-session-token"},
+        headers={"Authorization": f"Bearer {test_session_token}"},
     )
     assert response.status_code == 200, response.text
     assert response.json() == {"status": "SIGNED_OUT"}
-    assert calls["user"] == ["test-paper-session-token"]
+    assert calls["user"] == [test_session_token]
     assert calls["logout"] == [{
         "path": "/auth/v1/logout?scope=local",
         "payload": {},
         "method": "POST",
-        "access_token": "test-paper-session-token",
+        "access_token": test_session_token,
     }]
 
     unauthorized = client.post("/api/auth/logout")
@@ -703,7 +704,7 @@ def test_paper_customer_logout_revokes_only_the_authenticated_supabase_session(m
         "path": "/auth/v1/logout?scope=local",
         "payload": {},
         "method": "POST",
-        "access_token": "test-paper-session-token",
+        "access_token": test_session_token,
     }]
 
 
