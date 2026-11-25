@@ -1464,6 +1464,10 @@ def test_secret_scanner_allows_public_jwk_metadata_labels_and_prose_but_flags_ke
         + ("0123456789abcdef" * 2)
         + '"}}]'
     )
+    explicit_secret_metadata = (
+        '[{"kty":"EC","metadata":{"secret_blob":'
+        '"custom wallet recovery phrase material"}}]'
+    )
     (tmp_path / "public-jwk-metadata-descriptive-labels.yml").write_text(
         "wallet:\n  " + private_key_field + ": |\n"
         + "    " + descriptive_metadata + "\n",
@@ -1472,6 +1476,11 @@ def test_secret_scanner_allows_public_jwk_metadata_labels_and_prose_but_flags_ke
     (tmp_path / "public-jwk-metadata-secret-label-material.yml").write_text(
         "wallet:\n  " + private_key_field + ": |\n"
         + "    " + exposed_metadata_secret + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "public-jwk-metadata-explicit-secret.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + explicit_secret_metadata + "\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -1483,6 +1492,11 @@ def test_secret_scanner_allows_public_jwk_metadata_labels_and_prose_but_flags_ke
     )
     assert any(
         "public-jwk-metadata-secret-label-material.yml:2: seed/private-key assignment"
+        in item
+        for item in findings
+    )
+    assert any(
+        "public-jwk-metadata-explicit-secret.yml:2: seed/private-key assignment"
         in item
         for item in findings
     )
