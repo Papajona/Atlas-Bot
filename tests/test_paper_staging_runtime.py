@@ -691,7 +691,7 @@ def test_paper_customer_logout_revokes_only_the_authenticated_supabase_session(m
     assert response.json() == {"status": "SIGNED_OUT"}
     assert calls["user"] == ["test-paper-session-token"]
     assert calls["logout"] == [{
-        "path": "/auth/v1/logout",
+        "path": "/auth/v1/logout?scope=local",
         "payload": {},
         "method": "POST",
         "access_token": "test-paper-session-token",
@@ -700,7 +700,7 @@ def test_paper_customer_logout_revokes_only_the_authenticated_supabase_session(m
     unauthorized = client.post("/api/auth/logout")
     assert unauthorized.status_code == 401
     assert calls["logout"] == [{
-        "path": "/auth/v1/logout",
+        "path": "/auth/v1/logout?scope=local",
         "payload": {},
         "method": "POST",
         "access_token": "test-paper-session-token",
