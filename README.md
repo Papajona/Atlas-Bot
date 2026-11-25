@@ -85,7 +85,7 @@ The bundled requirements and hash-verified lockfiles pin CCXT to `4.5.88` (see `
 
 ## Production database
 
-SQLite is useful for local development. Production deployments should use PostgreSQL, backups, controlled migrations and managed secrets. The repository includes Alembic scaffolding and a migration helper for the shipped v2 SQLite schema.
+SQLite is useful for local development (the schema is created directly; the Alembic migration chain is PostgreSQL-only and fails at revision 0001 on SQLite). Production deployments should use PostgreSQL, backups, controlled migrations and managed secrets. The repository includes Alembic scaffolding and a migration helper for the shipped v2 SQLite schema.
 
 ## Security
 
