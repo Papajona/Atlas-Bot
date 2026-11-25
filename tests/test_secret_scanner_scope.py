@@ -1390,6 +1390,33 @@ def test_secret_scanner_allows_public_jwk_metadata_arrays_in_private_key_array(
     )
 
 
+def test_secret_scanner_detects_private_blob_nested_in_public_jwk_metadata(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_material = "0123456789abcdef" * 2
+    jwk_json = (
+        '[{"kty":"EC","metadata":{"private_blob":"'
+        + private_material
+        + '"}}]'
+    )
+    source = (
+        "wallet:\\n  " + private_key_field + ": |\\n"
+        + "    " + jwk_json + "\\n"
+    )
+    (tmp_path / "private-jwk-metadata-blob.yml").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "private-jwk-metadata-blob.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_prefixed_multiline_triple_quoted_private_keys(
     tmp_path, monkeypatch
 ):
