@@ -8,6 +8,7 @@
     challengeId: "",
     profile: null,
     initialized: false,
+    sessionVersion: 0,
   };
 
   function setNotice(id, message, kind) {
@@ -67,6 +68,7 @@
         : payload;
       const error = new Error(String(detail || ("Request failed (" + response.status + ")")));
       error.status = response.status;
+      error.paperGate = response.headers.get("x-atlas-paper-gate") === "blocked";
       throw error;
     }
     return payload;
@@ -83,7 +85,7 @@
   }
 
   function handlePaperGateError(error) {
-    if (error && (error.status === 409 || error.status === 503)) {
+    if (error && error.paperGate === true) {
       $("workspace").hidden = true;
       $("blocked-state").hidden = false;
       setNotice(
@@ -101,25 +103,82 @@
     return false;
   }
 
+  function revokeSessionToken(token) {
+    const value = String(token || "").trim();
+    if (!value) return;
+    void fetch("/api/auth/logout", {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Authorization": "Bearer " + value
+      },
+      cache: "no-store",
+      keepalive: true
+    }).catch(() => {
+      // Local credentials are cleared immediately. The server-side expiry still
+      // protects requests if an Auth service/network failure prevents revocation.
+    });
+  }
+
   function signOut(message) {
+    const tokenToRevoke = state.accessToken;
+    // Invalidate every in-flight login/MFA continuation before clearing the token.
+    // A late MFA response must never be able to restore an authenticated workspace.
+    state.sessionVersion += 1;
     state.accessToken = "";
     state.factorId = "";
     state.challengeId = "";
     state.profile = null;
     state.initialized = false;
-    showAuthState("Not signed in", false);
+
+    $("email").value = "";
+    $("password").value = "";
+    $("totp-code").value = "";
+    $("totp-secret").textContent = "—";
+    $("totp-qr").removeAttribute("src");
+    $("totp-qr").hidden = true;
+    $("totp-setup").hidden = true;
+    $("mfa-instructions").textContent = "Complete authenticator verification before paper access is enabled.";
+    $("mfa-state").textContent = "Required";
+    $("profile-summary").textContent = "";
+    $("welcome").textContent = "Paper account";
+    $("positions").innerHTML = '<p class="empty">No open paper positions.</p>';
+    $("orders").innerHTML = '<p class="empty">No open paper orders.</p>';
+    $("history").innerHTML = '<p class="empty">No order history loaded.</p>';
+    $("scanner-results").innerHTML = '<p class="empty">No market scan loaded.</p>';
+    $("cash-balance").textContent = "—";
+    $("equity").textContent = "—";
+    $("valuation").textContent = "Waiting for account setup";
+    $("position-count").textContent = "—";
+    $("order-count").textContent = "—";
+    $("initialize-button").disabled = false;
+    $("initialize-button").textContent = "Initialize virtual paper balance";
     $("mfa-panel").hidden = true;
+    showAuthState("Not signed in", false);
     showWorkspace(false);
-    setNotice("auth-message", message || "Signed out. Your browser session token has been cleared.", "info");
+    setNotice("mfa-message", "Authenticator verification is required.", "info");
+    setNotice("scanner-message", "Sign in to run a read-only market scan.", "info");
+    setNotice("order-message", "Initialize the virtual account before submitting an order.", "info");
+    setNotice("auth-message", message || "Signed out. Credentials have been cleared and the Auth session is being revoked.", "info");
+
+    // Revoke the Supabase session server-side as well as dropping the in-memory
+    // bearer token. The version guard above prevents any pending response from
+    // writing a new token back into this page after sign-out.
+    revokeSessionToken(tokenToRevoke);
   }
 
-  async function beginMfa() {
+  function sessionIsCurrent(version) {
+    return version === state.sessionVersion && Boolean(state.accessToken);
+  }
+
+  async function beginMfa(version = state.sessionVersion) {
     const status = await api("/api/auth/mfa/status");
+    if (!sessionIsCurrent(version)) return;
     $("mfa-panel").hidden = false;
     $("mfa-state").textContent = status.aal === "aal2" ? "Verified" : "Required";
 
     if (status.aal === "aal2") {
-      await finishCustomerAccess();
+      await finishCustomerAccess(version);
       return;
     }
 
@@ -129,7 +188,8 @@
       $("enroll-button").hidden = true;
       $("verify-button").disabled = false;
       $("mfa-instructions").textContent = "Enter the current six-digit code from your enrolled authenticator.";
-      await createMfaChallenge();
+      await createMfaChallenge(version);
+      if (!sessionIsCurrent(version)) return;
       setNotice("mfa-message", "Authenticator challenge created. Enter your current code.", "info");
       return;
     }
@@ -143,21 +203,25 @@
     setNotice("mfa-message", "No verified authenticator was found. Set one up to continue.", "info");
   }
 
-  async function createMfaChallenge() {
+  async function createMfaChallenge(version = state.sessionVersion) {
     if (!state.factorId) throw new Error("No authenticator factor is selected.");
     const challenge = await api("/api/auth/mfa/challenge", {
       method: "POST",
       body: { factor_id: state.factorId }
     });
+    if (!sessionIsCurrent(version)) return false;
     state.challengeId = String(challenge.id || challenge.challenge_id || "");
     if (!state.challengeId) throw new Error("The authenticator challenge response did not include an ID.");
+    return true;
   }
 
   async function enrollMfa() {
+    const version = state.sessionVersion;
     const button = $("enroll-button");
     setBusy(button, true, "Setting up…");
     try {
       const result = await api("/api/auth/mfa/enroll", { method: "POST", body: {} });
+      if (!sessionIsCurrent(version)) return;
       if (result.enabled) {
         const ids = Array.isArray(result.factor_ids) ? result.factor_ids : [];
         if (!ids.length) throw new Error("An authenticator is already enrolled but its factor ID was not returned. Sign out and sign in again.");
@@ -180,12 +244,13 @@
         $("totp-setup").hidden = false;
       }
       if (!state.factorId) throw new Error("The authenticator setup response did not include a factor ID.");
-      await createMfaChallenge();
+      const challengeCreated = await createMfaChallenge(version);
+      if (!challengeCreated || !sessionIsCurrent(version)) return;
       $("verify-button").disabled = false;
       $("mfa-instructions").textContent = "Enter the six-digit code shown in your authenticator to confirm setup.";
       setNotice("mfa-message", "Authenticator setup is ready. Verify the code to finish.", "success");
     } catch (error) {
-      setNotice("mfa-message", error.message, "error");
+      if (sessionIsCurrent(version)) setNotice("mfa-message", error.message, "error");
     } finally {
       setBusy(button, false);
     }
@@ -197,36 +262,52 @@
       setNotice("mfa-message", "Enter the six-digit authenticator code.", "error");
       return;
     }
+    const version = state.sessionVersion;
     const button = $("verify-button");
     setBusy(button, true, "Verifying…");
     try {
-      if (!state.challengeId) await createMfaChallenge();
+      if (!state.challengeId) {
+        const challengeCreated = await createMfaChallenge(version);
+        if (!challengeCreated || !sessionIsCurrent(version)) return;
+      }
       const result = await api("/api/auth/mfa/verify", {
         method: "POST",
         body: { factor_id: state.factorId, challenge_id: state.challengeId, code }
       });
+      if (!sessionIsCurrent(version)) {
+        // A late MFA response may carry a fresh access token after the user has
+        // already signed out. Revoke it rather than allowing a stale promise to
+        // restore the customer session.
+        revokeSessionToken(result.access_token);
+        return;
+      }
       if (result.access_token) state.accessToken = String(result.access_token);
       state.challengeId = "";
       $("totp-code").value = "";
       const status = await api("/api/auth/mfa/status");
+      if (!sessionIsCurrent(version)) return;
       if (status.aal !== "aal2") throw new Error("Authenticator code was accepted but the session is not AAL2. Sign in again and retry.");
       setNotice("mfa-message", "Authenticator verified. Loading your paper account…", "success");
-      await finishCustomerAccess();
+      await finishCustomerAccess(version);
     } catch (error) {
-      state.challengeId = "";
-      setNotice("mfa-message", error.message, "error");
-      if (state.factorId) {
-        try { await createMfaChallenge(); } catch (_) {}
+      if (sessionIsCurrent(version)) {
+        state.challengeId = "";
+        setNotice("mfa-message", error.message, "error");
+        if (state.factorId) {
+          try { await createMfaChallenge(version); } catch (_) {}
+        }
       }
     } finally {
       setBusy(button, false);
     }
   }
 
-  async function finishCustomerAccess() {
+  async function finishCustomerAccess(version = state.sessionVersion) {
     try {
       await api("/api/auth/profile/provision", { method: "POST", body: {} });
+      if (!sessionIsCurrent(version)) return;
       const profile = await api("/api/customer/me");
+      if (!sessionIsCurrent(version)) return;
       state.profile = profile;
       $("welcome").textContent = "Welcome" + (profile.display_name ? ", " + profile.display_name : "");
       $("profile-summary").textContent = String(profile.email || "Authenticated test customer") +
@@ -238,13 +319,16 @@
       setNotice("auth-message", "Signed in securely. Paper actions require the server-side staging checks to remain clear.", "success");
       await refreshData();
     } catch (error) {
-      showWorkspace(false);
-      setNotice("auth-message", error.message, "error");
+      if (sessionIsCurrent(version)) {
+        showWorkspace(false);
+        setNotice("auth-message", error.message, "error");
+      }
     }
   }
 
   async function login() {
     const button = $("login-button");
+    const version = state.sessionVersion;
     const email = $("email").value.trim();
     const password = $("password").value;
     if (!email || !password) {
@@ -257,14 +341,18 @@
         method: "POST",
         body: { email, password }
       });
+      if (version !== state.sessionVersion) {
+        revokeSessionToken(result.access_token);
+        return;
+      }
       if (!result.access_token) {
         throw new Error("Supabase did not return a session. Confirm the test-account email, then sign in again.");
       }
       state.accessToken = String(result.access_token);
       showAuthState("First factor accepted", true);
-      await beginMfa();
+      await beginMfa(version);
     } catch (error) {
-      signOut(error.message);
+      if (version === state.sessionVersion) signOut(error.message);
     } finally {
       setBusy(button, false);
     }
@@ -272,6 +360,7 @@
 
   async function signup() {
     const button = $("signup-button");
+    const version = state.sessionVersion;
     const email = $("email").value.trim();
     const password = $("password").value;
     if (!email || password.length < 8) {
@@ -284,15 +373,19 @@
         method: "POST",
         body: { email, password }
       });
+      if (version !== state.sessionVersion) {
+        revokeSessionToken(result.access_token);
+        return;
+      }
       if (result.access_token) {
         state.accessToken = String(result.access_token);
         showAuthState("First factor accepted", true);
-        await beginMfa();
+        await beginMfa(version);
       } else {
         setNotice("auth-message", "Account request accepted. Confirm the email from Supabase Auth, then return here and sign in.", "success");
       }
     } catch (error) {
-      setNotice("auth-message", error.message, "error");
+      if (version === state.sessionVersion) setNotice("auth-message", error.message, "error");
     } finally {
       setBusy(button, false);
     }
