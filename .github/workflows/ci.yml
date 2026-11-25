@@ -544,15 +544,19 @@ jobs:
         run: |
           set -euo pipefail
           ACL_DATABASE="atlas_trigger_acl_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-          PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas "$ACL_DATABASE"
+          # Clone the database already migrated to Alembic head in the previous step.
+          # This preserves the exact trigger/schema setup while isolating committed
+          # append-only probe fixtures from the later atlas_test backup/restore drill.
+          PGPASSWORD=test_password createdb --template=atlas_test -h 127.0.0.1 -U atlas "$ACL_DATABASE"
           cleanup() {
             PGPASSWORD=test_password dropdb --if-exists --force -h 127.0.0.1 -U atlas "$ACL_DATABASE" || true
             PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d postgres \
               -c 'DROP ROLE IF EXISTS atlas_runtime_trigger_probe' || true
           }
           trap cleanup EXIT
-          ACL_DATABASE_URL="postgresql+asyncpg://atlas:test_password@localhost:5432/${ACL_DATABASE}"
-          DATABASE_URL="$ACL_DATABASE_URL" ATLAS_POSTGRES_URL="$ACL_DATABASE_URL" python -m alembic upgrade head
+          acl_head="$(PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -At -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" -c 'SELECT version_num FROM alembic_version')"
+          expected_head="$(python -m alembic heads | awk '{print $1}')"
+          test "$acl_head" = "$expected_head"
           PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d "$ACL_DATABASE" <<'SQL'
           DO $create_runtime_trigger_probe$
           BEGIN
