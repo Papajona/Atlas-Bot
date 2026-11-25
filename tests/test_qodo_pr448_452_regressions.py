@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
-from app import execution, main
+from app import db as db_module, execution, main
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +44,7 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
     assert "func.lower(CustomerProfile.auth_user_id)" in block
     assert "_CUSTOMER_UUID_PATTERN" in block and "literal_column" in block
     assert "_CUSTOMER_UUID_GLOB" in block and "literal_column" in block
+    assert main._CUSTOMER_UUID_GLOB == db_module._UUID_AUTH_REFERENCE_GLOB
     assert ".ilike(" not in block
 
 
