@@ -71,7 +71,12 @@ def _valid_expected_label(field: str, value: Any) -> bool:
     if field in {"risk_per_trade", "stop_loss_atr", "take_profit_rr"}:
         if value is None and field != "risk_per_trade":
             return True
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False
+        try:
+            if not math.isfinite(value):
+                return False
+        except (OverflowError, TypeError):
             return False
         if field == "risk_per_trade":
             return 0 < value <= 0.05
