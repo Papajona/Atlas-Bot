@@ -1390,6 +1390,37 @@ def test_secret_scanner_allows_public_jwk_metadata_arrays_in_private_key_array(
     )
 
 
+def test_secret_scanner_allows_short_public_jwk_metadata_key_labels_but_flags_key_material(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    public_jwk = (
+        '[{"kty":"EC","metadata":{"key":"documentation","value":"provider label"}}]'
+    )
+    private_jwk = (
+        '[{"kty":"EC","metadata":{"key":"' + ("0123456789abcdef" * 2) + '"}}]'
+    )
+    (tmp_path / "public-jwk-metadata-key-label.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + public_jwk + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "private-jwk-metadata-key-material.yml").write_text(
+        "wallet:\n  " + private_key_field + ": |\n"
+        + "    " + private_jwk + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any("public-jwk-metadata-key-label.yml" in item for item in findings)
+    assert any(
+        "private-jwk-metadata-key-material.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_private_blob_nested_in_public_jwk_metadata(
     tmp_path, monkeypatch
 ):
