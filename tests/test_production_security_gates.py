@@ -904,25 +904,55 @@ def test_api_runtime_grants_preserve_financial_custody_execution_and_audit_histo
 def _assert_bypassrls_grant_loops_exclude_audit_reader(migrations: Path) -> None:
     import re
 
+    loop_pattern = re.compile(
+        r"(?is)\bFOR\s+\w+\s+IN\s+(?P<kind>SELECT|EXECUTE)\b"
+        r"(?P<query>.*?)\bLOOP\b(?P<body>.*?)\bEND\s+LOOP\b"
+    )
     for path in sorted(migrations.glob("*.py")):
         source = path.read_text(encoding="utf-8")
         revision = re.search(r'(?m)^revision\s*=\s*["\'](\d{4})_', source)
         if not revision or int(revision.group(1)) <= 59:
             continue
-        # FROM precedes WHERE in normal SQL. Capture the SELECT and loop body
-        # separately so a grant inside the loop cannot hide behind SQL ordering.
-        role_grant_loops = re.findall(
-            r"(?is)\bFOR\s+\w+\s+IN\s+(SELECT[\s\S]*?)\bLOOP\b([\s\S]*?)\bEND\s+LOOP\b",
-            source,
-        )
-        for role_query, loop_body in role_grant_loops:
+
+        for match in loop_pattern.finditer(source):
+            kind = match.group("kind").upper()
+            raw_query = match.group("query")
+            loop_body = match.group("body")
+            if not re.search(r"(?i)\bGRANT\b", loop_body):
+                continue
+
+            if kind == "EXECUTE":
+                # Inspect only statically declared SQL string fragments. Dynamic
+                # identifiers/variables or opaque builders fail closed so a
+                # future GRANT loop cannot silently evade this release gate.
+                literals = re.findall(r"'((?:''|[^'])*)'", raw_query)
+                remainder = re.sub(r"'(?:''|[^'])*'", "", raw_query)
+                if remainder.replace("||", "").strip() or not literals:
+                    raise AssertionError(
+                        f"{path.name} contains a dynamic GRANT loop whose role query cannot be statically verified"
+                    )
+                role_query = " ".join(part.replace("''", "'") for part in literals)
+                if not re.search(
+                    r"(?i)\bFROM\s+(?:pg_catalog\.)?pg_roles\b",
+                    role_query,
+                ):
+                    raise AssertionError(
+                        f"{path.name} contains a dynamic GRANT loop whose role query cannot be statically verified"
+                    )
+            else:
+                role_query = raw_query
+
             selects_login_bypass_roles = (
                 re.search(r"(?i)\bFROM\s+(?:pg_catalog\.)?pg_roles\b", role_query)
                 and re.search(r"(?i)\brolcanlogin\b", role_query)
                 and re.search(r"(?i)\brolbypassrls\b", role_query)
                 and not re.search(r"(?i)\bNOT\s+(?:\w+\.)?rolbypassrls\b", role_query)
-                and re.search(r"(?i)\bGRANT\b", loop_body)
             )
+            if kind == "EXECUTE" and not selects_login_bypass_roles:
+                raise AssertionError(
+                    f"{path.name} contains a dynamic GRANT loop whose role query is not restricted to login BYPASSRLS roles"
+                )
+
             if selects_login_bypass_roles:
                 excludes_audit_reader = re.search(
                     r"(?is)\brolname\b\s+NOT\s+IN\s*\([^)]*['\"]atlas_audit_reader['\"]",
@@ -934,7 +964,6 @@ def _assert_bypassrls_grant_loops_exclude_audit_reader(migrations: Path) -> None
                 assert excludes_audit_reader, (
                     f"{path.name} grants privileges to BYPASSRLS login roles without excluding atlas_audit_reader"
                 )
-
 
 def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
     _assert_bypassrls_grant_loops_exclude_audit_reader(ROOT / "alembic" / "versions")
@@ -964,6 +993,71 @@ END LOOP;
     ):
         _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
 
+
+
+def test_bypassrls_guard_detects_execute_dynamic_future_grant_query(tmp_path):
+    import pytest
+
+    (tmp_path / "0066_dynamic_role_grant.py").write_text(
+        '''
+revision = "0066_dynamic_role_grant"
+sql = """
+FOR role_name IN EXECUTE
+    'SELECT r.rolname FROM pg_roles r '
+    'WHERE r.rolcanlogin AND r.rolbypassrls'
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="without excluding atlas_audit_reader",
+    ):
+        _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
+
+
+def test_bypassrls_guard_accepts_execute_dynamic_query_excluding_audit_reader(tmp_path):
+    (tmp_path / "0066_safe_dynamic_role_grant.py").write_text(
+        '''
+revision = "0066_safe_dynamic_role_grant"
+sql = """
+FOR role_name IN EXECUTE
+    'SELECT r.rolname FROM pg_roles r '
+    'WHERE r.rolcanlogin AND r.rolbypassrls '
+    'AND r.rolname NOT IN (''atlas_audit_reader'')'
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
+
+
+def test_bypassrls_guard_fails_closed_for_uninspectable_dynamic_grant_query(tmp_path):
+    import pytest
+
+    (tmp_path / "0066_opaque_dynamic_role_grant.py").write_text(
+        '''
+revision = "0066_opaque_dynamic_role_grant"
+sql = """
+FOR role_name IN EXECUTE role_query
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="role query cannot be statically verified",
+    ):
+        _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
 
 def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
     src = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
