@@ -1566,8 +1566,8 @@ def test_secret_scanner_fallback_detects_list_item_phrase_in_malformed_yaml(
 ):
     phrase = " ".join(["abandon"] * 11 + ["about"])
     malformed_yaml = (
-        "broken: [unterminated\\n"
-        "- mnemonic: " + phrase + "\\n"
+        "broken: [unterminated\n"
+        "- mnemonic: " + phrase + "\n"
     )
     (tmp_path / "malformed-list-recovery.yml").write_text(
         malformed_yaml, encoding="utf-8"
@@ -1591,11 +1591,11 @@ def test_secret_scanner_detects_multiline_java_and_kotlin_token_text_blocks(
         ("Credential.kt", "val token = "),
     ):
         source = (
-            "class Credential {\\n"
-            + "    " + declaration + chr(34) * 3 + "\\n"
-            + "        " + token + "\\n"
-            + chr(34) * 3 + ";\\n"
-            + "}\\n"
+            "class Credential {\n"
+            + "    " + declaration + chr(34) * 3 + "\n"
+            + "        " + token + "\n"
+            + chr(34) * 3 + ";\n"
+            + "}\n"
         )
         (tmp_path / filename).write_text(source, encoding="utf-8")
 
