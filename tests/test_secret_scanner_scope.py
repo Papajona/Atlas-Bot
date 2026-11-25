@@ -1449,6 +1449,45 @@ def test_secret_scanner_detects_recovery_phrases_in_public_jwk_metadata_key_and_
         )
 
 
+def test_secret_scanner_allows_public_jwk_metadata_labels_and_prose_but_flags_key_material(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    descriptive_metadata = (
+        '[{"kty":"EC","metadata":{'
+        '"secret_label":"Signing key for external provider",'
+        '"key":"Documentation label for the provider account",'
+        '"value":"Used only to identify the external integration"}}]'
+    )
+    exposed_metadata_secret = (
+        '[{"kty":"EC","metadata":{"secret_label":"'
+        + ("0123456789abcdef" * 2)
+        + '"}}]'
+    )
+    (tmp_path / "public-jwk-metadata-descriptive-labels.yml").write_text(
+        "wallet:\\n  " + private_key_field + ": |\\n"
+        + "    " + descriptive_metadata + "\\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "public-jwk-metadata-secret-label-material.yml").write_text(
+        "wallet:\\n  " + private_key_field + ": |\\n"
+        + "    " + exposed_metadata_secret + "\\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any(
+        "public-jwk-metadata-descriptive-labels.yml" in item for item in findings
+    )
+    assert any(
+        "public-jwk-metadata-secret-label-material.yml:2: seed/private-key assignment"
+        in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_private_blob_nested_in_public_jwk_metadata(
     tmp_path, monkeypatch
 ):
