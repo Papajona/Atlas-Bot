@@ -4054,11 +4054,15 @@ async def get_customer(
     # A JWT that omits email must be checked against the current Auth identity,
     # even when the local profile has an older encrypted email value.
     needs_email_backfill = profile is None or not str(profile.email or "").strip()
+    pending_identity_review = (
+        profile is not None
+        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    )
     needs_auth_identity = (
         jwt_email_missing
         or needs_email_backfill
-        or stale_legacy_quarantine
-        or not str(profile.display_name or "").strip()
+        or pending_identity_review
+        or (profile is not None and not str(profile.display_name or "").strip())
     )
     if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
