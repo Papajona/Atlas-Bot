@@ -36,7 +36,8 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
         source.index("async def _legacy_customer_email_conflict"):
         source.index("async def get_customer")
     ]
-    assert "select(CustomerProfile.auth_user_id, CustomerProfile.email)" in block
+    assert "select(" in block
+    assert "CustomerProfile.auth_user_id, CustomerProfile.email" in block
     assert "uuid.UUID" in block
     assert 'op("!~*")' in block
     assert 'op("GLOB")' in block
@@ -391,14 +392,15 @@ def test_customer_identity_backfill_does_not_fetch_auth_for_blank_display_name_o
 
 
 
-def test_edge_legacy_identity_offset_paging_has_a_stable_order():
+def test_edge_legacy_identity_check_is_deferred_to_the_encrypted_api_path():
     edge = (ROOT / "supabase/functions/customer-profile-provision/index.ts").read_text(encoding="utf-8")
-    paging = edge[
-        edge.index("const pageSize = 500"):
-        edge.index("// Atlas stores customer_profiles.email")
-    ]
-    assert '.order("id", { ascending: true })' in paging
-    assert paging.index('.order("id", { ascending: true })') < paging.index(".range(offset, offset + pageSize - 1)")
+    # The Edge Function cannot inspect Fernet-encrypted legacy emails. A global
+    # non-UUID scan here would reject unrelated new customers; the API performs
+    # the per-identity check after confirmed Auth email verification.
+    assert "The API performs the" in edge
+    assert "per-identity check" in edge
+    assert "const pageSize = 500" not in edge
+    assert ".range(offset, offset + pageSize - 1)" not in edge
 
 
 def test_outcome_aggregation_excludes_unknown_quantity_or_notional():
