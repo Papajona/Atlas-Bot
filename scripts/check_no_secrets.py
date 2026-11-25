@@ -68,7 +68,7 @@ SOURCE_STRING_LITERAL = re.compile(
 # Match complete Python-style triple-quoted credential assignments before the
 # line-oriented scanner sees only the opening pair of quotes.
 TRIPLE_QUOTED_SOURCE_ASSIGNMENT = re.compile(
-    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:api[_-]?key|api[_-]?secret|secret[_-]?key|private[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token|mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase))["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
 )
 
 PLACEHOLDERS = {
@@ -746,27 +746,29 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
         value = match.group("value").strip()
         if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
             sensitive = _is_likely_recovery_phrase(value)
-        elif key_kind == "privatekey":
-            if value.startswith(("{", "[")):
-                try:
-                    structured = json.loads(value)
-                    sensitive = _structured_private_object_has_material(structured)
-                except (json.JSONDecodeError, RecursionError, _YamlTraversalLimitExceeded):
-                    sensitive = True
-            else:
-                sensitive = (
-                    PRIVATE_KEY.search(value) is not None
+        elif key_kind == "privatekey" and value.startswith(("{", "[")):
+            try:
+                structured = json.loads(value)
+                sensitive = _structured_private_object_has_material(structured)
+            except (json.JSONDecodeError, RecursionError, _YamlTraversalLimitExceeded):
+                sensitive = True
+        else:
+            candidate = value.strip().strip('\"').strip("'").strip()
+            sensitive = (
+                bool(candidate)
+                and candidate.lower() not in PLACEHOLDERS
+                and not ANGLE_PLACEHOLDER.fullmatch(candidate)
+                and (
+                    PRIVATE_KEY.search(candidate) is not None
                     or re.search(
                         r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
-                        value,
+                        candidate,
                     ) is not None
                 )
-        else:
-            sensitive = False
+            )
         if sensitive:
             findings.add(source.count("\n", 0, match.start()) + 1)
     return findings
-
 
 
 JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
