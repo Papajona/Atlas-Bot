@@ -910,13 +910,13 @@ def test_secret_scanner_detects_unknown_nested_scalar_in_multiline_private_key_j
     private_material = "0123456789abcdef" * 2
     triple_quote = chr(34) * 3
     source = (
-        "String " + private_key_field + " = " + triple_quote + "\n"
-        + "{\n"
-        + '  "private_key": {\n'
-        + '    "data": "' + private_material + '"\n'
-        + "  }\n"
-        + "}\n"
-        + triple_quote + ";\n"
+        "String " + private_key_field + " = " + triple_quote + "\\n"
+        + "{\\n"
+        + '  "private_key": {\\n'
+        + '    "data": "' + private_material + '"\\n'
+        + "  }\\n"
+        + "}\\n"
+        + triple_quote + ";\\n"
     )
     (tmp_path / "nested-private-data.java").write_text(
         source, encoding="utf-8"
@@ -1770,11 +1770,11 @@ def test_secret_scanner_detects_embedded_recovery_phrase_in_quoted_properties_va
     phrase = "abandon abandon abandon abandon abandon abandon "
     phrase += "abandon abandon abandon abandon abandon about"
     (tmp_path / "wallet.properties").write_text(
-        'wallet_config="mnemonic: ' + phrase + '"\n',
+        'wallet_config="mnemonic: ' + phrase + '"\\n',
         encoding="utf-8",
     )
     (tmp_path / "wallet-placeholder.properties").write_text(
-        'wallet_config="mnemonic: <YOUR_RECOVERY_PHRASE>"\n',
+        'wallet_config="mnemonic: <YOUR_RECOVERY_PHRASE>"\\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
@@ -1792,7 +1792,7 @@ def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
     tmp_path, monkeypatch
 ):
     (tmp_path / "ordinary.properties").write_text(
-        "service.name=atlas\nfeature.enabled=true\n", encoding="utf-8"
+        "service.name=atlas\\nfeature.enabled=true\\n", encoding="utf-8"
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
 
@@ -1802,8 +1802,8 @@ def test_secret_scanner_ignores_secret_manager_placeholder_with_shell_continuati
     tmp_path, monkeypatch
 ):
     (tmp_path / "deployment.md").write_text(
-        "SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \\n"
-        "  BACKUP_RECOVERY_URL=... \\n",
+        "SECRET_MODEL_SIGNING_PRIVATE_REF=atlas-model-signing-private-key:<v> \\\n"
+        "  BACKUP_RECOVERY_URL=... \\\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
