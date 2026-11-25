@@ -1746,3 +1746,54 @@ def test_multiline_template_private_key_scanner_honors_only_exact_fixture_tokens
     assert check_no_secrets._find_multiline_template_literal_assignments(fixture) == {}
     findings = check_no_secrets._find_multiline_template_literal_assignments(mixed)
     assert findings == {2: "private_key"}
+
+
+def test_secret_scanner_fallback_detects_list_item_phrase_in_malformed_yaml(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    malformed_yaml = (
+        "broken: [unterminated\n"
+        "- mnemonic: " + phrase + "\n"
+    )
+    (tmp_path / "malformed-list-recovery.yml").write_text(
+        malformed_yaml, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "malformed-list-recovery.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_multiline_java_and_kotlin_token_text_blocks(
+    tmp_path, monkeypatch
+):
+    token = "a4V8n2K6p9Q3x7M1r5T0w4Y8b2C6d9F3"
+    for filename, declaration in (
+        ("Credential.java", "String token = "),
+        ("Credential.kt", "val token = "),
+    ):
+        source = (
+            "class Credential {\n"
+            + "    " + declaration + chr(34) * 3 + "\n"
+            + "        " + token + "\n"
+            + chr(34) * 3 + ";\n"
+            + "}\n"
+        )
+        (tmp_path / filename).write_text(source, encoding="utf-8")
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "Credential.java:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "Credential.kt:2: seed/private-key assignment" in item
+        for item in findings
+    )
