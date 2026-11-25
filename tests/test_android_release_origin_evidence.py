@@ -247,7 +247,6 @@ def test_cli_entrypoint_succeeds_for_the_effective_runtime_backend(tmp_path: Pat
     }
 
 
-
 def test_pull_request_android_build_publishes_a_verified_debug_apk_artifact():
     assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4" in ANDROID_RELEASE_WORKFLOW
     assert "atlas-android-debug-pr-${{ github.event.pull_request.number }}-${{ github.sha }}" in ANDROID_RELEASE_WORKFLOW
