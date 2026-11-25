@@ -115,7 +115,11 @@ This application can be engineered for production reliability, but software hard
 - `RUNBOOK.md` — incident, timeout, restart and model-response procedures.
 - `SECURITY.md` — security model and key handling.
 - `ARCHITECTURE.md` — system and CCXT integration design.
-- `scripts/smoke.py` — post-deployment HTTP smoke check.
+- `scripts/smoke.py` — post-deployment HTTP smoke check. The restricted paper-only staging app requires an authenticated readiness probe and does not expose `/metrics`. Keep the paper database URL in a protected file (for example, mode `0600`) and run:
+  ```bash
+  python scripts/smoke.py "$ATLAS_STAGING_URL" --paper-database-url-file "$ATLAS_STAGING_PAPER_DATABASE_URL_FILE" --skip-metrics
+  ```
+  For the full API, pass `--admin-token-file` with a protected file containing the admin Bearer token when `METRICS_REQUIRE_ADMIN=true`. The script never prints either secret.
 - `scripts/migrate_v2_sqlite.py` — best-effort v2 SQLite migration helper; back up first.
 
 
