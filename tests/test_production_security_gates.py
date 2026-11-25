@@ -910,18 +910,32 @@ def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
         revision = re.search(r'(?m)^revision\s*=\s*["\'](\d{4})_', source)
         if not revision or int(revision.group(1)) <= 59:
             continue
-        # Only flag migrations that select BYPASSRLS login roles for a grant
-        # loop. A defensive check that a dedicated NOLOGIN role is NOT BYPASSRLS
-        # is not such a loop and must not be mistaken for one.
-        selects_bypassrls_roles = re.search(
-            r"(?is)\bSELECT\b(?:(?!;).)*?\brolbypassrls\b"
-            r"(?:(?!;).)*?\bFROM\s+pg_roles\b",
+        # Inspect each role-selection loop as SQL is written: FROM appears
+        # before WHERE in normal SELECT syntax, so the matcher must not require
+        # rolbypassrls to precede FROM. A fixed NOLOGIN role guard (NOT rolbypassrls)
+        # is not a BYPASSRLS application-role grant loop.
+        role_grant_loops = re.findall(
+            r"(?is)\bFOR\s+\w+\s+IN\s+(SELECT\b(?:(?!\bLOOP\b).)*?)\bLOOP\b(?:(?!\bEND\s+LOOP\b).)*?\bGRANT\b",
             source,
         )
-        if selects_bypassrls_roles and re.search(r"\bGRANT\b", source, re.IGNORECASE):
-            assert "atlas_audit_reader" in source, (
-                f"{path.name} grants privileges to BYPASSRLS roles but does not exclude atlas_audit_reader"
+        for role_query in role_grant_loops:
+            selects_login_bypass_roles = (
+                re.search(r"(?i)\bFROM\s+(?:pg_catalog\.)?pg_roles\b", role_query)
+                and re.search(r"(?i)\brolcanlogin\b", role_query)
+                and re.search(r"(?i)\brolbypassrls\b", role_query)
+                and not re.search(r"(?i)\bNOT\s+(?:\w+\.)?rolbypassrls\b", role_query)
             )
+            if selects_login_bypass_roles:
+                excludes_audit_reader = re.search(
+                    r"(?is)\brolname\b\s+NOT\s+IN\s*\([^)]*['\"]atlas_audit_reader['\"]",
+                    role_query,
+                ) or re.search(
+                    r"(?is)\brolname\b\s*(?:<>|!=)\s*['\"]atlas_audit_reader['\"]",
+                    role_query,
+                )
+                assert excludes_audit_reader, (
+                    f"{path.name} grants privileges to BYPASSRLS login roles without excluding atlas_audit_reader"
+                )
 
 
 
