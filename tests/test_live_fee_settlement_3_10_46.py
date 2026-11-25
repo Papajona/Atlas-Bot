@@ -213,3 +213,47 @@ def test_unknown_fee_currency_is_withheld_then_authoritative_snapshot_settles_ex
             assert balance.available == Decimal("999.75")
 
     asyncio.run(with_database(check))
+
+def test_estimated_fee_incident_resolves_after_authoritative_fee_reconciliation():
+    async def check(sessions):
+        async with sessions() as db:
+            db.add(CustomerLedgerAccount(customer_id=1, available=Decimal("1000")))
+            trade = _trade(status="FILLED")
+            db.add(trade)
+            await db.flush()
+
+            withheld, cumulative, quality, note = execution._prepare_live_fee(
+                trade, {}, 0.1, 60000
+            )
+            assert quality == "estimated"
+            assert withheld == Decimal("0")
+            assert trade.fee_reconciliation_pending is True
+            await execution._post_live_fee(db, trade, withheld, cumulative, quality, note)
+            await db.flush()
+
+            incident = (await db.execute(
+                select(Incident).where(
+                    Incident.incident_key == f"LIVE_FEE_ESTIMATED:{trade.id}"
+                )
+            )).scalar_one()
+            assert str(incident.status).upper() not in {"RESOLVED", "CLOSED"}
+
+            delta, final_total, final_quality, final_note = execution._prepare_live_fee(
+                trade, {"fee": {"currency": "USDT", "cost": "0.25"}}, 0.1, 60000
+            )
+            assert delta == Decimal("0.25")
+            assert final_quality == "exact"
+            assert trade.fee_reconciliation_pending is False
+            await execution._post_live_fee(
+                db, trade, delta, final_total, final_quality, final_note
+            )
+            await db.commit()
+
+            incident = (await db.execute(
+                select(Incident).where(Incident.id == incident.id)
+            )).scalar_one()
+            assert str(incident.status).upper() == "RESOLVED"
+            ledger = (await db.execute(select(CustomerLedgerAccount))).scalar_one()
+            assert ledger.available == Decimal("999.75")
+
+    asyncio.run(with_database(check))
