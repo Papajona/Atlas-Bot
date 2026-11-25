@@ -1090,3 +1090,68 @@ def test_identity_summary_can_show_pending_status_without_reactivating_account(m
     assert returned.status == "PENDING_IDENTITY_REVIEW"
     assert returned.identity_review_required is False
     assert subscription_calls == []
+
+def test_customer_auth_email_is_verified_when_jwt_omits_email_even_if_profile_has_stored_email(monkeypatch):
+    profile = SimpleNamespace(
+        id=901,
+        auth_user_id="existing-customer",
+        email="stored@example.test",
+        display_name="Existing Customer",
+        status="ACTIVE",
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+        async def flush(self):
+            return None
+
+    auth_calls = []
+    compared_emails = []
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {
+            "sub": "existing-customer",
+            "email": "",
+            "user_metadata": {},
+        }
+
+    async def verified_auth_user(token):
+        auth_calls.append(token)
+        return {
+            "id": "existing-customer",
+            "email": "confirmed@example.test",
+            "email_confirmed_at": "2026-11-25T00:00:00Z",
+            "user_metadata": {},
+        }
+
+    async def no_legacy_conflict(_db, _uid, email):
+        compared_emails.append(email)
+        return False
+
+    async def ensure_subscription(_db, _profile):
+        return None
+
+    monkeypatch.setattr(main, "customer_claims", verified_claims)
+    monkeypatch.setattr(main, "_supabase_user", verified_auth_user)
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", no_legacy_conflict)
+    monkeypatch.setattr(main, "_ensure_customer_subscription", ensure_subscription)
+
+    returned, claims = asyncio.run(
+        main.get_customer(
+            "Bearer verified-token",
+            Database(),
+            require_aal2=False,
+        )
+    )
+
+    assert claims["sub"] == "existing-customer"
+    assert returned is profile
+    assert auth_calls == ["verified-token"]
+    assert compared_emails == ["confirmed@example.test"]
+
