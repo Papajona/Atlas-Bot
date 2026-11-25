@@ -1978,8 +1978,136 @@ def test_fee_history_uses_binance_trade_id_cursor_for_same_millisecond_pages():
 
     assert result["fees"] == [{"cost": "0.04", "currency": "USDT"}]
     assert len(calls) == 2
-    assert calls[0] == ("BTC/USDT", 40_000, 2, {"orderId": "same-ms-order"})
+    assert calls[0] == ("BTC/USDT", None, 2, {"orderId": "same-ms-order"})
     assert calls[1] == (
-        "BTC/USDT", 40_000, 2,
+        "BTC/USDT", None, 2,
         {"orderId": "same-ms-order", "fromId": "1003"},
     )
+
+
+
+def test_binance_order_filter_falls_back_to_time_history_without_mixed_filters():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    calls = []
+
+    class FakeBroker:
+        cfg = SimpleNamespace(exchange_id="binance")
+
+        def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+            calls.append((symbol, since, limit, params))
+            if params == {"orderId": "fallback-order"}:
+                raise RuntimeError("adapter does not support orderId filter")
+            return [{
+                "id": "77",
+                "order": "fallback-order",
+                "timestamp": 100_000,
+                "amount": "0.2",
+                "fee": {"cost": "0.03", "currency": "USDT"},
+            }]
+
+    result = asyncio.run(
+        execution._order_with_verified_trade_history_fee(
+            FakeBroker(),
+            {"id": "fallback-order", "timestamp": 100_000, "filled": "0.2"},
+            symbol="BTC/USDT",
+            expected_order_id="fallback-order",
+            stored_filled_quantity="0.2",
+            created_at=datetime.fromtimestamp(90, tz=timezone.utc),
+            page_limit=2,
+            max_pages=3,
+        )
+    )
+
+    assert result["fees"] == [{"cost": "0.03", "currency": "USDT"}]
+    assert calls == [
+        ("BTC/USDT", None, 2, {"orderId": "fallback-order"}),
+        ("BTC/USDT", 40_000, 2, {}),
+    ]
+
+
+def test_terminal_trade_rejects_stale_snapshot_but_accepts_verified_fee_history():
+    async def check(sessions):
+        async with sessions() as db:
+            trade = _trade(
+                customer_id=None,
+                status="FILLED",
+                filled_quantity=Decimal("0.2"),
+                remaining_quantity=Decimal("0"),
+                requested_quantity=Decimal("0.2"),
+                quantity=Decimal("0.2"),
+                average_fill_price=Decimal("100"),
+                fee=Decimal("0"),
+                fee_reconciliation_pending=True,
+            )
+            db.add(trade)
+            await db.flush()
+
+            stale_order = {
+                "id": "terminal-order",
+                "status": "open",
+                "filled": "0.1",
+                "remaining": "0.1",
+                "average": "100",
+                "fee": {"currency": "USDT", "cost": "0.02"},
+            }
+            await execution._apply_broker_snapshot(db, trade, stale_order)
+            await db.commit()
+            await db.refresh(trade)
+
+            assert trade.status == "FILLED"
+            assert Decimal(str(trade.filled_quantity)) == Decimal("0.2")
+            assert Decimal(str(trade.fee)) == Decimal("0")
+            assert trade.fee_reconciliation_pending is True
+
+            class FakeBroker:
+                cfg = SimpleNamespace(exchange_id="binance")
+
+                def fetch_my_trades(self, symbol, since=None, limit=None, params=None):
+                    assert since is None
+                    assert params == {"orderId": "terminal-order"}
+                    return [
+                        {
+                            "id": "1001",
+                            "order": "terminal-order",
+                            "amount": "0.1",
+                            "fee": {"cost": "0.02", "currency": "USDT"},
+                        },
+                        {
+                            "id": "1002",
+                            "order": "terminal-order",
+                            "amount": "0.1",
+                            "fee": {"cost": "0.02", "currency": "USDT"},
+                        },
+                    ]
+
+            verified_order = await execution._order_with_verified_trade_history_fee(
+                FakeBroker(),
+                stale_order,
+                symbol="BTC/USDT",
+                expected_order_id="terminal-order",
+                stored_filled_quantity="0.2",
+                page_limit=10,
+                max_pages=2,
+            )
+            assert verified_order is not stale_order
+            assert verified_order["fees"] == [
+                {"cost": "0.04", "currency": "USDT"}
+            ]
+
+            await execution._apply_broker_snapshot(
+                db,
+                trade,
+                verified_order,
+                verified_trade_history_fee=True,
+            )
+            await db.commit()
+            await db.refresh(trade)
+
+            assert trade.status == "FILLED"
+            assert Decimal(str(trade.filled_quantity)) == Decimal("0.2")
+            assert Decimal(str(trade.fee)) == Decimal("0.04")
+            assert trade.fee_reconciliation_pending is False
+
+    asyncio.run(with_database(check))
