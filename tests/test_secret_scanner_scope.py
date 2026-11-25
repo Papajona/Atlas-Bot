@@ -1840,6 +1840,38 @@ def test_secret_scanner_allows_short_but_detects_long_integer_and_decimal_metada
     )
 
 
+
+def test_secret_scanner_detects_decimal_scalars_in_private_key_json_arrays(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    for label, serialized_decimal in (
+        ("short", "1.23"),
+        ("long", "1.23456789012345678901234567890"),
+    ):
+        jwk_json = "[" + serialized_decimal + "]"
+        source = (
+            "wallet:\\n  " + private_key_field + ": |\\n"
+            + "    " + jwk_json + "\\n"
+        )
+        (tmp_path / f"decimal-private-array-{label}.yml").write_text(
+            source, encoding="utf-8"
+        )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "decimal-private-array-short.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "decimal-private-array-long.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+
 def test_secret_scanner_ignores_private_key_angle_placeholder_with_shell_continuation(
     tmp_path, monkeypatch
 ):
