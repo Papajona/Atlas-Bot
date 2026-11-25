@@ -482,3 +482,17 @@ async def test_optional_capture_query_failure_rolls_back_savepoint_and_keeps_can
         raise primary_error.with_traceback(primary_error.__traceback__)
     if cleanup_error is not None:
         raise cleanup_error
+
+
+def test_benchmark_capture_and_delete_share_one_advisory_lock_and_store_no_plain_prompt_hash():
+    service = (ROOT / "app/benchmark_capture.py").read_text(encoding="utf-8")
+    assert "BENCHMARK_CAPTURE_ADVISORY_LOCK_NAMESPACE = 17012026" in service
+    assert "async def lock_customer_benchmark_captures" in service
+    assert service.count("await lock_customer_benchmark_captures(db, customer_id)") == 1
+    main = (ROOT / "app/main.py").read_text(encoding="utf-8")
+    assert "lock_customer_benchmark_captures(db, int(profile.id))" in main
+    model = (ROOT / "app/db.py").read_text(encoding="utf-8")
+    migration = (ROOT / "alembic/versions/0062_customer_benchmark_capture.py").read_text(encoding="utf-8")
+    assert "prompt_sha256" not in service
+    assert "prompt_sha256" not in model
+    assert "prompt_sha256" not in migration
