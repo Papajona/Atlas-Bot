@@ -771,14 +771,11 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
         # Every withheld fee needs another broker-history pass, including an
         # estimated fallback. Preserve the stronger UNVERIFIED state when a
         # prior snapshot already reported a fee with an unknown denomination.
-        was_pending = bool(getattr(trade, "fee_reconciliation_pending", False))
+        # The pending flag only schedules another broker-history lookup. It does
+        # not prove that this snapshot contained a fee with an unknown currency.
+        # Keep the quality returned for the current snapshot so an estimated
+        # fallback cannot create a false unknown-denomination incident.
         trade.fee_reconciliation_pending = True
-        if quality != UNVERIFIED and was_pending:
-            quality = UNVERIFIED
-            note = (
-                "previously reported fee still has an unresolved denomination; "
-                "estimated fallback withheld pending authoritative reconciliation"
-            )
         return Decimal("0"), prev, quality, note
     # Only an authoritative denomination clears the pending state. The flag is
     # changed in the same transaction as the eventual ledger settlement.
