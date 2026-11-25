@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import json
 import re
+from decimal import Decimal
 import sys
 import unicodedata
 from pathlib import Path
@@ -421,6 +422,11 @@ PUBLIC_JWK_METADATA_FIELDS = {
 }
 
 
+def _loads_json_preserving_decimal_numbers(value: str):
+    """Parse JSON without rounding long decimal credential values through float."""
+    return json.loads(value, parse_float=Decimal)
+
+
 def _structured_private_object_has_material(value) -> bool:
     """Detect nested private JWK material while preserving public metadata exceptions."""
     # A root array under private_key may contain public JWK objects with
@@ -489,16 +495,28 @@ def _structured_private_object_has_material(value) -> bool:
                         return True
                 if (
                     field_is_private
-                    and isinstance(item, (int, float))
+                    and isinstance(item, (int, float, Decimal))
                     and not isinstance(item, bool)
                     and item != 0
                 ):
-                    numeric_digits = re.sub(
-                        r"[^0-9]", "", str(item).lower().split("e", 1)[0]
-                    )
+                    if isinstance(item, Decimal):
+                        numeric_digits = (
+                            len(item.as_tuple().digits) if item.is_finite() else 20
+                        )
+                    elif isinstance(item, int):
+                        numeric_digits = len(str(abs(item)))
+                    else:
+                        # JSON parsing uses Decimal; retain a safe fallback for
+                        # callers that pass a Python float directly.
+                        parsed_number = Decimal(str(item))
+                        numeric_digits = (
+                            len(parsed_number.as_tuple().digits)
+                            if parsed_number.is_finite()
+                            else 20
+                        )
                     if (
                         not descriptive_metadata_field
-                        or len(numeric_digits) >= 20
+                        or numeric_digits >= 20
                     ):
                         return True
                 if isinstance(item, (dict, list)):
@@ -569,7 +587,7 @@ def _yaml_node_has_private_material(
                     return True
             if candidate.startswith(("{", "[")):
                 try:
-                    structured = json.loads(candidate)
+                    structured = _loads_json_preserving_decimal_numbers(candidate)
                 except RecursionError:
                     # Deeply nested JSON key material cannot be inspected safely.
                     return True
@@ -821,7 +839,7 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
             sensitive = _is_likely_recovery_phrase(value)
         elif key_kind == "privatekey" and value.startswith(("{", "[")):
             try:
-                structured = json.loads(value)
+                structured = _loads_json_preserving_decimal_numbers(value)
                 sensitive = _structured_private_object_has_material(structured)
             except (json.JSONDecodeError, RecursionError, _YamlTraversalLimitExceeded):
                 sensitive = True
