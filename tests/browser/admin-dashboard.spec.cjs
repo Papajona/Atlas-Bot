@@ -713,7 +713,7 @@ async function testPaperStagingWorkspace(browser, baseUrl) {
     if (p === "/api/customer/paper/orders" && method === "POST") {
       orderPost = { body: req.postDataJSON(), authorization: headers.authorization || "" };
       paperOrders = [{
-        client_order_id: orderPost.body.client_order_id,
+        client_order_id: "mock-paper-order-1",
         symbol: orderPost.body.symbol,
         side: orderPost.body.side,
         quantity: orderPost.body.quantity,
