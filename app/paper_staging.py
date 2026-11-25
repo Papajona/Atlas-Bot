@@ -13,12 +13,13 @@ import hmac
 import logging
 import time
 import uuid
+from pathlib import Path
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field
 from sqlalchemy import select, text
 
@@ -421,6 +422,39 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+_PAPER_STAGING_UI_DIR = Path(__file__).resolve().parent / "paper_staging_ui"
+
+
+@app.get("/", include_in_schema=True)
+async def paper_staging_home():
+    """Serve the dedicated browser console for the restricted paper-only API."""
+    return FileResponse(
+        _PAPER_STAGING_UI_DIR / "index.html",
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/paper-staging.js", include_in_schema=True)
+async def paper_staging_javascript():
+    """Serve same-origin browser code under the staging Content Security Policy."""
+    return FileResponse(
+        _PAPER_STAGING_UI_DIR / "paper-staging.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/paper-staging.css", include_in_schema=True)
+async def paper_staging_stylesheet():
+    """Serve the small responsive stylesheet for the paper testing console."""
+    return FileResponse(
+        _PAPER_STAGING_UI_DIR / "paper-staging.css",
+        media_type="text/css; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
 
 # Reject oversized customer-paper request bodies before auth/route handlers buffer them.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
