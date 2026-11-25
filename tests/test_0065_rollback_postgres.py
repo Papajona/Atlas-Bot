@@ -414,8 +414,23 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
         asyncio.run(prepare_and_check("verify-downgrade"))
     finally:
         async def cleanup() -> None:
+            revision = await _get_revision(dsn)
+            if revision == MIGRATION_HEAD:
+                _run_alembic(env, "downgrade", PREDECESSOR)
             connection = await asyncpg.connect(dsn=dsn)
             try:
+                await connection.execute(
+                    "REVOKE EXECUTE ON FUNCTION "
+                    "public.atlas_validate_ledger_journal(integer) "
+                    "FROM atlas_ledger_trigger_owner"
+                )
+                await connection.execute(
+                    "REVOKE SELECT ON TABLE public.ledger_journals, "
+                    "public.ledger_journal_lines FROM atlas_ledger_trigger_owner"
+                )
+                await connection.execute(
+                    "REVOKE USAGE ON SCHEMA public FROM atlas_ledger_trigger_owner"
+                )
                 await connection.execute(
                     "DROP ROLE IF EXISTS atlas_ledger_trigger_owner"
                 )
