@@ -89,9 +89,25 @@
         </div>
       </section>
 
+      <section class="panel scanner-panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">04 · READ-ONLY MARKET DATA</p><h2>Market scanner</h2></div>
+          <span class="step-state">Advisory only · 15m</span>
+        </div>
+        <label class="scanner-label">Spot markets, comma-separated
+          <input id="scanner-symbols" type="text" maxlength="320" value="BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="hint">Reads public market candles for up to eight symbols. Signals are rule-based test indicators, not AI advice or trade instructions. This tool never places or advances orders.</p>
+        <div class="button-row">
+          <button class="secondary" id="scanner-button" type="button">Scan markets</button>
+        </div>
+        <div class="notice info" id="scanner-message" role="status" aria-live="polite">Run a scan to load current public market indicators.</div>
+        <div id="scanner-results" class="table-wrap"><p class="empty">No market scan loaded.</p></div>
+      </section>
+
       <section class="panel">
         <div class="panel-head">
-          <div><p class="eyebrow">04 · SPOT PAPER ORDER</p><h2>Submit a test order</h2></div>
+          <div><p class="eyebrow">05 · SPOT PAPER ORDER</p><h2>Submit a test order</h2></div>
           <span class="step-state">No exchange order</span>
         </div>
         <form id="order-form">
@@ -111,11 +127,11 @@
 
       <div class="data-grid">
         <section class="panel">
-          <div class="panel-head"><div><p class="eyebrow">05 · VIRTUAL POSITIONS</p><h2>Positions</h2></div></div>
+          <div class="panel-head"><div><p class="eyebrow">06 · VIRTUAL POSITIONS</p><h2>Positions</h2></div></div>
           <div id="positions" class="table-wrap"><p class="empty">No positions loaded.</p></div>
         </section>
         <section class="panel">
-          <div class="panel-head"><div><p class="eyebrow">06 · ORDER LIFECYCLE</p><h2>Open orders</h2></div></div>
+          <div class="panel-head"><div><p class="eyebrow">07 · ORDER LIFECYCLE</p><h2>Open orders</h2></div></div>
           <div id="orders" class="table-wrap"><p class="empty">No orders loaded.</p></div>
         </section>
       </div>
