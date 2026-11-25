@@ -486,10 +486,15 @@ jobs:
           CREATE ROLE atlas_ledger_acl_delegate NOLOGIN;
           GRANT EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable()
               TO atlas_ledger_acl_grantor WITH GRANT OPTION;
+          -- The public-schema lockdown at 0053 removes PUBLIC USAGE. Give
+          -- the temporary grantor only the schema access needed to issue this
+          -- delegated function grant, then revoke it immediately afterward.
+          GRANT USAGE ON SCHEMA public TO atlas_ledger_acl_grantor;
           SET ROLE atlas_ledger_acl_grantor;
           GRANT EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable()
               TO atlas_ledger_acl_delegate;
           RESET ROLE;
+          REVOKE USAGE ON SCHEMA public FROM atlas_ledger_acl_grantor;
           SQL
           python -m alembic upgrade head
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
