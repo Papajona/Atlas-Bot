@@ -172,7 +172,7 @@ def test_0065_rollback_provenance_tracks_direct_acl_grants_not_public_defaults()
     assert "p.proacl" in migration
 
     rollback_state = migration.split("role_state := jsonb_build_object", 1)[1].split(
-        "EXECUTE format(\\n                'COMMENT ON ROLE", 1
+        "'prior_role_comment', role_comment", 1
     )[0]
     assert "has_schema_privilege(" not in rollback_state
     assert "has_table_privilege(" not in rollback_state
