@@ -139,7 +139,7 @@ def test_development_accepts_only_local_database_urls(database_url):
     Settings(
         environment="development",
         database_url=database_url,
-        admin_token="local-development-token",
+        admin_token="dev-fixture-token",
     )
 
 
