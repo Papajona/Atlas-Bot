@@ -104,6 +104,8 @@ def test_0066_pins_research_trigger_paths_and_revokes_public_execute():
     assert "ARRAY['anon', 'authenticated']" in migration
     assert "REVOKE EXECUTE ON FUNCTION %s FROM %I" in migration
     assert "has_function_privilege(" in migration
+    assert "role_name::name" in migration
+    assert "to_regprocedure(function_signature)::oid" in migration
     assert "p.proconfig @> ARRAY['search_path=pg_catalog']" in migration
     assert "acl.grantee = 0" in migration
     assert "PUBLIC retains EXECUTE" in migration
