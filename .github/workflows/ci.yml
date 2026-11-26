@@ -522,6 +522,39 @@ jobs:
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           GRANT EXECUTE ON FUNCTION public.atlas_block_ledger_mutation() TO service_role;
           GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO service_role;
+          -- Prove 0067 refuses a managed-owner PUBLIC default EXECUTE grant before DDL.
+          SET ROLE supabase_admin;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              GRANT EXECUTE ON FUNCTIONS TO PUBLIC;
+          RESET ROLE;
+          -- Prove a service_role grant-option holder's delegated EXECUTE grant is cascaded.
+          CREATE ROLE atlas_0067_service_role_delegate NOLOGIN;
+          CREATE FUNCTION public.atlas_0067_delegation_probe() RETURNS integer
+              LANGUAGE sql AS $ SELECT 1 $;
+          GRANT EXECUTE ON FUNCTION public.atlas_0067_delegation_probe()
+              TO service_role WITH GRANT OPTION;
+          SET ROLE service_role;
+          GRANT EXECUTE ON FUNCTION public.atlas_0067_delegation_probe()
+              TO atlas_0067_service_role_delegate;
+          RESET ROLE;
+          SQL
+          if python -m alembic upgrade head >/tmp/atlas-0067-public-default.log 2>&1; then
+            cat /tmp/atlas-0067-public-default.log
+            echo '0067 unexpectedly accepted a managed-owner PUBLIC EXECUTE default' >&2
+            exit 1
+          fi
+          grep -q 'PUBLIC' /tmp/atlas-0067-public-default.log || {
+            cat /tmp/atlas-0067-public-default.log
+            echo '0067 failed for a reason other than the PUBLIC default ACL gate' >&2
+            exit 1
+          }
+          # The failed upgrade must leave Alembic at 0066 and make no partial change.
+          python -m alembic current | grep -q '0066_pin_research_trigger_path'
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          SET ROLE supabase_admin;
+          ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+          RESET ROLE;
           SQL
           python -m alembic upgrade head
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
@@ -618,8 +651,18 @@ jobs:
                   RAISE EXCEPTION
                       '0065 failed to cascade-revoke delegated internal function EXECUTE grants';
               END IF;
+              IF has_function_privilege(
+                  'atlas_0067_service_role_delegate',
+                  'public.atlas_0067_delegation_probe()',
+                  'EXECUTE'
+              ) THEN
+                  RAISE EXCEPTION
+                      '0067 failed to cascade-revoke delegated service_role EXECUTE grants';
+              END IF;
           END
           $verify_delegated_internal_function_grants$;
+          DROP FUNCTION public.atlas_0067_delegation_probe();
+          DROP ROLE atlas_0067_service_role_delegate;
           DROP ROLE atlas_ledger_acl_delegate;
           DROP ROLE atlas_ledger_acl_grantor;
           SQL
