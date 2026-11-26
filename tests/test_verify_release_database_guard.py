@@ -161,3 +161,11 @@ def test_asyncpg_database_url_normalizer_maps_all_libpq_ssl_modes(sslmode):
 def test_asyncpg_database_url_normalizer_rejects_ambiguous_or_unsupported_ssl(database_url):
     with pytest.raises(ValueError):
         normalize_asyncpg_database_url(database_url)
+
+
+def test_sslmode_normalization_keeps_loopback_database_guard_approval():
+    url = normalize_asyncpg_database_url(
+        "postgresql://atlas:secret@127.0.0.1:5432/verify?sslmode=require"
+    )
+    assert url.endswith("?ssl=require")
+    assert is_approved_verification_database_url(url)
