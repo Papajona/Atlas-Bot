@@ -469,13 +469,14 @@ fun ModernSettingsScreen(
                     badge = "NOT VERIFIED HERE",
                     badgeBg = Color(0xFFFFF7ED),
                     badgeText = Color(0xFF9A3412),
-                    subtitle = "Check administrator MFA in the authenticated web console",
+                    subtitle = "Customer AAL2 enrollment and verification have not been accepted in this mobile test build",
                     onClick = {
                         activeDialogTitle = "Two-Factor Authentication"
-                        activeDialogContent = "This mobile settings screen does not verify current MFA enrollment or AAL2. Check the server-reported MFA status in the authenticated administrator console before privileged actions."
+                        activeDialogContent = "Customer AAL2 enrollment and verification have not been accepted in this mobile test build. This row does not change account security."
                     },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -509,7 +510,8 @@ fun ModernSettingsScreen(
                         activeDialogContent = "No live audit events are available in this build. Connect an authenticated account and backend audit API before displaying security events."
                     },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
             }
         }
