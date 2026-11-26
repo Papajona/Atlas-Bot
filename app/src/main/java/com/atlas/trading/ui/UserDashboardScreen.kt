@@ -53,11 +53,15 @@ enum class DashboardTab {
     SETTINGS
 }
 
-enum class AssetClass(val label: String, val badge: String) {
-    ALL("All Markets", "🌐"),
-    CRYPTO("Crypto", "🪙"),
-    FOREX("Forex", "💱"),
-    COMMODITIES("Commodities", "🥇")
+enum class AssetClass(
+    val label: String,
+    val badge: String,
+    val scannerAssetClass: String
+) {
+    ALL("All Markets", "🌐", "crypto"),
+    CRYPTO("Crypto", "🪙", "crypto"),
+    FOREX("Forex", "💱", "forex"),
+    COMMODITIES("Commodities", "🥇", "commodity")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -83,12 +87,17 @@ fun UserDashboardScreen(
     var pendingCustomerSession by remember { mutableStateOf<CustomerAuthClient.Session?>(null) }
     val customerAuthScope = rememberCoroutineScope()
 
-    LaunchedEffect(backendUrl, activeCustomerToken) {
+    LaunchedEffect(backendUrl, activeCustomerToken, selectedAssetClass) {
         val token = activeCustomerToken?.takeIf { it.isNotBlank() }
         customerSnapshot = if (token == null || backendUrl.isBlank()) {
             null
         } else {
-            runCatching { CustomerDataClient(backendUrl).loadSnapshot(token) }.getOrNull()
+            runCatching {
+                CustomerDataClient(backendUrl).loadSnapshot(
+                    token,
+                    scannerAssetClass = selectedAssetClass.scannerAssetClass
+                )
+            }.getOrNull()
         }
     }
 
