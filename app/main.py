@@ -7890,6 +7890,17 @@ async def customer_market_scanner(
         provider = exchange
         fetch = lambda symbol: fetch_crypto(symbol, exchange, "15m", 30, True)
     elif asset == "forex":
+        allowed_fx = {
+            _normalize_oanda_instrument(symbol)
+            for symbol in settings.adaptive_established_fx_symbols.split(",")
+            if symbol.strip()
+        }
+        normalized_symbols = list(dict.fromkeys(
+            _normalize_oanda_instrument(symbol) for symbol in requested
+        ))
+        if not normalized_symbols or any(symbol not in allowed_fx for symbol in normalized_symbols):
+            raise HTTPException(422, "FX scanner symbols must belong to the configured major currency universe")
+        requested = normalized_symbols
         use_oanda_practice = bool(
             settings.forex_broker == "oanda"
             and settings.oanda_practice
@@ -7898,9 +7909,7 @@ async def customer_market_scanner(
         )
         if use_oanda_practice:
             provider = "oanda_practice"
-            fetch = lambda symbol: fetch_forex_oanda(
-                _normalize_oanda_instrument(symbol), "15m", 30
-            )
+            fetch = lambda symbol: fetch_forex_oanda(symbol, "15m", 30)
         else:
             provider = "yfinance_fx"
             fetch = lambda symbol: fetch_forex(symbol, "15m", 30)
@@ -7917,11 +7926,15 @@ async def customer_market_scanner(
                 "Commodity market scanning requires explicitly configured OANDA practice credentials; no live provider is used",
             )
         allowed_commodities = {
-            "XAU_USD", "XAG_USD", "WTICO_USD", "BCO_USD", "NATGAS_USD"
+            _normalize_oanda_instrument(symbol)
+            for symbol in settings.adaptive_established_commodity_symbols.split(",")
+            if symbol.strip()
         }
-        normalized_symbols = [_normalize_oanda_instrument(symbol) for symbol in requested]
-        if any(symbol not in allowed_commodities for symbol in normalized_symbols):
-            raise HTTPException(422, "Unsupported commodity instrument")
+        normalized_symbols = list(dict.fromkeys(
+            _normalize_oanda_instrument(symbol) for symbol in requested
+        ))
+        if not normalized_symbols or any(symbol not in allowed_commodities for symbol in normalized_symbols):
+            raise HTTPException(422, "Commodity scanner symbols must belong to the configured established instrument universe")
         requested = normalized_symbols
         provider = "oanda_practice"
         fetch = lambda symbol: fetch_forex_oanda(symbol, "15m", 30)
