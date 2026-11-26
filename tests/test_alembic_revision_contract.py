@@ -144,7 +144,7 @@ def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
     dynamic_end = migration.index("$atlas_service_role_maintain_check$", dynamic + 20)
     assert guard < dynamic < dynamic_end
     assert re.search(
-        r"has_table_privilege\\s*\\(\\s*'service_role'\\s*,\\s*c\\.oid\\s*,\\s*'MAINTAIN'\\s*\\)",
+        r"has_table_privilege\s*\(\s*'service_role'\s*,\s*c\.oid\s*,\s*'MAINTAIN'\s*\)",
         migration[dynamic:dynamic_end],
     )
     assert "has_table_privilege('service_role', profile_table_oid, 'MAINTAIN')" not in migration
