@@ -15,7 +15,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PREDECESSOR = "0064_strategy_outcome_recent_index"
-MIGRATION_HEAD = "0065_ledger_trigger_owner_isolation"
+MIGRATION_HEAD = "0067_service_role_customer_profiles_acl"
 TRIGGER_OWNER = "atlas_ledger_trigger_owner"
 VALIDATE_FUNCTION = "public.atlas_validate_ledger_journal(integer)"
 
@@ -232,8 +232,9 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
         pytest.skip("requires a PostgreSQL DATABASE_URL for Alembic")
     env["DATABASE_URL"] = alembic_url
 
-    # The PostgreSQL workflow applies head before running marked integration
-    # tests. Downgrade once to establish an explicit PUBLIC-only baseline.
+    # The PostgreSQL workflow applies the current Alembic head before running marked
+    # integration tests. The later 0066/0067 downgrades are intentionally forward-only;
+    # Alembic then reaches 0064 so this suite can exercise 0065 rollback semantics.
     try:
         current = asyncio.run(
             _get_revision(dsn)
