@@ -423,6 +423,21 @@ def test_supabase_future_default_grants_are_opt_in():
     assert "migration unexpectedly removed service_role access from an existing table" in workflow
     assert "has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'SELECT')" in workflow
 
+def test_supabase_service_role_existing_public_grants_are_restricted():
+    migration = (
+        ROOT / "alembic" / "versions" / "0067_service_role_customer_profiles_acl.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision = "0067_service_role_customer_profiles_acl"' in migration
+    assert 'down_revision = "0066_pin_research_trigger_path"' in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM service_role" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM service_role" in migration
+    assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
+    assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
+    assert "GRANT UPDATE" not in migration
+    assert "pg_get_serial_sequence(" in migration
+    assert "service_role retains privileges on a public relation other than customer_profiles" in migration
+    assert "service_role retains privileges on a public sequence other than customer_profiles_id_seq" in migration
+
 def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     preflight = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
