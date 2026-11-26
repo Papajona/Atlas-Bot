@@ -391,7 +391,7 @@ def main() -> int:
     parser.add_argument("--staging-ref", default="")
     parser.add_argument("--production-ref", default="")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
-    parser.add_argument("--expected-revision", default="0066_pin_research_trigger_path")
+    parser.add_argument("--expected-revision", default="0067_service_role_customer_profiles_acl")
     parser.add_argument("--output", default="provider-ledger-reconciliation.json")
     args = parser.parse_args()
     import os
