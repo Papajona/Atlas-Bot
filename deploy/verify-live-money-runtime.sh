@@ -6,9 +6,12 @@ set -euo pipefail
 # It does not enable live trading.
 : "${DATABASE_URL:?Set DATABASE_URL to a PostgreSQL database}"
 case "$DATABASE_URL" in
-  postgresql*) ;;
-  *) echo "DATABASE_URL must use PostgreSQL for this verification" >&2; exit 2;;
+  postgresql+asyncpg://*) ;;
+  postgresql://*) DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgresql://}" ;;
+  postgres://*) DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgres://}" ;;
+  *) echo "DATABASE_URL must use PostgreSQL with the asyncpg driver" >&2; exit 2;;
 esac
+export DATABASE_URL
 
 # Reuse the strict verification guard, but disable the Compose-only hostname
 # exception: this Cloud Shell/Compute workflow must use a loopback proxy.
