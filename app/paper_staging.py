@@ -775,6 +775,17 @@ async def paper_customer_market_scanner(
             )
         )
     else:
+        if asset == "forex":
+            allowed_fx = {
+                _normalize_oanda_instrument(symbol)
+                for symbol in settings.adaptive_established_fx_symbols.split(",")
+                if symbol.strip()
+            }
+            requested = list(dict.fromkeys(
+                _normalize_oanda_instrument(symbol) for symbol in requested
+            ))
+            if not requested or any(symbol not in allowed_fx for symbol in requested):
+                raise HTTPException(422, "FX scanner symbols must belong to the configured major currency universe")
         use_oanda_practice = bool(
             settings.forex_broker == "oanda"
             and settings.oanda_practice
@@ -787,10 +798,16 @@ async def paper_customer_market_scanner(
                     503,
                     "Commodity scanning requires explicitly configured OANDA practice credentials; no live provider is used",
                 )
-            allowed = {"XAU_USD", "XAG_USD", "WTICO_USD", "BCO_USD", "NATGAS_USD"}
-            requested = [_normalize_oanda_instrument(symbol) for symbol in requested]
-            if any(symbol not in allowed for symbol in requested):
-                raise HTTPException(422, "Unsupported commodity instrument")
+            allowed_commodities = {
+                _normalize_oanda_instrument(symbol)
+                for symbol in settings.adaptive_established_commodity_symbols.split(",")
+                if symbol.strip()
+            }
+            requested = list(dict.fromkeys(
+                _normalize_oanda_instrument(symbol) for symbol in requested
+            ))
+            if not requested or any(symbol not in allowed_commodities for symbol in requested):
+                raise HTTPException(422, "Commodity scanner symbols must belong to the configured established instrument universe")
         if use_oanda_practice:
             provider = "oanda_practice"
             fetch = lambda symbol: fetch_forex_oanda(
