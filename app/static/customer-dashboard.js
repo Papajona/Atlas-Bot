@@ -75,7 +75,7 @@ async function logout(){try{await api('/api/auth/logout',{method:'POST'});}catch
 if(sessionStorage.getItem(tokenKey))continueLoginSecurity();
 
 
-// Atlas UI layer: responsive navigation and local display preferences.
+// Atlas UI layer: responsive navigation and account-synced display preferences.
 const uiSections={overview:['Your command center','Monitor balances, markets and customer-scoped trading tools.'],markets:['Market overview','Follow Atlas signals and customer-scoped market intelligence.'],trade:['Trade desk','Build paper trades and analyze setups before execution.'],wallet:['Wallet','Fund, monitor and protect your USDT trading wallet.'],security:['Security','Manage withdrawal verification and account protection.'],settings:['Settings','Preferences, billing, referrals and session controls.']};
 function setActiveSection(id){document.querySelectorAll('.nav-link').forEach(a=>a.classList.toggle('active',a.dataset.section===id));const meta=uiSections[id];if(meta){document.getElementById('pageTitle').textContent=meta[0];document.getElementById('pageSubtitle').textContent=meta[1];}}
 document.querySelectorAll('.nav-link').forEach(a=>a.addEventListener('click',()=>{setActiveSection(a.dataset.section);document.getElementById('appShell').classList.remove('nav-open');}));
@@ -86,13 +86,81 @@ document.querySelectorAll('[data-market-filter]').forEach(btn=>btn.addEventListe
 document.getElementById('menuBtn')?.addEventListener('click',()=>document.getElementById('appShell').classList.toggle('nav-open'));
 window.addEventListener('hashchange',()=>setActiveSection(location.hash.replace('#','')||'overview'));
 if(location.hash)setActiveSection(location.hash.replace('#',''));
-document.querySelectorAll('[data-setting]').forEach(el=>{const saved=localStorage.getItem('atlas_ui_'+el.dataset.setting);if(saved!==null)el.checked=saved==='1';el.addEventListener('change',()=>{localStorage.setItem('atlas_ui_'+el.dataset.setting,el.checked?'1':'0');if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);});});
+const WORKSPACE_SETTING_FIELDS={reduceMotion:'reduce_motion',compactMarkets:'compact_markets',touchFeedback:'touch_feedback'};
+let workspacePreferenceSaveQueue=Promise.resolve();
+function applyWorkspacePreference(el,value){
+  el.checked=!!value;
+  if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);
+  if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);
+  if(el.id==='touchFeedback')document.body.classList.toggle('touch-feedback-enabled',el.checked);
+  localStorage.setItem('atlas_ui_'+el.dataset.setting,el.checked?'1':'0');
+}
+function applyWorkspacePreferences(preferences){
+  document.querySelectorAll('[data-setting]').forEach(el=>{
+    const field=WORKSPACE_SETTING_FIELDS[el.dataset.setting];
+    if(field&&Object.prototype.hasOwnProperty.call(preferences||{},field)){
+      applyWorkspacePreference(el,preferences[field]);
+    }
+  });
+}
+async function loadWorkspacePreferences(){
+  try{
+    const saved=await api('/api/customer/workspace-preferences');
+    let preferences=saved.preferences||{};
+    if(!saved.configured){
+      const legacy={};
+      for(const [setting,field] of Object.entries(WORKSPACE_SETTING_FIELDS)){
+        const value=localStorage.getItem('atlas_ui_'+setting);
+        if(value==='0'||value==='1')legacy[field]=value==='1';
+      }
+      if(Object.keys(legacy).length){
+        const migrated=await api('/api/customer/workspace-preferences',{
+          method:'PATCH',body:JSON.stringify(legacy)
+        });
+        preferences=migrated.preferences||preferences;
+      }
+    }
+    applyWorkspacePreferences(preferences);
+    const status=document.getElementById('workspacePreferencesStatus');
+    if(status)status.textContent='Saved to your Atlas account.';
+  }catch(error){
+    // Retain cached display preferences if the account preference endpoint is unavailable.
+    document.querySelectorAll('[data-setting]').forEach(el=>{
+      const value=localStorage.getItem('atlas_ui_'+el.dataset.setting);
+      if(value==='0'||value==='1')applyWorkspacePreference(el,value==='1');
+    });
+    const status=document.getElementById('workspacePreferencesStatus');
+    if(status)status.textContent='Account sync unavailable; cached display preferences are in use.';
+  }
+}
+document.querySelectorAll('[data-setting]').forEach(el=>{
+  const cached=localStorage.getItem('atlas_ui_'+el.dataset.setting);
+  if(cached==='0'||cached==='1')applyWorkspacePreference(el,cached==='1');
+  el.addEventListener('change',()=>{
+    const field=WORKSPACE_SETTING_FIELDS[el.dataset.setting];
+    if(!field)return;
+    applyWorkspacePreference(el,el.checked);
+    if(!sessionStorage.getItem(tokenKey))return;
+    const value=el.checked;
+    workspacePreferenceSaveQueue=workspacePreferenceSaveQueue.catch(()=>{}).then(async()=>{
+      await api('/api/customer/workspace-preferences',{
+        method:'PATCH',body:JSON.stringify({[field]:value})
+      });
+      const status=document.getElementById('workspacePreferencesStatus');
+      if(status)status.textContent='Saved to your Atlas account.';
+    }).catch(()=>{
+      const status=document.getElementById('workspacePreferencesStatus');
+      if(status)status.textContent='Could not sync this preference; the local copy is retained.';
+    });
+  });
+});
 /* Keep one wrapper per lifecycle function: predictable, testable, and easy to maintain. */
 async function showAccount(){
   document.getElementById('auth').style.display='none';
   document.getElementById('mfaBox').style.display='none';
   document.getElementById('account').style.display='block';
   await loadAccount();
+  await loadWorkspacePreferences();
   await loadProductWorkspace();
   for(const fn of [loadBilling,loadCandidates,loadExecutors,refreshBotStatus]){try{await fn();}catch(e){}}
   syncUiAccount();
