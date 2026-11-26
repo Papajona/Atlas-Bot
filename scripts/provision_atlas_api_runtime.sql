@@ -18,7 +18,7 @@ BEGIN
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
                    WHERE version_num = '0069_customer_equity_history_and_workspace_preferences') THEN
-        RAISE EXCEPTION 'database must be at 0068_tron_sweep_txid_casefold_unique before API role provisioning';
+        RAISE EXCEPTION 'database must be at 0069_customer_equity_history_and_workspace_preferences before API role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)
