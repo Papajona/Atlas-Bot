@@ -393,15 +393,16 @@ def test_gcp_secret_access_repair_fails_closed_on_conditional_accessor_binding(t
     assert sum(line.startswith("secrets add-iam-policy-binding ") for line in calls) == 1
     assert not any("secrets versions" in line for line in calls)
 
-def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
+def test_provision_verifier_matches_all_eleven_current_schema_tables_and_policy_types():
     schema = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
     expected_tables = {
         "accounts", "journals", "journal_lines", "orders", "fills", "order_events",
-        "position_events", "market_bar_budgets", "market_bar_allocations",
+        "position_events", "equity_snapshots", "workspace_preferences",
+        "market_bar_budgets", "market_bar_allocations",
     }
     actual_tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS customer_paper\.(\w+)", schema))
     assert actual_tables == expected_tables
-    for table in ("accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events"):
+    for table in ("accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events", "equity_snapshots", "workspace_preferences"):
         assert f"ALTER TABLE customer_paper.{table} FORCE ROW LEVEL SECURITY" in schema
     assert "CREATE POLICY customer_paper_tenant" in schema
     assert "CREATE POLICY customer_paper_bar_budget_backend" in schema
@@ -411,7 +412,7 @@ def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_ty
     assert "policyname='customer_paper_bar_budget_backend'" in VERIFY_SQL
     source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 13" in source
-    assert '"nine_paper_tables_only": table_count == "9" and expected_table_count == "9"' in source
+    assert '"eleven_paper_tables_only": table_count == "11" and expected_table_count == "11"' in source
 
 
 
@@ -703,7 +704,7 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
 def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
     provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 13" in provisioner
-    assert '"paper_tables_allow_only_select_insert"' in provisioner
+    assert '"paper_tables_allow_only_select_insert_and_preferences_update"' in provisioner
     assert "server_version_num" in provisioner
     assert ">= 170000" in provisioner
     assert "THEN has_table_privilege(\'atlas_customer_paper\',c.oid,\'MAINTAIN\')" in provisioner
