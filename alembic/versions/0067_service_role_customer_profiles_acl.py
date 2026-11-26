@@ -139,7 +139,8 @@ def upgrade() -> None:
             SELECT owner_role.rolname
             INTO default_function_owner
             FROM pg_roles AS owner_role
-            WHERE has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')
+            WHERE owner_role.rolname <> 'pg_database_owner'
+              AND has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')
               AND (
                     NOT EXISTS (
                         SELECT 1
