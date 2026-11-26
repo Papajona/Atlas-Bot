@@ -33,6 +33,7 @@ from .customer_paper_ledger import (
     preflight_isolated_customer_paper_ledger,
 )
 from .customer_paper_lifecycle import get_customer_paper_positions
+from .data import fetch_forex, fetch_forex_oanda
 from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
 # Import only the existing Auth/JWT helpers and market-data adapter. The main ASGI
 # app is not mounted or served; its startup/lifespan is never executed in this process.
@@ -40,7 +41,7 @@ from .main import (
     MarketRequest, _SCANNER_MAX_CONCURRENT_FETCHES, _scanner_metrics,
     _scanner_normalize_symbols, _scanner_scan_symbols,
     _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
-    _customer_paper_group_mark_prices,
+    _customer_paper_group_mark_prices, _normalize_oanda_instrument,
     _supabase_request, _supabase_user, _trusted_client_ip, api_rate_limit,
     customer_claims, market_data,
 )
@@ -734,33 +735,37 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
 @app.get("/api/customer/market-scanner")
 async def paper_customer_market_scanner(
     exchange: str = "binance",
-    symbols: str = "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT",
+    asset_class: str = "crypto",
+    symbols: str | None = None,
     authorization: str | None = Header(default=None),
 ):
-    """Serve bounded, read-only public market signals to authenticated paper customers."""
-    # The shared Supabase paper role cannot read subscription entitlements. Keep
-    # this scanner disabled by default and expose it only through the explicit
-    # staging-only service flag; the full API retains its per-plan feature gate.
+    """Serve bounded, read-only customer scanner data without creating paper orders."""
     if not settings.paper_staging_market_scanner_enabled:
         raise HTTPException(404, "Market scanner is not enabled in this environment")
 
     async with SessionLocal() as db:
-        # Market data is customer-visible only after the same AAL2 profile check as
-        # the paper portfolio; this route never creates or advances an order.
         await get_existing_customer(authorization, db, require_aal2=True)
 
-    import ccxt
-
-    if exchange not in ccxt.exchanges:
-        raise HTTPException(422, "Unsupported exchange")
-
-    requested = _scanner_normalize_symbols(symbols)
+    asset = str(asset_class or "crypto").strip().lower()
+    if asset not in {"crypto", "forex", "commodity"}:
+        raise HTTPException(422, "Unsupported scanner asset class")
+    defaults = {
+        "crypto": "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT",
+        "forex": "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD",
+        "commodity": "XAU_USD,XAG_USD,WTICO_USD,BCO_USD,NATGAS_USD",
+    }
+    requested = _scanner_normalize_symbols(
+        symbols if symbols is not None else defaults[asset]
+    )
     if not requested:
         raise HTTPException(422, "At least one valid market symbol is required")
 
-    results = await _scanner_scan_symbols(
-        requested,
-        fetch=lambda symbol: market_data(
+    if asset == "crypto":
+        import ccxt
+        if exchange not in ccxt.exchanges:
+            raise HTTPException(422, "Unsupported exchange")
+        provider = exchange
+        fetch = lambda symbol: market_data(
             MarketRequest(
                 asset="crypto",
                 symbol=symbol,
@@ -768,17 +773,55 @@ async def paper_customer_market_scanner(
                 timeframe="15m",
                 days=30,
             )
-        ),
+        )
+    else:
+        use_oanda_practice = bool(
+            settings.forex_broker == "oanda"
+            and settings.oanda_practice
+            and settings.oanda_account_id
+            and settings.oanda_api_token
+        )
+        if asset == "commodity":
+            if not use_oanda_practice:
+                raise HTTPException(
+                    503,
+                    "Commodity scanning requires explicitly configured OANDA practice credentials; no live provider is used",
+                )
+            allowed = {"XAU_USD", "XAG_USD", "WTICO_USD", "BCO_USD", "NATGAS_USD"}
+            requested = [_normalize_oanda_instrument(symbol) for symbol in requested]
+            if any(symbol not in allowed for symbol in requested):
+                raise HTTPException(422, "Unsupported commodity instrument")
+        if use_oanda_practice:
+            provider = "oanda_practice"
+            fetch = lambda symbol: fetch_forex_oanda(
+                _normalize_oanda_instrument(symbol), "15m", 30
+            )
+        else:
+            provider = "yfinance_fx"
+            fetch = lambda symbol: fetch_forex(symbol, "15m", 30)
+
+    results = await _scanner_scan_symbols(
+        requested,
+        fetch=fetch,
         metrics=_scanner_metrics,
         semaphore=_PAPER_SCANNER_SEMAPHORE,
         logger=logging.getLogger(__name__),
     )
+    for result in results:
+        result["asset_class"] = asset
+        result["data_source"] = provider
     results.sort(
         key=lambda row: abs(float(row.get("score", 0.0) or 0.0)),
         reverse=True,
     )
-    return {"exchange": exchange, "timeframe": "15m", "results": results}
-
+    return {
+        "asset_class": asset,
+        "exchange": provider,
+        "timeframe": "15m",
+        "data_source": provider,
+        "read_only": True,
+        "results": results,
+    }
 
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
