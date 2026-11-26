@@ -86,3 +86,15 @@ def test_compose_verification_declares_the_exact_postgres_service_alias():
     root = Path(__file__).resolve().parents[1]
     compose = (root / "docker-compose.verify.yml").read_text(encoding="utf-8")
     assert "ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE: postgres" in compose
+
+
+def test_live_money_runtime_verifier_requires_loopback_proxy_before_alembic():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
+    guard = script.index("python scripts/verify_release_database_guard.py")
+    migration = script.index("python -m alembic upgrade head")
+    assert "unset ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE" in script
+    assert "loopback-bound Cloud SQL Auth Proxy/tunnel" in script
+    assert guard < migration
