@@ -414,7 +414,8 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     main = Path("app/main.py").read_text()
     migration = Path("alembic/versions/0033b_sweep_reconciliation_integrity.py").read_text()
     assert "custody_transfer_id" in db
-    assert "uq_tron_sweep_transaction_id_nonempty" in db
+    assert "uq_tron_sweep_transaction_id_ci_nonempty" in db
+    assert "lower(transaction_id)" in db
     assert "create_custody_transfer" in main
     assert "transition_custody_transfer" in main
     assert "an in-flight sweep already exists for this deposit wallet" in main

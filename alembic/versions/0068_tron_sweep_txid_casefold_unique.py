@@ -238,5 +238,7 @@ def downgrade() -> None:
             schema=schema,
             sqlite_where=NONEMPTY_PREDICATE,
         )
-    if CASEFOLD_INDEX_NAME in indexes:
+    # SQLite does not reflect expression-based indexes through get_indexes().
+    # Query sqlite_master by name so the downgrade always removes the index.
+    if _sqlite_index_valid(bind) is not None:
         op.drop_index(CASEFOLD_INDEX_NAME, table_name=TABLE_NAME, schema=schema)

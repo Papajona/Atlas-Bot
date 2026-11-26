@@ -246,7 +246,7 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
         ROOT / ".github" / "workflows" / "provider-ledger-reconciliation.yml"
     ).read_text(encoding="utf-8")
 
-    expected = "0067_service_role_customer_profiles_acl"
+    expected = "0068_tron_sweep_txid_casefold_unique"
     for source in (
         api_provisioner,
         audit_provisioner,
