@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 import os
 import subprocess
 import yaml
@@ -1124,7 +1125,9 @@ def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles(
 
 
 def test_customer_profile_provision_edge_function_keeps_platform_jwt_verification_enabled():
-    config = (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
-    assert "[functions.customer-profile-provision]" in config
-    assert "verify_jwt = true" in config
+    config = tomllib.loads(
+        (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
+    )
+    function_config = config.get("functions", {}).get("customer-profile-provision", {})
+    assert function_config.get("verify_jwt") is True
 
