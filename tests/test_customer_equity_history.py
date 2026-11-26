@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -154,7 +155,7 @@ def test_workspace_preference_payload_has_safe_defaults():
     }
 
 
-def test_workspace_preference_patch_only_updates_owner_display_flags(monkeypatch):
+def test_workspace_preference_patch_uses_atomic_customer_scoped_upsert(monkeypatch):
     profile = SimpleNamespace(id=314)
     captured = {}
 
@@ -162,21 +163,31 @@ def test_workspace_preference_patch_only_updates_owner_display_flags(monkeypatch
         def __init__(self):
             self.row = None
 
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+        async def execute(self, statement):
+            captured["statement"] = statement
+            compiled = statement.compile(dialect=sqlite_dialect())
+            captured["sql"] = str(compiled)
+            captured["params"] = compiled.params
+            self.row = CustomerWorkspacePreference(
+                customer_id=profile.id,
+                reduce_motion=True,
+                compact_markets=False,
+                touch_feedback=False,
+            )
+
         async def get(self, model, customer_id):
             assert model is CustomerWorkspacePreference
             captured["customer_id"] = customer_id
             return self.row
 
-        def add(self, row):
-            self.row = row
-
         async def commit(self):
             captured["committed"] = True
 
         async def refresh(self, row):
-            row.reduce_motion = row.reduce_motion if row.reduce_motion is not None else False
-            row.compact_markets = row.compact_markets if row.compact_markets is not None else False
-            row.touch_feedback = row.touch_feedback if row.touch_feedback is not None else True
+            captured["refreshed_customer_id"] = row.customer_id
 
     database = Database()
 
@@ -201,7 +212,9 @@ def test_workspace_preference_patch_only_updates_owner_display_flags(monkeypatch
         )
     )
 
-    assert captured["customer_id"] == 314
+    assert "ON CONFLICT (customer_id) DO UPDATE" in captured["sql"]
+    assert captured["params"]["customer_id"] == 314
+    assert captured["customer_id"] == captured["refreshed_customer_id"] == 314
     assert captured["committed"] is True
     assert response["scope"] == "customer_only"
     assert response["preferences"] == {
@@ -224,3 +237,10 @@ def test_workspace_preferences_reject_non_display_or_non_boolean_updates(payload
     with pytest.raises(main.HTTPException) as exc:
         asyncio.run(main.customer_update_workspace_preferences(payload))
     assert exc.value.status_code == 422
+
+def test_runtime_provisioning_requires_the_0069_schema_head():
+    script = Path("scripts/provision_atlas_api_runtime.sql").read_text(encoding="utf-8")
+    revision = "0069_customer_equity_history_and_workspace_preferences"
+    assert f"WHERE version_num = '{revision}'" in script
+    assert f"database must be at {revision} before API role provisioning" in script
+    assert "database must be at 0068_tron_sweep_txid_casefold_unique" not in script
