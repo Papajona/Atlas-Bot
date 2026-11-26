@@ -281,6 +281,8 @@ jobs:
         run: |
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           GRANT USAGE, CREATE ON SCHEMA public TO anon, authenticated;
+          -- Model Supabase's explicit schema access for its built-in Data API service role.
+          GRANT USAGE ON SCHEMA public TO service_role;
           GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
           GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
           DO $seed_public_api_grants$
@@ -504,6 +506,10 @@ jobs:
           DECLARE
               profile_sequence text := pg_get_serial_sequence('public.customer_profiles', 'id');
           BEGIN
+              IF NOT has_schema_privilege('service_role', 'public', 'USAGE') THEN
+                  RAISE EXCEPTION 'service_role lost public schema USAGE needed for Data API access';
+              END IF;
+
               IF profile_sequence IS DISTINCT FROM 'public.customer_profiles_id_seq' THEN
                   RAISE EXCEPTION 'customer_profiles.id sequence mismatch: %', profile_sequence;
               END IF;
