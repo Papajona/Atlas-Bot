@@ -7480,7 +7480,7 @@ async def customer_update_workspace_preferences(
         profile, _ = await get_customer(authorization, db, require_aal2=False)
         row = await db.get(CustomerWorkspacePreference, profile.id)
         if row is None:
-            row = CustomerWorkspacePreference(customer_id=profile.id)
+            row = CustomerWorkspacePreference(customer_id=profile.id, reduce_motion=False, compact_markets=False, touch_feedback=True)
             db.add(row)
         for key, value in req.items():
             setattr(row, key, value)
