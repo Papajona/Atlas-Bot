@@ -683,6 +683,50 @@ class CustomerProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
+class CustomerEquitySnapshot(Base):
+    """Append-only observations of customer trading-account equity.
+
+    A row is sampled at most once per customer per 15-minute bucket, when the
+    authenticated customer portfolio is read. Gaps therefore mean no observation
+    was recorded; they are never filled with interpolated or synthetic values.
+    """
+    __tablename__ = "customer_equity_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "customer_id", "bucket_at",
+            name="uq_customer_equity_snapshot_customer_bucket",
+        ),
+        Index(
+            "ix_customer_equity_snapshot_customer_observed",
+            "customer_id", "observed_at",
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_profiles.id", name="fk_customer_equity_snapshots_customer_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    bucket_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow)
+    equity: Mapped[float] = mapped_column(FinancialNumeric, nullable=False)
+    cash_equity: Mapped[float | None] = mapped_column(FinancialNumeric, nullable=True)
+    currency: Mapped[str] = mapped_column(String(20), nullable=False, default="USDT")
+    valuation_source: Mapped[str] = mapped_column(String(40), nullable=False, default="TRADING_ACCOUNT_EQUITY")
+
+
+class CustomerWorkspacePreference(Base):
+    """Cross-device customer display preferences; deliberately not trading controls."""
+    __tablename__ = "customer_workspace_preferences"
+    customer_id: Mapped[int] = mapped_column(
+        ForeignKey("customer_profiles.id", name="fk_customer_workspace_preferences_customer_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    reduce_motion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    compact_markets: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    touch_feedback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+
 class Wallet(Base):
     __tablename__ = "wallets"
     __table_args__ = (UniqueConstraint("customer_id", "currency", name="uq_wallet_customer_currency"),
