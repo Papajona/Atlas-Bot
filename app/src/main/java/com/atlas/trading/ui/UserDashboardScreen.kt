@@ -491,13 +491,15 @@ fun UserDashboardScreen(
                                         color = textPrimary
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
-                                    val scannerMessage = when (selectedAssetClass) {
-                                        AssetClass.FOREX -> "FX quotes are not available from this scanner. The customer market-scanner endpoint currently provides crypto-only market data."
-                                        AssetClass.COMMODITIES -> "Commodity quotes are not available from this scanner. A verified Deriv/OANDA market-data integration is required."
-                                        else -> customerSnapshot?.marketQuotes?.takeIf { it.isNotEmpty() }?.joinToString("\n") {
+                                    val scannerMessage = customerSnapshot?.marketQuotes
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?.joinToString("\n") {
                                             "${it.symbol}: ${it.price} • ${it.signal}"
-                                        } ?: "Crypto market data unavailable. Sign in to an authorized customer account and confirm the market-scanner entitlement and provider."
-                                    }
+                                        } ?: when (selectedAssetClass) {
+                                            AssetClass.FOREX -> "FX quotes unavailable. Confirm the scanner entitlement and read-only provider response."
+                                            AssetClass.COMMODITIES -> "Commodity quotes unavailable. This scanner requires configured OANDA practice credentials and supported instruments."
+                                            else -> "Crypto market data unavailable. Sign in to an authorized customer account and confirm the market-scanner entitlement and provider."
+                                        }
                                     Text(
                                         text = scannerMessage,
                                         fontSize = 13.sp,
@@ -1389,20 +1391,46 @@ private fun WatchlistCard(
             )
             Spacer(modifier = Modifier.height(8.dp))
             when (selectedAssetClass) {
-                AssetClass.FOREX -> Text(
-                    "FX prices are unavailable from this crypto-only scanner. A verified Deriv/OANDA feed is required.",
-                    fontSize = 12.sp,
-                    color = textMuted
-                )
-                AssetClass.COMMODITIES -> Text(
-                    "Commodity prices are unavailable from this scanner until a verified Deriv/OANDA market-data feed is connected.",
-                    fontSize = 12.sp,
-                    color = textMuted
-                )
+                AssetClass.FOREX -> {
+                    if (marketQuotes.isEmpty()) {
+                        Text(
+                            "No verified FX quotes are available. The scanner uses read-only FX market data.",
+                            fontSize = 12.sp,
+                            color = textMuted
+                        )
+                    } else {
+                        marketQuotes.forEach { quote ->
+                            Text(
+                                "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                                fontSize = 13.sp,
+                                color = textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+                AssetClass.COMMODITIES -> {
+                    if (marketQuotes.isEmpty()) {
+                        Text(
+                            "No verified commodity quotes are available from the configured OANDA practice feed.",
+                            fontSize = 12.sp,
+                            color = textMuted
+                        )
+                    } else {
+                        marketQuotes.forEach { quote ->
+                            Text(
+                                "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                                fontSize = 13.sp,
+                                color = textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
                 else -> {
                     if (selectedAssetClass == AssetClass.ALL) {
                         Text(
-                            "Showing the supported crypto feed. FX and commodities are not yet connected to this scanner.",
+                            "Showing the crypto feed. Select Forex or Commodities to load their read-only scanner data.",
                             fontSize = 10.sp,
                             color = textMuted
                         )
