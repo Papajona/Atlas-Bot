@@ -81,12 +81,28 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
     assert expected_alembic_heads(versions) == {"0065_tron_sweep_txid_casefold_unique"}
 
 
-def test_production_provisioning_scripts_require_the_current_alembic_head():
+def test_runbook_and_production_provisioners_require_the_current_alembic_head():
     expected = "0065_tron_sweep_txid_casefold_unique"
     for path in (
+        ROOT / "RUNBOOK.md",
         ROOT / "scripts" / "provision_atlas_api_runtime.sql",
         ROOT / "scripts" / "provision_atlas_audit_reader.sql",
     ):
         source = path.read_text(encoding="utf-8")
         assert expected in source
         assert "0064_strategy_outcome_recent_index" not in source
+
+
+def test_cloud_sql_recovery_installs_paper_schema_before_alembic_upgrade():
+    source = (ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
+    paper_schema_step = (
+        "4. While still connected as the database owner/admin, apply "
+        "`scripts/customer_paper_ledger_schema.sql`"
+    )
+    migration_step = (
+        "5. **Only after step 4 succeeds**, apply the repository Alembic chain"
+    )
+
+    assert source.count("alembic upgrade head") == 1
+    assert source.index(paper_schema_step) < source.index(migration_step)
+    assert "This must complete **before any Alembic upgrade**" in source
