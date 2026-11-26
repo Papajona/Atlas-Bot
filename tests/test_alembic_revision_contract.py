@@ -148,6 +148,8 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "GRANT EXECUTE ON FUNCTION public.atlas_block_ledger_mutation() TO service_role" in workflow
     assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO service_role" in workflow
     assert "has_function_privilege('service_role', p.oid, 'EXECUTE')" in workflow
+    assert "CREATE FUNCTION public.atlas_supabase_admin_future_probe()" in workflow
+    assert "public.atlas_supabase_admin_future_probe()" in workflow
 
 
 def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
