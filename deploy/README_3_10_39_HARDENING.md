@@ -10,10 +10,10 @@
 - External security audit records are recursively redacted for likely secrets/tokens before they are copied to stdout/Cloud Logging.
 
 ## PostgreSQL runtime verification
-Use a disposable/staging PostgreSQL 17 database. PostgreSQL 17 documents row locking and transaction-level advisory locks for application-defined synchronization. The Atlas financial paths use transactional row locking and idempotency; the packaged concurrency drill verifies that PostgreSQL serializes concurrent updates correctly.
+Use a disposable/staging PostgreSQL 17 database through a Cloud SQL Auth Proxy or equivalent tunnel bound to `127.0.0.1`. Do **not** put a direct remote database hostname in `DATABASE_URL`: the runtime verifier rejects it before Alembic or any database-mutating test runs. The proxy's local listener forwards to the selected disposable/staging instance. PostgreSQL 17 documents row locking and transaction-level advisory locks for application-defined synchronization. The Atlas financial paths use transactional row locking and idempotency; the packaged concurrency drill verifies that PostgreSQL serializes concurrent updates correctly.
 
 ```bash
-DATABASE_URL='postgresql+asyncpg://USER:PASSWORD@HOST:5432/DB' \
+DATABASE_URL='postgresql+asyncpg://USER:PASSWORD@127.0.0.1:5432/DB' \
   ./deploy/verify-live-money-runtime.sh
 ```
 
