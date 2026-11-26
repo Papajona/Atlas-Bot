@@ -867,6 +867,7 @@ def test_production_api_role_is_dedicated_and_does_not_receive_ddl_or_immutable_
     assert "'trades'" in generic_grants
     assert "ledger_delete" in sql and "withdrawal_delete" in sql and "trades_delete" in sql
     assert "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public" in sql
+    assert "CASE WHEN c.relkind='S' THEN has_sequence_privilege(r.rolname,c.oid,'UPDATE') ELSE false END" in sql
     for forbidden in ("GRANT TRUNCATE", "GRANT REFERENCES", "GRANT TRIGGER", "GRANT EXECUTE", "GRANT CREATE"):
         assert forbidden not in sql
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
@@ -1120,3 +1121,10 @@ def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles(
     assert "atlas_api_runtime" in integrity and "atlas_audit_reader" in integrity
     assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_api_runtime" not in integrity
     assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_audit_reader" not in integrity
+
+
+def test_customer_profile_provision_edge_function_keeps_platform_jwt_verification_enabled():
+    config = (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
+    assert "[functions.customer-profile-provision]" in config
+    assert "verify_jwt = true" in config
+
