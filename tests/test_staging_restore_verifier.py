@@ -377,7 +377,7 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
     failures = customer_paper_schema_failures(missing_schema)
     assert "customer_paper schema is missing" in failures
     assert "required customer-paper table missing: accounts" in failures
-    assert "customer_paper_tables_without_forced_rls expected 0, observed 9" in failures
+    assert "customer_paper_tables_without_forced_rls expected 0, observed 11" in failures
     assert "customer_paper_policy_count expected 11, observed 0" in failures
     assert "customer_paper_tenant_policy_count expected 9, observed 0" in failures
     assert "customer_paper_backend_policy_count expected 2, observed 0" in failures
