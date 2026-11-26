@@ -210,7 +210,7 @@ let cachedJournals = [];
 
 function setPerfTimeframe(days) {
   perfDays = days;
-  document.getElementById('perfTitle').textContent = `Portfolio Performance · ${days} days`;
+  document.getElementById('perfTitle').textContent = `Realised trading P&L · ${days} days`;
   const btn7 = document.getElementById('btnTf7');
   const btn30 = document.getElementById('btnTf30');
   if (btn7 && btn30) {
