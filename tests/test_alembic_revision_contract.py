@@ -80,7 +80,7 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
-    assert expected_alembic_heads(versions) == {"0066_pin_research_trigger_path"}
+    assert expected_alembic_heads(versions) == {"0067_service_role_customer_profiles_acl"}
 
 
 def test_0066_pins_research_trigger_paths_and_revokes_public_execute():
