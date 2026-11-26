@@ -701,7 +701,7 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert primary_password not in result.stdout + result.stderr
 
 
-def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
+def test_provision_verifier_allows_updates_only_on_workspace_preferences():
     provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 13" in provisioner
     assert '"paper_tables_allow_only_select_insert_and_preferences_update"' in provisioner
