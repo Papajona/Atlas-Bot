@@ -24,12 +24,12 @@ def _normalize_postgres_index_expression(value: str | None) -> str:
     # pg_get_expr can render varchar/text coercions around either expression.
     # Remove only those harmless casts, then compare the remaining SQL shape.
     value = re.sub(
-        r"::(?:character varying|varchar|text)\\b",
+        r"::(?:character varying|varchar|text)\b",
         "",
         value,
         flags=re.IGNORECASE,
     )
-    return re.sub(r'[\\s()"\\x60]+', "", value).casefold()
+    return re.sub(r'[\s"\x60]+', "", value).casefold()
 
 
 def _postgres_index_valid(bind) -> bool | None:
@@ -91,7 +91,7 @@ def _sqlite_index_valid(bind) -> bool | None:
     ).scalar_one_or_none()
     if definition is None:
         return None
-    normalized = re.sub(r'[\\s"\\x60\\[\\]]+', "", str(definition)).casefold()
+    normalized = re.sub(r'[\s"\x60\[\]]+', "", str(definition)).casefold()
     expected = (
         f"createuniqueindex{CASEFOLD_INDEX_NAME.lower()}on{TABLE_NAME.lower()}"
         "(lower(transaction_id))wheretransaction_id<>''"
