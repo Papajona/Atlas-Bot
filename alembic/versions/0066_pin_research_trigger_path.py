@@ -24,6 +24,7 @@ def upgrade() -> None:
         DO $atlas_research_trigger_path$
         DECLARE
             function_signature text;
+            role_name text;
         BEGIN
             FOREACH function_signature IN ARRAY ARRAY[
                 'public.atlas_research_trial_archive_immutable()',
@@ -46,6 +47,27 @@ def upgrade() -> None:
                     'REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC',
                     function_signature
                 );
+
+                -- PUBLIC revocation removes the inherited default grant; also
+                -- remove any historical direct grants to Supabase API roles.
+                FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+                    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
+                        EXECUTE format(
+                            'REVOKE EXECUTE ON FUNCTION %s FROM %I',
+                            function_signature,
+                            role_name
+                        );
+                        IF has_function_privilege(
+                            role_name,
+                            to_regprocedure(function_signature),
+                            'EXECUTE'
+                        ) THEN
+                            RAISE EXCEPTION
+                                'Supabase API role % retains EXECUTE on internal research trigger function: %',
+                                role_name, function_signature;
+                        END IF;
+                    END IF;
+                END LOOP;
 
                 IF NOT EXISTS (
                     SELECT 1
