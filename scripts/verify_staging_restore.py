@@ -965,7 +965,7 @@ def main() -> int:
     parser.add_argument("--verified-target-project-ref", default="", help="Supabase target ref verified from provider record")
     parser.add_argument("--verified-target-instance-connection-name", default="", help="Cloud SQL instance verified from provider record")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
-    parser.add_argument("--expected-revision", default="0068_tron_sweep_txid_casefold_unique")
+    parser.add_argument("--expected-revision", 0069_customer_equity_history_and_workspace_preferences)
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
     try:
