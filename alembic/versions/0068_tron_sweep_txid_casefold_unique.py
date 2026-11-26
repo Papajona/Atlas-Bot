@@ -1,6 +1,8 @@
 """Enforce case-insensitive uniqueness for TRON sweep transaction hashes."""
 from __future__ import annotations
 
+import re
+
 from alembic import op
 import sqlalchemy as sa
 
@@ -16,11 +18,33 @@ CASEFOLD_INDEX_NAME = "uq_tron_sweep_transaction_id_ci_nonempty"
 NONEMPTY_PREDICATE = sa.text("transaction_id <> ''")
 
 
+def _normalize_postgres_index_expression(value: str | None) -> str:
+    if not value:
+        return ""
+    # pg_get_expr can render varchar/text coercions around either expression.
+    # Remove only those harmless casts, then compare the remaining SQL shape.
+    value = re.sub(
+        r"::(?:character varying|varchar|text)\\b",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r'[\\s()"\\x60]+', "", value).casefold()
+
+
 def _postgres_index_valid(bind) -> bool | None:
-    return bind.execute(
+    row = bind.execute(
         sa.text(
             """
-            SELECT index_data.indisvalid
+            SELECT
+              index_data.indisvalid,
+              index_data.indisready,
+              index_data.indislive,
+              index_data.indisunique,
+              index_data.indnatts,
+              index_data.indnkeyatts,
+              pg_get_expr(index_data.indexprs, table_class.oid) AS index_expression,
+              pg_get_expr(index_data.indpred, table_class.oid) AS index_predicate
             FROM pg_class AS table_class
             JOIN pg_namespace AS table_schema
               ON table_schema.oid = table_class.relnamespace
@@ -41,15 +65,46 @@ def _postgres_index_valid(bind) -> bool | None:
             "table_name": TABLE_NAME,
             "index_name": CASEFOLD_INDEX_NAME,
         },
+    ).mappings().one_or_none()
+    if row is None:
+        return None
+    return bool(
+        row["indisvalid"]
+        and row["indisready"]
+        and row["indislive"]
+        and row["indisunique"]
+        and int(row["indnatts"]) == 1
+        and int(row["indnkeyatts"]) == 1
+        and _normalize_postgres_index_expression(row["index_expression"])
+        == "lowertransaction_id"
+        and _normalize_postgres_index_expression(row["index_predicate"])
+        == "transaction_id<>''"
+    )
+
+
+def _sqlite_index_valid(bind) -> bool | None:
+    definition = bind.execute(
+        sa.text(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :index_name"
+        ),
+        {"index_name": CASEFOLD_INDEX_NAME},
     ).scalar_one_or_none()
+    if definition is None:
+        return None
+    normalized = re.sub(r'[\\s"\\x60\\[\\]]+', "", str(definition)).casefold()
+    expected = (
+        f"createuniqueindex{CASEFOLD_INDEX_NAME.lower()}on{TABLE_NAME.lower()}"
+        "(lower(transaction_id))wheretransaction_id<>''"
+    )
+    return normalized == expected
 
 
-def _reject_legacy_casefold_collisions(bind) -> None:
+def _reject_legacy_casefold_collisions(bind, table_reference: str) -> None:
     collisions = bind.execute(
         sa.text(
             f"""
             SELECT lower(transaction_id) AS normalized_id, COUNT(*) AS row_count
-            FROM {TABLE_NAME}
+            FROM {table_reference}
             WHERE transaction_id <> ''
             GROUP BY lower(transaction_id)
             HAVING COUNT(*) > 1
@@ -78,7 +133,8 @@ def upgrade() -> None:
 
     # Do not silently choose a winner if legacy case-sensitive rows already
     # represent the same on-chain transaction. That requires custody review.
-    _reject_legacy_casefold_collisions(bind)
+    table_reference = f'public.{TABLE_NAME}' if bind.dialect.name == 'postgresql' else TABLE_NAME
+    _reject_legacy_casefold_collisions(bind, table_reference)
 
     indexes = {
         item["name"]
@@ -122,7 +178,14 @@ def upgrade() -> None:
                 )
         return
 
-    if CASEFOLD_INDEX_NAME not in indexes:
+    sqlite_state = _sqlite_index_valid(bind)
+    if sqlite_state is not True:
+        if sqlite_state is False:
+            op.drop_index(
+                CASEFOLD_INDEX_NAME,
+                table_name=TABLE_NAME,
+                schema=schema,
+            )
         op.create_index(
             CASEFOLD_INDEX_NAME,
             TABLE_NAME,
