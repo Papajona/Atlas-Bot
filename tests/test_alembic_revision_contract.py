@@ -78,7 +78,7 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
-    assert expected_alembic_heads(versions) == {"0064_strategy_outcome_recent_index"}
+    assert expected_alembic_heads(versions) == {"0065_tron_sweep_txid_casefold_unique"}
 
 
 def test_production_provisioning_scripts_require_the_current_alembic_head():
