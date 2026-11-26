@@ -5096,15 +5096,52 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
 
 
 def _is_tron_sweep_txid_unique_violation(exc: IntegrityError) -> bool:
-    """Return true only for the case-insensitive TRON sweep txid unique index."""
-    original = getattr(exc, "orig", None)
-    constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
-    if constraint_name:
-        return constraint_name == "uq_tron_sweep_transaction_id_ci_nonempty"
-    message = str(original or exc).lower()
-    return (
-        "unique constraint failed" in message
-        and "uq_tron_sweep_transaction_id_ci_nonempty" in message
+    """Match only the sweep txid index across SQLAlchemy and underlying DBAPI errors."""
+    expected_constraint = "uq_tron_sweep_transaction_id_ci_nonempty"
+    pending = [exc]
+    visited: set[int] = set()
+    constraint_names: set[str] = set()
+    messages: list[str] = []
+
+    # SQLAlchemy's asyncpg adapter wraps the native exception. Inspect the full
+    # exception chain because the native constraint name may live on __cause__,
+    # rather than on the adapter's DBAPI exception or psycopg-style .diag.
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in visited:
+            continue
+        visited.add(id(current))
+
+        constraint_name = getattr(current, "constraint_name", None)
+        if constraint_name:
+            constraint_names.add(str(constraint_name))
+        diagnostic = getattr(current, "diag", None)
+        diagnostic_name = getattr(diagnostic, "constraint_name", None)
+        if diagnostic_name:
+            constraint_names.add(str(diagnostic_name))
+
+        messages.append(str(current).lower())
+        pending.extend(
+            getattr(current, attr, None)
+            for attr in ("orig", "__cause__", "__context__")
+        )
+
+    # Explicit driver metadata is authoritative, including a different named
+    # constraint: never turn an unrelated integrity error into a txid conflict.
+    if constraint_names:
+        return expected_constraint in constraint_names
+
+    # PostgreSQL/asyncpg reports "duplicate key ... violates unique constraint";
+    # SQLite reports "UNIQUE constraint failed". Require both the exact index
+    # name and a uniqueness marker so unrelated failures remain untouched.
+    return any(
+        expected_constraint in message
+        and (
+            "unique constraint" in message
+            or "unique violation" in message
+            or "duplicate key" in message
+        )
+        for message in messages
     )
 
 
