@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 import sqlalchemy as sa
-from sqlalchemy import String, Float, Boolean, DateTime, Integer, BigInteger, Text, UniqueConstraint, Index, Numeric, ForeignKey, ForeignKeyConstraint, event
+from sqlalchemy import String, Float, Boolean, DateTime, Integer, BigInteger, Text, UniqueConstraint, Index, CheckConstraint, Numeric, ForeignKey, ForeignKeyConstraint, event
 from sqlalchemy.engine import make_url
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -717,6 +717,12 @@ class CustomerEquitySnapshot(Base):
 class CustomerWorkspacePreference(Base):
     """Cross-device customer display preferences; deliberately not trading controls."""
     __tablename__ = "customer_workspace_preferences"
+    __table_args__ = (
+        CheckConstraint(
+            "mobile_default_timeframe_days IN (7, 30)",
+            name="ck_customer_workspace_mobile_timeframe",
+        ),
+    )
     customer_id: Mapped[int] = mapped_column(
         ForeignKey("customer_profiles.id", name="fk_customer_workspace_preferences_customer_id", ondelete="CASCADE"),
         primary_key=True,
@@ -724,6 +730,8 @@ class CustomerWorkspacePreference(Base):
     reduce_motion: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     compact_markets: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     touch_feedback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    mobile_default_timeframe_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    mobile_chart_crosshair_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
 
 
