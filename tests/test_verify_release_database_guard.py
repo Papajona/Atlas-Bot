@@ -1,6 +1,7 @@
-"""Safety tests for the disposable release-verification database guard."""
+"Compatibility and safety tests for the disposable release-verification database guard."""
 import pytest
 
+from scripts.normalize_asyncpg_database_url import normalize_asyncpg_database_url
 from scripts.verify_release_database_guard import is_approved_verification_database_url
 
 
@@ -93,11 +94,13 @@ def test_live_money_runtime_verifier_requires_loopback_proxy_before_alembic():
 
     root = Path(__file__).resolve().parents[1]
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
+    normalize = script.index('python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"')
+    export_url = script.index("export DATABASE_URL")
     guard = script.index("python scripts/verify_release_database_guard.py")
     migration = script.index("python -m alembic upgrade head")
     assert "unset ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE" in script
     assert "loopback-bound Cloud SQL Auth Proxy/tunnel" in script
-    assert guard < migration
+    assert normalize < export_url < guard < migration
 
 
 def test_live_money_runtime_verifier_normalizes_legacy_postgres_urls_for_async_alembic():
@@ -107,13 +110,54 @@ def test_live_money_runtime_verifier_normalizes_legacy_postgres_urls_for_async_a
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
     docs = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
 
-    normal_postgresql = script.index('DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgresql://}"')
-    normal_postgres = script.index('DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgres://}"')
+    normalize = script.index('python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"')
     export_url = script.index("export DATABASE_URL")
     guard = script.index("python scripts/verify_release_database_guard.py")
     migration = script.index("python -m alembic upgrade head")
 
-    assert script.index("postgresql+asyncpg://*)") < normal_postgresql < export_url < guard < migration
-    assert script.index("postgres://*)") < normal_postgres < export_url
+    assert normalize < export_url < guard < migration
     assert "DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@127.0.0.1:5432/DB" in docs
     assert "DATABASE_URL=postgresql://" not in docs
+
+
+@pytest.mark.parametrize(
+    ("database_url", "expected"),
+    [
+        (
+            "postgresql://atlas:secret@127.0.0.1:5432/verify?sslmode=require",
+            "postgresql+asyncpg://atlas:secret@127.0.0.1:5432/verify?ssl=require",
+        ),
+        (
+            "postgres://atlas:secret@localhost:5432/verify?sslmode=verify-full&application_name=atlas",
+            "postgresql+asyncpg://atlas:secret@localhost:5432/verify?ssl=verify-full&application_name=atlas",
+        ),
+        (
+            "postgresql+asyncpg://atlas:secret@localhost:5432/verify?ssl=prefer",
+            "postgresql+asyncpg://atlas:secret@localhost:5432/verify?ssl=prefer",
+        ),
+    ],
+)
+def test_asyncpg_database_url_normalizer_preserves_ssl_mode(database_url, expected):
+    assert normalize_asyncpg_database_url(database_url) == expected
+
+
+@pytest.mark.parametrize("sslmode", ["disable", "allow", "prefer", "require", "verify-ca", "verify-full"])
+def test_asyncpg_database_url_normalizer_maps_all_libpq_ssl_modes(sslmode):
+    normalized = normalize_asyncpg_database_url(
+        f"postgresql://atlas:secret@localhost/verify?sslmode={sslmode}"
+    )
+    assert normalized.endswith(f"?ssl={sslmode}")
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql://atlas:secret@localhost/verify?sslmode=require&ssl=disable",
+        "postgresql://atlas:secret@localhost/verify?sslmode=require&sslmode=disable",
+        "postgresql://atlas:secret@localhost/verify?sslmode=invalid",
+        "mysql://atlas:secret@localhost/verify?sslmode=require",
+    ],
+)
+def test_asyncpg_database_url_normalizer_rejects_ambiguous_or_unsupported_ssl(database_url):
+    with pytest.raises(ValueError):
+        normalize_asyncpg_database_url(database_url)
