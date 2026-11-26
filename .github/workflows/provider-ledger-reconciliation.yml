@@ -112,7 +112,7 @@ jobs:
             --from-utc "$FROM_UTC" \
             --to-utc "$TO_UTC" \
             --expected-audit-role "$EXPECTED_AUDIT_DB_ROLE" \
-            --expected-revision 0065_ledger_trigger_owner_isolation \
+            --expected-revision 0066_pin_research_trigger_path \
             --output "$RUNNER_TEMP/provider-ledger-reconciliation.json"
       - name: Archive restricted reconciliation report even if a mismatch is found
         if: always()
