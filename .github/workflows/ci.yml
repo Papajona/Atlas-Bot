@@ -500,6 +500,71 @@ jobs:
           SQL
           python -m alembic upgrade head
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          DO $verify_service_role_public_acl$
+          DECLARE
+              profile_sequence text := pg_get_serial_sequence('public.customer_profiles', 'id');
+          BEGIN
+              IF profile_sequence IS DISTINCT FROM 'public.customer_profiles_id_seq' THEN
+                  RAISE EXCEPTION 'customer_profiles.id sequence mismatch: %', profile_sequence;
+              END IF;
+
+              IF NOT has_table_privilege('service_role', 'public.customer_profiles', 'SELECT')
+                 OR NOT has_table_privilege('service_role', 'public.customer_profiles', 'INSERT')
+                 OR has_table_privilege('service_role', 'public.customer_profiles', 'UPDATE')
+                 OR has_table_privilege('service_role', 'public.customer_profiles', 'DELETE')
+                 OR has_table_privilege('service_role', 'public.customer_profiles', 'TRUNCATE')
+                 OR has_table_privilege('service_role', 'public.customer_profiles', 'REFERENCES')
+                 OR has_table_privilege('service_role', 'public.customer_profiles', 'TRIGGER')
+                 OR has_table_privilege('service_role', 'public.customer_profiles', 'MAINTAIN') THEN
+                  RAISE EXCEPTION 'service_role customer_profiles grants are not exactly SELECT, INSERT';
+              END IF;
+
+              IF EXISTS (
+                  SELECT 1
+                  FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'public'
+                    AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                    AND c.oid <> to_regclass('public.customer_profiles')
+                    AND (
+                        has_table_privilege('service_role', c.oid, 'SELECT')
+                        OR has_table_privilege('service_role', c.oid, 'INSERT')
+                        OR has_table_privilege('service_role', c.oid, 'UPDATE')
+                        OR has_table_privilege('service_role', c.oid, 'DELETE')
+                        OR has_table_privilege('service_role', c.oid, 'TRUNCATE')
+                        OR has_table_privilege('service_role', c.oid, 'REFERENCES')
+                        OR has_table_privilege('service_role', c.oid, 'TRIGGER')
+                        OR has_table_privilege('service_role', c.oid, 'MAINTAIN')
+                    )
+              ) THEN
+                  RAISE EXCEPTION 'service_role retains privileges on another public relation';
+              END IF;
+
+              IF NOT has_sequence_privilege('service_role', profile_sequence, 'USAGE')
+                 OR NOT has_sequence_privilege('service_role', profile_sequence, 'SELECT')
+                 OR has_sequence_privilege('service_role', profile_sequence, 'UPDATE') THEN
+                  RAISE EXCEPTION 'service_role customer_profiles sequence grants are not exactly USAGE, SELECT';
+              END IF;
+
+              IF EXISTS (
+                  SELECT 1
+                  FROM pg_class c
+                  JOIN pg_namespace n ON n.oid = c.relnamespace
+                  WHERE n.nspname = 'public'
+                    AND c.relkind = 'S'
+                    AND c.oid <> to_regclass('public.customer_profiles_id_seq')
+                    AND (
+                        has_sequence_privilege('service_role', c.oid, 'USAGE')
+                        OR has_sequence_privilege('service_role', c.oid, 'SELECT')
+                        OR has_sequence_privilege('service_role', c.oid, 'UPDATE')
+                    )
+              ) THEN
+                  RAISE EXCEPTION 'service_role retains privileges on another public sequence';
+              END IF;
+          END
+          $verify_service_role_public_acl$;
+          SQL
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           DO $verify_delegated_internal_function_grants$
           BEGIN
               IF has_function_privilege(
