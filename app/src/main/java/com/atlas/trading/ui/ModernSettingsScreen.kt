@@ -29,10 +29,14 @@ fun ModernSettingsScreen(
     userEmail: String = "Unavailable until account sign-in",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {},
+    planName: String? = null,
+    subscriptionStatus: String? = null,
+    onSignOut: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    // Preferences State
-    var isPaperTrading by remember { mutableStateOf(true) }
+    // Remaining controls in this screen are local UI previews only; execution policy
+    // and authorization are enforced by the backend.
+
     var riskBudgetPct by remember { mutableStateOf("0.5%") }
     var autoTrailingStop by remember { mutableStateOf(true) }
     var costStressFilter by remember { mutableStateOf(true) }
@@ -87,6 +91,12 @@ fun ModernSettingsScreen(
                 Text(
                     text = "Account, risk discipline, theme & security",
                     fontSize = 13.sp,
+                    color = textMuted
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Preference controls on this screen are local previews and do not change backend execution settings.",
+                    fontSize = 11.sp,
                     color = textMuted
                 )
             }
@@ -186,13 +196,29 @@ fun ModernSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text(text = "Account Tier", fontSize = 11.sp, color = textMuted)
-                            Text(text = "Tier 1 Multi-Asset Access", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+                            Text(text = "Subscription plan", fontSize = 11.sp, color = textMuted)
+                            Text(text = planName ?: "Unavailable", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+                            Text(
+                                text = "Status: ${subscriptionStatus ?: "Unavailable"}",
+                                fontSize = 10.sp,
+                                color = textMuted
+                            )
                         }
 
                         Column(horizontalAlignment = Alignment.End) {
-                            Text(text = "Trader ID", fontSize = 11.sp, color = textMuted)
-                            Text(text = "Unavailable", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
+                            Text(text = "Customer ID", fontSize = 11.sp, color = textMuted)
+                            Text(text = "Not exposed", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
+                        }
+                    }
+                    if (onSignOut != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(
+                            onClick = onSignOut,
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Sign out", color = brandTeal, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -210,10 +236,11 @@ fun ModernSettingsScreen(
                 SettingsSwitchRow(
                     icon = Icons.Default.PlayArrow,
                     iconTint = brandTeal,
-                    title = "Paper Trading Simulation",
-                    subtitle = if (isPaperTrading) "Safe demo execution (Zero financial risk)" else "Live order routing active",
-                    checked = isPaperTrading,
-                    onCheckedChange = { isPaperTrading = it },
+                    title = "Paper Trading Mode",
+                    subtitle = "Enforced by backend safety settings; live trading and payouts remain disabled",
+                    checked = true,
+                    onCheckedChange = {},
+                    enabled = false,
                     textPrimary = textPrimary,
                     textMuted = textMuted
                 )
@@ -668,12 +695,13 @@ private fun SettingsSwitchRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     textPrimary: Color,
-    textMuted: Color
+    textMuted: Color,
+    enabled: Boolean = true
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
+            .clickable(enabled = enabled) { onCheckedChange(!checked) }
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -700,6 +728,7 @@ private fun SettingsSwitchRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
+            enabled = enabled,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = Color(0xFF0D9488)

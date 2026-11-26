@@ -118,6 +118,11 @@ class CustomerAuthClient(
         return Session(token, json.optString("refresh_token").takeIf { it.isNotBlank() && it != "null" })
     }
 
+    suspend fun logout(accessToken: String) {
+        require(accessToken.isNotBlank()) { "Customer sign-in is required to sign out" }
+        requestJson("/api/auth/logout", accessToken, JSONObject())
+    }
+
     suspend fun provisionProfile(accessToken: String): String {
         val json = requestJson("/api/auth/profile/provision", accessToken, JSONObject())
         val status = json.optString("status").takeIf { it.isNotBlank() && it != "null" }

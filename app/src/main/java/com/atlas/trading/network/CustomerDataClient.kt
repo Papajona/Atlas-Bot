@@ -40,7 +40,9 @@ class CustomerDataClient(
         val portfolioUnavailableReason: String?,
         val marketUnavailableReason: String?,
         val recentTrades: List<RecentTrade> = emptyList(),
-        val recentTradesUnavailableReason: String? = null
+        val recentTradesUnavailableReason: String? = null,
+        val planName: String? = null,
+        val subscriptionStatus: String? = null
     )
 
     suspend fun loadSnapshot(accessToken: String): Snapshot = withContext(Dispatchers.IO) {
@@ -53,6 +55,7 @@ class CustomerDataClient(
             accessToken
         )
         val recentTradesResult = requestJson("/api/customer/trades/recent?limit=20", accessToken)
+        val billingResult = requestJson("/api/customer/billing", accessToken)
 
         val profile = profileResult.body?.let(::parseProfile)
         val portfolio = portfolioResult.body?.let(::parsePortfolio)
@@ -68,7 +71,11 @@ class CustomerDataClient(
             recentTrades = recentTrades,
             recentTradesUnavailableReason = if (recentTradesResult.body == null) {
                 recentTradesResult.error ?: "Recent trade history unavailable"
-            } else null
+            } else null,
+            planName = billingResult.body?.optJSONObject("plan")
+                ?.optString("name")?.takeIf { it.isNotBlank() && it != "null" },
+            subscriptionStatus = billingResult.body?.optJSONObject("subscription")
+                ?.optString("status")?.takeIf { it.isNotBlank() && it != "null" }
         )
     }
 

@@ -484,6 +484,31 @@ fun UserDashboardScreen(
                         userEmail = customerSnapshot?.profile?.email ?: "Unavailable until account sign-in",
                         onOpenOperatorConsole = onOpenOperatorConsole,
                         onOpenPortal = onOpenPortal,
+                        planName = customerSnapshot?.planName,
+                        subscriptionStatus = customerSnapshot?.subscriptionStatus,
+                        onSignOut = {
+                            customerAuthScope.launch {
+                                val token = activeCustomerToken
+                                try {
+                                    if (!token.isNullOrBlank() && backendUrl.isNotBlank()) {
+                                        CustomerAuthClient(backendUrl).logout(token)
+                                    }
+                                } catch (_: Exception) {
+                                    // Always clear this device's bearer token even when the
+                                    // best-effort remote revocation endpoint cannot be reached.
+                                    customerInfoMessage = "Signed out on this device. Remote token revocation could not be confirmed."
+                                }
+                                activeCustomerToken = null
+                                customerSnapshot = null
+                                customerMfaSetupSecret = null
+                                customerMfaChallenge = null
+                                pendingCustomerSession = null
+                                if (customerInfoMessage == null) {
+                                    customerInfoMessage = "Signed out on this device."
+                                }
+                                currentTab = DashboardTab.HOME
+                            }
+                        },
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
