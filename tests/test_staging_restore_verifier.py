@@ -319,7 +319,7 @@ def _valid_customer_paper_tenant_policies():
         }
         for table in (
             "accounts", "journals", "journal_lines", "orders", "fills",
-            "order_events", "position_events",
+            "order_events", "position_events", "equity_snapshots", "workspace_preferences",
         )
     ]
 
@@ -343,8 +343,8 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
         "customer_paper_schema_present": True,
         "customer_paper_tables_missing": [],
         "customer_paper_tables_without_forced_rls": 0,
-        "customer_paper_policy_count": 9,
-        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_policy_count": 11,
+        "customer_paper_tenant_policy_count": 9,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
@@ -354,8 +354,8 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
         "customer_paper_runtime_schema_create": False,
         "customer_paper_runtime_public_schema_usage": False,
         "customer_paper_runtime_invalid_table_privileges": 0,
-        "customer_paper_runtime_sequences": 4,
-        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences": 5,
+        "customer_paper_runtime_sequences_with_usage": 5,
         "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
         "customer_paper_runtime_public_financial_privileges": 0,
     }
@@ -366,9 +366,10 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
         "customer_paper_schema_present": False,
         "customer_paper_tables_missing": [
             "accounts", "journals", "journal_lines", "orders", "fills",
-            "order_events", "position_events", "market_bar_budgets", "market_bar_allocations",
+            "order_events", "position_events", "equity_snapshots", "workspace_preferences",
+            "market_bar_budgets", "market_bar_allocations",
         ],
-        "customer_paper_tables_without_forced_rls": 9,
+        "customer_paper_tables_without_forced_rls": 11,
         "customer_paper_policy_count": 0,
         "customer_paper_tenant_policy_count": 0,
         "customer_paper_backend_policy_count": 0,
@@ -377,8 +378,8 @@ def test_restore_audit_requires_complete_customer_paper_schema_and_rls_policies(
     assert "customer_paper schema is missing" in failures
     assert "required customer-paper table missing: accounts" in failures
     assert "customer_paper_tables_without_forced_rls expected 0, observed 9" in failures
-    assert "customer_paper_policy_count expected 9, observed 0" in failures
-    assert "customer_paper_tenant_policy_count expected 7, observed 0" in failures
+    assert "customer_paper_policy_count expected 11, observed 0" in failures
+    assert "customer_paper_tenant_policy_count expected 9, observed 0" in failures
     assert "customer_paper_backend_policy_count expected 2, observed 0" in failures
 
 
@@ -391,7 +392,7 @@ def test_restore_audit_rejects_malformed_customer_paper_catalog_observations():
         "customer_paper_tables_missing": "accounts",
         "customer_paper_tables_without_forced_rls": "invalid",
         "customer_paper_policy_count": None,
-        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_tenant_policy_count": 9,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
@@ -409,8 +410,8 @@ def test_customer_paper_restore_audit_rejects_unsafe_runtime_role_and_acl():
         "customer_paper_schema_present": True,
         "customer_paper_tables_missing": [],
         "customer_paper_tables_without_forced_rls": 0,
-        "customer_paper_policy_count": 9,
-        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_policy_count": 11,
+        "customer_paper_tenant_policy_count": 9,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
@@ -420,8 +421,8 @@ def test_customer_paper_restore_audit_rejects_unsafe_runtime_role_and_acl():
         "customer_paper_runtime_schema_create": False,
         "customer_paper_runtime_public_schema_usage": False,
         "customer_paper_runtime_invalid_table_privileges": 0,
-        "customer_paper_runtime_sequences": 4,
-        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences": 5,
+        "customer_paper_runtime_sequences_with_usage": 5,
         "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
         "customer_paper_runtime_public_financial_privileges": 0,
     }
@@ -451,8 +452,8 @@ def test_customer_paper_restore_audit_rejects_malformed_missing_table_names():
         "customer_paper_schema_present": True,
         "customer_paper_tables_missing": [None],
         "customer_paper_tables_without_forced_rls": 0,
-        "customer_paper_policy_count": 9,
-        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_policy_count": 11,
+        "customer_paper_tenant_policy_count": 9,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
@@ -522,8 +523,8 @@ def test_customer_paper_restore_audit_rejects_non_integer_counts(count_key, inva
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
         "customer_paper_tables_without_forced_rls": 0,
-        "customer_paper_policy_count": 9,
-        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_policy_count": 11,
+        "customer_paper_tenant_policy_count": 9,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_wrong_policy_role_count": 0,
         "customer_paper_runtime_role_valid": True,
@@ -531,8 +532,8 @@ def test_customer_paper_restore_audit_rejects_non_integer_counts(count_key, inva
         "customer_paper_runtime_schema_create": False,
         "customer_paper_runtime_public_schema_usage": False,
         "customer_paper_runtime_invalid_table_privileges": 0,
-        "customer_paper_runtime_sequences": 4,
-        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences": 5,
+        "customer_paper_runtime_sequences_with_usage": 5,
         "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
         "customer_paper_runtime_public_financial_privileges": 0,
     }
@@ -655,8 +656,8 @@ def test_restore_audit_rejects_a_maintain_only_public_financial_grant():
         "customer_paper_schema_present": True,
         "customer_paper_tables_missing": [],
         "customer_paper_tables_without_forced_rls": 0,
-        "customer_paper_policy_count": 9,
-        "customer_paper_tenant_policy_count": 7,
+        "customer_paper_policy_count": 11,
+        "customer_paper_tenant_policy_count": 9,
         "customer_paper_backend_policy_count": 2,
         "customer_paper_tenant_policies": _valid_customer_paper_tenant_policies(),
         "customer_paper_backend_policies": _valid_customer_paper_backend_policies(),
@@ -666,8 +667,8 @@ def test_restore_audit_rejects_a_maintain_only_public_financial_grant():
         "customer_paper_runtime_schema_create": False,
         "customer_paper_runtime_public_schema_usage": False,
         "customer_paper_runtime_invalid_table_privileges": 0,
-        "customer_paper_runtime_sequences": 4,
-        "customer_paper_runtime_sequences_with_usage": 4,
+        "customer_paper_runtime_sequences": 5,
+        "customer_paper_runtime_sequences_with_usage": 5,
         "customer_paper_runtime_sequences_with_forbidden_privileges": 0,
         # A MAINTAIN-only grant is included in this forbidden effective-privilege count.
         "customer_paper_runtime_public_financial_privileges": 1,
