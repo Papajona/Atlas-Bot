@@ -437,7 +437,8 @@ def test_supabase_service_role_existing_public_grants_are_restricted():
     assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public" not in migration
     assert "FROM pg_default_acl" in migration
     assert "aclexplode(defaults.defaclacl)" in migration
-    assert "acl.grantee = service_role_oid" in migration
+    assert "acl.grantee IN (service_role_oid, 0)" in migration
+    assert "COALESCE(grantee_role.rolname, 'PUBLIC')" in migration
     assert "0067 refuses to continue" in migration
     assert "current_setting('server_version_num')::integer >= 170000" in migration
     assert "EXECUTE $atlas_service_role_maintain_check$" in migration
