@@ -1,0 +1,4 @@
+# Keep platform JWT verification enabled for customer provisioning.
+# The Edge Function also enforces AAL2, confirmed email, and a verified TOTP factor.
+[functions.customer-profile-provision]
+verify_jwt = true
