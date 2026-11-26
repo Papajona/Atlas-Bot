@@ -2,8 +2,10 @@ package com.atlas.trading.network
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -35,6 +37,10 @@ class CustomerDataClient(
     data class EquityHistoryPoint(
         val observedAt: String,
         val equity: Double
+    )
+    data class WorkspacePreferences(
+        val defaultChartWindowDays: Int,
+        val chartCrosshairEnabled: Boolean
     )
     data class Snapshot(
         val profile: Profile?,
@@ -107,6 +113,69 @@ class CustomerDataClient(
         )
     }
 
+    suspend fun loadWorkspacePreferences(accessToken: String): WorkspacePreferences =
+        withContext(Dispatchers.IO) {
+            require(accessToken.isNotBlank()) { "Customer sign-in is required to load preferences" }
+            val result = requestJson("/api/customer/workspace-preferences", accessToken)
+            val body = result.body ?: throw IllegalStateException(
+                result.error ?: "Workspace preferences are unavailable"
+            )
+            parseWorkspacePreferences(body)
+        }
+
+    suspend fun updateWorkspacePreferences(
+        accessToken: String,
+        defaultChartWindowDays: Int? = null,
+        chartCrosshairEnabled: Boolean? = null
+    ): WorkspacePreferences = withContext(Dispatchers.IO) {
+        require(accessToken.isNotBlank()) { "Customer sign-in is required to save preferences" }
+        require(defaultChartWindowDays == null || defaultChartWindowDays in setOf(7, 30)) {
+            "Default chart window must be 7 or 30 days"
+        }
+        require(defaultChartWindowDays != null || chartCrosshairEnabled != null) {
+            "At least one chart preference must be provided"
+        }
+        val payload = JSONObject()
+        defaultChartWindowDays?.let { payload.put("mobile_default_timeframe_days", it) }
+        chartCrosshairEnabled?.let { payload.put("mobile_chart_crosshair_enabled", it) }
+        val result = requestPatchJson(
+            "/api/customer/workspace-preferences",
+            accessToken,
+            payload
+        )
+        val body = result.body ?: throw IllegalStateException(
+            result.error ?: "Workspace preferences could not be saved"
+        )
+        parseWorkspacePreferences(body)
+    }
+
+    private fun requestPatchJson(path: String, token: String, payload: JSONObject): JsonResult {
+        return try {
+            val requestBody = payload.toString().toRequestBody(
+                "application/json; charset=utf-8".toMediaType()
+            )
+            val request = Request.Builder()
+                .url(baseUrl.trimEnd('/') + path)
+                .patch(requestBody)
+                .header("Accept", "application/json")
+                .header("Authorization", "Bearer $token")
+                .header("Content-Type", "application/json")
+                .build()
+            http.newCall(request).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                if (!response.isSuccessful) {
+                    JsonResult(null, "Unavailable (HTTP ${response.code})")
+                } else {
+                    val json = runCatching { JSONObject(raw) }.getOrNull()
+                    if (json == null) JsonResult(null, "Unavailable (invalid server response)")
+                    else JsonResult(json, null)
+                }
+            }
+        } catch (_: Exception) {
+            JsonResult(null, "Unavailable (server could not be reached)")
+        }
+    }
+
     private data class JsonResult(val body: JSONObject?, val error: String?)
 
     private fun requestJson(path: String, token: String): JsonResult {
@@ -133,6 +202,22 @@ class CustomerDataClient(
     }
 
     companion object {
+        internal fun parseWorkspacePreferences(json: JSONObject): WorkspacePreferences {
+            val preferences = json.optJSONObject("preferences")
+                ?: throw IllegalArgumentException("Workspace preferences response is invalid")
+            val days = preferences.optInt("mobile_default_timeframe_days", 30)
+            if (days !in setOf(7, 30)) {
+                throw IllegalArgumentException("Server returned an unsupported chart window")
+            }
+            return WorkspacePreferences(
+                defaultChartWindowDays = days,
+                chartCrosshairEnabled = preferences.optBoolean(
+                    "mobile_chart_crosshair_enabled",
+                    true
+                )
+            )
+        }
+
         internal fun parseProfile(json: JSONObject): Profile = Profile(
             displayName = json.optString("display_name").takeIf { it.isNotBlank() && it != "null" },
             email = json.optString("email").takeIf { it.isNotBlank() && it != "null" }
