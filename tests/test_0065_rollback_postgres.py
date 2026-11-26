@@ -699,6 +699,7 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
         "public.atlas_research_holdout_registry_immutable()",
     )
     created_roles: list[str] = []
+    granted_privileges: list[tuple[str, str]] = []
 
     async def grant_direct_execution() -> None:
         connection = await asyncpg.connect(dsn=dsn)
@@ -712,15 +713,35 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
                     await connection.execute(f"CREATE ROLE {role_name} NOLOGIN")
                     created_roles.append(role_name)
                 for signature in trigger_functions:
+                    already_can_execute = await connection.fetchval(
+                        """
+                        SELECT has_function_privilege(
+                            $1::name,
+                            to_regprocedure($2)::oid,
+                            'EXECUTE'
+                        )
+                        """,
+                        role_name,
+                        signature,
+                    )
+                    assert already_can_execute is False, (
+                        f"0065 baseline unexpectedly grants {role_name} EXECUTE "
+                        f"on {signature}; refusing to overwrite pre-existing access"
+                    )
                     await connection.execute(
                         f"GRANT EXECUTE ON FUNCTION {signature} TO {role_name}"
                     )
+                    granted_privileges.append((role_name, signature))
         finally:
             await connection.close()
 
     async def assert_execution_revoked() -> None:
         connection = await asyncpg.connect(dsn=dsn)
         try:
+            revision = await connection.fetchval(
+                "SELECT version_num FROM public.alembic_version"
+            )
+            assert revision == "0066_pin_research_trigger_path", revision
             for role_name in api_roles:
                 for signature in trigger_functions:
                     can_execute = await connection.fetchval(
@@ -743,18 +764,24 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
     async def cleanup_created_roles() -> None:
         connection = await asyncpg.connect(dsn=dsn)
         try:
-            for role_name in api_roles:
+            # Revoke only privileges this test actually introduced. In
+            # particular, never remove an operator's pre-existing API-role ACL.
+            for role_name, signature in granted_privileges:
                 exists = await connection.fetchval(
                     "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
                     role_name,
                 )
-                if not exists:
-                    continue
-                for signature in trigger_functions:
+                if exists:
                     await connection.execute(
                         f"REVOKE EXECUTE ON FUNCTION {signature} FROM {role_name}"
                     )
-                if role_name in created_roles:
+
+            for role_name in created_roles:
+                exists = await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                    role_name,
+                )
+                if exists:
                     await connection.execute(f"DROP ROLE {role_name}")
         finally:
             await connection.close()
@@ -770,7 +797,9 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
         _run_alembic(env, "downgrade", "0065_ledger_trigger_owner_isolation")
         asyncio.run(grant_direct_execution())
 
-        _run_alembic(env, "upgrade", "head")
+        # Upgrade only through 0066 so no later migration can mask a
+        # missing direct-grant revoke in the revision under test.
+        _run_alembic(env, "upgrade", "0066_pin_research_trigger_path")
         asyncio.run(assert_execution_revoked())
     finally:
         try:

@@ -7,6 +7,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _customer_profile_provision_jwt_verification_enabled(config_text: str) -> bool:
+    config = tomllib.loads(config_text)
+    functions = config.get("functions", {})
+    if not isinstance(functions, dict):
+        return False
+    function_config = functions.get("customer-profile-provision", {})
+    return (
+        isinstance(function_config, dict)
+        and function_config.get("verify_jwt") is True
+    )
+
+
 def test_android_release_never_uses_debug_keystore():
     src = (ROOT / "app" / "build.gradle.kts").read_text()
     release = src[src.index('release {'):]
@@ -1125,9 +1137,31 @@ def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles(
 
 
 def test_customer_profile_provision_edge_function_keeps_platform_jwt_verification_enabled():
-    config = tomllib.loads(
-        (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
+    config_text = (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
+    assert _customer_profile_provision_jwt_verification_enabled(config_text)
+
+
+def test_customer_profile_provision_jwt_guard_does_not_read_another_function_setting():
+    unsafe_configs = (
+        """
+[functions.customer-profile-provision]
+verify_jwt = false
+
+[functions.unrelated-public-function]
+verify_jwt = true
+""",
+        """
+[functions.unrelated-public-function]
+verify_jwt = true
+""",
+        """
+[functions.customer-profile-provision]
+verify_jwt = \"true\"
+
+[functions.unrelated-public-function]
+verify_jwt = true
+""",
     )
-    function_config = config.get("functions", {}).get("customer-profile-provision", {})
-    assert function_config.get("verify_jwt") is True
+    for config_text in unsafe_configs:
+        assert not _customer_profile_provision_jwt_verification_enabled(config_text)
 
