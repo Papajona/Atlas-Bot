@@ -98,3 +98,22 @@ def test_live_money_runtime_verifier_requires_loopback_proxy_before_alembic():
     assert "unset ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE" in script
     assert "loopback-bound Cloud SQL Auth Proxy/tunnel" in script
     assert guard < migration
+
+
+def test_live_money_runtime_verifier_normalizes_legacy_postgres_urls_for_async_alembic():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
+    docs = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
+
+    normal_postgresql = script.index('DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgresql://}"')
+    normal_postgres = script.index('DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgres://}"')
+    export_url = script.index("export DATABASE_URL")
+    guard = script.index("python scripts/verify_release_database_guard.py")
+    migration = script.index("python -m alembic upgrade head")
+
+    assert script.index("postgresql+asyncpg://*)") < normal_postgresql < export_url < guard < migration
+    assert script.index("postgres://*)") < normal_postgres < export_url
+    assert "DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@127.0.0.1:5432/DB" in docs
+    assert "DATABASE_URL=postgresql://" not in docs
