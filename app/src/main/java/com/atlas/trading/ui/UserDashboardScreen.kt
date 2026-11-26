@@ -463,10 +463,15 @@ fun UserDashboardScreen(
                                         color = textPrimary
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
+                                    val scannerMessage = when (selectedAssetClass) {
+                                        AssetClass.FOREX -> "FX quotes are not available from this scanner. The customer market-scanner endpoint currently provides crypto-only market data."
+                                        AssetClass.COMMODITIES -> "Commodity quotes are not available from this scanner. A verified Deriv/OANDA market-data integration is required."
+                                        else -> customerSnapshot?.marketQuotes?.takeIf { it.isNotEmpty() }?.joinToString("\n") {
+                                            "${it.symbol}: ${it.price} • ${it.signal}"
+                                        } ?: "Crypto market data unavailable. Sign in to an authorized customer account and confirm the market-scanner entitlement and provider."
+                                    }
                                     Text(
-                                        text = customerSnapshot?.marketQuotes?.takeIf { it.isNotEmpty() }?.joinToString("\n") {
-                                    "${it.symbol}: ${it.price} • ${it.signal}"
-                                } ?: "Live market data unavailable. Sign in to an authorized customer account and ensure the market-scanner entitlement and provider are available.",
+                                        text = scannerMessage,
                                         fontSize = 13.sp,
                                         color = textMuted,
                                         lineHeight = 22.sp
@@ -1356,20 +1361,41 @@ private fun WatchlistCard(
                 color = textPrimary
             )
             Spacer(modifier = Modifier.height(8.dp))
-            if (marketQuotes.isEmpty()) {
-                Text(
-                    "Live prices unavailable — sign in to an authorized customer account and confirm market-scanner access. No placeholder prices are shown.",
+            when (selectedAssetClass) {
+                AssetClass.FOREX -> Text(
+                    "FX prices are unavailable from this crypto-only scanner. A verified Deriv/OANDA feed is required.",
                     fontSize = 12.sp,
                     color = textMuted
                 )
-            } else {
-                marketQuotes.forEach { quote ->
-                    Text(
-                        "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
-                        fontSize = 13.sp,
-                        color = textPrimary,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
+                AssetClass.COMMODITIES -> Text(
+                    "Commodity prices are unavailable from this scanner until a verified Deriv/OANDA market-data feed is connected.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+                else -> {
+                    if (selectedAssetClass == AssetClass.ALL) {
+                        Text(
+                            "Showing the supported crypto feed. FX and commodities are not yet connected to this scanner.",
+                            fontSize = 10.sp,
+                            color = textMuted
+                        )
+                    }
+                    if (marketQuotes.isEmpty()) {
+                        Text(
+                            "Crypto prices unavailable — sign in to an authorized customer account and confirm market-scanner access. No placeholder prices are shown.",
+                            fontSize = 12.sp,
+                            color = textMuted
+                        )
+                    } else {
+                        marketQuotes.forEach { quote ->
+                            Text(
+                                "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                                fontSize = 13.sp,
+                                color = textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
