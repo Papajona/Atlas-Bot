@@ -231,30 +231,17 @@ function renderPerformance(journals){
   const rows=journals.filter(j=>(j.type==='TRADE_SETTLEMENT'||j.type==='TRADING_FEE')&&Date.parse(j.at)>=cutoff).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
   box.replaceChildren();
   if(!rows.length){
-    // If no closed trades in DB yet, show the calibrated 30-day trend curve
-    renderMock30DayCurve(box, sub, perfDays);
+    sub.textContent='No persisted trade-settlement history is available for this period. Total historical equity is not yet verified.';
+    const empty=document.createElement('div');
+    empty.className='chart-empty';
+    empty.textContent='Verified performance history is not available yet.';
+    box.appendChild(empty);
     return;
   }
   let run=0;
   const points=rows.map(j=>{run+=j.net;return {at:j.at,v:run};});
   const total=run,vals=points.map(x=>x.v),min=Math.min(0,...vals),max=Math.max(0,...vals),range=Math.max(max-min,1),w=720,h=210,pad=18;
-  sub.textContent='Net '+fmtUsd(total,true)+' realised after fees ('+perfDays+' days). Deposits and withdrawals are excluded.';
-  drawRechartsAreaChart(box, points, min, range, total, w, h, pad);
-}
-
-function renderMock30DayCurve(box, sub, days) {
-  const count = days === 7 ? 7 : 30;
-  const changes = [
-    4.20, 8.50, -3.10, 6.40, 12.30, -5.20, 9.10,
-    14.50, -4.80, 11.20, 7.60, -6.10, 18.40, 10.50,
-    -7.20, 15.30, 8.90, -4.50, 13.20, 16.80, -8.10,
-    12.40, 9.50, -3.80, 14.60, 17.20, -5.40, 12.80,
-    10.60, 9.50
-  ].slice(-count);
-  let run = 0;
-  const points = changes.map((c, i) => { run += c; return { at: `Day ${i+1}`, v: run }; });
-  const total = run, vals = points.map(x=>x.v), min = Math.min(0, ...vals), max = Math.max(0, ...vals), range = Math.max(max - min, 1), w = 720, h = 210, pad = 18;
-  sub.textContent = 'Simulated net +' + fmtUsd(total, false) + ' realised profit trend (' + days + ' days). 2.0x cost stress active.';
+  sub.textContent='Net realised trading P&L '+fmtUsd(total,true)+' after fees ('+perfDays+' days). Ledger-derived; deposits and withdrawals excluded. This is not total portfolio equity.';
   drawRechartsAreaChart(box, points, min, range, total, w, h, pad);
 }
 
