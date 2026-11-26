@@ -56,6 +56,63 @@ class CustomerDataClientTest {
     }
 
     @Test
+    fun workspacePreferencesParserAppliesSafeChartDefaultsAndValidation() {
+        val preferences = CustomerDataClient.parseWorkspacePreferences(
+            JSONObject("""{"preferences":{"mobile_default_timeframe_days":7,"mobile_chart_crosshair_enabled":false}}""")
+        )
+        assertEquals(7, preferences.defaultChartWindowDays)
+        assertEquals(false, preferences.chartCrosshairEnabled)
+
+        val defaults = CustomerDataClient.parseWorkspacePreferences(
+            JSONObject("""{"preferences":{}}""")
+        )
+        assertEquals(30, defaults.defaultChartWindowDays)
+        assertEquals(true, defaults.chartCrosshairEnabled)
+    }
+
+    @Test
+    fun chartWorkspacePreferencesAreLoadedAndSavedForAuthenticatedCustomer() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"scope":"customer_only","configured":true,"preferences":{"mobile_default_timeframe_days":7,"mobile_chart_crosshair_enabled":false}}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"scope":"customer_only","configured":true,"preferences":{"mobile_default_timeframe_days":30,"mobile_chart_crosshair_enabled":true}}"""
+        ))
+        server.start()
+        try {
+            val client = CustomerDataClient(server.url("/").toString())
+            val loaded = client.loadWorkspacePreferences("test-customer-token")
+            assertEquals(7, loaded.defaultChartWindowDays)
+            assertEquals(false, loaded.chartCrosshairEnabled)
+
+            val saved = client.updateWorkspacePreferences(
+                "test-customer-token",
+                defaultChartWindowDays = 30,
+                chartCrosshairEnabled = true
+            )
+            assertEquals(30, saved.defaultChartWindowDays)
+            assertEquals(true, saved.chartCrosshairEnabled)
+
+            val getRequest = server.takeRequest()
+            assertEquals("GET", getRequest.method)
+            assertEquals("/api/customer/workspace-preferences", getRequest.path)
+            assertEquals("Bearer test-customer-token", getRequest.getHeader("Authorization"))
+
+            val patchRequest = server.takeRequest()
+            assertEquals("PATCH", patchRequest.method)
+            assertEquals("/api/customer/workspace-preferences", patchRequest.path)
+            assertEquals("Bearer test-customer-token", patchRequest.getHeader("Authorization"))
+            assertEquals(
+                """{"mobile_default_timeframe_days":30,"mobile_chart_crosshair_enabled":true}""",
+                patchRequest.body.readUtf8()
+            )
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun marketParserDropsErrorsAndInvalidOrNonFinitePrices() {
         val quotes = CustomerDataClient.parseMarketQuotes(
             JSONObject(
