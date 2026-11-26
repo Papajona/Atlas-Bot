@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0068_tron_sweep_txid_casefold_unique"
+        "0069_customer_equity_history_and_workspace_preferences"
     }
 
 
@@ -62,7 +62,7 @@ def test_integrated_alembic_chain_has_the_expected_single_head():
     assert 'revision = "0064_strategy_outcome_recent_index"' in migration
     assert 'down_revision = "0063_webhook_events_created_at_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0068_tron_sweep_txid_casefold_unique"
+        "0069_customer_equity_history_and_workspace_preferences"
     }
 
 
@@ -77,13 +77,13 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         "0065_ledger_trigger_owner_isolation": "0064_strategy_outcome_recent_index",
         "0066_pin_research_trigger_path": "0065_ledger_trigger_owner_isolation",
         "0067_service_role_customer_profiles_acl": "0066_pin_research_trigger_path",
-        "0068_tron_sweep_txid_casefold_unique": "0067_service_role_customer_profiles_acl",
+        "0069_customer_equity_history_and_workspace_preferences": "0067_service_role_customer_profiles_acl",
     }
     for revision, parent in expected.items():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
-    assert expected_alembic_heads(versions) == {"0068_tron_sweep_txid_casefold_unique"}
+    assert expected_alembic_heads(versions) == {"0069_customer_equity_history_and_workspace_preferences"}
 
 
 def test_0066_pins_research_trigger_paths_and_revokes_public_execute():
@@ -246,7 +246,7 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
         ROOT / ".github" / "workflows" / "provider-ledger-reconciliation.yml"
     ).read_text(encoding="utf-8")
 
-    expected = "0068_tron_sweep_txid_casefold_unique"
+    expected = "0069_customer_equity_history_and_workspace_preferences"
     for source in (
         api_provisioner,
         audit_provisioner,
