@@ -116,6 +116,8 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
     assert "pg_get_serial_sequence(" in migration
+    assert "has_schema_privilege('service_role', 'public', 'USAGE')" in migration
+    assert "service_role must retain USAGE on public" in migration
     assert "has_table_privilege(" in migration
     assert "has_sequence_privilege(" in migration
     assert "service_role retains privileges on a public relation other than customer_profiles" in migration
