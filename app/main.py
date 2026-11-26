@@ -7499,6 +7499,8 @@ async def customer_update_workspace_preferences(
         values = {
             "customer_id": profile.id,
             "updated_at": updated_at,
+            **_WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS,
+            "mobile_default_timeframe_days": 30,
             **req,
         }
         dialect = db.get_bind().dialect.name
