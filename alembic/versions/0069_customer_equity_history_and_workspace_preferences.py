@@ -70,6 +70,9 @@ def upgrade() -> None:
             f"ALTER TABLE public.{table_name} ENABLE ROW LEVEL SECURITY"
         ))
         op.execute(sa.text(
+            f"ALTER TABLE public.{table_name} FORCE ROW LEVEL SECURITY"
+        ))
+        op.execute(sa.text(
             f"REVOKE ALL PRIVILEGES ON TABLE public.{table_name} FROM PUBLIC"
         ))
 
