@@ -246,7 +246,7 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
         _run_alembic(env, "downgrade", PREDECESSOR)
         asyncio.run(_run_database_assertions(dsn, "prepare"))
 
-        _run_alembic(env, "upgrade", "head")
+        _run_alembic(env, "upgrade", MIGRATION_HEAD)
         asyncio.run(_run_database_assertions(dsn, "verify-upgrade"))
 
         _run_alembic(env, "downgrade", PREDECESSOR)
@@ -254,7 +254,7 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
     finally:
         # Keep the shared disposable CI database at the repository head even
         # when an assertion fails, so later integration tests see a valid schema.
-        _run_alembic(env, "upgrade", "head")
+        _run_alembic(env, "upgrade", MIGRATION_HEAD)
 
 
 def test_0065_inherited_acl_grantor_without_set_option_is_not_settable():
@@ -505,7 +505,7 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
         _run_alembic(env, "downgrade", PREDECESSOR)
         asyncio.run(prepare_and_check("prepare"))
 
-        _run_alembic(env, "upgrade", "head")
+        _run_alembic(env, "upgrade", MIGRATION_HEAD)
         asyncio.run(prepare_and_check("verify-upgrade"))
 
         _run_alembic(env, "downgrade", PREDECESSOR)
@@ -561,7 +561,7 @@ def test_0065_reused_trigger_role_keeps_preexisting_direct_acl_grants():
         try:
             asyncio.run(cleanup())
         finally:
-            _run_alembic(env, "upgrade", "head")
+            _run_alembic(env, "upgrade", MIGRATION_HEAD)
 
 
 def test_0065_downgrade_rejects_a_different_administrator_before_mutating():
@@ -655,7 +655,7 @@ def test_0065_downgrade_rejects_a_different_administrator_before_mutating():
         try:
             asyncio.run(drop_alternate_admin())
         finally:
-            _run_alembic(env, "upgrade", "head")
+            _run_alembic(env, "upgrade", MIGRATION_HEAD)
 
 
 async def _get_revision(dsn: str) -> str | None:
@@ -805,7 +805,7 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
     finally:
         try:
             # Keep the shared disposable PostgreSQL database at the exact head.
-            _run_alembic(env, "upgrade", "head")
+            _run_alembic(env, "upgrade", MIGRATION_HEAD)
         finally:
             asyncio.run(cleanup_created_roles())
 
