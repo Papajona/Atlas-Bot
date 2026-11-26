@@ -28,8 +28,9 @@ REAL_MONEY_TABLES = (
 PAPER_TABLES = (
     "customer_paper.accounts", "customer_paper.journals", "customer_paper.journal_lines",
     "customer_paper.orders", "customer_paper.order_events", "customer_paper.fills",
-    "customer_paper.position_events",
+    "customer_paper.position_events", "customer_paper.equity_snapshots",
 )
+PAPER_MUTABLE_TABLES = ("customer_paper.workspace_preferences",)
 # Shared market-bar budgets contain only public OHLCV provenance and aggregate capacity,
 # never customer identifiers or financial balances. They use a separate explicit policy.
 PAPER_GLOBAL_TABLES = ("customer_paper.market_bar_budgets", "customer_paper.market_bar_allocations")
@@ -360,15 +361,15 @@ async def preflight_isolated_customer_paper_ledger(
                 WHERE (n.nspname='customer_paper' AND c.relname = ANY(:paper_table_names))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
                 """),
-                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_GLOBAL_TABLES]},
+                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_MUTABLE_TABLES + PAPER_GLOBAL_TABLES]},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
-            missing_paper = sorted(set(PAPER_TABLES + PAPER_GLOBAL_TABLES) - set(by_name))
+            missing_paper = sorted(set(PAPER_TABLES + PAPER_MUTABLE_TABLES + PAPER_GLOBAL_TABLES) - set(by_name))
             if missing_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_NOT_PROVISIONED",
                         "missing_tables": missing_paper, "identity": {"database": db_name, "role": role_name}}
             insecure_paper = []
-            for name in PAPER_TABLES + PAPER_GLOBAL_TABLES:
+            for name in PAPER_TABLES + PAPER_MUTABLE_TABLES + PAPER_GLOBAL_TABLES:
                 row = by_name[name]
                 if row["relkind"] not in {"r", "p"}:
                     insecure_paper.append(f"{name}:NOT_A_TABLE")
@@ -376,7 +377,10 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(f"{name}:RLS_NOT_FORCED")
                 if not bool(row["can_select"]) or not bool(row["can_insert"]):
                     insecure_paper.append(f"{name}:SELECT_OR_INSERT_MISSING")
-                if bool(row["can_update"]):
+                if name in PAPER_MUTABLE_TABLES:
+                    if not bool(row["can_update"]):
+                        insecure_paper.append(f"{name}:UPDATE_MISSING")
+                elif bool(row["can_update"]):
                     insecure_paper.append(f"{name}:UPDATE_ALLOWED")
                 if bool(row["can_delete"]):
                     insecure_paper.append(f"{name}:DELETE_ALLOWED")
@@ -392,7 +396,8 @@ async def preflight_isolated_customer_paper_ledger(
                       NULLIF(pg_get_serial_sequence('customer_paper.accounts', 'id'), '')::regclass,
                       NULLIF(pg_get_serial_sequence('customer_paper.journal_lines', 'id'), '')::regclass,
                       NULLIF(pg_get_serial_sequence('customer_paper.order_events', 'id'), '')::regclass,
-                      NULLIF(pg_get_serial_sequence('customer_paper.position_events', 'id'), '')::regclass
+                      NULLIF(pg_get_serial_sequence('customer_paper.position_events', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.equity_snapshots', 'id'), '')::regclass
                   )
                 """
             ))).mappings().all()
@@ -401,6 +406,7 @@ async def preflight_isolated_customer_paper_ledger(
                 "customer_paper.journal_lines_id_seq",
                 "customer_paper.order_events_id_seq",
                 "customer_paper.position_events_id_seq",
+                "customer_paper.equity_snapshots_id_seq",
             }
             observed_sequences = {str(row["sequence_name"]) for row in paper_sequence_rows}
             if (
@@ -426,7 +432,7 @@ async def preflight_isolated_customer_paper_ledger(
             policy_by_table: dict[str, list[Mapping[str, Any]]] = {}
             for policy in policy_rows:
                 policy_by_table.setdefault(str(policy["tablename"]), []).append(policy)
-            for table in (name.split(".", 1)[1] for name in PAPER_TABLES):
+            for table in (name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_MUTABLE_TABLES):
                 candidates = policy_by_table.get(table, [])
                 row = candidates[0] if len(candidates) == 1 else None
                 policy_error = _tenant_policy_validation_error(row, str(role_name))
