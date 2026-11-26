@@ -112,7 +112,7 @@ It enables the required APIs, creates the Artifact Registry repo, the three serv
 Creates the log sink/bucket retention. Lock the retention policy only after reviewing it (locking is irreversible).
 
 ### Step 3: Pre-flight against a disposable PostgreSQL -- `deploy/verify-live-money-runtime.sh`
-First start a Cloud SQL Auth Proxy (or equivalent authenticated tunnel) bound only to `127.0.0.1`, targeting the disposable/staging PostgreSQL instance. The verifier rejects direct remote hostnames and SQLAlchemy driver-level host overrides before any database mutation; `DATABASE_URL` must point to the local proxy listener. Then `DATABASE_URL=postgresql://USER:PASSWORD@127.0.0.1:5432/DB bash deploy/verify-live-money-runtime.sh` runs: `alembic upgrade head`, `alembic check`, `validate-postgres-constraints.py`,
+First start a Cloud SQL Auth Proxy (or equivalent authenticated tunnel) bound only to `127.0.0.1`, targeting the disposable/staging PostgreSQL instance. The verifier rejects direct remote hostnames and SQLAlchemy driver-level host overrides before any database mutation; `DATABASE_URL` must point to the local proxy listener. Then `DATABASE_URL=postgresql+asyncpg://USER:PASSWORD@127.0.0.1:5432/DB bash deploy/verify-live-money-runtime.sh` runs: `alembic upgrade head`, `alembic check`, `validate-postgres-constraints.py`,
 the Postgres concurrency tests (the original probe test **and** `tests/test_postgres_ledger_concurrency_3_10_46.py`, which exercises the real ledger under
 contention), the live-money static suites, `bandit -lll`, and `pip-audit --strict`. It never enables live trading.
 **Pass criteria:** zero failures. Expect fixes on the first run: the 3.10.47 tests were written without a database available.
@@ -271,7 +271,7 @@ See `docs/RISK_ASSESSMENT_3_10_46.md` for the failure-mode analysis behind these
 ## Appendix A: command cheat sheet
 ```
 bash deploy/gcp-bootstrap.sh                                  # once
-DATABASE_URL=postgresql://... bash deploy/verify-live-money-runtime.sh
+DATABASE_URL=postgresql+asyncpg://... bash deploy/verify-live-money-runtime.sh
 bash deploy/cloud-run-deploy.sh                               # builds + deploys API
 IMAGE=... DATABASE_SECRET_REF=atlas-database-url:N CLOUD_RUN_MIGRATION_JOB=atlas-migrate bash deploy/cloud-run-migration-job.sh
 IMAGE=... (worker refs) bash deploy/cloud-run-worker-deploy.sh
