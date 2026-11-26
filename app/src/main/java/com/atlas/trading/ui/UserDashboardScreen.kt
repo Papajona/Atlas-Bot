@@ -42,7 +42,8 @@ data class EquityPoint(
     val dateLabel: String,
     val equity: Double,
     val dailyPnl: Double,
-    val cumProfit: Double
+    val cumProfit: Double,
+    val observedAtEpochMillis: Long
 )
 
 enum class DashboardTab {
@@ -91,15 +92,33 @@ fun UserDashboardScreen(
         }
     }
 
-    // Do not fabricate account history. The authenticated customer API must supply it.
-    val equityHistory = remember { emptyList<EquityPoint>() }
+    // Only server-persisted, customer-scoped observations are eligible for the chart.
+    // The API records at most one observation per 15-minute bucket when portfolio data is read.
+    val equityHistory = remember(customerSnapshot?.equityHistory) {
+        val observations = customerSnapshot?.equityHistory.orEmpty()
+        val firstEquity = observations.firstOrNull()?.equity
+        var previousEquity: Double? = null
+        observations.mapIndexedNotNull { index, point ->
+            val timestamp = runCatching {
+                java.time.Instant.parse(point.observedAt).toEpochMilli()
+            }.getOrNull() ?: return@mapIndexedNotNull null
+            val dailyChange = previousEquity?.let { point.equity - it } ?: 0.0
+            previousEquity = point.equity
+            EquityPoint(
+                day = index + 1,
+                dateLabel = point.observedAt.take(16).replace('T', ' ') + " UTC",
+                equity = point.equity,
+                dailyPnl = dailyChange,
+                cumProfit = point.equity - (firstEquity ?: point.equity),
+                observedAtEpochMillis = timestamp
+            )
+        }
+    }
 
     val displayPoints = remember(selectedTimeframeDays, equityHistory) {
-        if (selectedTimeframeDays == 7) {
-            equityHistory.takeLast(7)
-        } else {
-            equityHistory
-        }
+        val cutoff = System.currentTimeMillis() -
+            selectedTimeframeDays.toLong() * 24L * 60L * 60L * 1000L
+        equityHistory.filter { it.observedAtEpochMillis >= cutoff }
     }
 
     // Dynamically retrieve theme colors supporting Light and Dark modes
@@ -924,9 +943,8 @@ private fun PortfolioPerformanceCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val assetSuffix = if (selectedAssetClass != AssetClass.ALL) " • ${selectedAssetClass.label}" else ""
                 Text(
-                    text = "Portfolio Performance (${selectedTimeframe}D$assetSuffix)",
+                    text = "Portfolio Equity (${selectedTimeframe}D)",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = textPrimary
@@ -975,13 +993,13 @@ private fun PortfolioPerformanceCard(
                 ) {
                     Column {
                         Text(
-                            text = "$${String.format(Locale.US, "%,.2f", activePoint.equity)}",
+                            text = "${String.format(Locale.US, "%,.2f", activePoint.equity)} USDT",
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
                             color = textPrimary
                         )
                         Text(
-                            text = "${activePoint.dateLabel} • Cum. PnL: +$${String.format(Locale.US, "%.2f", activePoint.cumProfit)}",
+                            text = "${activePoint.dateLabel} • Change: ${String.format(Locale.US, "%+.2f", activePoint.cumProfit)} USDT",
                             fontSize = 11.sp,
                             color = emeraldAccent
                         )
