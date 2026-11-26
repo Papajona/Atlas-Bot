@@ -670,3 +670,103 @@ async def _get_revision(dsn: str) -> str | None:
         )
     finally:
         await connection.close()
+
+def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
+    """0066 must remove both PUBLIC and historical direct API-role execution grants."""
+    dsn = _postgres_test_url()
+    env = os.environ.copy()
+    alembic_url = next(
+        (
+            value
+            for value in (
+                os.environ.get("ATLAS_POSTGRES_URL"),
+                os.environ.get("DATABASE_URL"),
+            )
+            if value
+            and value.startswith(
+                ("postgres://", "postgresql://", "postgresql+asyncpg://")
+            )
+        ),
+        None,
+    )
+    if alembic_url is None:
+        pytest.skip("requires a PostgreSQL DATABASE_URL for Alembic")
+    env["DATABASE_URL"] = alembic_url
+
+    api_roles = ("anon", "authenticated")
+    trigger_functions = (
+        "public.atlas_research_trial_archive_immutable()",
+        "public.atlas_research_holdout_registry_immutable()",
+    )
+    created_roles: list[str] = []
+
+    async def grant_direct_execution() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            for role_name in api_roles:
+                exists = await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                    role_name,
+                )
+                if not exists:
+                    await connection.execute(f"CREATE ROLE {role_name} NOLOGIN")
+                    created_roles.append(role_name)
+                for signature in trigger_functions:
+                    await connection.execute(
+                        f"GRANT EXECUTE ON FUNCTION {signature} TO {role_name}"
+                    )
+        finally:
+            await connection.close()
+
+    async def assert_execution_revoked() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            for role_name in api_roles:
+                for signature in trigger_functions:
+                    can_execute = await connection.fetchval(
+                        """
+                        SELECT has_function_privilege(
+                            $1::name,
+                            to_regprocedure($2)::oid,
+                            'EXECUTE'
+                        )
+                        """,
+                        role_name,
+                        signature,
+                    )
+                    assert can_execute is False, (
+                        f"0066 left {role_name} able to EXECUTE {signature}"
+                    )
+        finally:
+            await connection.close()
+
+    async def cleanup_created_roles() -> None:
+        connection = await asyncpg.connect(dsn=dsn)
+        try:
+            for role_name in api_roles:
+                for signature in trigger_functions:
+                    await connection.execute(
+                        f"REVOKE EXECUTE ON FUNCTION {signature} FROM {role_name}"
+                    )
+                if role_name in created_roles:
+                    await connection.execute(f"DROP ROLE {role_name}")
+        finally:
+            await connection.close()
+
+    try:
+        current = asyncio.run(_get_revision(dsn))
+        assert current == MIGRATION_HEAD, (
+            f"expected disposable database at {MIGRATION_HEAD}, got {current!r}"
+        )
+        _run_alembic(env, "downgrade", PREDECESSOR)
+        asyncio.run(grant_direct_execution())
+
+        _run_alembic(env, "upgrade", "head")
+        asyncio.run(assert_execution_revoked())
+    finally:
+        try:
+            # Keep the shared disposable PostgreSQL database at the exact head.
+            _run_alembic(env, "upgrade", "head")
+        finally:
+            asyncio.run(cleanup_created_roles())
+
