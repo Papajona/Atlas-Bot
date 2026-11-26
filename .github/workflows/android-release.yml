@@ -119,6 +119,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          command -v avdmanager
+          command -v emulator
+          command -v adb
           AVD_NAME="atlas-ci-api35"
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
