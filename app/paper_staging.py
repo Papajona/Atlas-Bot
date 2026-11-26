@@ -861,10 +861,15 @@ async def paper_customer_portfolio(authorization: str | None = Header(default=No
     # Only a single USDT cash balance with no open positions has a verified
     # portfolio valuation in this paper-only path. Positions without fresh marks
     # remain unavailable; cost basis is never substituted for current equity.
-    cash = (
+    candidate_cash = (
         Decimal(str(cash_rows[0].get("balance") or "0"))
         if len(cash_rows) == 1
         and str(cash_rows[0].get("currency") or "").upper() == "USDT"
+        else None
+    )
+    cash = (
+        candidate_cash
+        if candidate_cash is not None and candidate_cash.is_finite() and candidate_cash >= 0
         else None
     )
     equity = float(cash) if cash is not None and not positions else None
