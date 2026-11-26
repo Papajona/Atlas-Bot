@@ -33,7 +33,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .paper_execution_model import configured_paper_execution_settings
-from .db import _UUID_AUTH_REFERENCE_PATTERN, _UUID_AUTH_REFERENCE_GLOB
+from .db import _UUID_AUTH_REFERENCE_PATTERN, _UUID_AUTH_REFERENCE_GLOB, dispose_identity_quarantine_engine
 from .db import init_db, SessionLocal, IdentityQuarantineSessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, BenchmarkPromptCapture, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
@@ -1779,6 +1779,10 @@ async def shutdown():
     _worker_tasks.clear()
     _background_task = None
     _usdt_task = None
+    try:
+        await dispose_identity_quarantine_engine()
+    except Exception:
+        logger.exception("identity_quarantine_pool_dispose_failed")
 
 
 async def _record_model_experiment(model_path: str, asset: str, result: dict) -> None:
