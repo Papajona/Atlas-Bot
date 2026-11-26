@@ -133,7 +133,8 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "COALESCE(grantee_role.rolname, 'PUBLIC')" in migration
     assert "default_acl_grantee" in migration
     assert "has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')" in migration
-    assert "owner_role.rolname <> 'pg_database_owner'" in migration
+    assert "owner_role.rolname <> 'pg_database_owner'" not in migration
+    assert "has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')" in migration
     assert "global_defaults.defaclnamespace = 0" in migration
     assert "NOT EXISTS (" in migration
     assert "default_function_owner" in migration
@@ -153,6 +154,9 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "public.atlas_supabase_admin_future_probe()" in workflow
     assert "atlas-0067-implicit-public-default.log" in workflow
     assert "default PUBLIC EXECUTE" in workflow
+    assert "atlas-0067-pg-database-owner-default.log" in workflow
+    assert "SET ROLE pg_database_owner" in workflow
+    assert "CREATE FUNCTION public.atlas_pg_database_owner_future_probe()" in workflow
 
 
 def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
