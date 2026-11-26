@@ -764,7 +764,10 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
         assert current == MIGRATION_HEAD, (
             f"expected disposable database at {MIGRATION_HEAD}, got {current!r}"
         )
-        _run_alembic(env, "downgrade", PREDECESSOR)
+        # Stop after 0065 because that migration already revokes the API-role
+        # grants. Recreate the direct grants only after 0065 has completed so
+        # this regression proves that 0066 itself removes them.
+        _run_alembic(env, "downgrade", "0065_ledger_trigger_owner_isolation")
         asyncio.run(grant_direct_execution())
 
         _run_alembic(env, "upgrade", "head")
