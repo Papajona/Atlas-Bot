@@ -1,4 +1,4 @@
-"Compatibility and safety tests for the disposable release-verification database guard."""
+"""Compatibility and safety tests for the disposable release-verification database guard."""
 import pytest
 
 from scripts.normalize_asyncpg_database_url import normalize_asyncpg_database_url
