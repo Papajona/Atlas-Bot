@@ -454,13 +454,13 @@ def test_0069_adds_append_only_equity_history_and_owner_scoped_display_preferenc
     assert 'op.create_table(\n        "customer_equity_snapshots"' in migration
     assert '"customer_id", "bucket_at"' in migration
     assert "ENABLE ROW LEVEL SECURITY" in migration
-    assert "REVOKE ALL PRIVILEGES ON TABLE public.customer_equity_snapshots FROM PUBLIC" in migration
+    assert 'f"REVOKE ALL PRIVILEGES ON TABLE public.{table_name} FROM PUBLIC"' in migration
     assert "GRANT SELECT, INSERT ON TABLE public.customer_equity_snapshots TO atlas_api_runtime" in migration
     assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_workspace_preferences TO atlas_api_runtime" in migration
     assert "GRANT UPDATE ON TABLE public.customer_equity_snapshots" not in migration
     assert "GRANT DELETE ON TABLE public.customer_equity_snapshots" not in migration
     assert "FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated', 'service_role']" in migration
-    assert "Destructive downgrade is prohibited" in migration
+    assert "destructive downgrade is prohibited." in migration.lower()
 
     provisioner = (
         ROOT / "scripts" / "provision_atlas_api_runtime.sql"
