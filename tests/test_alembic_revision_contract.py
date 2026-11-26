@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0064_strategy_outcome_recent_index"
+        "0065_tron_sweep_txid_casefold_unique"
     }
 
 
@@ -55,12 +55,12 @@ def test_alembic_revision_contract_rejects_cycles(tmp_path):
 
 def test_integrated_alembic_chain_has_the_expected_single_head():
     migration = (
-        ROOT / "alembic" / "versions" / "0064_strategy_outcome_recent_index.py"
+        ROOT / "alembic" / "versions" / "0065_tron_sweep_txid_casefold_unique.py"
     ).read_text(encoding="utf-8")
-    assert 'revision = "0064_strategy_outcome_recent_index"' in migration
-    assert 'down_revision = "0063_webhook_events_created_at_index"' in migration
+    assert 'revision = "0065_tron_sweep_txid_casefold_unique"' in migration
+    assert 'down_revision = "0064_strategy_outcome_recent_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0064_strategy_outcome_recent_index"
+        "0065_tron_sweep_txid_casefold_unique"
     }
 
 
@@ -72,9 +72,21 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         "0062_customer_benchmark_capture": "0061_strategy_outcome_fill_aggregation",
         "0063_webhook_events_created_at_index": "0062_customer_benchmark_capture",
         "0064_strategy_outcome_recent_index": "0063_webhook_events_created_at_index",
+        "0065_tron_sweep_txid_casefold_unique": "0064_strategy_outcome_recent_index",
     }
     for revision, parent in expected.items():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
     assert expected_alembic_heads(versions) == {"0064_strategy_outcome_recent_index"}
+
+
+def test_production_provisioning_scripts_require_the_current_alembic_head():
+    expected = "0065_tron_sweep_txid_casefold_unique"
+    for path in (
+        ROOT / "scripts" / "provision_atlas_api_runtime.sql",
+        ROOT / "scripts" / "provision_atlas_audit_reader.sql",
+    ):
+        source = path.read_text(encoding="utf-8")
+        assert expected in source
+        assert "0064_strategy_outcome_recent_index" not in source
