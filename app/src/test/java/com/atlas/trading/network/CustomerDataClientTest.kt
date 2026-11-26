@@ -39,6 +39,23 @@ class CustomerDataClientTest {
     }
 
     @Test
+    fun equityHistoryParserAcceptsOnlyVerifiedFiniteAccountEquityPoints() {
+        val points = CustomerDataClient.parseEquityHistory(
+            JSONObject(
+                """{"points":[
+                    {"observed_at":"2026-11-25T10:00:00+00:00","equity":125.5,"currency":"USDT","valuation_source":"TRADING_ACCOUNT_EQUITY"},
+                    {"observed_at":"2026-11-25T10:15:00+00:00","equity":"NaN","currency":"USDT","valuation_source":"TRADING_ACCOUNT_EQUITY"},
+                    {"observed_at":"2026-11-25T10:30:00+00:00","equity":140.0,"currency":"USD","valuation_source":"TRADING_ACCOUNT_EQUITY"},
+                    {"observed_at":"2026-11-25T10:45:00+00:00","equity":150.0,"currency":"USDT","valuation_source":"UNVERIFIED"}
+                ]}"""
+            )
+        )
+        assertEquals(1, points.size)
+        assertEquals("2026-11-25T10:00:00+00:00", points.single().observedAt)
+        assertEquals(125.5, points.single().equity, 0.000001)
+    }
+
+    @Test
     fun marketParserDropsErrorsAndInvalidOrNonFinitePrices() {
         val quotes = CustomerDataClient.parseMarketQuotes(
             JSONObject(
@@ -72,6 +89,13 @@ class CustomerDataClientTest {
         server.enqueue(MockResponse().setResponseCode(200).setBody(
             """{"results":[{"symbol":"BTC/USDT","price":65000.25,"signal":"WATCH"}]}"""
         ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"trades":[]}"""))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"plan":{"name":"Free"},"subscription":{"status":"active"}}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"points":[{"observed_at":"2026-11-25T10:00:00+00:00","equity":912.34,"cash_equity":800.12,"currency":"USDT","valuation_source":"TRADING_ACCOUNT_EQUITY"}]}"""
+        ))
         server.start()
         try {
             val snapshot = CustomerDataClient(server.url("/").toString()).loadSnapshot("test-customer-token")
@@ -80,11 +104,13 @@ class CustomerDataClientTest {
             assertEquals(1, snapshot.portfolio?.openPositions)
             assertEquals("BTC/USDT", snapshot.marketQuotes.single().symbol)
             assertEquals(65000.25, snapshot.marketQuotes.single().price, 0.000001)
+            assertEquals(912.34, snapshot.equityHistory.single().equity, 0.000001)
+            assertNull(snapshot.equityHistoryUnavailableReason)
             assertNull(snapshot.profileUnavailableReason)
             assertNull(snapshot.portfolioUnavailableReason)
             assertNull(snapshot.marketUnavailableReason)
 
-            repeat(3) {
+            repeat(6) {
                 val request = server.takeRequest()
                 assertEquals("Bearer test-customer-token", request.getHeader("Authorization"))
                 assertEquals("GET", request.method)
@@ -100,6 +126,9 @@ class CustomerDataClientTest {
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"detail":"Unauthorized"}"""))
         server.enqueue(MockResponse().setResponseCode(403).setBody("""{"detail":"Feature not enabled"}"""))
         server.enqueue(MockResponse().setResponseCode(403).setBody("""{"detail":"Feature not enabled"}"""))
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"detail":"Not found"}"""))
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"detail":"Not found"}"""))
+        server.enqueue(MockResponse().setResponseCode(403).setBody("""{"detail":"Feature not enabled"}"""))
         server.start()
         try {
             val snapshot = CustomerDataClient(server.url("/").toString()).loadSnapshot("expired-token")
@@ -109,6 +138,7 @@ class CustomerDataClientTest {
             assertTrue(snapshot.profileUnavailableReason!!.contains("HTTP 401"))
             assertTrue(snapshot.portfolioUnavailableReason!!.contains("HTTP 403"))
             assertTrue(snapshot.marketUnavailableReason!!.contains("HTTP 403"))
+            assertTrue(snapshot.equityHistoryUnavailableReason!!.contains("HTTP 403"))
         } finally {
             server.shutdown()
         }
