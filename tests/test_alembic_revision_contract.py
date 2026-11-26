@@ -111,18 +111,39 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
 
     assert 'revision = "0067_service_role_customer_profiles_acl"' in migration
     assert 'down_revision = "0066_pin_research_trigger_path"' in migration
-    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM service_role" in migration
-    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM service_role" in migration
     assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
+    assert "GRANT UPDATE" not in migration
     assert "pg_get_serial_sequence(" in migration
     assert "has_schema_privilege('service_role', 'public', 'USAGE')" in migration
     assert "service_role must retain USAGE on public" in migration
-    assert "has_table_privilege(" in migration
-    assert "has_sequence_privilege(" in migration
-    assert "service_role retains privileges on a public relation other than customer_profiles" in migration
-    assert "service_role retains privileges on a public sequence other than customer_profiles_id_seq" in migration
+    assert "migration_role_oid" in migration
+    assert "c.relowner = migration_role_oid" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public" not in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public" not in migration
+    assert "FROM pg_default_acl" in migration
+    assert "aclexplode(defaults.defaclacl)" in migration
+    assert "acl.grantee = service_role_oid" in migration
+    assert "defaults.defaclnamespace IN (0, public_schema_oid)" in migration
+    assert "0067 refuses to continue" in migration
+    assert "authorized managed-owner operation" in migration
+    assert "service_role retains privileges on an Atlas-owned public relation" in migration
+    assert "service_role retains privileges on an Atlas-owned public sequence" in migration
     assert "# Deliberately forward-only" in migration
+
+
+def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
+    migration = (
+        ROOT / "alembic" / "versions" / "0067_service_role_customer_profiles_acl.py"
+    ).read_text(encoding="utf-8")
+
+    guard = migration.index("current_setting('server_version_num')::integer >= 170000")
+    dynamic = migration.index("EXECUTE $atlas_service_role_maintain_check$", guard)
+    dynamic_end = migration.index("$atlas_service_role_maintain_check$", dynamic + 20)
+    assert guard < dynamic < dynamic_end
+    assert "has_table_privilege('service_role', c.oid, 'MAINTAIN')" in migration[dynamic:dynamic_end]
+    assert "has_table_privilege('service_role', profile_table_oid, 'MAINTAIN')" not in migration
+
 
 def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer():
     migration = (
