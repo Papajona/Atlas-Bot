@@ -242,7 +242,7 @@ class CustomerDataClient(
                     val source = row.optString("valuation_source")
                     val currency = row.optString("currency")
                     val equity = row.optionalFiniteDouble("equity") ?: continue
-                    if (source != "TRADING_ACCOUNT_EQUITY" || currency != "USDT") continue
+                    if (source !in setOf("TRADING_ACCOUNT_EQUITY", "PAPER_LEDGER_CASH_ONLY") || currency != "USDT") continue
                     if (runCatching { java.time.Instant.parse(observedAt) }.isFailure) continue
                     add(EquityHistoryPoint(observedAt = observedAt, equity = equity))
                 }
