@@ -124,13 +124,28 @@ jobs:
           command -v emulator
           command -v adb
           AVD_NAME="atlas-ci-api35"
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/atlas-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
           APK="app/build/outputs/apk/debug/app-debug.apk"
           test -s "$APK"
-          echo "no" | avdmanager create avd \
+          printf "no\n" | avdmanager create avd \
             --force \
             --name "$AVD_NAME" \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME.avd" \
             --package "system-images;android-35;google_apis;x86_64" \
             --device "pixel_2"
+          test -s "$ANDROID_AVD_HOME/$AVD_NAME.ini" || {
+            echo "BLOCKED: avdmanager did not create the expected AVD definition."
+            avdmanager list avd || true
+            find "$RUNNER_TEMP" -maxdepth 5 -iname "*atlas-ci-api35*" -print || true
+            exit 1
+          }
+          test -s "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini" || {
+            echo "BLOCKED: AVD config.ini is missing."
+            find "$ANDROID_AVD_HOME" -maxdepth 4 -type f -print || true
+            exit 1
+          }
+          avdmanager list avd
           emulator -avd "$AVD_NAME" \
             -no-window -no-audio -no-boot-anim -no-snapshot -wipe-data \
             -gpu swiftshader_indirect \
