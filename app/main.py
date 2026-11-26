@@ -5025,9 +5025,26 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
     """
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     try:
-        wallet_id = int(req.get("wallet_id"))
+        raw_wallet_id = req.get("wallet_id")
+        if isinstance(raw_wallet_id, bool):
+            raise ValueError("wallet_id must be an integer")
+        if isinstance(raw_wallet_id, int):
+            wallet_id = raw_wallet_id
+        elif isinstance(raw_wallet_id, str) and re.fullmatch(r"[0-9]+", raw_wallet_id.strip()):
+            wallet_id = int(raw_wallet_id.strip())
+        else:
+            raise ValueError("wallet_id must be an integer")
+        if wallet_id <= 0:
+            raise ValueError("wallet_id must be a positive integer")
         amount = req.get("amount_usdt")
+        if isinstance(amount, bool) or not Decimal(str(amount)).is_finite():
+            raise ValueError("amount_usdt must be a finite number")
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise HTTPException(422, "wallet_id (integer) and a finite amount_usdt are required") from exc
+    try:
         async with SessionLocal() as db:
             # Read owner identity first, then acquire locks in the global customer-cash
             # order: ledger -> wallet. Re-check wallet status/owner after locking it.
@@ -5094,8 +5111,13 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
     """Record a signer/broadcaster result without exposing signing material to Atlas."""
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     txid = str(req.get("transaction_id") or "").strip()
     outcome = str(req.get("outcome") or "").strip().upper()
+    if txid and not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+        raise HTTPException(400, "transaction_id must be a 64-character hexadecimal TRON transaction hash")
+    txid = txid.lower()
     if outcome not in {"", "TIMEOUT", "REJECTED"}:
         raise HTTPException(400, "unsupported broadcast outcome")
     if not txid and not outcome:
@@ -5130,14 +5152,16 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
                                                   detail={"broadcast_outcome": "REJECTED"})
             await db.commit()
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
-        if sweep.transaction_id and sweep.transaction_id != txid:
+        stored_txid = str(sweep.transaction_id or "").strip().lower()
+        if stored_txid and stored_txid != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
-        if sweep.status == "SUBMITTED" and sweep.transaction_id == txid:
-            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id, "idempotent": True}
+        if sweep.status == "SUBMITTED" and stored_txid == txid:
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": txid, "idempotent": True}
         if sweep.status not in {"READY_FOR_SIGNER", "UNKNOWN", "SUBMITTED"}:
             raise HTTPException(409, f"Sweep is {sweep.status}; broadcast result cannot be recorded")
         duplicate = (await db.execute(select(TronSweep).where(
-            TronSweep.transaction_id == txid, TronSweep.id != sweep.id
+            func.lower(TronSweep.transaction_id) == txid,
+            TronSweep.id != sweep.id
         ).with_for_update())).scalar_one_or_none()
         if duplicate:
             raise HTTPException(409, "transaction id is already assigned to another sweep")
@@ -5343,9 +5367,13 @@ async def admin_verify_audit_chain(authorization: str | None = Header(default=No
 async def admin_set_role(req: dict, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "ADMINISTRATOR")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     uid = str(req.get("auth_user_id") or "").strip()
     role = str(req.get("role") or "").strip().upper()
-    active = bool(req.get("active", True))
+    active = req.get("active", True)
+    if not isinstance(active, bool):
+        raise HTTPException(400, "active must be a JSON boolean (true or false)")
     if not uid or role not in ROLES:
         raise HTTPException(400, "auth_user_id and a valid role are required")
     row = await upsert_role(uid, role, active)
@@ -5576,11 +5604,49 @@ async def customer_otp_verify(req: OtpVerifyRequest, authorization: str | None =
     return {"ok": True, "purpose": "withdrawal", "step_up_token": token, "proposal_digest": expected_digest, "expires_in": settings.withdrawal_step_up_minutes * 60}
 
 
+def _is_valid_password_reset_email(email: str) -> bool:
+    """Accept a bounded dot-atom mailbox with a valid fully qualified domain."""
+    if not isinstance(email, str) or len(email) > 254 or email.count("@") != 1:
+        return False
+    local, domain = email.rsplit("@", 1)
+    if (
+        not local
+        or len(local) > 64
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not re.fullmatch(
+            r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*",
+            local,
+        )
+        or not domain
+    ):
+        return False
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(domain) > 253:
+        return False
+    labels = domain.split(".")
+    if len(labels) < 2 or len(labels[-1]) < 2:
+        return False
+    return all(
+        1 <= len(label) <= 63
+        and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+        for label in labels
+    )
+
+
 @app.post("/api/auth/password-reset")
 async def customer_password_reset(req: dict):
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     email = str(req.get("email") or "").strip()
     if not email:
         raise HTTPException(422, "Email is required")
+    if not _is_valid_password_reset_email(email):
+        raise HTTPException(422, "A valid email address is required")
     key = hashlib.sha256(email.lower().encode()).hexdigest()
     allowed, _ = await allow_rate_limit(f"password-reset:contact:{key}", max(1, settings.auth_rate_limit_per_minute))
     if not allowed:
