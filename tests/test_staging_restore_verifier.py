@@ -81,7 +81,7 @@ def test_restore_revision_matches_workflow_and_operator_runbook():
     provider_verifier = Path("scripts/verify_provider_ledger_reconciliation.py").read_text(encoding="utf-8")
     verifier = Path("scripts/verify_staging_restore.py").read_text(encoding="utf-8")
     runbook = Path("RUNBOOK.md").read_text(encoding="utf-8")
-    expected = "0067_service_role_customer_profiles_acl"
+    expected = "0068_tron_sweep_txid_casefold_unique"
 
     assert f"--expected-revision {expected}" in workflow
     assert f"--expected-revision {expected}" in reconciliation_workflow

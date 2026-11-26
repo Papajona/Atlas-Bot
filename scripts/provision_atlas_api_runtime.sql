@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated server-side production API login. Run only after verified backup/restore
--- and Alembic head 0067_service_role_customer_profiles_acl. Set its password separately with psql's hidden \password
+-- and Alembic head 0068_tron_sweep_txid_casefold_unique. Set its password separately with psql's hidden \password
 -- prompt; never store passwords in this file or place them in chat.
 BEGIN;
 
@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the production API login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0067_service_role_customer_profiles_acl') THEN
-        RAISE EXCEPTION 'database must be at 0067_service_role_customer_profiles_acl before API role provisioning';
+                   WHERE version_num = '0068_tron_sweep_txid_casefold_unique') THEN
+        RAISE EXCEPTION 'database must be at 0068_tron_sweep_txid_casefold_unique before API role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)

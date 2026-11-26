@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated read-only identity for restore and provider-ledger audits.
--- Apply only after alembic is at 0067_service_role_customer_profiles_acl and after a
+-- Apply only after alembic is at 0068_tron_sweep_txid_casefold_unique and after a
 -- recoverable backup has been independently verified. Never reuse an existing role.
 BEGIN;
 
@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the dedicated audit login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0067_service_role_customer_profiles_acl') THEN
-        RAISE EXCEPTION 'database must be at 0067_service_role_customer_profiles_acl before audit role provisioning';
+                   WHERE version_num = '0068_tron_sweep_txid_casefold_unique') THEN
+        RAISE EXCEPTION 'database must be at 0068_tron_sweep_txid_casefold_unique before audit role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)
