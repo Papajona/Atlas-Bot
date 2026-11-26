@@ -7478,14 +7478,46 @@ async def customer_update_workspace_preferences(
         raise HTTPException(422, "Workspace preference values must be booleans")
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=False)
-        row = await db.get(CustomerWorkspacePreference, profile.id)
+        updated_at = datetime.now(timezone.utc)
+        values = {
+            "customer_id": profile.id,
+            "updated_at": updated_at,
+            **req,
+        }
+        dialect = db.get_bind().dialect.name
+        if dialect == "postgresql":
+            statement = pg_insert(CustomerWorkspacePreference).values(**values).on_conflict_do_update(
+                index_elements=[CustomerWorkspacePreference.customer_id],
+                set_={**req, "updated_at": updated_at},
+            )
+            await db.execute(statement)
+            await db.commit()
+            row = await db.get(CustomerWorkspacePreference, profile.id)
+        elif dialect == "sqlite":
+            statement = sqlite_insert(CustomerWorkspacePreference).values(**values).on_conflict_do_update(
+                index_elements=[CustomerWorkspacePreference.customer_id],
+                set_={**req, "updated_at": updated_at},
+            )
+            await db.execute(statement)
+            await db.commit()
+            row = await db.get(CustomerWorkspacePreference, profile.id)
+        else:
+            # Keep a conservative fallback for alternate dialects without native upsert.
+            row = await db.get(CustomerWorkspacePreference, profile.id)
+            if row is None:
+                row = CustomerWorkspacePreference(
+                    customer_id=profile.id,
+                    reduce_motion=False,
+                    compact_markets=False,
+                    touch_feedback=True,
+                )
+                db.add(row)
+            for key, value in req.items():
+                setattr(row, key, value)
+            row.updated_at = updated_at
+            await db.commit()
         if row is None:
-            row = CustomerWorkspacePreference(customer_id=profile.id, reduce_motion=False, compact_markets=False, touch_feedback=True)
-            db.add(row)
-        for key, value in req.items():
-            setattr(row, key, value)
-        row.updated_at = datetime.now(timezone.utc)
-        await db.commit()
+            raise RuntimeError("Workspace preference upsert completed without a readable row")
         await db.refresh(row)
         return {
             "scope": "customer_only",
