@@ -139,8 +139,11 @@ def upgrade() -> None:
             SELECT owner_role.rolname
             INTO default_function_owner
             FROM pg_roles AS owner_role
-            WHERE owner_role.rolname <> 'pg_database_owner'
-              AND has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')
+            -- pg_database_owner is an effective creator context for this database:
+            -- its database owner can SET ROLE to it and create public functions.
+            -- Require an explicit global PUBLIC EXECUTE revoke for this role too;
+            -- otherwise future functions inherit PostgreSQL's built-in default.
+            WHERE has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')
               AND (
                     NOT EXISTS (
                         SELECT 1
