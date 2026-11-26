@@ -1227,21 +1227,44 @@ async def update_customer_paper_workspace_preferences(
         normalized[key] = value
 
     await _assert_customer_paper_ready()
-    columns = ["customer_id", *normalized]
-    values_sql = [":customer_id", *(f":{key}" for key in normalized)]
-    updates_sql = ", ".join(
-        f"{key} = EXCLUDED.{key}" for key in normalized
-    )
+    preferences = {
+        **_PAPER_WORKSPACE_BOOLEAN_DEFAULTS,
+        "mobile_default_timeframe_days": 30,
+        **normalized,
+    }
+    update_flags = {
+        f"update_{key}": key in normalized
+        for key in _PAPER_WORKSPACE_ALLOWED_FIELDS
+    }
     statement = text(
-        "INSERT INTO customer_paper.workspace_preferences ("
-        + ", ".join(columns)
-        + ") VALUES ("
-        + ", ".join(values_sql)
-        + ") ON CONFLICT (customer_id) DO UPDATE SET "
-        + updates_sql
-        + ", updated_at = now() "
-        + "RETURNING reduce_motion, compact_markets, touch_feedback, "
-        + "mobile_default_timeframe_days, mobile_chart_crosshair_enabled"
+        """
+        INSERT INTO customer_paper.workspace_preferences (
+            customer_id, reduce_motion, compact_markets, touch_feedback,
+            mobile_default_timeframe_days, mobile_chart_crosshair_enabled
+        ) VALUES (
+            :customer_id, :reduce_motion, :compact_markets, :touch_feedback,
+            :mobile_default_timeframe_days, :mobile_chart_crosshair_enabled
+        )
+        ON CONFLICT (customer_id) DO UPDATE SET
+            reduce_motion = CASE WHEN :update_reduce_motion
+                THEN EXCLUDED.reduce_motion
+                ELSE customer_paper.workspace_preferences.reduce_motion END,
+            compact_markets = CASE WHEN :update_compact_markets
+                THEN EXCLUDED.compact_markets
+                ELSE customer_paper.workspace_preferences.compact_markets END,
+            touch_feedback = CASE WHEN :update_touch_feedback
+                THEN EXCLUDED.touch_feedback
+                ELSE customer_paper.workspace_preferences.touch_feedback END,
+            mobile_default_timeframe_days = CASE WHEN :update_mobile_default_timeframe_days
+                THEN EXCLUDED.mobile_default_timeframe_days
+                ELSE customer_paper.workspace_preferences.mobile_default_timeframe_days END,
+            mobile_chart_crosshair_enabled = CASE WHEN :update_mobile_chart_crosshair_enabled
+                THEN EXCLUDED.mobile_chart_crosshair_enabled
+                ELSE customer_paper.workspace_preferences.mobile_chart_crosshair_enabled END,
+            updated_at = now()
+        RETURNING reduce_motion, compact_markets, touch_feedback,
+                  mobile_default_timeframe_days, mobile_chart_crosshair_enabled
+        """
     )
     engine = _paper_engine()
     try:
@@ -1251,7 +1274,11 @@ async def update_customer_paper_workspace_preferences(
                 {"customer_id": str(tenant_id)},
             )
             row = (await conn.execute(
-                statement, {"customer_id": tenant_id, **normalized}
+                statement, {
+                    "customer_id": tenant_id,
+                    **preferences,
+                    **update_flags,
+                }
             )).mappings().one()
         return {
             "configured": True,
