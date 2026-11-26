@@ -744,6 +744,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "development environment may not point at a remote database"
             )
+        if (
+            self.environment == "development"
+            and str(self.customer_paper_database_url or "").strip()
+            and not _is_local_database_url(self.customer_paper_database_url)
+        ):
+            raise ValueError(
+                "development environment may not point at a remote customer paper database"
+            )
         if self.paper_staging_market_scanner_enabled and self.environment != "staging":
             raise ValueError(
                 "PAPER_STAGING_MARKET_SCANNER_ENABLED may only be true in staging"
