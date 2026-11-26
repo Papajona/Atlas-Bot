@@ -214,14 +214,10 @@ def test_recent_platform_risk_returns_select_only_latest_closed_row_per_trade(
                     )
                 ).all()
                 plan_text = " ".join(str(row[-1]) for row in plan)
-                # The two-row SQLite fixture is too small to make the cost-based
-                # planner prefer the composite partial index for the correlated
-                # lookup; it correctly uses the simpler trade_id index instead.
-                # Verify both access paths stay indexed, then inspect the partial
-                # composite index definition directly rather than asserting a
-                # cost-based planner choice that changes with table cardinality.
+                # The correlated latest-lifecycle lookup must use the deterministic
+                # composite partial index, not the legacy trade_id-only index.
                 assert "USING INDEX ix_strategy_outcome_platform_completed" in plan_text
-                assert "USING INDEX ix_strategy_outcomes_trade_id" in plan_text
+                assert "USING INDEX ix_strategy_outcome_platform_closed_trade_time" in plan_text
                 assert "SCAN strategy_outcomes" not in plan_text
 
                 index_columns = (
