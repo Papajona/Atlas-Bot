@@ -29,7 +29,7 @@ def _normalize_postgres_index_expression(value: str | None) -> str:
         value,
         flags=re.IGNORECASE,
     )
-    return re.sub(r'[\s"\x60]+', "", value).casefold()
+    return re.sub(r'[\s()"\x60]+', "", value).casefold()
 
 
 def _postgres_index_valid(bind) -> bool | None:
