@@ -1,10 +1,37 @@
-import os
+import ipaddress
 import math
+import os
+from urllib.parse import urlsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _VALID_ENVIRONMENTS = {"development", "staging", "production", "test"}
+
+
+def _is_local_database_url(database_url: str) -> bool:
+    """Return true only for SQLite or a loopback-hosted database URL."""
+    value = str(database_url or "").strip()
+    if not value:
+        return False
+    try:
+        parsed = urlsplit(value)
+        scheme = parsed.scheme.partition("+")[0].lower()
+        if scheme == "sqlite":
+            return True
+        hostname = parsed.hostname
+    except ValueError:
+        return False
+
+    if not hostname:
+        return False
+    hostname = hostname.rstrip(".").lower()
+    if hostname == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
 
 
 class Settings(BaseSettings):
@@ -650,6 +677,14 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _production_security_requirements(self):
+        if self.environment == "development" and not _is_local_database_url(self.database_url):
+            if str(self.admin_token or "").strip():
+                raise ValueError(
+                    "legacy ADMIN_TOKEN is not allowed against a remote database"
+                )
+            raise ValueError(
+                "development environment may not point at a remote database"
+            )
         if self.paper_staging_market_scanner_enabled and self.environment != "staging":
             raise ValueError(
                 "PAPER_STAGING_MARKET_SCANNER_ENABLED may only be true in staging"

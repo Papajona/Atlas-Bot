@@ -126,3 +126,54 @@ def test_initial_equity_and_open_position_count_cannot_disable_validation():
     with pytest.raises(ValueError, match="MAX_OPEN_POSITIONS"):
         Settings(environment="test", max_open_positions=-1)
 
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "sqlite+aiosqlite:///./data/trading.db",
+        "postgresql+asyncpg://atlas:secret@localhost:5432/atlas",
+        "postgresql+asyncpg://atlas:secret@127.0.0.1:5432/atlas",
+        "postgresql+asyncpg://atlas:secret@[::1]:5432/atlas",
+    ],
+)
+def test_development_accepts_only_local_database_urls(database_url):
+    Settings(
+        environment="development",
+        database_url=database_url,
+        admin_token="local-development-token",
+    )
+
+
+@pytest.mark.parametrize(
+    "database_url",
+    [
+        "postgresql+asyncpg://atlas:secret@db.example.com:5432/atlas",
+        "postgresql+asyncpg://atlas:secret@localhost.attacker.example:5432/atlas",
+        "postgresql+asyncpg://atlas:secret@127.0.0.1.attacker.example:5432/atlas",
+    ],
+)
+def test_development_rejects_remote_database_without_legacy_admin_token(database_url):
+    with pytest.raises(
+        ValueError,
+        match="development environment may not point at a remote database",
+    ):
+        Settings(environment="development", database_url=database_url)
+
+
+def test_development_rejects_legacy_admin_token_with_remote_database():
+    with pytest.raises(
+        ValueError,
+        match="legacy ADMIN_TOKEN is not allowed against a remote database",
+    ):
+        Settings(
+            environment="development",
+            database_url="postgresql+asyncpg://atlas:secret@db.example.com:5432/atlas",
+            admin_token="legacy-shared-token",
+        )
+
+
+def test_test_environment_can_use_remote_postgresql_database():
+    Settings(
+        environment="test",
+        database_url="postgresql+asyncpg://atlas:secret@db.example.com:5432/atlas",
+    )
+
