@@ -29,7 +29,7 @@ class StrategyReplayEngineTest {
         assertFalse(result.strategyRulesExecuted)
         val repeated = ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 100.0)
         assertEquals(result.trades, repeated.trades)
-        assertEquals(result.netProfit, repeated.netProfit)
+        assertEquals(result.netProfit, repeated.netProfit, 0.0)
 
         // Verify that individual trades have both wins and losses
         val wins = result.trades.filter { it.isWin }
@@ -66,11 +66,10 @@ class StrategyReplayEngineTest {
         assertFalse(result.strategyRulesExecuted)
     }
 
-    private fun winOrLossNegative(pnl: Double): Boolean = pnl <= 0.0
-}
-
-
     @Test(expected = IllegalArgumentException::class)
     fun testSyntheticReplayRejectsInvalidInitialCapital() = runBlocking {
         ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 0.0)
     }
+
+    private fun winOrLossNegative(pnl: Double): Boolean = pnl <= 0.0
+}
