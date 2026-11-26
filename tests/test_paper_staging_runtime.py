@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +62,8 @@ def test_paper_staging_asgi_exposes_only_explicit_health_auth_customer_and_paper
             "/api/auth/mfa/challenge", "/api/auth/mfa/verify",
             "/api/auth/profile/provision",
             "/api/customer/me", "/api/customer/portfolio",
+            "/api/customer/portfolio/equity-history",
+            "/api/customer/workspace-preferences",
             "/api/customer/market-scanner",
         }
         or path.startswith("/api/customer/paper/")
@@ -857,3 +860,216 @@ def test_paper_customer_market_scanner_allows_only_configured_oanda_practice_com
     ]
     assert response.json()["data_source"] == "oanda_practice"
     assert response.json()["read_only"] is True
+
+
+def test_paper_portfolio_records_only_verified_usdt_cash_without_open_positions(monkeypatch):
+    async def no_guard():
+        return None
+
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        assert require_aal2 is True
+        return SimpleNamespace(id=314), {"sub": "customer-314", "aal": "aal2"}
+
+    async def balances(*, customer_id):
+        assert customer_id == 314
+        return [{"account_code": "PAPER_CASH", "currency": "USDT", "balance": "105.25"}]
+
+    async def positions(*, customer_id):
+        assert customer_id == 314
+        return []
+
+    recorded = []
+
+    async def record(**kwargs):
+        recorded.append(kwargs)
+        return True
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging, "_paper_state_guard", no_guard)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_balances", balances)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(paper_staging, "record_customer_paper_equity_snapshot", record)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/portfolio",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["equity"] == 105.25
+    assert response.json()["valuation_status"] == "CASH_ONLY"
+    assert response.json()["currency"] == "USDT"
+    assert recorded == [{
+        "customer_id": 314,
+        "equity": Decimal("105.25"),
+        "cash_equity": Decimal("105.25"),
+        "currency": "USDT",
+    }]
+
+
+def test_paper_portfolio_does_not_record_equity_from_unpriced_open_positions(monkeypatch):
+    async def no_guard():
+        return None
+
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        return SimpleNamespace(id=314), {"sub": "customer-314", "aal": "aal2"}
+
+    async def balances(*, customer_id):
+        return [{"account_code": "PAPER_CASH", "currency": "USDT", "balance": "105.25"}]
+
+    async def positions(*, customer_id):
+        return [{"symbol": "BTC/USDT", "quantity": "0.01"}]
+
+    async def unexpected_record(**_kwargs):
+        pytest.fail("equity must not be recorded from stale/unpriced positions")
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging, "_paper_state_guard", no_guard)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_balances", balances)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(paper_staging, "record_customer_paper_equity_snapshot", unexpected_record)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/portfolio",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["equity"] is None
+    assert response.json()["valuation_status"] == "CURRENT_MARK_REQUIRED"
+
+
+def test_paper_equity_history_endpoint_returns_only_persisted_customer_points(monkeypatch):
+    async def no_guard():
+        return None
+
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        assert require_aal2 is True
+        return SimpleNamespace(id=271), {"sub": "customer-271", "aal": "aal2"}
+
+    async def history(*, customer_id, days):
+        assert customer_id == 271
+        assert days == 7
+        return [{
+            "observed_at": "2026-11-26T12:00:00+00:00",
+            "equity": 90.5,
+            "cash_equity": 90.5,
+            "currency": "USDT",
+            "valuation_source": "PAPER_LEDGER_CASH_ONLY",
+        }]
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging, "_paper_state_guard", no_guard)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_equity_history", history)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/portfolio/equity-history?days=7",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["scope"] == "customer_only"
+    assert response.json()["history_complete"] is False
+    assert response.json()["points"][0]["valuation_source"] == "PAPER_LEDGER_CASH_ONLY"
+
+
+def test_paper_workspace_preferences_get_and_patch_use_customer_scoped_storage(monkeypatch):
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        assert require_aal2 is True
+        return SimpleNamespace(id=808), {"sub": "customer-808", "aal": "aal2"}
+
+    safe = {
+        "reduce_motion": False,
+        "compact_markets": False,
+        "touch_feedback": True,
+        "mobile_chart_crosshair_enabled": True,
+        "mobile_default_timeframe_days": 30,
+    }
+    updated = {**safe, "mobile_default_timeframe_days": 7, "mobile_chart_crosshair_enabled": False}
+    calls = []
+
+    async def get_preferences(*, customer_id):
+        assert customer_id == 808
+        return {"configured": False, "preferences": safe}
+
+    async def update_preferences(*, customer_id, updates):
+        calls.append((customer_id, updates))
+        return {"configured": True, "preferences": updated}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_workspace_preferences", get_preferences)
+    monkeypatch.setattr(paper_staging, "update_customer_paper_workspace_preferences", update_preferences)
+
+    client = TestClient(paper_staging.app)
+    headers = {"Authorization": "Bearer verified-customer-token"}
+    loaded = client.get("/api/customer/workspace-preferences", headers=headers)
+    saved = client.patch(
+        "/api/customer/workspace-preferences",
+        headers=headers,
+        json={"mobile_default_timeframe_days": 7, "mobile_chart_crosshair_enabled": False},
+    )
+    assert loaded.status_code == 200
+    assert loaded.json()["configured"] is False
+    assert loaded.json()["preferences"] == safe
+    assert saved.status_code == 200
+    assert saved.json()["configured"] is True
+    assert saved.json()["preferences"] == updated
+    assert calls == [(
+        808,
+        {"mobile_default_timeframe_days": 7, "mobile_chart_crosshair_enabled": False},
+    )]
+
+
+def test_paper_workspace_preferences_reject_execution_policy_fields(monkeypatch):
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        return SimpleNamespace(id=808), {"sub": "customer-808", "aal": "aal2"}
+
+    async def update_preferences(*, customer_id, updates):
+        raise ValueError("only supported display preferences may be changed")
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging, "update_customer_paper_workspace_preferences", update_preferences)
+
+    response = TestClient(paper_staging.app).patch(
+        "/api/customer/workspace-preferences",
+        headers={"Authorization": "Bearer verified-customer-token"},
+        json={"live_trading_enabled": True},
+    )
+    assert response.status_code == 422
