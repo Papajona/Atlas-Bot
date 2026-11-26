@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationInfo, field_validator
 
+from app.config import settings
+
 
 class MarketRequest(BaseModel):
     asset: str = Field(default="crypto", pattern="^(crypto|forex|commodity)$")
@@ -27,6 +29,18 @@ class CustomerPaperMarketRequest(MarketRequest):
 
 
 class ResearchMarketRequest(MarketRequest):
+    min_train: int = Field(
+        default_factory=lambda: settings.research_min_train,
+        ge=200,
+        le=5000,
+        validate_default=True,
+    )
+    folds: int = Field(
+        default_factory=lambda: settings.research_folds,
+        ge=2,
+        le=10,
+        validate_default=True,
+    )
     # Optional signed evidence is verified against server-configured trust roots;
     # it is never trusted merely because an API caller supplied it.
     point_in_time_universe_manifest: dict[str, Any] | None = Field(default=None, repr=False)
@@ -134,6 +148,8 @@ class StrategyLabRequest(BaseModel):
     # None means infer timeframe from the prompt; a selected value is an explicit override.
     timeframe: str | None = Field(default=None, pattern="^(5m|15m|30m|1h|4h|1d)$")
     days: int = Field(default=365, ge=60, le=1500)
+    # Explicit per-submission consent. Missing/false is always no capture.
+    benchmark_opt_in: bool = False
 
 
 class ExecutorCreateRequest(BaseModel):
@@ -163,6 +179,8 @@ class StrategyBuilderRequest(BaseModel):
     # Keep prompt inference as the default for the compatibility endpoint too.
     # An explicit value remains a caller-selected override.
     timeframe: str | None = Field(default=None, pattern="^(5m|15m|30m|1h|4h|1d)$")
+    # Explicit per-submission consent. Missing/false is always no capture.
+    benchmark_opt_in: bool = False
 
 
 class GridBotRequest(BaseModel):

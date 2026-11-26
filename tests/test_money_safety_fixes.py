@@ -414,7 +414,9 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     main = Path("app/main.py").read_text()
     migration = Path("alembic/versions/0033b_sweep_reconciliation_integrity.py").read_text()
     assert "custody_transfer_id" in db
-    assert "uq_tron_sweep_transaction_id_nonempty" in db
+    assert "uq_tron_sweep_transaction_id_ci_nonempty" in db
+    assert 'sa.text("lower(transaction_id)")' in db
+    assert "uq_tron_sweep_transaction_id_nonempty" not in db
     assert "create_custody_transfer" in main
     assert "transition_custody_transfer" in main
     assert "an in-flight sweep already exists for this deposit wallet" in main
@@ -423,6 +425,59 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     assert 'status="RECONCILIATION_REQUIRED"' in main
     assert 'status="FAILED"' in main
     assert "custody_transfer_id" in migration
+
+
+def test_tron_sweep_conflict_detector_only_matches_casefold_txid_index():
+    from types import SimpleNamespace
+    from sqlalchemy.exc import IntegrityError
+    import app.main as main
+
+    index_name = "uq_tron_sweep_transaction_id_ci_nonempty"
+    postgres_error = RuntimeError("duplicate key")
+    postgres_error.diag = SimpleNamespace(constraint_name=index_name)
+    assert main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, postgres_error)
+    )
+
+    # SQLAlchemy's asyncpg adapter wraps the native exception as its cause;
+    # PostgreSQL's message is not SQLite's "UNIQUE constraint failed" text.
+    asyncpg_error = RuntimeError(
+        f'duplicate key value violates unique constraint "{index_name}"'
+    )
+    adapted_error = RuntimeError("SQLAlchemy asyncpg DBAPI wrapper")
+    adapted_error.__cause__ = asyncpg_error
+    assert main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, adapted_error)
+    )
+
+    unrelated_asyncpg_error = RuntimeError(
+        'duplicate key value violates unique constraint "uq_tron_sweep_idempotency"'
+    )
+    assert not main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, unrelated_asyncpg_error)
+    )
+
+    sqlite_error = RuntimeError(
+        f"UNIQUE constraint failed: index '{index_name}'"
+    )
+    assert main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, sqlite_error)
+    )
+
+    unrelated_error = RuntimeError(
+        "UNIQUE constraint failed: tron_sweeps.id"
+    )
+    assert not main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, unrelated_error)
+    )
+
+    other_index_error = RuntimeError("duplicate key")
+    other_index_error.diag = SimpleNamespace(
+        constraint_name="uq_tron_sweep_idempotency"
+    )
+    assert not main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, other_index_error)
+    )
 
 
 def test_tron_sweep_settlement_requires_exact_onchain_transfer_evidence():
@@ -590,7 +645,7 @@ def test_old_completed_learning_replays_are_reprocessed_after_version_change(mon
 
         import app.db as db_module
         import app.trade_learning as learning
-        from app.db import TradeLearningEpisode
+        from app.db import StrategyOutcome, TradeLearningEpisode
 
         monkeypatch.setattr(db_module, "SessionLocal", sessions)
         monkeypatch.setattr(
@@ -620,6 +675,19 @@ def test_old_completed_learning_replays_are_reprocessed_after_version_change(mon
                 entry_quantity=1.0,
             )
             db.add(episode)
+            db.add(StrategyOutcome(
+                trade_id=987654,
+                closing_trade_id=987655,
+                strategy="test",
+                asset="crypto",
+                symbol="BTC/USDT",
+                timeframe="1h",
+                side="buy",
+                lifecycle_status="CLOSED",
+                closing_quantity=1.0,
+                closing_notional=101.0,
+                fee_basis_complete=True,
+            ))
             await db.commit()
             episode_id = episode.id
 

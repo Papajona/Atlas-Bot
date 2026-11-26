@@ -5,6 +5,7 @@ import pandas as pd
 
 from .strategy_engine import _atr, _adx, _rsi
 from .config import settings
+from .risk_governor import bounded_risk_tolerance
 
 
 @dataclass(frozen=True)
@@ -198,6 +199,7 @@ def gated_entry_exit_backtest(
     max_dd = 0.0
     trades: list[dict] = []
     ambiguous_bars = 0
+    gap_stop_exits = 0
     position = None
     # Backtests must apply the same entry-frequency discipline as execution so
     # historical results do not assume unlimited re-entry.
@@ -256,7 +258,13 @@ def gated_entry_exit_backtest(
             if hit_stop and hit_target:
                 ambiguous_bars += 1
             if hit_stop:
-                exit_price, reason = stop, "stop_loss"
+                # A touched stop is a market order: if the bar gaps through it, the fill is the
+                # open, not the (better) stop price. Matches execution_aware_research.py.
+                gap_open = float(bar["open"])
+                exit_price = min(stop, gap_open) if side == "buy" else max(stop, gap_open)
+                reason = "stop_loss"
+                if exit_price != stop:
+                    gap_stop_exits += 1
             elif hit_target:
                 exit_price, reason = target, "take_profit"
             elif side == "buy" and prev["side"] == "sell":
@@ -312,7 +320,7 @@ def gated_entry_exit_backtest(
                     if qty > 0:
                         if settings.discipline_enabled and settings.discipline_enforce_risk_per_trade:
                             risk_cash = initial_risk * qty
-                            allowed_risk = equity * risk_fraction * (1.0 + settings.discipline_risk_tolerance)
+                            allowed_risk = equity * risk_fraction * (1.0 + bounded_risk_tolerance(settings.discipline_risk_tolerance))
                             if risk_cash > allowed_risk + 1e-12:
                                 continue
                         entry_fee = abs(qty * fill) * fee_rate
@@ -393,6 +401,7 @@ def gated_entry_exit_backtest(
         "config": asdict(cfg),
         "execution_model": "next-bar reached-entry fill; gap-through at open; conservative stop-first; ATR trail after +1R",
         "ambiguous_bar_count": int(ambiguous_bars),
+        "gap_stop_exit_count": int(gap_stop_exits),
         "ambiguous_bar_policy": "STOP_FIRST",
         "trades_detail": trades,
     }

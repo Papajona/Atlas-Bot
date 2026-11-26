@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0059_research_integrity_controls"
+        "0065_tron_sweep_txid_casefold_unique"
     }
 
 
@@ -53,12 +53,56 @@ def test_alembic_revision_contract_rejects_cycles(tmp_path):
 
 
 
-def test_research_integrity_revision_is_direct_successor_and_single_repository_head():
+def test_integrated_alembic_chain_has_the_expected_single_head():
     migration = (
-        ROOT / "alembic" / "versions" / "0059_research_integrity_controls.py"
+        ROOT / "alembic" / "versions" / "0065_tron_sweep_txid_casefold_unique.py"
     ).read_text(encoding="utf-8")
-    assert 'revision = "0059_research_integrity_controls"' in migration
-    assert 'down_revision = "0058_customer_paper_rls_and_index_hardening"' in migration
+    assert 'revision = "0065_tron_sweep_txid_casefold_unique"' in migration
+    assert 'down_revision = "0064_strategy_outcome_recent_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0059_research_integrity_controls"
+        "0065_tron_sweep_txid_casefold_unique"
     }
+
+
+def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
+    versions = ROOT / "alembic" / "versions"
+    expected = {
+        "0060_customer_identity_unmapped_index": "0059_research_integrity_controls",
+        "0061_strategy_outcome_fill_aggregation": "0060_customer_identity_unmapped_index",
+        "0062_customer_benchmark_capture": "0061_strategy_outcome_fill_aggregation",
+        "0063_webhook_events_created_at_index": "0062_customer_benchmark_capture",
+        "0064_strategy_outcome_recent_index": "0063_webhook_events_created_at_index",
+        "0065_tron_sweep_txid_casefold_unique": "0064_strategy_outcome_recent_index",
+    }
+    for revision, parent in expected.items():
+        migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
+        assert f'revision = "{revision}"' in migration
+        assert f'down_revision = "{parent}"' in migration
+    assert expected_alembic_heads(versions) == {"0065_tron_sweep_txid_casefold_unique"}
+
+
+def test_runbook_and_production_provisioners_require_the_current_alembic_head():
+    expected = "0065_tron_sweep_txid_casefold_unique"
+    for path in (
+        ROOT / "RUNBOOK.md",
+        ROOT / "scripts" / "provision_atlas_api_runtime.sql",
+        ROOT / "scripts" / "provision_atlas_audit_reader.sql",
+    ):
+        source = path.read_text(encoding="utf-8")
+        assert expected in source
+        assert "0064_strategy_outcome_recent_index" not in source
+
+
+def test_cloud_sql_recovery_installs_paper_schema_before_alembic_upgrade():
+    source = (ROOT / "RUNBOOK.md").read_text(encoding="utf-8")
+    paper_schema_step = (
+        "4. While still connected as the database owner/admin, apply "
+        "`scripts/customer_paper_ledger_schema.sql`"
+    )
+    migration_step = (
+        "5. **Only after step 4 succeeds**, apply the repository Alembic chain"
+    )
+
+    assert source.count("alembic upgrade head") == 1
+    assert source.index(paper_schema_step) < source.index(migration_step)
+    assert "This must complete **before any Alembic upgrade**" in source

@@ -84,6 +84,26 @@ async def persist_withdrawal_replay_mismatch(db, mismatch: WithdrawalReplayMisma
         await db.flush()
 
 
+async def persist_trading_release_replay_mismatch(db, incident_args: dict) -> None:
+    """Roll back the rejected trade transaction, then durably record its HIGH alert.
+
+    Use the caller's session after rollback. A second SQLite session cannot write
+    while the failed fill transaction still owns SQLite's single-writer lock.
+    The rejected fill must not commit its position or ledger mutations.
+    """
+    await db.rollback()
+    try:
+        async with db.begin_nested():
+            await record_ledger_incident(db, **incident_args)
+            await db.flush()
+    except IntegrityError:
+        # A concurrent replay may have inserted the deterministic incident
+        # key after our SELECT. Retry the upsert outside the failed savepoint.
+        await record_ledger_incident(db, **incident_args)
+        await db.flush()
+    await db.commit()
+
+
 async def get_or_create_ledger(db, customer_id: int, currency: str = USDT) -> CustomerLedgerAccount:
     row = (await db.execute(select(CustomerLedgerAccount).where(
         CustomerLedgerAccount.customer_id == customer_id,
@@ -322,6 +342,153 @@ async def reserve_trading(db, customer_id: int, amount: float, *, reference_id: 
                        reference_id=reference_id, idempotency_key=idem))
     return fresh_ledger
 
+async def _check_trading_release_replay(
+    db,
+    journal: LedgerJournal,
+    *,
+    customer_id: int,
+    amount_d: Decimal,
+    reference_id: str,
+) -> None:
+    """Reject a release retry that reuses a key for a different ledger operation."""
+    problems: list[str] = []
+    idem = f"release:{reference_id}:{customer_id}"
+    if (
+        journal.idempotency_key != idem
+        or journal.entry_type != "TRADING_RELEASE"
+        or str(journal.currency or "").upper() != USDT
+        or journal.reference_type != "TRADE"
+        or journal.reference_id != reference_id
+    ):
+        problems.append("journal identity")
+
+    entry = (
+        await db.execute(
+            select(LedgerEntry)
+            .where(LedgerEntry.idempotency_key == idem)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    metadata: dict = {}
+    if entry is None:
+        problems.append("missing ledger entry")
+    else:
+        if (
+            entry.customer_id != customer_id
+            or str(entry.currency or "").upper() != USDT
+            or entry.entry_type != "TRADING_RELEASE"
+            or entry.reference_type != "TRADE"
+            or entry.reference_id != reference_id
+        ):
+            problems.append("ledger entry identity")
+        try:
+            parsed = json.loads(entry.metadata_json or "{}")
+            if not isinstance(parsed, dict):
+                raise ValueError("metadata is not an object")
+            metadata = parsed
+        except (TypeError, ValueError):
+            problems.append("invalid replay metadata")
+
+        recorded_request = metadata.get("requested_amount")
+        if recorded_request is None:
+            # The paid amount does not prove the original requested amount:
+            # an old shortfall release can have paid less than was requested.
+            # Recover the request only from the immutable shortfall incident;
+            # otherwise the legacy replay is ambiguous and must fail closed.
+            incident = (
+                await db.execute(
+                    select(Incident).where(
+                        Incident.incident_key
+                        == f"RELEASE_EXCEEDS_RESERVE:{reference_id}:{customer_id}"
+                    )
+                )
+            ).scalar_one_or_none()
+            if incident is not None:
+                try:
+                    incident_detail = json.loads(incident.detail_json or "{}")
+                    if (
+                        isinstance(incident_detail, dict)
+                        and str(incident_detail.get("customer_id")) == str(customer_id)
+                        and str(incident_detail.get("reference_id")) == str(reference_id)
+                    ):
+                        recorded_request = incident_detail.get("requested")
+                except (TypeError, ValueError, AttributeError):
+                    recorded_request = None
+        try:
+            if recorded_request is None or _q(recorded_request) != amount_d:
+                problems.append("requested amount")
+        except (TypeError, ValueError, ArithmeticError):
+            problems.append("invalid recorded requested amount")
+
+        try:
+            if "effective_amount" in metadata and _q(metadata["effective_amount"]) != D(str(entry.amount)):
+                problems.append("effective amount metadata")
+        except (TypeError, ValueError, ArithmeticError):
+            problems.append("invalid effective amount metadata")
+        if (
+            D(str(entry.debit)) != 0
+            or D(str(entry.credit)) != D(str(entry.amount))
+            or D(str(entry.amount)) <= 0
+        ):
+            problems.append("ledger entry amount shape")
+
+    lines = (
+        await db.execute(
+            select(LedgerJournalLine)
+            .where(LedgerJournalLine.journal_id == journal.id)
+        )
+    ).scalars().all()
+    reserved_account = _customer_account(customer_id, "TRADING_RESERVED")
+    available_account = _customer_account(customer_id, "AVAILABLE")
+    reserved_lines = [line for line in lines if line.account_code == reserved_account]
+    available_lines = [line for line in lines if line.account_code == available_account]
+    valid_line_shape = (
+        len(lines) == 2
+        and len(reserved_lines) == 1
+        and len(available_lines) == 1
+        and all(str(line.currency or "").upper() == USDT for line in lines)
+        and all(line.customer_id == customer_id for line in lines)
+        and D(str(reserved_lines[0].credit)) == 0
+        and D(str(available_lines[0].debit)) == 0
+    )
+    if not valid_line_shape or entry is None:
+        problems.append("journal lines")
+    else:
+        released_debit = D(str(reserved_lines[0].debit))
+        released_credit = D(str(available_lines[0].credit))
+        if (
+            released_debit <= 0
+            or released_debit != released_credit
+            or released_debit != D(str(entry.amount))
+        ):
+            problems.append("journal release amounts")
+
+    if problems:
+        logger.critical(
+            "trading_release_replay_mismatch customer=%s key=%s requested=%s problems=%s",
+            customer_id, idem, amount_d, ",".join(problems),
+        )
+        await persist_trading_release_replay_mismatch(
+            db,
+            {
+                "key": f"RELEASE_REPLAY_MISMATCH:{idem}",
+                "summary": "Idempotent trading release replayed with a different or inconsistent operation",
+                "detail": {
+                    "customer_id": customer_id,
+                    "reference_id": reference_id,
+                    "idempotency_key": idem,
+                    "requested_amount": str(amount_d),
+                    "problems": problems,
+                },
+                "customer_id": customer_id,
+                "severity": "HIGH",
+            }
+        )
+        raise ValueError(
+            "trading release idempotency key already used by a different or inconsistent operation"
+        )
+
+
 async def release_trading(
     db, customer_id: int, amount: float, *,
     reference_id: str, full_allocation: bool = False,
@@ -346,8 +513,31 @@ async def release_trading(
         )
     ).scalar_one_or_none()
     if existing:
+        await _check_trading_release_replay(
+            db,
+            existing,
+            customer_id=customer_id,
+            amount_d=amount_d,
+            reference_id=reference_id,
+        )
         return fresh_ledger
-    release = min(amount_d, fresh_ledger.trading_reserved)
+    reserved_now = D(str(fresh_ledger.trading_reserved))
+    release = min(amount_d, reserved_now)
+    # Both operands are quantized to the ledger's six-decimal scale. Any positive
+    # difference is a real, representable reserve shortfall and must be reported.
+    if amount_d > reserved_now:
+        # The caller expects more collateral to be reserved than the ledger holds. Releasing the
+        # smaller amount is the safe action, but the gap must not be silent: it means the position
+        # row and the ledger have drifted apart.
+        await record_ledger_incident(
+            db,
+            key=f"RELEASE_EXCEEDS_RESERVE:{reference_id}:{customer_id}",
+            summary="Trading release requested more than the customer's reserved balance",
+            detail={"customer_id": customer_id, "reference_id": str(reference_id),
+                    "requested": str(amount_d), "reserved": str(reserved_now),
+                    "released": str(max(release, D("0")))},
+            customer_id=customer_id, severity="HIGH", reopen_resolved=False,
+        )
     if release <= 0:
         return fresh_ledger
     fresh_ledger.trading_reserved -= release
@@ -358,9 +548,22 @@ async def release_trading(
                            {"account_code": _customer_account(customer_id, "TRADING_RESERVED"), "customer_id": customer_id, "debit": release, "credit": 0},
                            {"account_code": _customer_account(customer_id, "AVAILABLE"), "customer_id": customer_id, "debit": 0, "credit": release},
                        ], description="Release unused customer trading reserve")
-    db.add(LedgerEntry(customer_id=customer_id, currency=USDT, entry_type="TRADING_RELEASE",
-                       debit=0, credit=release, amount=release, reference_type="TRADE",
-                       reference_id=reference_id, idempotency_key=idem))
+    db.add(LedgerEntry(
+        customer_id=customer_id,
+        currency=USDT,
+        entry_type="TRADING_RELEASE",
+        debit=0,
+        credit=release,
+        amount=release,
+        reference_type="TRADE",
+        reference_id=reference_id,
+        idempotency_key=idem,
+        metadata_json=json.dumps({
+            "requested_amount": str(amount_d),
+            "effective_amount": str(release),
+            "full_allocation": bool(full_allocation),
+        }, separators=(",", ":")),
+    ))
     return fresh_ledger
 
 async def reserve_withdrawal(db, customer_id: int, amount: float, *, reference_id: str) -> CustomerLedgerAccount:

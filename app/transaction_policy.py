@@ -1,6 +1,7 @@
 from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from fastapi import HTTPException
 from .config import settings
 from .db import WithdrawalDestination
@@ -20,13 +21,25 @@ async def register_or_check_destination(db, *, customer_id: int, destination: st
         WithdrawalDestination.fingerprint == fp,
     ).with_for_update())).scalar_one_or_none()
     if not row:
-        row = WithdrawalDestination(
-            customer_id=customer_id, fingerprint=fp, currency=currency.upper(),
-            network=network.upper(), first_seen_at=now, status="PENDING",
-        )
-        db.add(row)
-        await db.flush()
-        return {"allowed": False, "reason": "new_destination_cooling_off", "fingerprint": fp, "ready_at": (now + timedelta(hours=max(0, settings.withdrawal_address_cooling_off_hours))).isoformat()}
+        # Two concurrent first requests can both see no row. Keep the uniqueness race inside a
+        # savepoint and fall through to the committed winner instead of failing with a 500.
+        try:
+            async with db.begin_nested():
+                row = WithdrawalDestination(
+                    customer_id=customer_id, fingerprint=fp, currency=currency.upper(),
+                    network=network.upper(), first_seen_at=now, status="PENDING",
+                )
+                db.add(row)
+                await db.flush()
+        except IntegrityError:
+            row = (await db.execute(select(WithdrawalDestination).where(
+                WithdrawalDestination.customer_id == customer_id,
+                WithdrawalDestination.fingerprint == fp,
+            ).with_for_update())).scalar_one_or_none()
+            if row is None:
+                raise
+        else:
+            return {"allowed": False, "reason": "new_destination_cooling_off", "fingerprint": fp, "ready_at": (now + timedelta(hours=max(0, settings.withdrawal_address_cooling_off_hours))).isoformat()}
 
     row.last_used_at = now
     if row.status == "VERIFIED":

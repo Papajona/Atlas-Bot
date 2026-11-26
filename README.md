@@ -81,7 +81,7 @@ A transport timeout on order placement becomes `UNKNOWN`. Operators must reconci
 
 ## CCXT version
 
-The bundled requirements pin CCXT to `4.5.85` (see `requirements.txt`). Check https://github.com/ccxt/ccxt/releases and run the exchange drill tests before changing the pin.
+The bundled requirements and hash-verified lockfiles pin CCXT to `4.5.88` (see `requirements.txt`, `requirements.lock`, and `requirements-dev.lock`). Check https://github.com/ccxt/ccxt/releases and run the exchange drill tests before changing the pin.
 
 ## Production database
 
