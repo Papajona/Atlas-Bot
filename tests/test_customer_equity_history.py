@@ -178,6 +178,8 @@ def test_workspace_preference_patch_uses_atomic_customer_scoped_upsert(monkeypat
                 reduce_motion=True,
                 compact_markets=False,
                 touch_feedback=False,
+                mobile_default_timeframe_days=7,
+                mobile_chart_crosshair_enabled=False,
             )
 
         async def get(self, model, customer_id):
@@ -209,7 +211,12 @@ def test_workspace_preference_patch_uses_atomic_customer_scoped_upsert(monkeypat
 
     response = asyncio.run(
         main.customer_update_workspace_preferences(
-            {"reduce_motion": True, "touch_feedback": False},
+            {
+                "reduce_motion": True,
+                "touch_feedback": False,
+                "mobile_default_timeframe_days": 7,
+                "mobile_chart_crosshair_enabled": False,
+            },
             authorization="Bearer tenant-314-token",
         )
     )
@@ -223,8 +230,8 @@ def test_workspace_preference_patch_uses_atomic_customer_scoped_upsert(monkeypat
         "reduce_motion": True,
         "compact_markets": False,
         "touch_feedback": False,
-        "mobile_chart_crosshair_enabled": True,
-        "mobile_default_timeframe_days": 30,
+        "mobile_chart_crosshair_enabled": False,
+        "mobile_default_timeframe_days": 7,
     }
 
 
