@@ -7435,18 +7435,31 @@ async def customer_portfolio_equity_history(
         }
 
 
-_WORKSPACE_PREFERENCE_FIELDS = {
+_WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS = {
     "reduce_motion": False,
     "compact_markets": False,
     "touch_feedback": True,
+    "mobile_chart_crosshair_enabled": True,
+}
+_WORKSPACE_INTEGER_PREFERENCE_CHOICES = {
+    "mobile_default_timeframe_days": {7, 30},
+}
+_WORKSPACE_PREFERENCE_FIELDS = {
+    **_WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS,
+    "mobile_default_timeframe_days": 30,
 }
 
 
 def _workspace_preferences_payload(row: CustomerWorkspacePreference | None) -> dict:
     return {
-        "reduce_motion": bool(row.reduce_motion) if row is not None else False,
-        "compact_markets": bool(row.compact_markets) if row is not None else False,
-        "touch_feedback": bool(row.touch_feedback) if row is not None else True,
+        **{
+            key: bool(getattr(row, key)) if row is not None else value
+            for key, value in _WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS.items()
+        },
+        **{
+            key: int(getattr(row, key)) if row is not None else 30
+            for key in _WORKSPACE_INTEGER_PREFERENCE_CHOICES
+        },
     }
 
 
@@ -7473,9 +7486,13 @@ async def customer_update_workspace_preferences(
         raise HTTPException(422, "At least one workspace preference is required")
     unknown = set(req) - set(_WORKSPACE_PREFERENCE_FIELDS)
     if unknown:
-        raise HTTPException(422, "Only display preferences may be changed here")
-    if any(type(value) is not bool for value in req.values()):
-        raise HTTPException(422, "Workspace preference values must be booleans")
+        raise HTTPException(422, "Only supported display preferences may be changed here")
+    for key, value in req.items():
+        if key in _WORKSPACE_INTEGER_PREFERENCE_CHOICES:
+            if type(value) is not int or value not in _WORKSPACE_INTEGER_PREFERENCE_CHOICES[key]:
+                raise HTTPException(422, "Default chart window must be 7 or 30 days")
+        elif type(value) is not bool:
+            raise HTTPException(422, "Boolean workspace preferences require boolean values")
     async with SessionLocal() as db:
         profile, _ = await get_customer(authorization, db, require_aal2=False)
         updated_at = datetime.now(timezone.utc)
@@ -7510,6 +7527,8 @@ async def customer_update_workspace_preferences(
                     reduce_motion=False,
                     compact_markets=False,
                     touch_feedback=True,
+                    mobile_default_timeframe_days=30,
+                    mobile_chart_crosshair_enabled=True,
                 )
                 db.add(row)
             for key, value in req.items():
