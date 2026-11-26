@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0066_pin_research_trigger_path"
+        "0067_service_role_customer_profiles_acl"
     }
 
 
@@ -60,7 +60,7 @@ def test_integrated_alembic_chain_has_the_expected_single_head():
     assert 'revision = "0064_strategy_outcome_recent_index"' in migration
     assert 'down_revision = "0063_webhook_events_created_at_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0066_pin_research_trigger_path"
+        "0067_service_role_customer_profiles_acl"
     }
 
 
@@ -74,6 +74,7 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         "0064_strategy_outcome_recent_index": "0063_webhook_events_created_at_index",
         "0065_ledger_trigger_owner_isolation": "0064_strategy_outcome_recent_index",
         "0066_pin_research_trigger_path": "0065_ledger_trigger_owner_isolation",
+        "0067_service_role_customer_profiles_acl": "0066_pin_research_trigger_path",
     }
     for revision, parent in expected.items():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
@@ -102,6 +103,24 @@ def test_0066_pins_research_trigger_paths_and_revokes_public_execute():
     assert "acl.grantee = 0" in migration
     assert "PUBLIC retains EXECUTE" in migration
 
+
+def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
+    migration = (
+        ROOT / "alembic" / "versions" / "0067_service_role_customer_profiles_acl.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "0067_service_role_customer_profiles_acl"' in migration
+    assert 'down_revision = "0066_pin_research_trigger_path"' in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM service_role" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM service_role" in migration
+    assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
+    assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
+    assert "pg_get_serial_sequence(" in migration
+    assert "has_table_privilege(" in migration
+    assert "has_sequence_privilege(" in migration
+    assert "service_role retains privileges on a public relation other than customer_profiles" in migration
+    assert "service_role retains privileges on a public sequence other than customer_profiles_id_seq" in migration
+    assert "# Deliberately forward-only" in migration
 
 def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer():
     migration = (
@@ -159,7 +178,7 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
         ROOT / ".github" / "workflows" / "provider-ledger-reconciliation.yml"
     ).read_text(encoding="utf-8")
 
-    expected = "0066_pin_research_trigger_path"
+    expected = "0067_service_role_customer_profiles_acl"
     for source in (
         api_provisioner,
         audit_provisioner,
