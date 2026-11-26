@@ -103,6 +103,12 @@ else:
     )
 
 
+async def dispose_identity_quarantine_engine() -> None:
+    """Release the isolated identity-quarantine connection pool during shutdown."""
+    if identity_quarantine_engine is not None:
+        await identity_quarantine_engine.dispose()
+
+
 class Base(DeclarativeBase):
     pass
 
