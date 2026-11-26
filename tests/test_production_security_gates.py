@@ -217,7 +217,10 @@ def test_tron_broadcast_result_cannot_overwrite_terminal_or_unknown_outcomes():
     assert "terminal_sweep_states" in block
     assert 'sweep.status != "READY_FOR_SIGNER"' in block
     assert "A rejection cannot override a prior timeout or known transaction" in block
-    assert 'sweep.status == "SUBMITTED" and sweep.transaction_id == txid' in block
+    assert 'stored_txid = str(sweep.transaction_id or "").strip().lower()' in block
+    assert 'sweep.status == "SUBMITTED" and stored_txid == txid' in block
+    assert 'func.lower(TronSweep.transaction_id) == txid' in block
+    assert 'sweep.transaction_id = txid' in block
 
 
 def test_production_deploy_requires_an_explicit_valid_administrator_bootstrap():
