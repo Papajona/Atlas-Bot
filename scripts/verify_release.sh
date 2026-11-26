@@ -3,7 +3,8 @@ set -euo pipefail
 
 : "${DATABASE_URL:=postgresql+asyncpg://trader:${POSTGRES_PASSWORD:-trader_test}@127.0.0.1:5432/trading}"
 export DATABASE_URL
-export ENVIRONMENT=development
+# This script targets only its disposable verification database, which may use a Compose service hostname.
+export ENVIRONMENT=test
 export PAPER_TRADING=true
 export LIVE_TRADING_ENABLED=false
 export BROKER_SANDBOX=true
