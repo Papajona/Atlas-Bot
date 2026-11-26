@@ -854,10 +854,6 @@ async def paper_customer_portfolio(authorization: str | None = Header(default=No
     await _paper_state_guard()
     balances = await get_customer_paper_balances(customer_id=int(profile.id))
     positions = await get_customer_paper_positions(customer_id=int(profile.id))
-    by_code = {
-        str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))
-        for row in balances
-    }
     cash_rows = [
         row for row in balances
         if str(row.get("account_code") or "") == "PAPER_CASH"
