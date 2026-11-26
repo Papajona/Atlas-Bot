@@ -146,6 +146,25 @@ def test_development_accepts_only_local_database_urls(database_url):
 
 
 @pytest.mark.parametrize(
+    "customer_paper_database_url",
+    [
+        "postgresql+asyncpg://atlas:secret@db.abcdefghijklmnop.supabase.co:5432/postgres",
+        "postgresql+asyncpg://atlas:secret@aws-0-eu-west-1.pooler.supabase.com:5432/postgres",
+    ],
+)
+def test_development_rejects_remote_customer_paper_database_url(customer_paper_database_url):
+    with pytest.raises(
+        ValueError,
+        match="development environment may not point at a remote customer paper database",
+    ):
+        Settings(
+            environment="development",
+            database_url="sqlite+aiosqlite:///./data/trading.db",
+            customer_paper_database_url=customer_paper_database_url,
+        )
+
+
+@pytest.mark.parametrize(
     "database_url",
     [
         "postgresql+asyncpg://atlas:secret@db.example.com:5432/atlas",
