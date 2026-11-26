@@ -118,13 +118,7 @@ SELECT
                         'ledger_entries','withdrawals','wallets','funding_transactions','tron_sweeps')
       AND (has_table_privilege('atlas_customer_paper',c.oid,'SELECT')
         OR has_table_privilege('atlas_customer_paper',c.oid,'INSERT')
-        OR (
-          (c.relname <> 'workspace_preferences'
-            AND has_table_privilege('atlas_customer_paper',c.oid,'UPDATE'))
-          OR
-          (c.relname = 'workspace_preferences'
-            AND NOT has_table_privilege('atlas_customer_paper',c.oid,'UPDATE'))
-        )
+        OR has_table_privilege('atlas_customer_paper',c.oid,'UPDATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'DELETE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
