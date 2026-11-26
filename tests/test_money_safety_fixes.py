@@ -414,7 +414,9 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     main = Path("app/main.py").read_text()
     migration = Path("alembic/versions/0033b_sweep_reconciliation_integrity.py").read_text()
     assert "custody_transfer_id" in db
-    assert "uq_tron_sweep_transaction_id_nonempty" in db
+    assert "uq_tron_sweep_transaction_id_ci_nonempty" in db
+    assert 'sa.text("lower(transaction_id)")' in db
+    assert "uq_tron_sweep_transaction_id_nonempty" not in db
     assert "create_custody_transfer" in main
     assert "transition_custody_transfer" in main
     assert "an in-flight sweep already exists for this deposit wallet" in main
@@ -423,6 +425,41 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     assert 'status="RECONCILIATION_REQUIRED"' in main
     assert 'status="FAILED"' in main
     assert "custody_transfer_id" in migration
+
+
+def test_tron_sweep_conflict_detector_only_matches_casefold_txid_index():
+    from types import SimpleNamespace
+    from sqlalchemy.exc import IntegrityError
+    import app.main as main
+
+    index_name = "uq_tron_sweep_transaction_id_ci_nonempty"
+    postgres_error = RuntimeError("duplicate key")
+    postgres_error.diag = SimpleNamespace(constraint_name=index_name)
+    assert main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, postgres_error)
+    )
+
+    sqlite_error = RuntimeError(
+        f"UNIQUE constraint failed: index '{index_name}'"
+    )
+    assert main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, sqlite_error)
+    )
+
+    unrelated_error = RuntimeError(
+        "UNIQUE constraint failed: tron_sweeps.id"
+    )
+    assert not main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, unrelated_error)
+    )
+
+    other_index_error = RuntimeError("duplicate key")
+    other_index_error.diag = SimpleNamespace(
+        constraint_name="uq_tron_sweep_idempotency"
+    )
+    assert not main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, other_index_error)
+    )
 
 
 def test_tron_sweep_settlement_requires_exact_onchain_transfer_evidence():
