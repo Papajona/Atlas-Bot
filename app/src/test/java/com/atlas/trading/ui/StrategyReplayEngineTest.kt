@@ -7,7 +7,7 @@ import org.junit.Test
 class StrategyReplayEngineTest {
 
     @Test
-    fun testTrendingBullReplaySimulation() = runBlocking {
+    fun testTrendingBullSyntheticScenarioIsNotHistoricalEvidence() = runBlocking {
         val result = ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 100.0)
 
         println("=== REPLAY TEST: TRENDING BULL ($100 STAKE) ===")
@@ -24,6 +24,12 @@ class StrategyReplayEngineTest {
         assertTrue("Win rate should be bounded between 0% and 100%", result.winRatePct in 0.0..100.0)
         assertTrue("Max drawdown should be non-negative", result.maxDrawdownPct >= 0.0)
         assertEquals(result.totalTrades, result.trades.size)
+        assertEquals("SYNTHETIC_SCENARIO_ONLY", result.evidenceStatus)
+        assertEquals(0, result.historicalBarsUsed)
+        assertFalse(result.strategyRulesExecuted)
+        val repeated = ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 100.0)
+        assertEquals(result.trades, repeated.trades)
+        assertEquals(result.netProfit, repeated.netProfit)
 
         // Verify that individual trades have both wins and losses
         val wins = result.trades.filter { it.isWin }
@@ -42,7 +48,7 @@ class StrategyReplayEngineTest {
     }
 
     @Test
-    fun testHighVolShockReplaySimulation() = runBlocking {
+    fun testHighVolShockSyntheticScenarioIsNotHistoricalEvidence() = runBlocking {
         val result = ReplaySimulator.runSimulation("Trend 1D (EUR/USD)", "High-Vol Shock", 100.0)
 
         println("=== REPLAY TEST: HIGH-VOL SHOCK ($100 STAKE) ===")
@@ -55,7 +61,16 @@ class StrategyReplayEngineTest {
         assertTrue(result.winningTrades > 0)
         assertTrue(result.losingTrades > 0)
         assertTrue(result.trades.any { it.exitReason == "STOP_LOSS_CIRCUIT" })
+        assertEquals("SYNTHETIC_SCENARIO_ONLY", result.evidenceStatus)
+        assertEquals(0, result.historicalBarsUsed)
+        assertFalse(result.strategyRulesExecuted)
     }
 
     private fun winOrLossNegative(pnl: Double): Boolean = pnl <= 0.0
 }
+
+
+    @Test(expected = IllegalArgumentException::class)
+    fun testSyntheticReplayRejectsInvalidInitialCapital() = runBlocking {
+        ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 0.0)
+    }
