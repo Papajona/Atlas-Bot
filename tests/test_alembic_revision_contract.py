@@ -150,6 +150,8 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "has_function_privilege('service_role', p.oid, 'EXECUTE')" in workflow
     assert "CREATE FUNCTION public.atlas_supabase_admin_future_probe()" in workflow
     assert "public.atlas_supabase_admin_future_probe()" in workflow
+    assert "atlas-0067-implicit-public-default.log" in workflow
+    assert "default PUBLIC EXECUTE" in workflow
 
 
 def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
