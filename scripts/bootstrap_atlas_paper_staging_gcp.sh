@@ -9,15 +9,15 @@ umask 077
 # --repair-secret-access is an IAM-only recovery path for existing service accounts
 # and secrets; it does not require DB passwords or access secret version contents.
 
-PROJECT_ID="atlas-staging-510915"
-PROJECT_NUMBER="350896810949"
+readonly PROJECT_ID="atlas-staging-510915"
+readonly PROJECT_NUMBER="350896810949"
 REGION="europe-west1"
 POOL_ID="atlas-bot-staging"
 PROVIDER_ID="github-main"
 
-DEPLOY_SA_ID="atlas-staging-deploy"
-PREFLIGHT_SA_ID="atlas-staging-preflight"
-RUNTIME_SA_ID="atlas-staging-runtime"
+readonly DEPLOY_SA_ID="atlas-staging-deploy"
+readonly PREFLIGHT_SA_ID="atlas-staging-preflight"
+readonly RUNTIME_SA_ID="atlas-staging-runtime"
 ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
 
@@ -27,9 +27,9 @@ PRIMARY_SECRET="atlas-staging-primary-db-url"
 PAPER_SECRET="atlas-staging-customer-paper-db-url"
 ANON_KEY_SECRET="atlas-staging-supabase-anon-key"
 
-DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+readonly DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+readonly PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+readonly RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 verify_secret_accessor_binding() {
   local secret_name="$1"
@@ -146,10 +146,6 @@ ensure_service_account() {
 ensure_service_account "$DEPLOY_SA_ID" "Atlas paper staging GitHub deploy"
 ensure_service_account "$PREFLIGHT_SA_ID" "Atlas staging identity preflight"
 ensure_service_account "$RUNTIME_SA_ID" "Atlas paper-only Cloud Run runtime"
-
-DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 if ! gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
     --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
