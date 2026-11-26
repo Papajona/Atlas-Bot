@@ -22,13 +22,25 @@ class CustomerDataClient(
         val openPositions: Int?
     )
     data class MarketQuote(val symbol: String, val price: Double, val signal: String)
+    data class RecentTrade(
+        val id: Long,
+        val symbol: String,
+        val side: String,
+        val mode: String,
+        val status: String,
+        val filledQuantity: String,
+        val averageFillPrice: String,
+        val createdAt: String?
+    )
     data class Snapshot(
         val profile: Profile?,
         val portfolio: Portfolio?,
         val marketQuotes: List<MarketQuote>,
         val profileUnavailableReason: String?,
         val portfolioUnavailableReason: String?,
-        val marketUnavailableReason: String?
+        val marketUnavailableReason: String?,
+        val recentTrades: List<RecentTrade> = emptyList(),
+        val recentTradesUnavailableReason: String? = null
     )
 
     suspend fun loadSnapshot(accessToken: String): Snapshot = withContext(Dispatchers.IO) {
@@ -40,17 +52,23 @@ class CustomerDataClient(
                 URLEncoder.encode("BTC/USDT:USDT,ETH/USDT:USDT", Charsets.UTF_8.name()),
             accessToken
         )
+        val recentTradesResult = requestJson("/api/customer/trades/recent?limit=20", accessToken)
 
         val profile = profileResult.body?.let(::parseProfile)
         val portfolio = portfolioResult.body?.let(::parsePortfolio)
         val quotes = marketResult.body?.let(::parseMarketQuotes).orEmpty()
+        val recentTrades = recentTradesResult.body?.let(::parseRecentTrades).orEmpty()
         Snapshot(
             profile = profile,
             portfolio = portfolio,
             marketQuotes = quotes,
             profileUnavailableReason = if (profile == null) profileResult.error ?: "Customer profile unavailable" else null,
             portfolioUnavailableReason = if (portfolio == null) portfolioResult.error ?: "Portfolio unavailable" else null,
-            marketUnavailableReason = if (quotes.isEmpty()) marketResult.error ?: "Live market data unavailable" else null
+            marketUnavailableReason = if (quotes.isEmpty()) marketResult.error ?: "Live market data unavailable" else null,
+            recentTrades = recentTrades,
+            recentTradesUnavailableReason = if (recentTradesResult.body == null) {
+                recentTradesResult.error ?: "Recent trade history unavailable"
+            } else null
         )
     }
 
@@ -92,6 +110,30 @@ class CustomerDataClient(
                 availableCash = json.optionalFiniteDouble("cash_equity"),
                 openPositions = positions?.length()
             )
+        }
+
+        internal fun parseRecentTrades(json: JSONObject): List<RecentTrade> {
+            val rows = json.optJSONArray("trades") ?: return emptyList()
+            return buildList {
+                for (index in 0 until rows.length()) {
+                    val row = rows.optJSONObject(index) ?: continue
+                    val id = row.optLong("id", 0L)
+                    val symbol = row.optString("symbol").takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    if (id <= 0L) continue
+                    add(
+                        RecentTrade(
+                            id = id,
+                            symbol = symbol,
+                            side = row.optString("side", "UNKNOWN").uppercase(),
+                            mode = row.optString("mode", "UNKNOWN").uppercase(),
+                            status = row.optString("status", "UNKNOWN").uppercase(),
+                            filledQuantity = row.optString("filled_quantity", "0").takeIf { it != "null" } ?: "0",
+                            averageFillPrice = row.optString("average_fill_price", "0").takeIf { it != "null" } ?: "0",
+                            createdAt = row.optString("created_at").takeIf { it.isNotBlank() && it != "null" }
+                        )
+                    )
+                }
+            }
         }
 
         internal fun parseMarketQuotes(json: JSONObject): List<MarketQuote> {

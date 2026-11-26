@@ -6035,6 +6035,42 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
         },
     )
 
+@app.get("/api/customer/trades/recent")
+async def customer_recent_trades(
+    limit: int = 20,
+    authorization: str | None = Header(default=None),
+):
+    """Return a bounded, customer-owned view of recent persisted trade orders."""
+    bounded_limit = max(1, min(int(limit), 50))
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        rows = (
+            await db.execute(
+                select(Trade)
+                .where(Trade.customer_id == profile.id)
+                .order_by(desc(Trade.created_at), desc(Trade.id))
+                .limit(bounded_limit)
+            )
+        ).scalars().all()
+        return {
+            "scope": "customer_only",
+            "trades": [
+                {
+                    "id": int(trade.id),
+                    "symbol": str(trade.symbol or ""),
+                    "side": str(trade.side or "").upper(),
+                    "mode": str(trade.mode or "").upper(),
+                    "status": str(trade.status or "").upper(),
+                    "filled_quantity": str(trade.filled_quantity or "0"),
+                    "average_fill_price": str(trade.average_fill_price or "0"),
+                    "created_at": trade.created_at.isoformat() if trade.created_at else None,
+                    "updated_at": trade.updated_at.isoformat() if trade.updated_at else None,
+                }
+                for trade in rows
+            ],
+        }
+
+
 @app.get("/api/customer/trades/{trade_id}/decision")
 async def customer_trade_decision(trade_id: int, authorization: str | None = Header(default=None)):
     """Expose only the authenticated owner's persisted trade outcome; do not fabricate a rationale."""

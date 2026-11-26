@@ -295,7 +295,8 @@ fun UserDashboardScreen(
                         // Recent Activity Card (Multi-Asset)
                         item {
                             RecentActivityCard(
-                                selectedAssetClass = selectedAssetClass,
+                                trades = customerSnapshot?.recentTrades.orEmpty(),
+                                unavailableReason = customerSnapshot?.recentTradesUnavailableReason,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -1131,7 +1132,8 @@ private fun RechartsMonotoneAreaCanvas(
 
 @Composable
 private fun RecentActivityCard(
-    selectedAssetClass: AssetClass = AssetClass.ALL,
+    trades: List<CustomerDataClient.RecentTrade>,
+    unavailableReason: String?,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -1146,13 +1148,65 @@ private fun RecentActivityCard(
         border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("Recent Activity", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+            Text("Recent customer trades", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "Unavailable — recent trades require an authenticated customer account and verified trade history.",
-                fontSize = 12.sp,
-                color = textMuted
-            )
+            when {
+                trades.isNotEmpty() -> {
+                    trades.take(5).forEachIndexed { index, trade ->
+                        if (index > 0) Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = trade.symbol,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = textPrimary,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = "${trade.side} • ${trade.mode} • ${trade.filledQuantity} filled",
+                                    fontSize = 10.sp,
+                                    color = textMuted,
+                                    maxLines = 1
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = trade.status.replace('_', ' '),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when (trade.status) {
+                                    "FILLED", "CLOSED", "SETTLED" -> emeraldAccent
+                                    "REJECTED", "FAILED", "CANCELLED" -> redDanger
+                                    else -> textMuted
+                                },
+                                maxLines = 1
+                            )
+                        }
+                        if (trade.averageFillPrice != "0" && trade.averageFillPrice != "0.0") {
+                            Text(
+                                text = "Average fill: ${trade.averageFillPrice}",
+                                fontSize = 10.sp,
+                                color = textMuted
+                            )
+                        }
+                    }
+                }
+                unavailableReason != null -> Text(
+                    text = unavailableReason,
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+                else -> Text(
+                    text = "No persisted trade activity yet. Completed or pending customer orders will appear here.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+            }
         }
     }
 }
