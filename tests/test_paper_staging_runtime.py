@@ -1112,3 +1112,74 @@ def test_paper_workspace_preferences_reject_execution_policy_fields(monkeypatch)
         json={"live_trading_enabled": True},
     )
     assert response.status_code == 422
+
+
+def test_paper_customer_fx_scanner_uses_read_only_yahoo_or_practice_provider(monkeypatch):
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        assert require_aal2 is True
+        return SimpleNamespace(id=314), {"sub": "customer-314", "aal": "aal2"}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    fetched = []
+
+    def fetch_fx(symbol, timeframe, days):
+        fetched.append((symbol, timeframe, days))
+        return object()
+
+    async def scan(symbols, *, fetch, metrics, semaphore, logger):
+        for symbol in symbols:
+            fetch(symbol)
+        return [{"symbol": symbol, "price": 1.25, "score": 0.5} for symbol in symbols]
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging.settings, "paper_staging_market_scanner_enabled", True)
+    monkeypatch.setattr(paper_staging.settings, "forex_broker", "yfinance")
+    monkeypatch.setattr(paper_staging.settings, "oanda_practice", False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_account_id", "")
+    monkeypatch.setattr(paper_staging.settings, "oanda_api_token", "")
+    monkeypatch.setattr(paper_staging.settings, "adaptive_established_fx_symbols", "EUR_USD,GBP_USD")
+    monkeypatch.setattr(paper_staging, "fetch_forex", fetch_fx)
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", scan)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?asset_class=forex&symbols=EUR_USD,GBP_USD",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["asset_class"] == "forex"
+    assert response.json()["data_source"] == "yfinance_fx"
+    assert response.json()["read_only"] is True
+    assert fetched == [("EUR_USD", "15m", 30), ("GBP_USD", "15m", 30)]
+
+
+def test_paper_customer_commodity_scanner_fails_closed_without_oanda_practice(monkeypatch):
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        return SimpleNamespace(id=314), {"sub": "customer-314", "aal": "aal2"}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging.settings, "paper_staging_market_scanner_enabled", True)
+    monkeypatch.setattr(paper_staging.settings, "forex_broker", "yfinance")
+    monkeypatch.setattr(paper_staging.settings, "oanda_practice", False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_account_id", "")
+    monkeypatch.setattr(paper_staging.settings, "oanda_api_token", "")
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?asset_class=commodity&symbols=XAU_USD",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 503
