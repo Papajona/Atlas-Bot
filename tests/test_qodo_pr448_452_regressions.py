@@ -1201,3 +1201,68 @@ def test_customer_uuid_predicates_share_the_sqlite_index_pattern():
     assert "uuid_glob = _UUID_AUTH_REFERENCE_GLOB" in main_source
     assert "_UUID_AUTH_REFERENCE_GLOB" in db_source
     assert "_UUID_AUTH_REFERENCE_PATTERN" in db_source
+
+
+def test_existing_active_identified_customer_is_not_blocked_by_unrelated_legacy_rows(monkeypatch):
+    profile = SimpleNamespace(
+        id=902,
+        auth_user_id="existing-active-customer",
+        email="customer@example.test",
+        display_name="Existing customer",
+        status="ACTIVE",
+    )
+
+    class Result:
+        def scalar_one_or_none(self):
+            return profile
+
+    class Database:
+        async def execute(self, _statement):
+            return Result()
+
+        async def flush(self):
+            return None
+
+    async def verified_claims(_authorization, *, require_aal2=True):
+        return {
+            "sub": "existing-active-customer",
+            "email": "customer@example.test",
+            "user_metadata": {},
+        }
+
+    conflict_calls = []
+    subscription_calls = []
+
+    async def unexpected_identity_comparison(_db, _uid, _email):
+        conflict_calls.append(True)
+        raise AssertionError(
+            "an active identified profile must not be checked against unrelated legacy rows"
+        )
+
+    async def unexpected_global_legacy_scan(_db, _uid):
+        raise AssertionError(
+            "an active identified profile must not be blocked by a global legacy-row scan"
+        )
+
+    async def ensure_subscription(_db, customer):
+        subscription_calls.append(customer.id)
+
+    monkeypatch.setattr(main, "customer_claims", verified_claims)
+    monkeypatch.setattr(main, "_legacy_customer_email_conflict", unexpected_identity_comparison)
+    monkeypatch.setattr(main, "_has_unmapped_legacy_customer_profile", unexpected_global_legacy_scan)
+    monkeypatch.setattr(main, "_ensure_customer_subscription", ensure_subscription)
+
+    returned, claims = asyncio.run(
+        main.get_customer(
+            "Bearer verified-token",
+            Database(),
+            require_aal2=False,
+        )
+    )
+
+    assert returned is profile
+    assert claims["sub"] == "existing-active-customer"
+    assert returned.status == "ACTIVE"
+    assert returned.identity_review_required is False
+    assert conflict_calls == []
+    assert subscription_calls == [profile.id]
