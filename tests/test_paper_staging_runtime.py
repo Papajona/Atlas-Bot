@@ -953,6 +953,45 @@ def test_paper_portfolio_does_not_record_equity_from_unpriced_open_positions(mon
     assert response.json()["valuation_status"] == "CURRENT_MARK_REQUIRED"
 
 
+def test_paper_portfolio_does_not_record_negative_cash_as_equity(monkeypatch):
+    async def no_guard():
+        return None
+
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        return SimpleNamespace(id=314), {"sub": "customer-314", "aal": "aal2"}
+
+    async def balances(*, customer_id):
+        return [{"account_code": "PAPER_CASH", "currency": "USDT", "balance": "-0.25"}]
+
+    async def positions(*, customer_id):
+        return []
+
+    async def unexpected_record(**_kwargs):
+        pytest.fail("negative cash must not be recorded as verified equity")
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+    monkeypatch.setattr(paper_staging, "_paper_state_guard", no_guard)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_balances", balances)
+    monkeypatch.setattr(paper_staging, "get_customer_paper_positions", positions)
+    monkeypatch.setattr(paper_staging, "record_customer_paper_equity_snapshot", unexpected_record)
+
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/portfolio",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 200
+    assert response.json()["equity"] is None
+    assert response.json()["valuation_status"] == "CASH_BALANCE_UNAVAILABLE"
+
+
 def test_paper_equity_history_endpoint_returns_only_persisted_customer_points(monkeypatch):
     async def no_guard():
         return None
