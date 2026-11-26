@@ -560,6 +560,28 @@ jobs:
           RESET ROLE;
           SQL
           python -m alembic upgrade head
+          # Create a future public routine as the previously managed owner after 0067.
+          # Its corrected defaults must not make it executable by service_role through PUBLIC.
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          SET ROLE supabase_admin;
+          CREATE FUNCTION public.atlas_supabase_admin_future_probe() RETURNS integer
+              LANGUAGE sql AS $ SELECT 1 $;
+          RESET ROLE;
+          DO $verify_future_public_function_defaults$
+          BEGIN
+              IF has_function_privilege(
+                  'service_role',
+                  'public.atlas_supabase_admin_future_probe()',
+                  'EXECUTE'
+              ) THEN
+                  RAISE EXCEPTION 'a future managed public function is executable by service_role';
+              END IF;
+          END
+          $verify_future_public_function_defaults$;
+          SET ROLE supabase_admin;
+          DROP FUNCTION public.atlas_supabase_admin_future_probe();
+          RESET ROLE;
+          SQL
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           DO $verify_service_role_public_acl$
           DECLARE
