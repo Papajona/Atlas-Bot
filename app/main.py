@@ -26,7 +26,7 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, and_, exists, func, case, cast, Numeric, Text, update, delete
+from sqlalchemy import select, desc, or_, and_, exists, func, case, cast, Numeric, Text, update, delete, tuple_
 from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -8331,13 +8331,8 @@ async def _recent_closed_platform_outcome_returns(db):
             StrategyOutcome.lifecycle_status == "CLOSED",
             StrategyOutcome.closing_notional > 0,
             StrategyOutcome.fee_basis_complete.is_(True),
-            or_(
-                StrategyOutcome.created_at > candidate.created_at,
-                and_(
-                    StrategyOutcome.created_at == candidate.created_at,
-                    StrategyOutcome.id > candidate.id,
-                ),
-            ),
+            tuple_(StrategyOutcome.created_at, StrategyOutcome.id)
+            > tuple_(candidate.created_at, candidate.id),
         )
     )
     return (await db.execute(
