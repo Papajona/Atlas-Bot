@@ -530,7 +530,7 @@ jobs:
           -- Prove a service_role grant-option holder's delegated EXECUTE grant is cascaded.
           CREATE ROLE atlas_0067_service_role_delegate NOLOGIN;
           CREATE FUNCTION public.atlas_0067_delegation_probe() RETURNS integer
-              LANGUAGE sql AS $ SELECT 1 $;
+              LANGUAGE sql AS $$ SELECT 1 $$;
           GRANT EXECUTE ON FUNCTION public.atlas_0067_delegation_probe()
               TO service_role WITH GRANT OPTION;
           SET ROLE service_role;
@@ -580,7 +580,7 @@ jobs:
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           SET ROLE supabase_admin;
           CREATE FUNCTION public.atlas_supabase_admin_future_probe() RETURNS integer
-              LANGUAGE sql AS $ SELECT 1 $;
+              LANGUAGE sql AS $$ SELECT 1 $$;
           RESET ROLE;
           DO $verify_future_public_function_defaults$
           BEGIN
