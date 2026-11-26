@@ -32,6 +32,10 @@ class CustomerDataClient(
         val averageFillPrice: String,
         val createdAt: String?
     )
+    data class EquityHistoryPoint(
+        val observedAt: String,
+        val equity: Double
+    )
     data class Snapshot(
         val profile: Profile?,
         val portfolio: Portfolio?,
@@ -41,6 +45,8 @@ class CustomerDataClient(
         val marketUnavailableReason: String?,
         val recentTrades: List<RecentTrade> = emptyList(),
         val recentTradesUnavailableReason: String? = null,
+        val equityHistory: List<EquityHistoryPoint> = emptyList(),
+        val equityHistoryUnavailableReason: String? = null,
         val planName: String? = null,
         val subscriptionStatus: String? = null
     )
@@ -56,11 +62,16 @@ class CustomerDataClient(
         )
         val recentTradesResult = requestJson("/api/customer/trades/recent?limit=20", accessToken)
         val billingResult = requestJson("/api/customer/billing", accessToken)
+        val equityHistoryResult = requestJson(
+            "/api/customer/portfolio/equity-history?days=30",
+            accessToken
+        )
 
         val profile = profileResult.body?.let(::parseProfile)
         val portfolio = portfolioResult.body?.let(::parsePortfolio)
         val quotes = marketResult.body?.let(::parseMarketQuotes).orEmpty()
         val recentTrades = recentTradesResult.body?.let(::parseRecentTrades).orEmpty()
+        val equityHistory = equityHistoryResult.body?.let(::parseEquityHistory).orEmpty()
         Snapshot(
             profile = profile,
             portfolio = portfolio,
@@ -72,6 +83,12 @@ class CustomerDataClient(
             recentTradesUnavailableReason = if (recentTradesResult.body == null) {
                 recentTradesResult.error ?: "Recent trade history unavailable"
             } else null,
+            equityHistory = equityHistory,
+            equityHistoryUnavailableReason = when {
+                equityHistoryResult.body == null -> equityHistoryResult.error ?: "Equity history unavailable"
+                equityHistory.isEmpty() -> "No persisted equity observations have been recorded yet"
+                else -> null
+            },
             planName = billingResult.body?.optJSONObject("plan")
                 ?.optString("name")?.takeIf { it.isNotBlank() && it != "null" },
             subscriptionStatus = billingResult.body?.optJSONObject("subscription")
@@ -117,6 +134,23 @@ class CustomerDataClient(
                 availableCash = json.optionalFiniteDouble("cash_equity"),
                 openPositions = positions?.length()
             )
+        }
+
+        internal fun parseEquityHistory(json: JSONObject): List<EquityHistoryPoint> {
+            val rows = json.optJSONArray("points") ?: return emptyList()
+            return buildList {
+                for (index in 0 until rows.length()) {
+                    val row = rows.optJSONObject(index) ?: continue
+                    val observedAt = row.optString("observed_at")
+                        .takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val source = row.optString("valuation_source")
+                    val currency = row.optString("currency")
+                    val equity = row.optionalFiniteDouble("equity") ?: continue
+                    if (source != "TRADING_ACCOUNT_EQUITY" || currency != "USDT") continue
+                    if (runCatching { java.time.Instant.parse(observedAt) }.isFailure) continue
+                    add(EquityHistoryPoint(observedAt = observedAt, equity = equity))
+                }
+            }.distinctBy { it.observedAt }.sortedBy { java.time.Instant.parse(it.observedAt) }
         }
 
         internal fun parseRecentTrades(json: JSONObject): List<RecentTrade> {
