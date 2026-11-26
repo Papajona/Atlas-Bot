@@ -133,6 +133,7 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "COALESCE(grantee_role.rolname, 'PUBLIC')" in migration
     assert "default_acl_grantee" in migration
     assert "has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')" in migration
+    assert "owner_role.rolname <> 'pg_database_owner'" in migration
     assert "global_defaults.defaclnamespace = 0" in migration
     assert "NOT EXISTS (" in migration
     assert "default_function_owner" in migration
