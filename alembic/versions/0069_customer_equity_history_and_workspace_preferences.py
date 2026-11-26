@@ -52,6 +52,12 @@ def upgrade() -> None:
         sa.Column("reduce_motion", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("compact_markets", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("touch_feedback", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.Column("mobile_default_timeframe_days", sa.Integer(), nullable=False, server_default="30"),
+        sa.Column("mobile_chart_crosshair_enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
+        sa.CheckConstraint(
+            "mobile_default_timeframe_days IN (7, 30)",
+            name="ck_customer_workspace_mobile_timeframe",
+        ),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
 
