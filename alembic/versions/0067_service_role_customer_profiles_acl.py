@@ -32,6 +32,7 @@ def upgrade() -> None:
             function_record record;
             default_acl_owner text;
             default_acl_object_type text;
+            default_acl_grantee text;
             has_maintain boolean := false;
         BEGIN
             SELECT oid INTO service_role_oid
@@ -94,16 +95,20 @@ def upgrade() -> None:
             END IF;
 
             -- A one-time object revoke cannot protect objects created later.
-            -- Check global and public-schema defaults for direct service_role
-            -- grants. This includes independent Supabase-managed defaults.
-            SELECT owner_role.rolname, defaults.defaclobjtype
-            INTO default_acl_owner, default_acl_object_type
+            -- Check global and public-schema defaults for any grants that
+            -- would reach service_role, including PUBLIC EXECUTE on future
+            -- functions (PUBLIC membership is effective for every role).
+            SELECT owner_role.rolname, defaults.defaclobjtype,
+                   COALESCE(grantee_role.rolname, 'PUBLIC')
+            INTO default_acl_owner, default_acl_object_type, default_acl_grantee
             FROM pg_default_acl AS defaults
             JOIN pg_roles AS owner_role
               ON owner_role.oid = defaults.defaclrole
             CROSS JOIN LATERAL aclexplode(defaults.defaclacl) AS acl
+            LEFT JOIN pg_roles AS grantee_role
+              ON grantee_role.oid = acl.grantee
             WHERE defaults.defaclnamespace IN (0, public_schema_oid)
-              AND acl.grantee = service_role_oid
+              AND acl.grantee IN (service_role_oid, 0)
               AND (
                     (defaults.defaclobjtype = 'r' AND acl.privilege_type IN (
                         'SELECT', 'INSERT', 'UPDATE', 'DELETE', 'TRUNCATE',
@@ -114,15 +119,15 @@ def upgrade() -> None:
                     ))
                     OR (defaults.defaclobjtype = 'f' AND acl.privilege_type = 'EXECUTE')
               )
-            ORDER BY owner_role.rolname, defaults.defaclobjtype
+            ORDER BY owner_role.rolname, defaults.defaclobjtype, default_acl_grantee
             LIMIT 1;
 
             IF FOUND THEN
                 RAISE EXCEPTION
-                    '0067 refuses to continue: role % has default % privileges for service_role on future public objects',
-                    default_acl_owner, default_acl_object_type
+                    '0067 refuses to continue: role % has default % privileges granted to % on future public objects',
+                    default_acl_owner, default_acl_object_type, default_acl_grantee
                     USING HINT =
-                        'Have the default-privilege owner remove the service_role defaults using an authorized managed-owner operation, then rerun the migration. Do not bypass this gate.';
+                        'Have the default-privilege owner remove matching PUBLIC or service_role defaults using an authorized owner operation, then rerun the migration. Do not bypass this gate.';
             END IF;
 
             -- Revoke only objects this migration identity owns. A schema-wide
@@ -163,7 +168,7 @@ def upgrade() -> None:
                   AND p.prokind IN ('f', 'p', 'a', 'w')
             LOOP
                 EXECUTE format(
-                    'REVOKE EXECUTE ON %s %I.%I(%s) FROM service_role',
+                    'REVOKE EXECUTE ON %s %I.%I(%s) FROM service_role CASCADE',
                     CASE WHEN function_record.prokind = 'p'
                          THEN 'PROCEDURE' ELSE 'FUNCTION' END,
                     function_record.nspname,
