@@ -25,7 +25,6 @@ services:
       LIVE_TRADING_ENABLED: "false"
       BROKER_SANDBOX: "true"
       BACKGROUND_RECONCILIATION_ENABLED: "false"
-      ADMIN_TOKEN: verify-only-token
     depends_on:
       postgres:
         condition: service_healthy
