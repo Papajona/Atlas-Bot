@@ -51,13 +51,24 @@ class CustomerDataClient(
         val subscriptionStatus: String? = null
     )
 
-    suspend fun loadSnapshot(accessToken: String): Snapshot = withContext(Dispatchers.IO) {
+    suspend fun loadSnapshot(
+        accessToken: String,
+        scannerAssetClass: String = "crypto"
+    ): Snapshot = withContext(Dispatchers.IO) {
         require(accessToken.isNotBlank()) { "Customer sign-in is required to load account data" }
+        val assetClass = scannerAssetClass.lowercase().takeIf {
+            it in setOf("crypto", "forex", "commodity")
+        } ?: "crypto"
+        val (scannerExchange, scannerSymbols) = when (assetClass) {
+            "forex" -> "yfinance" to "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD"
+            "commodity" -> "oanda" to "XAU_USD,XAG_USD,WTICO_USD,BCO_USD,NATGAS_USD"
+            else -> "binance" to "BTC/USDT:USDT,ETH/USDT:USDT"
+        }
         val profileResult = requestJson("/api/customer/me", accessToken)
         val portfolioResult = requestJson("/api/customer/portfolio", accessToken)
         val marketResult = requestJson(
-            "/api/customer/market-scanner?exchange=binance&symbols=" +
-                URLEncoder.encode("BTC/USDT:USDT,ETH/USDT:USDT", Charsets.UTF_8.name()),
+            "/api/customer/market-scanner?asset_class=$assetClass&exchange=$scannerExchange&symbols=" +
+                URLEncoder.encode(scannerSymbols, Charsets.UTF_8.name()),
             accessToken
         )
         val recentTradesResult = requestJson("/api/customer/trades/recent?limit=20", accessToken)
