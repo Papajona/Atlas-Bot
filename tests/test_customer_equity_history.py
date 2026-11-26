@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 
 from app import main
-from app.db import CustomerEquitySnapshot, CustomerWorkspacePreference
+from app.db import CustomerWorkspacePreference
 
 
 def test_equity_snapshot_writer_uses_idempotent_customer_15_minute_buckets():
