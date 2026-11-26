@@ -116,6 +116,10 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
     assert "GRANT UPDATE" not in migration
+    assert "REVOKE EXECUTE ON %s %I.%I(%s) FROM service_role" in migration
+    assert "p.proowner = migration_role_oid" in migration
+    assert "has_function_privilege('service_role', p.oid, 'EXECUTE')" in migration
+    assert "service_role retains EXECUTE on a public function" in migration
     assert "pg_get_serial_sequence(" in migration
     assert "has_schema_privilege('service_role', 'public', 'USAGE')" in migration
     assert "service_role must retain USAGE on public" in migration
@@ -132,6 +136,11 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "service_role retains privileges on an Atlas-owned public relation" in migration
     assert "service_role retains privileges on an Atlas-owned public sequence" in migration
     assert "# Deliberately forward-only" in migration
+
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_block_ledger_mutation() TO service_role" in workflow
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO service_role" in workflow
+    assert "has_function_privilege('service_role', p.oid, 'EXECUTE')" in workflow
 
 
 def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
