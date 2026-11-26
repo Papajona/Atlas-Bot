@@ -7859,23 +7859,95 @@ _SCANNER_SEMAPHORE = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT_FETCHES)
 
 
 @app.get("/api/customer/market-scanner")
-async def customer_market_scanner(exchange: str="binance", symbols: str="BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT", authorization: str | None = Header(default=None)):
+async def customer_market_scanner(
+    exchange: str = "binance",
+    asset_class: str = "crypto",
+    symbols: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Read-only customer scanner for crypto, FX, and practice-only commodities."""
     async with SessionLocal() as db:
-        profile,_=await get_customer(authorization,db,require_aal2=False)
-        await _require_feature(db,profile.id,"market_scanner")
-    import ccxt
-    if exchange not in ccxt.exchanges:
-        raise HTTPException(422,"Unsupported exchange")
-    requested=_scanner_normalize_symbols(symbols)
-    results=await _scanner_scan_symbols(
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        await _require_feature(db, profile.id, "market_scanner")
+
+    asset = str(asset_class or "crypto").strip().lower()
+    if asset not in {"crypto", "forex", "commodity"}:
+        raise HTTPException(422, "Unsupported scanner asset class")
+    default_symbols = {
+        "crypto": "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT",
+        "forex": "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD",
+        "commodity": "XAU_USD,XAG_USD,WTICO_USD,BCO_USD,NATGAS_USD",
+    }[asset]
+    requested = _scanner_normalize_symbols(symbols if symbols is not None else default_symbols)
+    if not requested:
+        raise HTTPException(422, "At least one valid market symbol is required")
+
+    provider = ""
+    if asset == "crypto":
+        import ccxt
+        if exchange not in ccxt.exchanges:
+            raise HTTPException(422, "Unsupported exchange")
+        provider = exchange
+        fetch = lambda symbol: fetch_crypto(symbol, exchange, "15m", 30, True)
+    elif asset == "forex":
+        use_oanda_practice = bool(
+            settings.forex_broker == "oanda"
+            and settings.oanda_practice
+            and settings.oanda_account_id
+            and settings.oanda_api_token
+        )
+        if use_oanda_practice:
+            provider = "oanda_practice"
+            fetch = lambda symbol: fetch_forex_oanda(
+                _normalize_oanda_instrument(symbol), "15m", 30
+            )
+        else:
+            provider = "yfinance_fx"
+            fetch = lambda symbol: fetch_forex(symbol, "15m", 30)
+    else:
+        use_oanda_practice = bool(
+            settings.forex_broker == "oanda"
+            and settings.oanda_practice
+            and settings.oanda_account_id
+            and settings.oanda_api_token
+        )
+        if not use_oanda_practice:
+            raise HTTPException(
+                503,
+                "Commodity market scanning requires explicitly configured OANDA practice credentials; no live provider is used",
+            )
+        allowed_commodities = {
+            "XAU_USD", "XAG_USD", "WTICO_USD", "BCO_USD", "NATGAS_USD"
+        }
+        normalized_symbols = [_normalize_oanda_instrument(symbol) for symbol in requested]
+        if any(symbol not in allowed_commodities for symbol in normalized_symbols):
+            raise HTTPException(422, "Unsupported commodity instrument")
+        requested = normalized_symbols
+        provider = "oanda_practice"
+        fetch = lambda symbol: fetch_forex_oanda(symbol, "15m", 30)
+
+    results = await _scanner_scan_symbols(
         requested,
-        fetch=lambda sym: fetch_crypto(sym,exchange,"15m",30,True),
+        fetch=fetch,
         metrics=_scanner_metrics,
         semaphore=_SCANNER_SEMAPHORE,
         logger=logging.getLogger(__name__),
     )
-    return {"exchange":exchange,"timeframe":"15m","results":sorted(results,key=lambda x: abs(float(x.get("score",0))),reverse=True)}
-
+    for result in results:
+        result["asset_class"] = asset
+        result["data_source"] = provider
+    return {
+        "asset_class": asset,
+        "exchange": provider,
+        "timeframe": "15m",
+        "data_source": provider,
+        "read_only": True,
+        "results": sorted(
+            results,
+            key=lambda item: abs(float(item.get("score", 0) or 0)),
+            reverse=True,
+        ),
+    }
 
 @app.get("/api/customer/market-intelligence")
 async def customer_market_intelligence(authorization: str | None = Header(default=None)):
