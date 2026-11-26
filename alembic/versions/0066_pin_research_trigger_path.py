@@ -15,8 +15,6 @@ branch_labels = None
 depends_on = None
 
 
-
-
 def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
