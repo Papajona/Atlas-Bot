@@ -5095,6 +5095,19 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
         raise _safe_http_error(400, exc, "Unable to prepare the sweep request") from exc
 
 
+def _is_tron_sweep_txid_unique_violation(exc: IntegrityError) -> bool:
+    """Return true only for the case-insensitive TRON sweep txid unique index."""
+    original = getattr(exc, "orig", None)
+    constraint_name = getattr(getattr(original, "diag", None), "constraint_name", None)
+    if constraint_name:
+        return constraint_name == "uq_tron_sweep_transaction_id_ci_nonempty"
+    message = str(original or exc).lower()
+    return (
+        "unique constraint failed" in message
+        and "uq_tron_sweep_transaction_id_ci_nonempty" in message
+    )
+
+
 @app.post("/api/admin/custody/tron/sweeps/{sweep_id}/record-broadcast")
 async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     """Record a signer/broadcaster result without exposing signing material to Atlas."""
@@ -5160,7 +5173,15 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
         if sweep.custody_transfer_id:
             await transition_custody_transfer(db, sweep.custody_transfer_id, status="SUBMITTED",
                                               provider_reference=txid, detail={"transaction_id": txid})
-        await db.commit()
+        try:
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            if _is_tron_sweep_txid_unique_violation(exc):
+                raise HTTPException(
+                    409, "transaction id is already assigned to another sweep"
+                ) from exc
+            raise
         return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id}
 
 
