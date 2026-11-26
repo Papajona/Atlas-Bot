@@ -44,15 +44,18 @@ class CustomerDataClientTest {
             JSONObject(
                 """{"points":[
                     {"observed_at":"2026-11-25T10:00:00+00:00","equity":125.5,"currency":"USDT","valuation_source":"TRADING_ACCOUNT_EQUITY"},
+                    {"observed_at":"2026-11-25T10:05:00+00:00","equity":126.0,"currency":"USDT","valuation_source":"PAPER_LEDGER_CASH_ONLY"},
                     {"observed_at":"2026-11-25T10:15:00+00:00","equity":"NaN","currency":"USDT","valuation_source":"TRADING_ACCOUNT_EQUITY"},
                     {"observed_at":"2026-11-25T10:30:00+00:00","equity":140.0,"currency":"USD","valuation_source":"TRADING_ACCOUNT_EQUITY"},
                     {"observed_at":"2026-11-25T10:45:00+00:00","equity":150.0,"currency":"USDT","valuation_source":"UNVERIFIED"}
                 ]}"""
             )
         )
-        assertEquals(1, points.size)
-        assertEquals("2026-11-25T10:00:00+00:00", points.single().observedAt)
-        assertEquals(125.5, points.single().equity, 0.000001)
+        assertEquals(2, points.size)
+        assertEquals("2026-11-25T10:00:00+00:00", points.first().observedAt)
+        assertEquals(125.5, points.first().equity, 0.000001)
+        assertEquals("2026-11-25T10:05:00+00:00", points.last().observedAt)
+        assertEquals(126.0, points.last().equity, 0.000001)
     }
 
     @Test
