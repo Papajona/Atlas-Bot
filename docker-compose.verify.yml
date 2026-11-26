@@ -21,6 +21,7 @@ services:
       # Disposable verification runs under the test profile; `postgres` is a Compose-only service DNS name.
       ENVIRONMENT: test
       DATABASE_URL: postgresql+asyncpg://trader:trader_test@postgres:5432/trading
+      ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE: postgres
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
       BROKER_SANDBOX: "true"
