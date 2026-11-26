@@ -116,7 +116,7 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
     assert "GRANT UPDATE" not in migration
-    assert "REVOKE EXECUTE ON %s %I.%I(%s) FROM service_role" in migration
+    assert "REVOKE EXECUTE ON %s %I.%I(%s) FROM service_role CASCADE" in migration
     assert "p.proowner = migration_role_oid" in migration
     assert "has_function_privilege('service_role', p.oid, 'EXECUTE')" in migration
     assert "service_role retains EXECUTE on a public function" in migration
@@ -129,7 +129,9 @@ def test_0067_restricts_service_role_to_customer_profiles_and_its_id_sequence():
     assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public" not in migration
     assert "FROM pg_default_acl" in migration
     assert "aclexplode(defaults.defaclacl)" in migration
-    assert "acl.grantee = service_role_oid" in migration
+    assert "acl.grantee IN (service_role_oid, 0)" in migration
+    assert "COALESCE(grantee_role.rolname, 'PUBLIC')" in migration
+    assert "default_acl_grantee" in migration
     assert "defaults.defaclnamespace IN (0, public_schema_oid)" in migration
     assert "0067 refuses to continue" in migration
     assert "authorized managed-owner operation" in migration
