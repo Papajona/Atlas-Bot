@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated server-side production API login. Run only after verified backup/restore
--- and Alembic head 0068_tron_sweep_txid_casefold_unique. Set its password separately with psql's hidden \password
+-- and Alembic head 0069_customer_equity_history_and_workspace_preferences. Set its password separately with psql's hidden \password
 -- prompt; never store passwords in this file or place them in chat.
 BEGIN;
 
@@ -17,7 +17,7 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the production API login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0068_tron_sweep_txid_casefold_unique') THEN
+                   WHERE version_num = '0069_customer_equity_history_and_workspace_preferences') THEN
         RAISE EXCEPTION 'database must be at 0068_tron_sweep_txid_casefold_unique before API role provisioning';
     END IF;
 
@@ -28,7 +28,8 @@ BEGIN
         'customer_paper_submission_audit_retries','customer_ledger_accounts',
         'ledger_entries','ledger_journals','ledger_journal_lines',
         'research_trial_archive','research_trial_ledger_head',
-        'research_holdout_registry','trades','withdrawals'
+        'research_holdout_registry','trades','withdrawals',
+        'customer_equity_snapshots','customer_workspace_preferences'
     ]::text[]) AS required(table_name)
     WHERE to_regclass(format('public.%I', required.table_name)) IS NULL;
     IF coalesce(array_length(missing_tables, 1), 0) > 0 THEN
@@ -73,7 +74,8 @@ BEGIN
             'funding_transactions','custody_transfers','tron_sweeps',
             'revenue_ledger','cost_ledger','referral_commissions',
             'positions','order_commands','audit_chain_state',
-            'customer_benchmark_captures'
+            'customer_benchmark_captures',
+            'customer_equity_snapshots','customer_workspace_preferences'
           )
     LOOP
         EXECUTE format(
@@ -87,6 +89,9 @@ $atlas_api_runtime_grants$;
 -- Explicit append-only / controlled-state grants.
 -- Financial account and withdrawal history may be updated, never deleted.
 GRANT SELECT ON TABLE public.alembic_version TO atlas_api_runtime;
+GRANT SELECT, INSERT ON TABLE public.customer_equity_snapshots TO atlas_api_runtime;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_workspace_preferences TO atlas_api_runtime;
+GRANT USAGE, SELECT ON SEQUENCE public.customer_equity_snapshots_id_seq TO atlas_api_runtime;
 GRANT SELECT, INSERT, UPDATE ON TABLE
     public.customer_ledger_accounts, public.withdrawals, public.trades
 TO atlas_api_runtime;
