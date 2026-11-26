@@ -439,6 +439,24 @@ def test_tron_sweep_conflict_detector_only_matches_casefold_txid_index():
         IntegrityError("INSERT", {}, postgres_error)
     )
 
+    # SQLAlchemy's asyncpg adapter wraps the native exception as its cause;
+    # PostgreSQL's message is not SQLite's "UNIQUE constraint failed" text.
+    asyncpg_error = RuntimeError(
+        f'duplicate key value violates unique constraint "{index_name}"'
+    )
+    adapted_error = RuntimeError("SQLAlchemy asyncpg DBAPI wrapper")
+    adapted_error.__cause__ = asyncpg_error
+    assert main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, adapted_error)
+    )
+
+    unrelated_asyncpg_error = RuntimeError(
+        'duplicate key value violates unique constraint "uq_tron_sweep_idempotency"'
+    )
+    assert not main._is_tron_sweep_txid_unique_violation(
+        IntegrityError("INSERT", {}, unrelated_asyncpg_error)
+    )
+
     sqlite_error = RuntimeError(
         f"UNIQUE constraint failed: index '{index_name}'"
     )
