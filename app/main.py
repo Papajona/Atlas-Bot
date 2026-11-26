@@ -3976,10 +3976,14 @@ async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
     bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
     dialect = getattr(getattr(bind, "dialect", None), "name", "")
     if dialect == "postgresql":
-        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        from sqlalchemy import literal_column
+
+        uuid_pattern = _UUID_AUTH_REFERENCE_PATTERN
         statement = select(CustomerProfile.id).where(
             CustomerProfile.auth_user_id != auth_user_id,
-            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+            CustomerProfile.auth_user_id.op("!~*")(
+                literal_column(f"'{uuid_pattern}'")
+            ),
         ).limit(1)
         return (await db.execute(statement)).scalar_one_or_none() is not None
     if dialect == "sqlite":
