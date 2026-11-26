@@ -29,8 +29,13 @@ from .monitoring import TelemetryMiddleware
 from .db import AppState, CustomerProfile, SessionLocal, engine
 from .customer_paper_api import _paper_feature_flags, build_customer_paper_router
 from .customer_paper_ledger import (
+    CustomerPaperLedgerBlocked,
     get_customer_paper_balances,
+    get_customer_paper_equity_history,
+    get_customer_paper_workspace_preferences,
     preflight_isolated_customer_paper_ledger,
+    record_customer_paper_equity_snapshot,
+    update_customer_paper_workspace_preferences,
 )
 from .customer_paper_lifecycle import get_customer_paper_positions
 from .data import fetch_forex, fetch_forex_oanda
@@ -853,20 +858,109 @@ async def paper_customer_portfolio(authorization: str | None = Header(default=No
         str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))
         for row in balances
     }
-    cash = by_code.get("PAPER_CASH")
-    # Open positions require a current, verified mark to calculate total equity.
-    # Never substitute cost basis or a stale value and label it as market equity.
-    equity = (
-        float(cash)
-        if cash is not None and not positions
+    cash_rows = [
+        row for row in balances
+        if str(row.get("account_code") or "") == "PAPER_CASH"
+    ]
+    # Only a single USDT cash balance with no open positions has a verified
+    # portfolio valuation in this paper-only path. Positions without fresh marks
+    # remain unavailable; cost basis is never substituted for current equity.
+    cash = (
+        Decimal(str(cash_rows[0].get("balance") or "0"))
+        if len(cash_rows) == 1
+        and str(cash_rows[0].get("currency") or "").upper() == "USDT"
         else None
     )
+    equity = float(cash) if cash is not None and not positions else None
+    if equity is not None:
+        await record_customer_paper_equity_snapshot(
+            customer_id=int(profile.id),
+            equity=cash,
+            cash_equity=cash,
+            currency="USDT",
+        )
     return {
         "equity": equity,
         "cash_equity": float(cash) if cash is not None else None,
+        "currency": "USDT" if cash is not None else None,
         "positions": positions,
         "virtual_only": True,
-        "valuation_status": "CASH_ONLY" if not positions else "CURRENT_MARK_REQUIRED",
+        "valuation_status": "CASH_ONLY" if equity is not None else (
+            "CURRENT_MARK_REQUIRED" if positions else "CASH_BALANCE_UNAVAILABLE"
+        ),
+    }
+
+
+@app.get("/api/customer/portfolio/equity-history")
+async def paper_customer_portfolio_equity_history(
+    days: int = 30,
+    authorization: str | None = Header(default=None),
+):
+    if days not in {7, 30}:
+        raise HTTPException(422, "Equity history window must be 7 or 30 days")
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    await _paper_state_guard()
+    try:
+        points = await get_customer_paper_equity_history(
+            customer_id=int(profile.id),
+            days=days,
+        )
+    except (CustomerPaperLedgerBlocked, ValueError) as exc:
+        raise HTTPException(503, "Verified paper equity history is unavailable") from exc
+    return {
+        "scope": "customer_only",
+        "days": days,
+        "points": points,
+        "history_available": bool(points),
+        "history_complete": False,
+        "sampling_interval_minutes": 15,
+        "sampling_description": (
+            "Observed paper cash equity only while there are no open positions; "
+            "unpriced positions and unobserved intervals are not interpolated."
+        ),
+    }
+
+
+@app.get("/api/customer/workspace-preferences")
+async def paper_customer_get_workspace_preferences(
+    authorization: str | None = Header(default=None),
+):
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    try:
+        result = await get_customer_paper_workspace_preferences(
+            customer_id=int(profile.id)
+        )
+    except CustomerPaperLedgerBlocked as exc:
+        raise HTTPException(503, "Customer workspace preferences are unavailable") from exc
+    return {
+        "scope": "customer_only",
+        "configured": result["configured"],
+        "preferences": result["preferences"],
+    }
+
+
+@app.patch("/api/customer/workspace-preferences")
+async def paper_customer_update_workspace_preferences(
+    req: dict,
+    authorization: str | None = Header(default=None),
+):
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    try:
+        result = await update_customer_paper_workspace_preferences(
+            customer_id=int(profile.id),
+            updates=req,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except CustomerPaperLedgerBlocked as exc:
+        raise HTTPException(503, "Customer workspace preferences are unavailable") from exc
+    return {
+        "scope": "customer_only",
+        "configured": result["configured"],
+        "preferences": result["preferences"],
     }
 
 
