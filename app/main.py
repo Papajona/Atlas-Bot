@@ -34,7 +34,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .paper_execution_model import configured_paper_execution_settings
 from .db import _UUID_AUTH_REFERENCE_PATTERN, _UUID_AUTH_REFERENCE_GLOB, dispose_identity_quarantine_engine
-from .db import init_db, SessionLocal, IdentityQuarantineSessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, BenchmarkPromptCapture, AdminRole, Incident, quantize_money
+from .db import init_db, SessionLocal, IdentityQuarantineSessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, BenchmarkPromptCapture, CustomerEquitySnapshot, CustomerWorkspacePreference, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -7271,6 +7271,69 @@ async def customer_subscription_entitlements(authorization: str | None = Header(
 
 
 
+async def _record_customer_equity_snapshot(
+    db,
+    *,
+    customer_id: int,
+    equity: float,
+    cash_equity: float | None,
+    observed_at: datetime | None = None,
+) -> None:
+    """Append one verified account-equity observation per customer per 15-minute bucket."""
+    equity_value = float(equity)
+    cash_value = float(cash_equity) if cash_equity is not None else None
+    if not math.isfinite(equity_value) or (
+        cash_value is not None and not math.isfinite(cash_value)
+    ):
+        return
+
+    observed = observed_at or datetime.now(timezone.utc)
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise ValueError("Customer equity observation time must be timezone-aware")
+    observed = observed.astimezone(timezone.utc)
+    bucket = observed.replace(
+        minute=(observed.minute // 15) * 15,
+        second=0,
+        microsecond=0,
+    )
+    values = {
+        "customer_id": int(customer_id),
+        "bucket_at": bucket,
+        "observed_at": observed,
+        "equity": equity_value,
+        "cash_equity": cash_value,
+        "currency": "USDT",
+        "valuation_source": "TRADING_ACCOUNT_EQUITY",
+    }
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        statement = pg_insert(CustomerEquitySnapshot).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                CustomerEquitySnapshot.customer_id,
+                CustomerEquitySnapshot.bucket_at,
+            ]
+        )
+        await db.execute(statement)
+    elif dialect == "sqlite":
+        statement = sqlite_insert(CustomerEquitySnapshot).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                CustomerEquitySnapshot.customer_id,
+                CustomerEquitySnapshot.bucket_at,
+            ]
+        )
+        await db.execute(statement)
+    else:
+        existing = await db.execute(
+            select(CustomerEquitySnapshot.id).where(
+                CustomerEquitySnapshot.customer_id == int(customer_id),
+                CustomerEquitySnapshot.bucket_at == bucket,
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none() is None:
+            db.add(CustomerEquitySnapshot(**values))
+    await db.commit()
+
+
 @app.get("/api/customer/portfolio")
 async def customer_portfolio(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -7296,6 +7359,13 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
                 "locked_minor_units": wallet_balance["locked_minor_units"],
                 "minor_units_scale": wallet_balance["minor_units_scale"],
             })
+        if account is not None:
+            await _record_customer_equity_snapshot(
+                db,
+                customer_id=profile.id,
+                equity=float(account.equity),
+                cash_equity=balance_api["available"],
+            )
         return {
             "equity": float(account.equity) if account else balance_api["total"],
             "cash_equity": balance_api["available"],
@@ -7313,6 +7383,114 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
             "positions": [{"id": p.id, "exchange": p.exchange, "symbol": p.symbol, "quantity": float(p.quantity),
                            "entry": float(p.average_entry_price), "mark": float(p.mark_price),
                            "unrealized_pnl": float(p.unrealized_pnl)} for p in positions],
+        }
+
+
+@app.get("/api/customer/portfolio/equity-history")
+async def customer_portfolio_equity_history(
+    days: int = 30,
+    authorization: str | None = Header(default=None),
+):
+    """Return observed customer account-equity snapshots; missing intervals stay missing."""
+    if days not in {7, 30}:
+        raise HTTPException(422, "Equity history window must be 7 or 30 days")
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        rows = (
+            await db.execute(
+                select(CustomerEquitySnapshot)
+                .where(
+                    CustomerEquitySnapshot.customer_id == profile.id,
+                    CustomerEquitySnapshot.observed_at >= since,
+                )
+                .order_by(desc(CustomerEquitySnapshot.observed_at))
+                .limit(3000)
+            )
+        ).scalars().all()
+        rows.reverse()
+        points = [
+            {
+                "observed_at": (
+                    row.observed_at.replace(tzinfo=timezone.utc)
+                    if row.observed_at.tzinfo is None
+                    else row.observed_at
+                ).isoformat(),
+                "equity": float(row.equity),
+                "cash_equity": float(row.cash_equity) if row.cash_equity is not None else None,
+                "currency": row.currency,
+                "valuation_source": row.valuation_source,
+            }
+            for row in rows
+            if math.isfinite(float(row.equity))
+        ]
+        return {
+            "scope": "customer_only",
+            "days": days,
+            "points": points,
+            "history_available": bool(points),
+            "history_complete": False,
+            "sampling_interval_minutes": 15,
+            "sampling_description": "At most one observed account-equity value per 15-minute bucket while the customer portfolio is refreshed; unobserved intervals are not interpolated.",
+        }
+
+
+_WORKSPACE_PREFERENCE_FIELDS = {
+    "reduce_motion": False,
+    "compact_markets": False,
+    "touch_feedback": True,
+}
+
+
+def _workspace_preferences_payload(row: CustomerWorkspacePreference | None) -> dict:
+    return {
+        "reduce_motion": bool(row.reduce_motion) if row is not None else False,
+        "compact_markets": bool(row.compact_markets) if row is not None else False,
+        "touch_feedback": bool(row.touch_feedback) if row is not None else True,
+    }
+
+
+@app.get("/api/customer/workspace-preferences")
+async def customer_get_workspace_preferences(
+    authorization: str | None = Header(default=None),
+):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        row = await db.get(CustomerWorkspacePreference, profile.id)
+        return {
+            "scope": "customer_only",
+            "configured": row is not None,
+            "preferences": _workspace_preferences_payload(row),
+        }
+
+
+@app.patch("/api/customer/workspace-preferences")
+async def customer_update_workspace_preferences(
+    req: dict,
+    authorization: str | None = Header(default=None),
+):
+    if not isinstance(req, dict) or not req:
+        raise HTTPException(422, "At least one workspace preference is required")
+    unknown = set(req) - set(_WORKSPACE_PREFERENCE_FIELDS)
+    if unknown:
+        raise HTTPException(422, "Only display preferences may be changed here")
+    if any(type(value) is not bool for value in req.values()):
+        raise HTTPException(422, "Workspace preference values must be booleans")
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        row = await db.get(CustomerWorkspacePreference, profile.id)
+        if row is None:
+            row = CustomerWorkspacePreference(customer_id=profile.id)
+            db.add(row)
+        for key, value in req.items():
+            setattr(row, key, value)
+        row.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        await db.refresh(row)
+        return {
+            "scope": "customer_only",
+            "configured": True,
+            "preferences": _workspace_preferences_payload(row),
         }
 
 
