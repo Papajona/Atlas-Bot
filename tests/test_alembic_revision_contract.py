@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_repository_alembic_graph_has_the_expected_single_head():
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0065_ledger_trigger_owner_isolation"
+        "0066_pin_research_trigger_path"
     }
 
 
@@ -60,7 +60,7 @@ def test_integrated_alembic_chain_has_the_expected_single_head():
     assert 'revision = "0064_strategy_outcome_recent_index"' in migration
     assert 'down_revision = "0063_webhook_events_created_at_index"' in migration
     assert expected_alembic_heads(ROOT / "alembic" / "versions") == {
-        "0065_ledger_trigger_owner_isolation"
+        "0066_pin_research_trigger_path"
     }
 
 
@@ -73,12 +73,34 @@ def test_integrated_migration_chain_is_linear_and_keeps_all_feature_revisions():
         "0063_webhook_events_created_at_index": "0062_customer_benchmark_capture",
         "0064_strategy_outcome_recent_index": "0063_webhook_events_created_at_index",
         "0065_ledger_trigger_owner_isolation": "0064_strategy_outcome_recent_index",
+        "0066_pin_research_trigger_path": "0065_ledger_trigger_owner_isolation",
     }
     for revision, parent in expected.items():
         migration = next(versions.glob(f"*{revision}.py")).read_text(encoding="utf-8")
         assert f'revision = "{revision}"' in migration
         assert f'down_revision = "{parent}"' in migration
-    assert expected_alembic_heads(versions) == {"0065_ledger_trigger_owner_isolation"}
+    assert expected_alembic_heads(versions) == {"0066_pin_research_trigger_path"}
+
+
+def test_0066_pins_research_trigger_paths_and_revokes_public_execute():
+    migration = (
+        ROOT / "alembic" / "versions" / "0066_pin_research_trigger_path.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision = "0066_pin_research_trigger_path"' in migration
+    assert 'down_revision = "0065_ledger_trigger_owner_isolation"' in migration
+    for signature in (
+        "public.atlas_research_trial_archive_immutable()",
+        "public.atlas_research_holdout_registry_immutable()",
+    ):
+        assert signature in migration
+
+    assert "to_regprocedure(function_signature) IS NULL" in migration
+    assert "ALTER FUNCTION %s SET search_path = pg_catalog" in migration
+    assert "REVOKE EXECUTE ON FUNCTION %s FROM PUBLIC" in migration
+    assert "p.proconfig @> ARRAY['search_path=pg_catalog']" in migration
+    assert "acl.grantee = 0" in migration
+    assert "PUBLIC retains EXECUTE" in migration
 
 
 def test_0065_trigger_owner_is_cloud_sql_compatible_and_revokes_before_transfer():
@@ -137,7 +159,7 @@ def test_0065_downgrade_restores_owner_for_round_trip_and_all_recovery_gates_exp
         ROOT / ".github" / "workflows" / "provider-ledger-reconciliation.yml"
     ).read_text(encoding="utf-8")
 
-    expected = "0065_ledger_trigger_owner_isolation"
+    expected = "0066_pin_research_trigger_path"
     for source in (
         api_provisioner,
         audit_provisioner,
