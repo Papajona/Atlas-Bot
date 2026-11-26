@@ -152,6 +152,8 @@ def test_workspace_preference_payload_has_safe_defaults():
         "reduce_motion": False,
         "compact_markets": False,
         "touch_feedback": True,
+        "mobile_chart_crosshair_enabled": True,
+        "mobile_default_timeframe_days": 30,
     }
 
 
@@ -221,6 +223,8 @@ def test_workspace_preference_patch_uses_atomic_customer_scoped_upsert(monkeypat
         "reduce_motion": True,
         "compact_markets": False,
         "touch_feedback": False,
+        "mobile_chart_crosshair_enabled": True,
+        "mobile_default_timeframe_days": 30,
     }
 
 
@@ -230,6 +234,8 @@ def test_workspace_preference_patch_uses_atomic_customer_scoped_upsert(monkeypat
         {"live_enabled": True},
         {"reduce_motion": "yes"},
         {"compact_markets": 1},
+        {"mobile_default_timeframe_days": True},
+        {"mobile_default_timeframe_days": 14},
         {},
     ],
 )
