@@ -67,8 +67,9 @@ class StrategyReplayEngineTest {
     }
 
     @Test(expected = IllegalArgumentException::class)
-    fun testSyntheticReplayRejectsInvalidInitialCapital() = runBlocking {
+    fun testSyntheticReplayRejectsInvalidInitialCapital(): Unit = runBlocking {
         ReplaySimulator.runSimulation("Trend 4H (BTC/USDT)", "Trending Bull", 0.0)
+        Unit
     }
 
     private fun winOrLossNegative(pnl: Double): Boolean = pnl <= 0.0
