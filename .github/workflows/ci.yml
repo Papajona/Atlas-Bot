@@ -552,7 +552,10 @@ jobs:
           python -m alembic current | grep -q '0066_pin_research_trigger_path'
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           SET ROLE supabase_admin;
+          -- Clear the schema-specific addition and the inherited global default.
           ALTER DEFAULT PRIVILEGES IN SCHEMA public
+              REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+          ALTER DEFAULT PRIVILEGES
               REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
           RESET ROLE;
           SQL
