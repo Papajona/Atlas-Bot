@@ -106,10 +106,9 @@ class CustomerDataClientTest {
             assertEquals("PATCH", patchRequest.method)
             assertEquals("/api/customer/workspace-preferences", patchRequest.path)
             assertEquals("Bearer test-customer-token", patchRequest.getHeader("Authorization"))
-            assertEquals(
-                """{"mobile_default_timeframe_days":30,"mobile_chart_crosshair_enabled":true}""",
-                patchRequest.body.readUtf8()
-            )
+            val patchBody = JSONObject(patchRequest.body.readUtf8())
+            assertEquals(30, patchBody.getInt("mobile_default_timeframe_days"))
+            assertTrue(patchBody.getBoolean("mobile_chart_crosshair_enabled"))
         } finally {
             server.shutdown()
         }
