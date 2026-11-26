@@ -39,6 +39,11 @@ def upgrade() -> None:
                     '0067 requires public.customer_profiles before restricting service_role';
             END IF;
 
+            IF NOT has_schema_privilege('service_role', 'public', 'USAGE') THEN
+                RAISE EXCEPTION
+                    'service_role must retain USAGE on public for its explicitly granted customer_profiles access';
+            END IF;
+
             profile_sequence := pg_get_serial_sequence(
                 'public.customer_profiles',
                 'id'
