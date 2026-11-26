@@ -5,12 +5,11 @@ set -euo pipefail
 # to a disposable/staging PostgreSQL database. Direct remote hostnames are rejected.
 # It does not enable live trading.
 : "${DATABASE_URL:?Set DATABASE_URL to a PostgreSQL database}"
-case "$DATABASE_URL" in
-  postgresql+asyncpg://*) ;;
-  postgresql://*) DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgresql://}" ;;
-  postgres://*) DATABASE_URL="postgresql+asyncpg://${DATABASE_URL#postgres://}" ;;
-  *) echo "DATABASE_URL must use PostgreSQL with the asyncpg driver" >&2; exit 2;;
-esac
+
+# Alembic uses SQLAlchemy's asyncpg driver. Normalize legacy PostgreSQL URL
+# schemes and libpq sslmode query parameters to asyncpg's ssl parameter before
+# the database guard and Alembic consume the URL.
+DATABASE_URL="$(python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL")"
 export DATABASE_URL
 
 # Reuse the strict verification guard, but disable the Compose-only hostname
