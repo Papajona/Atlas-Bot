@@ -143,7 +143,13 @@ SELECT
       AND (
         NOT has_table_privilege('atlas_customer_paper',c.oid,'SELECT')
         OR NOT has_table_privilege('atlas_customer_paper',c.oid,'INSERT')
-        OR has_table_privilege('atlas_customer_paper',c.oid,'UPDATE')
+        OR (
+          (c.relname = 'workspace_preferences'
+            AND NOT has_table_privilege('atlas_customer_paper',c.oid,'UPDATE'))
+          OR
+          (c.relname <> 'workspace_preferences'
+            AND has_table_privilege('atlas_customer_paper',c.oid,'UPDATE'))
+        )
         OR has_table_privilege('atlas_customer_paper',c.oid,'DELETE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
