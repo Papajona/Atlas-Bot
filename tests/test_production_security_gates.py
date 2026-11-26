@@ -435,6 +435,8 @@ def test_supabase_service_role_existing_public_grants_are_restricted():
     assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
     assert "GRANT UPDATE" not in migration
     assert "pg_get_serial_sequence(" in migration
+    assert "has_schema_privilege('service_role', 'public', 'USAGE')" in migration
+    assert "service_role must retain USAGE on public" in migration
     assert "service_role retains privileges on a public relation other than customer_profiles" in migration
     assert "service_role retains privileges on a public sequence other than customer_profiles_id_seq" in migration
 
