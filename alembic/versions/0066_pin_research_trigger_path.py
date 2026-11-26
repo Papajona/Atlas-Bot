@@ -15,10 +15,6 @@ branch_labels = None
 depends_on = None
 
 
-_RESEARCH_TRIGGER_FUNCTIONS = (
-    "public.atlas_research_trial_archive_immutable()",
-    "public.atlas_research_holdout_registry_immutable()",
-)
 
 
 def upgrade() -> None:
