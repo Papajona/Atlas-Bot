@@ -442,3 +442,29 @@ def test_0065_downgrade_preserves_preexisting_trigger_role_and_policies():
     assert "AND NOT EXISTS (" in downgrade
 
 
+
+
+def test_0069_adds_append_only_equity_history_and_owner_scoped_display_preferences():
+    migration = (
+        ROOT / "alembic" / "versions"
+        / "0069_customer_equity_history_and_workspace_preferences.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision = "0069_customer_equity_history_and_workspace_preferences"' in migration
+    assert 'down_revision = "0068_tron_sweep_txid_casefold_unique"' in migration
+    assert 'op.create_table(\n        "customer_equity_snapshots"' in migration
+    assert '"customer_id", "bucket_at"' in migration
+    assert "ENABLE ROW LEVEL SECURITY" in migration
+    assert "REVOKE ALL PRIVILEGES ON TABLE public.customer_equity_snapshots FROM PUBLIC" in migration
+    assert "GRANT SELECT, INSERT ON TABLE public.customer_equity_snapshots TO atlas_api_runtime" in migration
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_workspace_preferences TO atlas_api_runtime" in migration
+    assert "GRANT UPDATE ON TABLE public.customer_equity_snapshots" not in migration
+    assert "GRANT DELETE ON TABLE public.customer_equity_snapshots" not in migration
+    assert "FOREACH role_name IN ARRAY ARRAY['anon', 'authenticated', 'service_role']" in migration
+    assert "Destructive downgrade is prohibited" in migration
+
+    provisioner = (
+        ROOT / "scripts" / "provision_atlas_api_runtime.sql"
+    ).read_text(encoding="utf-8")
+    assert "'customer_equity_snapshots','customer_workspace_preferences'" in provisioner
+    assert "GRANT SELECT, INSERT ON TABLE public.customer_equity_snapshots TO atlas_api_runtime" in provisioner
+    assert "GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_workspace_preferences TO atlas_api_runtime" in provisioner
