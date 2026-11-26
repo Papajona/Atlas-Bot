@@ -30,6 +30,15 @@ def _run_migration(connection, action):
         getattr(migration, action)()
 
 
+def _index_sql(connection, index_name: str) -> str | None:
+    return connection.execute(
+        sa.text(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = :name"
+        ),
+        {"name": index_name},
+    ).scalar_one_or_none()
+
+
 def _legacy_schema(connection):
     connection.execute(
         sa.text(
@@ -70,11 +79,16 @@ def test_migration_replaces_case_sensitive_unique_index_with_casefolded_unique_i
                         {"txid": "a" * 64},
                     )
 
-            index_names = {
-                item["name"] for item in sa.inspect(connection).get_indexes("tron_sweeps")
-            }
-            assert "uq_tron_sweep_transaction_id_ci_nonempty" in index_names
-            assert "uq_tron_sweep_transaction_id_nonempty" not in index_names
+            casefold_index_sql = _index_sql(
+                connection, "uq_tron_sweep_transaction_id_ci_nonempty"
+            )
+            assert casefold_index_sql is not None
+            assert "CREATE UNIQUE INDEX" in casefold_index_sql.upper()
+            assert "LOWER(TRANSACTION_ID)" in casefold_index_sql.upper()
+            assert "TRANSACTION_ID <> ''" in casefold_index_sql.upper()
+            assert _index_sql(
+                connection, "uq_tron_sweep_transaction_id_nonempty"
+            ) is None
     finally:
         engine.dispose()
 
@@ -96,10 +110,11 @@ def test_migration_refuses_legacy_casefold_collisions_without_dropping_old_guard
             with pytest.raises(RuntimeError, match="case-insensitive TRON sweep transaction uniqueness"):
                 _run_migration(connection, "upgrade")
 
-            index_names = {
-                item["name"] for item in sa.inspect(connection).get_indexes("tron_sweeps")
-            }
-            assert "uq_tron_sweep_transaction_id_nonempty" in index_names
-            assert "uq_tron_sweep_transaction_id_ci_nonempty" not in index_names
+            assert _index_sql(
+                connection, "uq_tron_sweep_transaction_id_nonempty"
+            ) is not None
+            assert _index_sql(
+                connection, "uq_tron_sweep_transaction_id_ci_nonempty"
+            ) is None
     finally:
         engine.dispose()
