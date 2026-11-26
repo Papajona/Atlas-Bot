@@ -618,7 +618,7 @@ jobs:
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
           SET ROLE pg_database_owner;
           CREATE FUNCTION public.atlas_pg_database_owner_future_probe() RETURNS integer
-              LANGUAGE sql AS $ SELECT 1 $;
+              LANGUAGE sql AS $$ SELECT 1 $$;
           RESET ROLE;
           DO $verify_pg_database_owner_future_function_defaults$
           BEGIN
