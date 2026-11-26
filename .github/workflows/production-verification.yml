@@ -120,6 +120,39 @@ jobs:
           python -m alembic upgrade head
           python -m alembic current
           python -m alembic heads
+
+      - name: Provision isolated PostgreSQL 0068 rollback-regression database
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGPASSWORD=verification_password createdb \
+            -h 127.0.0.1 -U atlas \
+            --template=atlas_production_verify \
+            atlas_rollback_0068
+          PGPASSWORD=verification_password psql -X -v ON_ERROR_STOP=1 \
+            -h 127.0.0.1 -U atlas -d atlas_rollback_0068 <<'SQL'
+          DROP TABLE public.customer_workspace_preferences;
+          DROP TABLE public.customer_equity_snapshots;
+          UPDATE public.alembic_version
+          SET version_num = '0068_tron_sweep_txid_casefold_unique'
+          WHERE version_num = '0069_customer_equity_history_and_workspace_preferences';
+          DO $verify_0068_rollback_fixture$
+          BEGIN
+              IF (SELECT count(*) FROM public.alembic_version
+                  WHERE version_num = '0068_tron_sweep_txid_casefold_unique') <> 1 THEN
+                  RAISE EXCEPTION 'rollback fixture is not at the expected 0068 revision';
+              END IF;
+              IF to_regclass('public.customer_equity_snapshots') IS NOT NULL
+                 OR to_regclass('public.customer_workspace_preferences') IS NOT NULL THEN
+                  RAISE EXCEPTION '0069-only customer tables remain in the 0068 rollback fixture';
+              END IF;
+          END
+          $verify_0068_rollback_fixture$;
+          SQL
+          actual_head="$(PGPASSWORD=verification_password psql -X -A -t -v ON_ERROR_STOP=1 \
+            -h 127.0.0.1 -U atlas -d atlas_rollback_0068 \
+            -c 'SELECT version_num FROM public.alembic_version')"
+          test "$actual_head" = "0068_tron_sweep_txid_casefold_unique"
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: Atlas Native AI offline verification (no provider calls)
