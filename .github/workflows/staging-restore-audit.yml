@@ -362,7 +362,7 @@ jobs:
             --restore-evidence-sha256 "$RESTORE_EVIDENCE_SHA256" \
             "${verified_args[@]}" \
             --expected-audit-role "$EXPECTED_AUDIT_DB_ROLE" \
-            --expected-revision 0068_tron_sweep_txid_casefold_unique \
+            0069_customer_equity_history_and_workspace_preferences \
             --output "$RUNNER_TEMP/staging-restore-audit.json"
       - name: Archive audit output even if ledger invariants failed
         if: always()
