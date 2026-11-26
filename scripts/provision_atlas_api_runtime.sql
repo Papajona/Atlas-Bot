@@ -194,7 +194,7 @@ SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
         )) AS elevated_table_privileges,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind='S'
-          AND has_sequence_privilege(r.rolname,c.oid,'UPDATE')) AS sequence_setval_privileges,
+          AND CASE WHEN c.relkind='S' THEN has_sequence_privilege(r.rolname,c.oid,'UPDATE') ELSE false END) AS sequence_setval_privileges,
        (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname='public' AND has_function_privilege(r.rolname,p.oid,'EXECUTE')) AS executable_public_functions
 FROM pg_roles r WHERE r.rolname='atlas_api_runtime';
