@@ -33,6 +33,7 @@ def upgrade() -> None:
             default_acl_owner text;
             default_acl_object_type text;
             default_acl_grantee text;
+            default_function_owner text;
             has_maintain boolean := false;
         BEGIN
             SELECT oid INTO service_role_oid
@@ -128,6 +129,45 @@ def upgrade() -> None:
                     default_acl_owner, default_acl_object_type, default_acl_grantee
                     USING HINT =
                         'Have the default-privilege owner remove matching PUBLIC or service_role defaults using an authorized owner operation, then rerun the migration. Do not bypass this gate.';
+            END IF;
+
+            -- PostgreSQL's hard-wired function default is EXECUTE for PUBLIC.
+            -- An absent global default-ACL row therefore means PUBLIC EXECUTE
+            -- is still inherited by future functions. For every role able to
+            -- CREATE in public, require explicit global revocation and reject
+            -- any public-schema addition that re-enables PUBLIC EXECUTE.
+            SELECT owner_role.rolname
+            INTO default_function_owner
+            FROM pg_roles AS owner_role
+            WHERE has_schema_privilege(owner_role.oid, public_schema_oid, 'CREATE')
+              AND (
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM pg_default_acl AS global_defaults
+                        WHERE global_defaults.defaclrole = owner_role.oid
+                          AND global_defaults.defaclnamespace = 0
+                          AND global_defaults.defaclobjtype = 'f'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM pg_default_acl AS defaults
+                        CROSS JOIN LATERAL aclexplode(defaults.defaclacl) AS acl
+                        WHERE defaults.defaclrole = owner_role.oid
+                          AND defaults.defaclnamespace IN (0, public_schema_oid)
+                          AND defaults.defaclobjtype = 'f'
+                          AND acl.grantee = 0
+                          AND acl.privilege_type = 'EXECUTE'
+                    )
+              )
+            ORDER BY owner_role.rolname
+            LIMIT 1;
+
+            IF FOUND THEN
+                RAISE EXCEPTION
+                    '0067 refuses to continue: role % can create public functions with default PUBLIC EXECUTE',
+                    default_function_owner
+                    USING HINT =
+                        'The function owner must explicitly revoke global default EXECUTE from PUBLIC and ensure no public-schema default re-grants it before rerunning 0067.';
             END IF;
 
             -- Revoke only objects this migration identity owns. A schema-wide
