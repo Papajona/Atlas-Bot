@@ -726,3 +726,134 @@ def test_paper_runtime_preflight_gate_uses_explicit_gate_header(monkeypatch):
     assert response.status_code == 503
     assert response.headers["x-atlas-paper-gate"] == "blocked"
     assert "PAPER_LEDGER_PREFLIGHT_FAILED" in response.json()["detail"]
+
+
+def _install_paper_scanner_customer(monkeypatch):
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def existing_customer(_authorization, _db, *, require_aal2=True):
+        assert require_aal2 is True
+        return SimpleNamespace(id=314), {"sub": "customer-314", "aal": "aal2"}
+
+    monkeypatch.setattr(paper_staging.settings, "paper_staging_market_scanner_enabled", True)
+    monkeypatch.setattr(paper_staging, "SessionLocal", FakeSession)
+    monkeypatch.setattr(paper_staging, "get_existing_customer", existing_customer)
+
+
+def test_paper_customer_market_scanner_rejects_fx_symbols_outside_configured_universe(monkeypatch):
+    _install_paper_scanner_customer(monkeypatch)
+    monkeypatch.setattr(
+        paper_staging.settings,
+        "adaptive_established_fx_symbols",
+        "EUR_USD,GBP_USD,USD_JPY",
+        raising=False,
+    )
+
+    def unexpected_scan(*_args, **_kwargs):
+        pytest.fail("unsupported FX symbol reached the scanner/provider")
+
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", unexpected_scan)
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?asset_class=forex&symbols=EUR_CHF",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 422
+
+
+def test_paper_customer_market_scanner_normalizes_and_deduplicates_configured_fx(monkeypatch):
+    _install_paper_scanner_customer(monkeypatch)
+    monkeypatch.setattr(
+        paper_staging.settings,
+        "adaptive_established_fx_symbols",
+        "EUR_USD,GBP_USD",
+        raising=False,
+    )
+    monkeypatch.setattr(paper_staging.settings, "forex_broker", "yfinance", raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_practice", False, raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_account_id", "", raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_api_token", "", raising=False)
+    fetched = []
+
+    def fetch_fx(symbol, timeframe, days):
+        fetched.append((symbol, timeframe, days))
+        return object()
+
+    async def scan(symbols, *, fetch, metrics, semaphore, logger):
+        assert symbols == ["EUR_USD"]
+        fetch(symbols[0])
+        return [{"symbol": symbols[0], "price": 1.25, "score": 0.5}]
+
+    monkeypatch.setattr(paper_staging, "fetch_forex", fetch_fx)
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", scan)
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?asset_class=forex&symbols=EUR%2FUSD%2CEUR_USD",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+
+    assert response.status_code == 200
+    assert fetched == [("EUR_USD", "15m", 30)]
+    assert response.json()["data_source"] == "yfinance_fx"
+    assert response.json()["read_only"] is True
+
+
+def test_paper_customer_market_scanner_fails_closed_for_commodity_without_oanda_practice(monkeypatch):
+    _install_paper_scanner_customer(monkeypatch)
+    monkeypatch.setattr(paper_staging.settings, "forex_broker", "oanda", raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_practice", False, raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_account_id", "practice-account", raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_api_token", "practice-token", raising=False)
+
+    def unexpected_scan(*_args, **_kwargs):
+        pytest.fail("commodity scanner ran without explicit OANDA practice mode")
+
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", unexpected_scan)
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?asset_class=commodity&symbols=XAU_USD",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+    assert response.status_code == 503
+
+
+def test_paper_customer_market_scanner_allows_only_configured_oanda_practice_commodities(monkeypatch):
+    _install_paper_scanner_customer(monkeypatch)
+    monkeypatch.setattr(
+        paper_staging.settings,
+        "adaptive_established_commodity_symbols",
+        "XAU_USD,WTICO_USD",
+        raising=False,
+    )
+    monkeypatch.setattr(paper_staging.settings, "forex_broker", "oanda", raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_practice", True, raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_account_id", "practice-account", raising=False)
+    monkeypatch.setattr(paper_staging.settings, "oanda_api_token", "practice-token", raising=False)
+    fetched = []
+
+    def fetch_oanda(symbol, timeframe, days):
+        fetched.append((symbol, timeframe, days))
+        return object()
+
+    async def scan(symbols, *, fetch, metrics, semaphore, logger):
+        assert symbols == ["XAU_USD", "WTICO_USD"]
+        for symbol in symbols:
+            fetch(symbol)
+        return [{"symbol": symbol, "price": 2000.0, "score": 0.25} for symbol in symbols]
+
+    monkeypatch.setattr(paper_staging, "fetch_forex_oanda", fetch_oanda)
+    monkeypatch.setattr(paper_staging, "_scanner_scan_symbols", scan)
+    response = TestClient(paper_staging.app).get(
+        "/api/customer/market-scanner?asset_class=commodity&symbols=XAUUSD,WTI",
+        headers={"Authorization": "Bearer verified-customer-token"},
+    )
+
+    assert response.status_code == 200
+    assert fetched == [
+        ("XAU_USD", "15m", 30),
+        ("WTICO_USD", "15m", 30),
+    ]
+    assert response.json()["data_source"] == "oanda_practice"
+    assert response.json()["read_only"] is True
