@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -249,6 +250,48 @@ def test_project_iam_guard_rejects_whole_project_policy_replacement():
         _assert_project_iam_commands_are_allowlisted(unsafe)
 
 
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        (
+            '--member="serviceAccount:${DEPLOY_SA}"',
+            '--member="serviceAccount:unapproved@example.invalid"',
+        ),
+        (
+            '--member="serviceAccount:${PREFLIGHT_SA}"',
+            '--member="serviceAccount:unapproved@example.invalid"',
+        ),
+        (
+            'gcloud projects add-iam-policy-binding "$PROJECT_ID" \\',
+            'gcloud projects add-iam-policy-binding "unapproved-project" \\',
+        ),
+    ],
+)
+def test_project_iam_guard_rejects_unreviewed_project_targets_and_principals(
+    original: str, replacement: str
+):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script.replace(original, replacement, 1)
+    assert unsafe != script
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def test_project_iam_guard_detects_project_grants_wrapped_in_if_not():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    hidden_grant = (
+        '\nif ! gcloud projects add-iam-policy-binding "$PROJECT_ID" \\\n'
+        '  --member="serviceAccount:${DEPLOY_SA}" --role="roles/run.admin" --quiet\n'
+        "then\n"
+        '  echo "project binding failed"\n'
+        "fi\n"
+    )
+    unsafe = script + hidden_grant
+    assert len(_extract_project_iam_policy_commands(unsafe)) == 3
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
 def test_project_iam_guard_rejects_unexpected_additional_project_grants():
     script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
     unsafe = script + (
@@ -379,51 +422,98 @@ def _extract_shell_function(script: str, name: str) -> str:
 
 
 def _extract_project_iam_policy_commands(script: str) -> list[str]:
-    lines = script.splitlines()
-    commands: list[str] = []
-    command_start = re.compile(
-        r"^\s*gcloud\s+projects\s+(?:add-iam-policy-binding|set-iam-policy)\b"
-    )
-    index = 0
-    while index < len(lines):
-        if not command_start.match(lines[index]):
-            index += 1
+    # Join shell continuations before scanning. Search inside each logical line,
+    # not only at column zero: if ! gcloud projects ... is still an IAM mutation.
+    logical_lines: list[str] = []
+    pending: list[str] = []
+    for physical_line in script.splitlines():
+        stripped = physical_line.strip()
+        if not pending and (not stripped or stripped.startswith("#")):
             continue
-        parts: list[str] = []
-        while True:
-            part = lines[index].strip()
-            continues = part.endswith("\\")
-            parts.append(part[:-1].rstrip() if continues else part)
-            if not continues:
-                break
-            index += 1
-            assert index < len(lines), "unterminated project IAM command"
-        commands.append(" ".join(parts))
-        index += 1
+        continues = stripped.endswith("\\")
+        pending.append(stripped[:-1].rstrip() if continues else stripped)
+        if continues:
+            continue
+        logical_lines.append(" ".join(pending))
+        pending = []
+    assert not pending, "unterminated shell continuation in staging bootstrap"
+
+    mutation = re.compile(
+        r"(?<![A-Za-z0-9_./-])gcloud\s+projects\s+"
+        r"(?:add-iam-policy-binding|set-iam-policy)\b"
+    )
+    commands: list[str] = []
+    for logical_line in logical_lines:
+        matches = list(mutation.finditer(logical_line))
+        for index, match in enumerate(matches):
+            # The only reviewed shell wrapper is if !; reject any other
+            # prefix (for example sudo, env, command, or a compound list)
+            # instead of silently overlooking the nested project mutation.
+            prefix = logical_line[: match.start()].strip()
+            assert prefix in {"", "if !"}, (
+                f"unreviewed shell wrapper around project IAM mutation: {prefix!r}"
+            )
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(logical_line)
+            commands.append(logical_line[match.start() : end].strip())
     return commands
 
 
 def _assert_project_iam_commands_are_allowlisted(script: str) -> None:
+    # Lock the target project and service-account identities used by the
+    # project-wide grants. All assignments must remain the reviewed literals.
+    expected_assignments = {
+        "PROJECT_ID": '"atlas-staging-510915"',
+        "PROJECT_NUMBER": '"350896810949"',
+        "DEPLOY_SA_ID": '"atlas-staging-deploy"',
+        "PREFLIGHT_SA_ID": '"atlas-staging-preflight"',
+        "DEPLOY_SA": '"${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"',
+        "PREFLIGHT_SA": '"${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"',
+    }
+    for name, expected in expected_assignments.items():
+        assignments = re.findall(
+            rf"(?m)^\s*(?:(?:readonly|export|local)\s+)*{re.escape(name)}=(.*?)\s*$",
+            script,
+        )
+        assert assignments and all(value.strip() == expected for value in assignments), (
+            f"{name} must remain assigned only its reviewed staging value"
+        )
+
     commands = _extract_project_iam_policy_commands(script)
     assert len(commands) == 2, (
         "unexpected project-wide IAM mutation; review it before adding it to the allowlist"
     )
-    allowed_roles = {"roles/run.admin", "roles/run.viewer"}
+    expected_members_by_role = {
+        "roles/run.admin": "serviceAccount:${DEPLOY_SA}",
+        "roles/run.viewer": "serviceAccount:${PREFLIGHT_SA}",
+    }
     observed_roles: list[str] = []
     for command in commands:
-        assert re.match(r"^gcloud projects add-iam-policy-binding\b", command), (
+        try:
+            tokens = shlex.split(command, comments=True, posix=True)
+        except ValueError as exc:
+            raise AssertionError(f"malformed project-wide IAM command: {exc}") from exc
+        assert tokens[:3] == ["gcloud", "projects", "add-iam-policy-binding"], (
             "project-wide set-iam-policy is forbidden"
         )
-        role_args = re.findall(
-            r"""--role(?:=|\s+)(?:"([^"]+)"|'([^']+)'|([^\s]+))""",
-            command,
+        assert len(tokens) == 7 and tokens[3] == "$PROJECT_ID", (
+            "project-wide IAM mutation must target the exact configured staging project"
         )
-        assert len(role_args) == 1, "project-wide IAM role must be a single explicit literal"
-        role = next(value for value in role_args[0] if value)
-        assert role in allowed_roles, f"unreviewed project-wide IAM role: {role}"
-        assert "$" not in role and "`" not in role, "dynamic project-wide IAM roles are forbidden"
+        member_args = [token.removeprefix("--member=") for token in tokens[4:] if token.startswith("--member=")]
+        role_args = [token.removeprefix("--role=") for token in tokens[4:] if token.startswith("--role=")]
+        assert len(member_args) == 1, "project-wide IAM principal must be a single explicit value"
+        assert len(role_args) == 1, "project-wide IAM role must be a single explicit value"
+        role = role_args[0]
+        assert role in expected_members_by_role, f"unreviewed project-wide IAM role: {role}"
+        assert member_args[0] == expected_members_by_role[role], (
+            f"{role} must be granted only to its reviewed staging service account"
+        )
+        assert set(tokens[4:]) == {
+            f"--member={expected_members_by_role[role]}",
+            f"--role={role}",
+            "--quiet",
+        }, "unexpected project-wide IAM option or argument"
         observed_roles.append(role)
-    assert set(observed_roles) == allowed_roles
+    assert set(observed_roles) == set(expected_members_by_role)
 
 
 def _run_paper_bootstrap_subset(
