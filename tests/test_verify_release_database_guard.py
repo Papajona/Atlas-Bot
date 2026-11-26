@@ -67,3 +67,22 @@ def test_release_guard_does_not_allow_remote_host_in_multi_host_override():
         "?host=localhost:5432&host=db.example.com:5432"
     )
     assert not is_approved_verification_database_url(url)
+
+
+def test_release_script_enforces_database_guard_before_mutating_database():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "scripts" / "verify_release.sh").read_text(encoding="utf-8")
+    guard = script.index("python scripts/verify_release_database_guard.py")
+    migration = script.index("python -m alembic upgrade head")
+    postgres_tests = script.index("tests/test_postgres_concurrency_3_10_39.py")
+    assert guard < migration < postgres_tests
+
+
+def test_compose_verification_declares_the_exact_postgres_service_alias():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "docker-compose.verify.yml").read_text(encoding="utf-8")
+    assert "ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE: postgres" in compose
