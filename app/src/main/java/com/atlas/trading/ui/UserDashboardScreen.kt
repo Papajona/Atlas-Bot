@@ -314,9 +314,9 @@ fun UserDashboardScreen(
                                 textPrimary = textPrimary,
                                 onAction = { actionName ->
                                     when (actionName) {
-                                        "New Trade" -> actionDialogMessage = "New Paper Trade:\nSelect asset to place disciplined trade:\n• Crypto: BTC/USDT, ETH/USDT\n• Forex: EUR/USD, GBP/USD (OANDA demo)\n• Commodities: Gold XAU/USD (OANDA demo)"
-                                        "Deposit" -> actionDialogMessage = "Deposit USDT: Dedicated TRC-20 omnibus deposit addresses enabled."
-                                        "Withdraw" -> actionDialogMessage = "Withdrawal Portal: 2-man approval and AAL2 step-up authentication required."
+                                        "New Trade" -> actionDialogMessage = "Order entry is not available from this dashboard yet. Market Scanner and Strategy Lab are research views; they do not submit customer orders."
+                                        "Deposit" -> actionDialogMessage = "Customer funding is disabled in this build. No deposit address is provided here. Do not send funds based on this screen."
+                                        "Withdraw" -> actionDialogMessage = "Customer withdrawals are disabled in this build. No payout will be submitted from this screen."
                                         "Analytics" -> currentTab = DashboardTab.PORTFOLIO
                                     }
                                 }
