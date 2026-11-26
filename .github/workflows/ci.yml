@@ -574,6 +574,24 @@ jobs:
           ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
           RESET ROLE;
           SQL
+          # The database owner can create objects through pg_database_owner.
+          # Its built-in PUBLIC EXECUTE default must block 0067 until explicitly revoked.
+          if python -m alembic upgrade head >/tmp/atlas-0067-pg-database-owner-default.log 2>&1; then
+            cat /tmp/atlas-0067-pg-database-owner-default.log
+            echo '0067 unexpectedly accepted pg_database_owner default PUBLIC EXECUTE' >&2
+            exit 1
+          fi
+          grep -q 'default PUBLIC EXECUTE' /tmp/atlas-0067-pg-database-owner-default.log || {
+            cat /tmp/atlas-0067-pg-database-owner-default.log
+            echo '0067 failed for a reason other than the pg_database_owner PUBLIC EXECUTE gate' >&2
+            exit 1
+          }
+          python -m alembic current | grep -q '0066_pin_research_trigger_path'
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          SET ROLE pg_database_owner;
+          ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+          RESET ROLE;
+          SQL
           python -m alembic upgrade head
           # Create a future public routine as the previously managed owner after 0067.
           # Its corrected defaults must not make it executable by service_role through PUBLIC.
@@ -595,6 +613,26 @@ jobs:
           $verify_future_public_function_defaults$;
           SET ROLE supabase_admin;
           DROP FUNCTION public.atlas_supabase_admin_future_probe();
+          RESET ROLE;
+          SQL
+          PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
+          SET ROLE pg_database_owner;
+          CREATE FUNCTION public.atlas_pg_database_owner_future_probe() RETURNS integer
+              LANGUAGE sql AS $ SELECT 1 $;
+          RESET ROLE;
+          DO $verify_pg_database_owner_future_function_defaults$
+          BEGIN
+              IF has_function_privilege(
+                  'service_role',
+                  'public.atlas_pg_database_owner_future_probe()',
+                  'EXECUTE'
+              ) THEN
+                  RAISE EXCEPTION 'a future pg_database_owner function is executable by service_role';
+              END IF;
+          END
+          $verify_pg_database_owner_future_function_defaults$;
+          SET ROLE pg_database_owner;
+          DROP FUNCTION public.atlas_pg_database_owner_future_probe();
           RESET ROLE;
           SQL
           PGPASSWORD=test_password psql -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
