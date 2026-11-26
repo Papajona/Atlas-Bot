@@ -29,6 +29,7 @@ def upgrade() -> None:
             profile_sequence_oid oid;
             profile_sequence text;
             object_record record;
+            function_record record;
             default_acl_owner text;
             default_acl_object_type text;
             has_maintain boolean := false;
@@ -148,6 +149,29 @@ def upgrade() -> None:
                 END IF;
             END LOOP;
 
+            -- The Edge Function admin client performs table operations only;
+            -- it does not call public RPCs. Remove legacy EXECUTE grants from
+            -- Atlas-owned public routines. PostgreSQL trigger firing does not
+            -- require the caller to retain EXECUTE on a trigger function.
+            FOR function_record IN
+                SELECT p.prokind, n.nspname, p.proname,
+                       pg_get_function_identity_arguments(p.oid) AS identity_arguments
+                FROM pg_proc AS p
+                JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND p.proowner = migration_role_oid
+                  AND p.prokind IN ('f', 'p', 'a', 'w')
+            LOOP
+                EXECUTE format(
+                    'REVOKE EXECUTE ON %s %I.%I(%s) FROM service_role',
+                    CASE WHEN function_record.prokind = 'p'
+                         THEN 'PROCEDURE' ELSE 'FUNCTION' END,
+                    function_record.nspname,
+                    function_record.proname,
+                    function_record.identity_arguments
+                );
+            END LOOP;
+
             EXECUTE
                 'GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role';
             EXECUTE
@@ -225,6 +249,17 @@ def upgrade() -> None:
                ) THEN
                 RAISE EXCEPTION
                     'service_role customer_profiles_id_seq privileges do not match USAGE, SELECT only';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1
+                FROM pg_proc AS p
+                JOIN pg_namespace AS n ON n.oid = p.pronamespace
+                WHERE n.nspname = 'public'
+                  AND has_function_privilege('service_role', p.oid, 'EXECUTE')
+            ) THEN
+                RAISE EXCEPTION
+                    'service_role retains EXECUTE on a public function; remove direct or managed-owner grants before enabling the Edge Function admin client';
             END IF;
 
             IF EXISTS (
