@@ -141,7 +141,8 @@ def test_0067_checks_maintain_only_on_postgresql_17_or_newer():
     dynamic = migration.index("EXECUTE $atlas_service_role_maintain_check$", guard)
     dynamic_end = migration.index("$atlas_service_role_maintain_check$", dynamic + 20)
     assert guard < dynamic < dynamic_end
-    assert "has_table_privilege('service_role', c.oid, 'MAINTAIN')" in migration[dynamic:dynamic_end]
+    maintain_sql = " ".join(migration[dynamic:dynamic_end].split())
+    assert "has_table_privilege('service_role', c.oid, 'MAINTAIN')" in maintain_sql
     assert "has_table_privilege('service_role', profile_table_oid, 'MAINTAIN')" not in migration
 
 
@@ -317,11 +318,17 @@ def test_cloud_sql_recovery_runbook_keeps_schema_before_alembic_and_no_duplicate
         "4. While still connected as the database owner/admin, apply "
         "`scripts/customer_paper_ledger_schema.sql`"
     )
-    migration_step = runbook.index(
-        "5. Apply the repository Alembic chain with `ENVIRONMENT=development`"
+    acl_prerequisite_step = runbook.index(
+        "5. Before running Alembic, inspect `pg_default_acl`"
     )
-    assert schema_step < migration_step
-    assert runbook.count("5. Apply the repository Alembic chain") == 1
+    migration_step = runbook.index(
+        "Then apply the repository Alembic chain with `ENVIRONMENT=development`",
+        acl_prerequisite_step,
+    )
+    assert schema_step < acl_prerequisite_step < migration_step
+    assert runbook.count(
+        "Then apply the repository Alembic chain with `ENVIRONMENT=development`"
+    ) == 1
     assert runbook.count("Once the bucket retention policy is locked") == 1
     assert runbook.count(
         "Revision `0065_ledger_trigger_owner_isolation` creates the internal "
