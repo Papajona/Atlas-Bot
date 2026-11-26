@@ -40,7 +40,7 @@ jobs:
       # Exercise the same Android SDK package setup in PR CI, without exposing signing secrets.
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 emulator system-images;android-35;google_apis;x86_64"
       - name: Run Kotlin unit tests
         env:
           ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000
@@ -113,6 +113,70 @@ jobs:
           rm -f "$ATLAS_RELEASE_STORE_FILE"
           echo "PASS: optimized release APK retains the effective runtime backend resource."
 
+
+      - name: Install and launch debug APK in Android 15 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          AVD_NAME="atlas-ci-api35"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          echo "no" | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --package "system-images;android-35;google_apis;x86_64" \
+            --device "pixel_2"
+          emulator -avd "$AVD_NAME" \
+            -no-window -no-audio -no-boot-anim -no-snapshot -wipe-data \
+            -gpu swiftshader_indirect \
+            > "$RUNNER_TEMP/atlas-android-emulator.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/atlas-android-emulator.pid"
+          adb wait-for-device
+          booted=false
+          for attempt in $(seq 1 60); do
+            if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+              booted=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$booted" != true ]]; then
+            cat "$RUNNER_TEMP/atlas-android-emulator.log" || true
+            adb devices -l || true
+            echo "BLOCKED: Android emulator did not finish booting."
+            exit 1
+          fi
+          adb install -r "$APK"
+          adb shell am start -W -n com.atlas.trading/.MainActivity
+          sleep 8
+          adb shell pidof com.atlas.trading >/dev/null || {
+            adb logcat -d -t 10000 || true
+            echo "BLOCKED: Atlas process did not remain running after launch."
+            exit 1
+          }
+          python - <<'PY'
+          import subprocess
+
+          result = subprocess.run(
+              ["adb", "logcat", "-d", "-t", "10000"],
+              check=True,
+              capture_output=True,
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+          )
+          lines = result.stdout.splitlines()
+          for index, line in enumerate(lines):
+              if "FATAL EXCEPTION" not in line:
+                  continue
+              block = "\n".join(lines[index:index + 20])
+              if "com.atlas.trading" in block:
+                  raise SystemExit(
+                      "BLOCKED: Atlas crashed during emulator startup:\n" + block
+                  )
+          print("PASS: debug APK installed and MainActivity remained running on Android 15 emulator.")
+          PY
+          adb shell am force-stop com.atlas.trading
 
       - name: Create SHA-256 checksum for emulator debug APK
         shell: bash
