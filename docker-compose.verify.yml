@@ -18,7 +18,8 @@ services:
       context: .
       dockerfile: Dockerfile.verify
     environment:
-      ENVIRONMENT: development
+      # Disposable verification runs under the test profile; `postgres` is a Compose-only service DNS name.
+      ENVIRONMENT: test
       DATABASE_URL: postgresql+asyncpg://trader:trader_test@postgres:5432/trading
       PAPER_TRADING: "true"
       LIVE_TRADING_ENABLED: "false"
