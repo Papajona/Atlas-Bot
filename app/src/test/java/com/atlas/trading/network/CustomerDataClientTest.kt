@@ -121,6 +121,40 @@ class CustomerDataClientTest {
     }
 
     @Test
+    fun scannerRequestSelectsForexMarketData() = runBlocking {
+        val server = MockWebServer()
+        repeat(6) { server.enqueue(MockResponse().setResponseCode(200).setBody("{}")) }
+        server.start()
+        try {
+            CustomerDataClient(server.url("/").toString())
+                .loadSnapshot("test-customer-token", scannerAssetClass = "forex")
+            val paths = (0 until 6).map { server.takeRequest().path.orEmpty() }
+            assertTrue(paths[2].contains("asset_class=forex"))
+            assertTrue(paths[2].contains("exchange=yfinance"))
+            assertTrue(paths[2].contains("symbols=EUR_USD%2CGBP_USD"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun scannerRequestSelectsPracticeCommodityMarketData() = runBlocking {
+        val server = MockWebServer()
+        repeat(6) { server.enqueue(MockResponse().setResponseCode(200).setBody("{}")) }
+        server.start()
+        try {
+            CustomerDataClient(server.url("/").toString())
+                .loadSnapshot("test-customer-token", scannerAssetClass = "commodity")
+            val paths = (0 until 6).map { server.takeRequest().path.orEmpty() }
+            assertTrue(paths[2].contains("asset_class=commodity"))
+            assertTrue(paths[2].contains("exchange=oanda"))
+            assertTrue(paths[2].contains("symbols=XAU_USD%2CXAG_USD"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun failedCustomerAndMarketRequestsStayExplicitlyUnavailable() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"detail":"Unauthorized"}"""))
