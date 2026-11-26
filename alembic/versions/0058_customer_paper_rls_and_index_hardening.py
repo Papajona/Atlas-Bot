@@ -35,8 +35,6 @@ _CUSTOMER_PAPER_TENANT_TABLES = (
     "order_events",
     "fills",
     "position_events",
-    "equity_snapshots",
-    "workspace_preferences",
 )
 
 # (schema, table, index, ordered child columns)
