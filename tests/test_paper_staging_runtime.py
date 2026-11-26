@@ -144,12 +144,17 @@ def test_paper_customer_market_scanner_requires_aal2_and_returns_bounded_public_
 
     assert response.status_code == 200
     assert response.json() == {
+        "asset_class": "crypto",
         "exchange": "binance",
         "timeframe": "15m",
+        "data_source": "binance",
+        "read_only": True,
         "results": [{
             "symbol": "BTC/USDT:USDT",
             "price": 65000.25,
             "signal": "WATCH",
+            "asset_class": "crypto",
+            "data_source": "binance",
         }],
     }
     assert len(requests) == 1
