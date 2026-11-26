@@ -161,7 +161,7 @@ def test_development_rejects_remote_database_without_legacy_admin_token(database
         ValueError,
         match="development environment may not point at a remote database",
     ):
-        Settings(environment="development", database_url=database_url)
+        Settings(environment="development", database_url=database_url, admin_token="")
 
 
 def test_development_rejects_legacy_admin_token_with_remote_database():
