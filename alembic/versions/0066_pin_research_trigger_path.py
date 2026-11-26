@@ -58,8 +58,8 @@ def upgrade() -> None:
                             role_name
                         );
                         IF has_function_privilege(
-                            role_name,
-                            to_regprocedure(function_signature),
+                            role_name::name,
+                            to_regprocedure(function_signature)::oid,
                             'EXECUTE'
                         ) THEN
                             RAISE EXCEPTION
