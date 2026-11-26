@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run this from Cloud Shell/Compute against a disposable/staging PostgreSQL database.
+# Run this from Cloud Shell/Compute through a loopback-bound Cloud SQL Auth Proxy/tunnel
+# to a disposable/staging PostgreSQL database. Direct remote hostnames are rejected.
 # It does not enable live trading.
 : "${DATABASE_URL:?Set DATABASE_URL to a PostgreSQL database}"
 case "$DATABASE_URL" in
   postgresql*) ;;
   *) echo "DATABASE_URL must use PostgreSQL for this verification" >&2; exit 2;;
 esac
+
+# Reuse the strict verification guard, but disable the Compose-only hostname
+# exception: this Cloud Shell/Compute workflow must use a loopback proxy.
+unset ATLAS_VERIFY_COMPOSE_POSTGRES_SERVICE
+python scripts/verify_release_database_guard.py
 
 export ENVIRONMENT=development
 export PAPER_TRADING=true
