@@ -128,7 +128,7 @@ def upgrade() -> None:
                     '0067 refuses to continue: role % has default % privileges granted to % on future public objects',
                     default_acl_owner, default_acl_object_type, default_acl_grantee
                     USING HINT =
-                        'Have the default-privilege owner remove matching PUBLIC or service_role defaults using an authorized owner operation, then rerun the migration. Do not bypass this gate.';
+                        'Have each default-privilege owner remove matching PUBLIC or service_role defaults using an authorized managed-owner operation, then rerun the migration. Do not bypass this gate.';
             END IF;
 
             -- PostgreSQL's hard-wired function default is EXECUTE for PUBLIC.
