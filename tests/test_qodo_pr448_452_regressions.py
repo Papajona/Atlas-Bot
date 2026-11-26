@@ -52,7 +52,9 @@ def test_legacy_email_duplicate_detection_uses_decrypted_orm_values_not_sql_like
     assert "uuid.UUID" in block
     assert 'CustomerProfile.auth_user_id.op("!~*")' in block
     assert 'func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")' in block
-    assert "literal_column" in block
+    assert "literal_column" in conflict_block
+    assert "uuid_pattern = _UUID_AUTH_REFERENCE_PATTERN" in unmapped_block
+    assert "literal_column(f\"'{uuid_pattern}'\")" in unmapped_block
     assert ".ilike(" not in block
 
 
