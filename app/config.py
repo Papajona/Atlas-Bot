@@ -1,7 +1,7 @@
 import ipaddress
 import math
 import os
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -9,8 +9,65 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _VALID_ENVIRONMENTS = {"development", "staging", "production", "test"}
 
 
+def _is_loopback_host(hostname: str) -> bool:
+    """Return true only for localhost names and loopback IP addresses."""
+    normalized = str(hostname or "").strip().rstrip(".").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_loopback_host_override(value: str) -> bool:
+    """Validate SQLAlchemy host/hostaddr query overrides without accepting remote targets."""
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+
+    # Some drivers accept a comma-separated host list. Every candidate must
+    # be loopback; accepting one local member must not mask a remote fallback.
+    candidates = [part.strip() for part in raw.split(",")]
+    if not candidates or any(not part for part in candidates):
+        return False
+
+    for candidate in candidates:
+        # hostaddr may be a bare IPv4/IPv6 address (including unbracketed IPv6).
+        address_candidate = candidate[1:-1] if candidate.startswith("[") and candidate.endswith("]") else candidate
+        try:
+            address = ipaddress.ip_address(address_candidate)
+        except ValueError:
+            address = None
+        if address is not None:
+            if not address.is_loopback:
+                return False
+            continue
+
+        try:
+            endpoint = urlsplit(f"//{candidate}")
+            hostname = endpoint.hostname
+            # Query overrides must be a bare host with an optional port, not
+            # an authority carrying credentials, paths, or a second query.
+            if (
+                endpoint.username is not None
+                or endpoint.password is not None
+                or endpoint.path
+                or endpoint.query
+                or endpoint.fragment
+            ):
+                return False
+            _ = endpoint.port  # Force validation of malformed/out-of-range ports.
+        except ValueError:
+            return False
+        if not hostname or not _is_loopback_host(hostname):
+            return False
+
+    return True
+
+
 def _is_local_database_url(database_url: str) -> bool:
-    """Return true only for SQLite or a loopback-hosted database URL."""
+    """Return true only when every effective database host is loopback-local."""
     value = str(database_url or "").strip()
     if not value:
         return False
@@ -20,18 +77,20 @@ def _is_local_database_url(database_url: str) -> bool:
         if scheme == "sqlite":
             return True
         hostname = parsed.hostname
+        # SQLAlchemy forwards URL query parameters to the PostgreSQL driver.
+        # Its host/hostaddr options can override the authority hostname, so
+        # validate every supplied override rather than trusting parsed.hostname.
+        host_overrides = [
+            item_value
+            for item_key, item_value in parse_qsl(parsed.query, keep_blank_values=True)
+            if item_key.lower() in {"host", "hostaddr"}
+        ]
     except ValueError:
         return False
 
-    if not hostname:
+    if not hostname or not _is_loopback_host(hostname):
         return False
-    hostname = hostname.rstrip(".").lower()
-    if hostname == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(hostname).is_loopback
-    except ValueError:
-        return False
+    return all(_is_loopback_host_override(item) for item in host_overrides)
 
 
 class Settings(BaseSettings):
