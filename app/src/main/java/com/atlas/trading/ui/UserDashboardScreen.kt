@@ -76,6 +76,7 @@ fun UserDashboardScreen(
     var currentTab by remember { mutableStateOf(DashboardTab.HOME) }
     var selectedAssetClass by remember { mutableStateOf(AssetClass.ALL) }
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
+    var chartCrosshairEnabled by remember { mutableStateOf(true) }
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
     var activeCustomerToken by remember { mutableStateOf(customerAccessToken) }
     var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
@@ -98,6 +99,40 @@ fun UserDashboardScreen(
                     scannerAssetClass = selectedAssetClass.scannerAssetClass
                 )
             }.getOrNull()
+        }
+    }
+
+    LaunchedEffect(backendUrl, activeCustomerToken) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+        if (token == null || backendUrl.isBlank()) {
+            selectedTimeframeDays = 30
+            chartCrosshairEnabled = true
+        } else {
+            runCatching {
+                CustomerDataClient(backendUrl).loadWorkspacePreferences(token)
+            }.onSuccess { preferences ->
+                selectedTimeframeDays = preferences.defaultChartWindowDays
+                chartCrosshairEnabled = preferences.chartCrosshairEnabled
+            }
+        }
+    }
+
+    fun saveChartPreferences(
+        defaultChartWindowDays: Int? = null,
+        crosshairEnabled: Boolean? = null
+    ) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() } ?: return
+        if (backendUrl.isBlank()) return
+        customerAuthScope.launch {
+            runCatching {
+                CustomerDataClient(backendUrl).updateWorkspacePreferences(
+                    token,
+                    defaultChartWindowDays = defaultChartWindowDays,
+                    chartCrosshairEnabled = crosshairEnabled
+                )
+            }.onFailure {
+                customerInfoMessage = "Could not sync chart preferences. Your current selection remains active on this screen."
+            }
         }
     }
 
@@ -311,7 +346,11 @@ fun UserDashboardScreen(
                                 points = displayPoints,
                                 selectedTimeframe = selectedTimeframeDays,
                                 selectedAssetClass = selectedAssetClass,
-                                onTimeframeChange = { selectedTimeframeDays = it },
+                                onTimeframeChange = {
+                                    selectedTimeframeDays = it
+                                    saveChartPreferences(defaultChartWindowDays = it)
+                                },
+                                crosshairEnabled = chartCrosshairEnabled,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -410,7 +449,11 @@ fun UserDashboardScreen(
                                 points = displayPoints,
                                 selectedTimeframe = selectedTimeframeDays,
                                 selectedAssetClass = selectedAssetClass,
-                                onTimeframeChange = { selectedTimeframeDays = it },
+                                onTimeframeChange = {
+                                    selectedTimeframeDays = it
+                                    saveChartPreferences(defaultChartWindowDays = it)
+                                },
+                                crosshairEnabled = chartCrosshairEnabled,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -521,6 +564,16 @@ fun UserDashboardScreen(
                         onOpenPortal = onOpenPortal,
                         planName = customerSnapshot?.planName,
                         subscriptionStatus = customerSnapshot?.subscriptionStatus,
+                        defaultChartWindowDays = selectedTimeframeDays,
+                        onDefaultChartWindowChange = {
+                            selectedTimeframeDays = it
+                            saveChartPreferences(defaultChartWindowDays = it)
+                        },
+                        chartCrosshairEnabled = chartCrosshairEnabled,
+                        onChartCrosshairChange = {
+                            chartCrosshairEnabled = it
+                            saveChartPreferences(crosshairEnabled = it)
+                        },
                         onSignOut = {
                             customerAuthScope.launch {
                                 val token = activeCustomerToken
@@ -931,6 +984,7 @@ private fun PortfolioPerformanceCard(
     selectedTimeframe: Int,
     selectedAssetClass: AssetClass = AssetClass.ALL,
     onTimeframeChange: (Int) -> Unit,
+    crosshairEnabled: Boolean = true,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -938,6 +992,9 @@ private fun PortfolioPerformanceCard(
     emeraldAccent: Color
 ) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(crosshairEnabled) {
+        if (!crosshairEnabled) selectedIndex = null
+    }
 
     Card(
         modifier = Modifier
@@ -1038,6 +1095,7 @@ private fun PortfolioPerformanceCard(
                 points = points,
                 selectedIndex = selectedIndex,
                 onSelectIndex = { selectedIndex = it },
+                crosshairEnabled = crosshairEnabled,
                 accentColor = emeraldAccent,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1052,6 +1110,7 @@ private fun RechartsMonotoneAreaCanvas(
     points: List<EquityPoint>,
     selectedIndex: Int?,
     onSelectIndex: (Int?) -> Unit,
+    crosshairEnabled: Boolean = true,
     accentColor: Color,
     modifier: Modifier = Modifier
 ) {
@@ -1061,8 +1120,8 @@ private fun RechartsMonotoneAreaCanvas(
     val maxEquity = points.maxOf { it.equity } * 1.015
     val equityRange = max(1.0, maxEquity - minEquity)
 
-    Canvas(
-        modifier = modifier
+    val interactionModifier = if (crosshairEnabled) {
+        Modifier
             .pointerInput(points) {
                 detectTapGestures(
                     onPress = { offset ->
@@ -1089,7 +1148,11 @@ private fun RechartsMonotoneAreaCanvas(
                     }
                 )
             }
-    ) {
+    } else {
+        Modifier
+    }
+
+    Canvas(modifier = modifier.then(interactionModifier)) {
         val width = size.width
         val height = size.height
         val n = points.size
@@ -1160,7 +1223,7 @@ private fun RechartsMonotoneAreaCanvas(
         val activeCoord = computedCoords[activeIdx]
 
         // Guide vertical line if scrubbing
-        if (selectedIndex != null) {
+        if (crosshairEnabled && selectedIndex != null) {
             drawLine(
                 color = accentColor.copy(alpha = 0.4f),
                 start = Offset(activeCoord.x, 0f),
