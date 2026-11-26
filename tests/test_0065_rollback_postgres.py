@@ -744,6 +744,12 @@ def test_0066_research_trigger_acl_revokes_direct_supabase_api_grants():
         connection = await asyncpg.connect(dsn=dsn)
         try:
             for role_name in api_roles:
+                exists = await connection.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)",
+                    role_name,
+                )
+                if not exists:
+                    continue
                 for signature in trigger_functions:
                     await connection.execute(
                         f"REVOKE EXECUTE ON FUNCTION {signature} FROM {role_name}"
