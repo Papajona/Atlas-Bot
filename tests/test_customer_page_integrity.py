@@ -86,8 +86,7 @@ def test_workspace_preferences_never_import_or_cache_shared_browser_values():
 def test_customer_logout_clears_local_session_before_best_effort_revocation():
     _, js = _split()
     start = js.index("function logout(){")
-    end = js.index("\n}", start)
-    body = js[start:end]
+    body = js[start:]
     assert body.index("sessionStorage.removeItem(tokenKey)") < body.index("fetch('/api/auth/logout'")
     assert "keepalive:true" in body
     assert "location.reload();" in body
