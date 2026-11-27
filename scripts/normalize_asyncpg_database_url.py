@@ -33,7 +33,8 @@ def normalize_asyncpg_database_url(database_url: str) -> str:
         raise ValueError("DATABASE_URL must be a non-empty PostgreSQL URL")
 
     parsed = urlsplit(database_url.strip())
-    scheme = _ASYNCPG_SCHEME_BY_LEGACY.get(parsed.scheme, parsed.scheme)
+    normalized_scheme = parsed.scheme.lower()
+    scheme = _ASYNCPG_SCHEME_BY_LEGACY.get(normalized_scheme, normalized_scheme)
     if scheme != "postgresql+asyncpg":
         raise ValueError("DATABASE_URL must use PostgreSQL with the asyncpg driver")
 
@@ -58,11 +59,12 @@ def normalize_asyncpg_database_url(database_url: str) -> str:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("Usage: normalize_asyncpg_database_url.py DATABASE_URL", file=sys.stderr)
+    if len(sys.argv) != 1:
+        print("Usage: normalize_asyncpg_database_url.py < DATABASE_URL", file=sys.stderr)
         return 2
     try:
-        print(normalize_asyncpg_database_url(sys.argv[1]))
+        database_url = sys.stdin.read()
+        print(normalize_asyncpg_database_url(database_url))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
