@@ -9,7 +9,7 @@ set -euo pipefail
 # Alembic uses SQLAlchemy's asyncpg driver. Normalize legacy PostgreSQL URL
 # schemes and libpq sslmode query parameters to asyncpg's ssl parameter before
 # the database guard and Alembic consume the URL.
-DATABASE_URL="$(python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL")"
+DATABASE_URL="$(printf '%s' "$DATABASE_URL" | python scripts/normalize_asyncpg_database_url.py)"
 export DATABASE_URL
 
 # Reuse the strict verification guard, but disable the Compose-only hostname
