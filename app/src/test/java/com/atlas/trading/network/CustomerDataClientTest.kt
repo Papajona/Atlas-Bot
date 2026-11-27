@@ -280,6 +280,46 @@ class CustomerDataClientTest {
     }
 
     @Test
+    fun mobilePaperBalancesAndHistoryUseAuthenticatedCustomerEndpoints() = runBlocking {
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"virtual_only":true,"balances":[
+                {"currency":"USDT","account_code":"PAPER_CASH","balance":"10000.00"},
+                {"currency":"USDT","account_code":"PAPER_EQUITY","balance":"-10000.00"}
+            ]}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"virtual_only":true,"orders":[
+                {"client_order_id":"paper-history-1","symbol":"BTC/USDT","side":"BUY","status":"FILLED","order_type":"MARKET","quantity":"0.01","filled_quantity":"0.01","remaining_quantity":"0","average_fill_price":"65000"}
+            ]}"""
+        ))
+        server.start()
+        try {
+            val client = CustomerDataClient(server.url("/").toString())
+            val balances = client.loadPaperBalances("aal2-customer-token")
+            assertEquals(2, balances.size)
+            assertEquals("10000.00", balances.first { it.accountCode == "PAPER_CASH" }.balance)
+
+            val history = client.loadPaperOrderHistory("aal2-customer-token", limit = 10)
+            assertEquals(1, history.size)
+            assertEquals("FILLED", history.single().status)
+            assertEquals("65000", history.single().averageFillPrice)
+
+            val balanceRequest = server.takeRequest()
+            assertEquals("GET", balanceRequest.method)
+            assertEquals("/api/customer/paper/balances", balanceRequest.path)
+            assertEquals("Bearer aal2-customer-token", balanceRequest.getHeader("Authorization"))
+
+            val historyRequest = server.takeRequest()
+            assertEquals("GET", historyRequest.method)
+            assertEquals("/api/customer/paper/history?limit=10", historyRequest.path)
+            assertEquals("Bearer aal2-customer-token", historyRequest.getHeader("Authorization"))
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun mobilePaperOrderParserRejectsMissingOrInvalidOrderIdentity() {
         val orders = CustomerDataClient.parsePaperOrders(
             JSONObject(
