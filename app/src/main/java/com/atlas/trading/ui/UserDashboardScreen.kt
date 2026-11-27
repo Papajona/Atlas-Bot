@@ -50,6 +50,12 @@ internal fun parseEquityObservationEpochMillis(value: String): Long? =
         java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli()
     }.getOrNull()
 
+/** Keep a scrub selection inside the current timeframe's point list. */
+internal fun safeEquityChartSelectedIndex(selectedIndex: Int?, pointCount: Int): Int? {
+    if (pointCount <= 0) return null
+    return (selectedIndex ?: pointCount - 1).coerceIn(0, pointCount - 1)
+}
+
 /**
  * Historical daily equity and profit data point for 30-day visualization.
  */
@@ -1339,6 +1345,7 @@ private fun PortfolioPerformanceCard(
     emeraldAccent: Color
 ) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(points) { selectedIndex = null }
     LaunchedEffect(crosshairEnabled) {
         if (!crosshairEnabled) selectedIndex = null
     }
@@ -1577,7 +1584,7 @@ private fun RechartsMonotoneAreaCanvas(
         )
 
         // 3. Draw active point or scrub indicator
-        val activeIdx = selectedIndex ?: (points.size - 1)
+        val activeIdx = safeEquityChartSelectedIndex(selectedIndex, points.size) ?: return@Canvas
         val activeCoord = computedCoords[activeIdx]
 
         // Guide vertical line if scrubbing
