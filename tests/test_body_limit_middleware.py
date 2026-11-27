@@ -304,3 +304,16 @@ def test_path_specific_limit_cannot_raise_global_body_cap():
     ))
     assert sent[0]["status"] == 413
     assert sent[-1]["body"] == b'{"detail":"Request body too large"}'
+
+def test_disabled_global_cap_still_honors_explicit_path_limit():
+    middleware = BodySizeLimitMiddleware(
+        _reader_app(),
+        max_bytes=0,
+        path_prefix_limits={"/api/webhooks/": 10},
+    )
+    sent = _run(_drive(
+        middleware,
+        chunks=[b"x" * 11],
+        path="/api/webhooks/123",
+    ))
+    assert sent[0]["status"] == 413
