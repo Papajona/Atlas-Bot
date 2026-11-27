@@ -7334,6 +7334,35 @@ async def _record_customer_equity_snapshot(
     await db.commit()
 
 
+async def _record_customer_equity_snapshot_best_effort(
+    db,
+    *,
+    customer_id: int,
+    equity: float,
+    cash_equity: float | None,
+) -> bool:
+    """Record chart history without making the portfolio read depend on a write."""
+    try:
+        await _record_customer_equity_snapshot(
+            db,
+            customer_id=customer_id,
+            equity=equity,
+            cash_equity=cash_equity,
+        )
+        return True
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Customer portfolio equity snapshot failed; returning portfolio without a new history point"
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Customer portfolio session rollback failed after equity snapshot error"
+            )
+        return False
+
+
 @app.get("/api/customer/portfolio")
 async def customer_portfolio(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -7360,7 +7389,7 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
                 "minor_units_scale": wallet_balance["minor_units_scale"],
             })
         if account is not None:
-            await _record_customer_equity_snapshot(
+            await _record_customer_equity_snapshot_best_effort(
                 db,
                 customer_id=profile.id,
                 equity=float(account.equity),
