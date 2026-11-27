@@ -94,7 +94,8 @@ def test_live_money_runtime_verifier_requires_loopback_proxy_before_alembic():
 
     root = Path(__file__).resolve().parents[1]
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
-    normalize = script.index('python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"')
+    normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | python scripts/normalize_asyncpg_database_url.py")
+    assert 'python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"' not in script
     export_url = script.index("export DATABASE_URL")
     guard = script.index("python scripts/verify_release_database_guard.py")
     migration = script.index("python -m alembic upgrade head")
@@ -110,7 +111,8 @@ def test_live_money_runtime_verifier_normalizes_legacy_postgres_urls_for_async_a
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
     docs = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
 
-    normalize = script.index('python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"')
+    normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | python scripts/normalize_asyncpg_database_url.py")
+    assert 'python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"' not in script
     export_url = script.index("export DATABASE_URL")
     guard = script.index("python scripts/verify_release_database_guard.py")
     migration = script.index("python -m alembic upgrade head")
@@ -130,6 +132,14 @@ def test_live_money_runtime_verifier_normalizes_legacy_postgres_urls_for_async_a
         (
             "postgres://atlas:secret@localhost:5432/verify?sslmode=verify-full&application_name=atlas",
             "postgresql+asyncpg://atlas:secret@localhost:5432/verify?ssl=verify-full&application_name=atlas",
+        ),
+        (
+            "POSTGRESQL://atlas:secret@127.0.0.1:5432/verify?sslmode=require",
+            "postgresql+asyncpg://atlas:secret@127.0.0.1:5432/verify?ssl=require",
+        ),
+        (
+            "POSTGRESQL+ASYNCPG://atlas:secret@localhost:5432/verify?ssl=prefer",
+            "postgresql+asyncpg://atlas:secret@localhost:5432/verify?ssl=prefer",
         ),
         (
             "postgresql+asyncpg://atlas:secret@localhost:5432/verify?ssl=prefer",
@@ -169,3 +179,20 @@ def test_sslmode_normalization_keeps_loopback_database_guard_approval():
     )
     assert url.endswith("?ssl=require")
     assert is_approved_verification_database_url(url)
+
+def test_asyncpg_database_url_normalizer_cli_reads_secret_from_stdin():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "normalize_asyncpg_database_url.py"
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        input="POSTGRESQL://atlas:secret@127.0.0.1:5432/verify?sslmode=require",
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert result.stdout.strip() == (
+        "postgresql+asyncpg://atlas:secret@127.0.0.1:5432/verify?ssl=require"
+    )
