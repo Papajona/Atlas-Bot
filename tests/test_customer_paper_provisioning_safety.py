@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
+import shlex
 import subprocess
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -167,15 +169,240 @@ def test_gcp_bootstrap_reuses_provisioner_generated_paper_url_without_retyping_p
     assert 'db.${SUPABASE_PROJECT_REF}.supabase.co' not in script
 
 
-def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_types():
+def test_gcp_bootstrap_grants_runtime_and_preflight_only_required_secret_access():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    runtime_block = script.split(
+        "# Cloud Run can read only its three explicitly referenced secret values.", 1
+    )[1].split("# The read-only preflight identity", 1)[0]
+    preflight_block = script.split(
+        "# The read-only preflight identity may inspect the two DB URLs", 1
+    )[1].split("\necho\n", 1)[0]
+    grant_helper = _extract_shell_function(script, "grant_secret_accessor")
+    verify_helper = _extract_shell_function(script, "verify_secret_accessor_binding")
+
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do' in runtime_block
+    assert 'grant_secret_accessor "$secret_name" "$RUNTIME_SA"' in runtime_block
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do' in preflight_block
+    assert 'grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"' in preflight_block
+    assert '--member="serviceAccount:${principal}"' in grant_helper
+    assert '--role="roles/secretmanager.secretAccessor"' in grant_helper
+    assert 'gcloud secrets get-iam-policy "$secret_name"' in verify_helper
+    assert 'iam_member = f"serviceAccount:{principal}"' in verify_helper
+    assert 'iam_member in binding.get("members", [])' in verify_helper
+    assert "binding.get(\"condition\")" in verify_helper
+    assert "gcloud projects add-iam-policy-binding" not in grant_helper
+
+    # Inspect every project-level IAM command in the complete script. Only the
+    # reviewed Cloud Run deploy/viewer roles are allowed; secret-capable, basic,
+    # custom, dynamically supplied, or whole-policy grants fail closed.
+    _assert_project_iam_commands_are_allowlisted(script)
+    assert 'gcloud secrets add-iam-policy-binding "$secret_name"' in grant_helper
+
+
+def test_gcp_bootstrap_secret_access_repair_is_idempotent_and_never_reads_or_rotates_secrets():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    repair = _extract_shell_function(script, "repair_secret_access_only")
+    dispatch = script.split(
+        'if [[ "${1:-}" == "--repair-secret-access" ]]; then', 1
+    )[1].split("fi", 1)[0]
+
+    assert '--repair-secret-access' in repair
+    assert 'gcloud projects describe "$PROJECT_ID"' in repair
+    assert 'gcloud iam service-accounts describe "$RUNTIME_SA"' in repair
+    assert 'gcloud iam service-accounts describe "$PREFLIGHT_SA"' in repair
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do' in repair
+    assert 'grant_secret_accessor "$secret_name" "$RUNTIME_SA"' in repair
+    assert 'for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do' in repair
+    assert 'grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"' in repair
+    assert "put_secret" not in repair
+    assert "versions add" not in repair
+    assert "versions access" not in repair
+    assert "PAPER_URL_FILE" not in repair
+    assert "repair_secret_access_only \"$@\"" in dispatch
+
+
+
+@pytest.mark.parametrize(
+    "unsafe_project_grant",
+    [
+        '--role="roles/secretmanager.secretAccessor"',
+        '--role="roles/secretmanager.admin"',
+        '--role="$PROJECT_WIDE_IAM_ROLE"',
+    ],
+)
+def test_project_iam_guard_rejects_unreviewed_or_dynamic_roles(unsafe_project_grant: str):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script.replace('--role="roles/run.admin"', unsafe_project_grant, 1)
+    assert unsafe != script
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def test_project_iam_guard_rejects_whole_project_policy_replacement():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script.replace(
+        'gcloud projects add-iam-policy-binding "$PROJECT_ID" \\',
+        'gcloud projects set-iam-policy "$PROJECT_ID" policy.json \\',
+        1,
+    )
+    assert unsafe != script
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+@pytest.mark.parametrize(
+    ("original", "replacement"),
+    [
+        (
+            '--member="serviceAccount:${DEPLOY_SA}"',
+            '--member="serviceAccount:unapproved@example.invalid"',
+        ),
+        (
+            '--member="serviceAccount:${PREFLIGHT_SA}"',
+            '--member="serviceAccount:unapproved@example.invalid"',
+        ),
+        (
+            'gcloud projects add-iam-policy-binding "$PROJECT_ID" \\',
+            'gcloud projects add-iam-policy-binding "unapproved-project" \\',
+        ),
+    ],
+)
+def test_project_iam_guard_rejects_unreviewed_project_targets_and_principals(
+    original: str, replacement: str
+):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script.replace(original, replacement, 1)
+    assert unsafe != script
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def test_project_iam_guard_detects_project_grants_wrapped_in_if_not():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    hidden_grant = (
+        '\nif ! gcloud projects add-iam-policy-binding "$PROJECT_ID" \\\n'
+        '  --member="serviceAccount:${DEPLOY_SA}" --role="roles/run.admin" --quiet\n'
+        "then\n"
+        '  echo "project binding failed"\n'
+        "fi\n"
+    )
+    unsafe = script + hidden_grant
+    assert len(_extract_project_iam_policy_commands(unsafe)) == 3
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def test_project_iam_guard_rejects_unexpected_additional_project_grants():
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    unsafe = script + (
+        '\ngcloud projects add-iam-policy-binding "$PROJECT_ID" '
+        '--member="allUsers" --role="roles/secretmanager.admin" --quiet\\n'
+    )
+    with pytest.raises(AssertionError):
+        _assert_project_iam_commands_are_allowlisted(unsafe)
+
+
+def _run_secret_access_repair_with_fake_gcloud(tmp_path: Path, iam_policy: dict):
+    script = Path("scripts/bootstrap_atlas_paper_staging_gcp.sh").read_text(encoding="utf-8")
+    helpers = chr(10).join(
+        _extract_shell_function(script, name)
+        for name in (
+            "verify_secret_accessor_binding",
+            "grant_secret_accessor",
+            "repair_secret_access_only",
+        )
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    gcloud_log = tmp_path / "gcloud.log"
+    stub = fake_bin / "gcloud"
+    stub.write_text(
+        r'''#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$GCLOUD_LOG"
+case "$1 $2" in
+  'projects describe') printf '%s' 350896810949 ;;
+  'secrets get-iam-policy') printf '%s' "$IAM_POLICY_JSON" ;;
+esac
+''',
+        encoding="utf-8",
+    )
+    os.chmod(stub, 0o755)
+    env = os.environ.copy()
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{env.get('PATH', '')}",
+        "GCLOUD_LOG": str(gcloud_log),
+        "IAM_POLICY_JSON": json.dumps(iam_policy),
+        "PROJECT_ID": "atlas-staging-510915",
+        "PROJECT_NUMBER": "350896810949",
+        "RUNTIME_SA_ID": "atlas-staging-runtime",
+        "PREFLIGHT_SA_ID": "atlas-staging-preflight",
+        "DEPLOY_SA_ID": "atlas-staging-deploy",
+        "RUNTIME_SA": "atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com",
+        "PREFLIGHT_SA": "atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com",
+        "PRIMARY_SECRET": "atlas-staging-primary-db-url",
+        "PAPER_SECRET": "atlas-staging-customer-paper-db-url",
+        "ANON_KEY_SECRET": "atlas-staging-supabase-anon-key",
+    })
+    completed = subprocess.run(
+        ["bash", "-c", helpers + chr(10) + "repair_secret_access_only --repair-secret-access"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    return completed, gcloud_log
+
+
+def test_gcp_secret_access_repair_applies_exact_five_bindings_without_secret_io(tmp_path: Path):
+    runtime = "serviceAccount:atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com"
+    preflight = "serviceAccount:atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com"
+    policy = {"bindings": [{
+        "role": "roles/secretmanager.secretAccessor",
+        "members": [runtime, preflight],
+    }]}
+    completed, gcloud_log = _run_secret_access_repair_with_fake_gcloud(tmp_path, policy)
+
+    assert completed.returncode == 0, completed.stderr
+    calls = gcloud_log.read_text(encoding="utf-8").splitlines()
+    grants = [line for line in calls if line.startswith("secrets add-iam-policy-binding ")]
+    assert len(grants) == 5
+    assert sum(runtime in line for line in grants) == 3
+    assert sum(preflight in line for line in grants) == 2
+    assert any("atlas-staging-primary-db-url" in line and runtime in line for line in grants)
+    assert any("atlas-staging-customer-paper-db-url" in line and runtime in line for line in grants)
+    assert any("atlas-staging-supabase-anon-key" in line and runtime in line for line in grants)
+    assert not any("atlas-staging-supabase-anon-key" in line and preflight in line for line in grants)
+    assert all("--project=atlas-staging-510915" in line for line in grants)
+    assert all("--role=roles/secretmanager.secretAccessor" in line for line in grants)
+    assert any("secrets get-iam-policy" in line for line in calls)
+    assert not any("secrets versions" in line for line in calls)
+    assert "PASS: runtime and preflight Secret Manager access" in completed.stdout
+
+
+def test_gcp_secret_access_repair_fails_closed_on_conditional_accessor_binding(tmp_path: Path):
+    runtime = "serviceAccount:atlas-staging-runtime@atlas-staging-510915.iam.gserviceaccount.com"
+    preflight = "serviceAccount:atlas-staging-preflight@atlas-staging-510915.iam.gserviceaccount.com"
+    policy = {"bindings": [{
+        "role": "roles/secretmanager.secretAccessor",
+        "members": [runtime, preflight],
+        "condition": {"title": "temporary", "expression": "request.time < timestamp('2030-01-01T00:00:00Z')"},
+    }]}
+    completed, gcloud_log = _run_secret_access_repair_with_fake_gcloud(tmp_path, policy)
+
+    assert completed.returncode != 0
+    assert "missing unconditional Secret Accessor" in completed.stderr
+    calls = gcloud_log.read_text(encoding="utf-8").splitlines()
+    assert sum(line.startswith("secrets add-iam-policy-binding ") for line in calls) == 1
+    assert not any("secrets versions" in line for line in calls)
+
+def test_provision_verifier_matches_all_eleven_current_schema_tables_and_policy_types():
     schema = Path("scripts/customer_paper_ledger_schema.sql").read_text(encoding="utf-8")
     expected_tables = {
         "accounts", "journals", "journal_lines", "orders", "fills", "order_events",
-        "position_events", "market_bar_budgets", "market_bar_allocations",
+        "position_events", "equity_snapshots", "workspace_preferences",
+        "market_bar_budgets", "market_bar_allocations",
     }
     actual_tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS customer_paper\.(\w+)", schema))
     assert actual_tables == expected_tables
-    for table in ("accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events"):
+    for table in ("accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events", "equity_snapshots", "workspace_preferences"):
         assert f"ALTER TABLE customer_paper.{table} FORCE ROW LEVEL SECURITY" in schema
     assert "CREATE POLICY customer_paper_tenant" in schema
     assert "CREATE POLICY customer_paper_bar_budget_backend" in schema
@@ -185,7 +412,7 @@ def test_provision_verifier_matches_all_nine_current_schema_tables_and_policy_ty
     assert "policyname='customer_paper_bar_budget_backend'" in VERIFY_SQL
     source = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 13" in source
-    assert '"nine_paper_tables_only": table_count == "9" and expected_table_count == "9"' in source
+    assert '"eleven_paper_tables_only": table_count == "11" and expected_table_count == "11"' in source
 
 
 
@@ -193,6 +420,101 @@ def _extract_shell_function(script: str, name: str) -> str:
     match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", script)
     assert match is not None, f"{name}() must be present for behavioral testing"
     return match.group(0)
+
+
+def _extract_project_iam_policy_commands(script: str) -> list[str]:
+    # Join shell continuations before scanning. Search inside each logical line,
+    # not only at column zero: if ! gcloud projects ... is still an IAM mutation.
+    logical_lines: list[str] = []
+    pending: list[str] = []
+    for physical_line in script.splitlines():
+        stripped = physical_line.strip()
+        if not pending and (not stripped or stripped.startswith("#")):
+            continue
+        continues = stripped.endswith("\\")
+        pending.append(stripped[:-1].rstrip() if continues else stripped)
+        if continues:
+            continue
+        logical_lines.append(" ".join(pending))
+        pending = []
+    assert not pending, "unterminated shell continuation in staging bootstrap"
+
+    mutation = re.compile(
+        r"(?<![A-Za-z0-9_./-])gcloud\s+projects\s+"
+        r"(?:add-iam-policy-binding|set-iam-policy)\b"
+    )
+    commands: list[str] = []
+    for logical_line in logical_lines:
+        matches = list(mutation.finditer(logical_line))
+        for index, match in enumerate(matches):
+            # The only reviewed shell wrapper is if !; reject any other
+            # prefix (for example sudo, env, command, or a compound list)
+            # instead of silently overlooking the nested project mutation.
+            prefix = logical_line[: match.start()].strip()
+            assert prefix in {"", "if !"}, (
+                f"unreviewed shell wrapper around project IAM mutation: {prefix!r}"
+            )
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(logical_line)
+            commands.append(logical_line[match.start() : end].strip())
+    return commands
+
+
+def _assert_project_iam_commands_are_allowlisted(script: str) -> None:
+    # Lock the target project and service-account identities used by the
+    # project-wide grants. All assignments must remain the reviewed literals.
+    expected_assignments = {
+        "PROJECT_ID": '"atlas-staging-510915"',
+        "PROJECT_NUMBER": '"350896810949"',
+        "DEPLOY_SA_ID": '"atlas-staging-deploy"',
+        "PREFLIGHT_SA_ID": '"atlas-staging-preflight"',
+        "DEPLOY_SA": '"${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"',
+        "PREFLIGHT_SA": '"${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"',
+    }
+    for name, expected in expected_assignments.items():
+        assignments = re.findall(
+            rf"(?m)^\s*(?:(?:readonly|export|local)\s+)*{re.escape(name)}=(.*?)\s*$",
+            script,
+        )
+        assert assignments and all(value.strip() == expected for value in assignments), (
+            f"{name} must remain assigned only its reviewed staging value"
+        )
+
+    commands = _extract_project_iam_policy_commands(script)
+    assert len(commands) == 2, (
+        "unexpected project-wide IAM mutation; review it before adding it to the allowlist"
+    )
+    expected_members_by_role = {
+        "roles/run.admin": "serviceAccount:${DEPLOY_SA}",
+        "roles/run.viewer": "serviceAccount:${PREFLIGHT_SA}",
+    }
+    observed_roles: list[str] = []
+    for command in commands:
+        try:
+            tokens = shlex.split(command, comments=True, posix=True)
+        except ValueError as exc:
+            raise AssertionError(f"malformed project-wide IAM command: {exc}") from exc
+        assert tokens[:3] == ["gcloud", "projects", "add-iam-policy-binding"], (
+            "project-wide set-iam-policy is forbidden"
+        )
+        assert len(tokens) == 7 and tokens[3] == "$PROJECT_ID", (
+            "project-wide IAM mutation must target the exact configured staging project"
+        )
+        member_args = [token.removeprefix("--member=") for token in tokens[4:] if token.startswith("--member=")]
+        role_args = [token.removeprefix("--role=") for token in tokens[4:] if token.startswith("--role=")]
+        assert len(member_args) == 1, "project-wide IAM principal must be a single explicit value"
+        assert len(role_args) == 1, "project-wide IAM role must be a single explicit value"
+        role = role_args[0]
+        assert role in expected_members_by_role, f"unreviewed project-wide IAM role: {role}"
+        assert member_args[0] == expected_members_by_role[role], (
+            f"{role} must be granted only to its reviewed staging service account"
+        )
+        assert set(tokens[4:]) == {
+            f"--member={expected_members_by_role[role]}",
+            f"--role={role}",
+            "--quiet",
+        }, "unexpected project-wide IAM option or argument"
+        observed_roles.append(role)
+    assert set(observed_roles) == set(expected_members_by_role)
 
 
 def _run_paper_bootstrap_subset(
@@ -379,10 +701,10 @@ def test_file_backed_bootstrap_accepts_distinct_passwords_without_disclosing_the
     assert primary_password not in result.stdout + result.stderr
 
 
-def test_provision_verifier_rejects_mutating_privileges_on_every_paper_table():
+def test_provision_verifier_allows_updates_only_on_workspace_preferences():
     provisioner = Path("scripts/provision_customer_paper_schema.py").read_text(encoding="utf-8")
     assert "len(verification) != 13" in provisioner
-    assert '"paper_tables_allow_only_select_insert"' in provisioner
+    assert '"paper_tables_allow_only_select_insert_and_preferences_update"' in provisioner
     assert "server_version_num" in provisioner
     assert ">= 170000" in provisioner
     assert "THEN has_table_privilege(\'atlas_customer_paper\',c.oid,\'MAINTAIN\')" in provisioner

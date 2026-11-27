@@ -32,18 +32,69 @@ async function createDcaBot(){try{const d=await api('/api/customer/dca-bots',{me
 function fmtPct(x){return (typeof x==='number'&&isFinite(x))?(x*100).toFixed(1)+'%':'n/a';}
 function fmtNum(x){return (typeof x==='number'&&isFinite(x))?x.toFixed(2):'n/a';}
 function summarizeValidation(d){const g=d.gate||{};const lines=[`Result: ${d.status}${d.attempt?` (attempt ${d.attempt})`:''}`,`Strategy family tested: ${g.strategy_family||'n/a'} -> Atlas component "${g.validated_component||'n/a'}"`,`Sharpe ${fmtNum(g.sharpe)} | Max drawdown ${fmtPct(g.max_drawdown)} | Trades ${g.trades??'n/a'} | Return ${fmtPct(g.total_return)}`,`Out-of-sample return ${fmtPct(g.oos_total_return)} | Positive folds ${fmtPct(g.oos_positive_fold_ratio)}`];if(d.validation_scope)lines.push('Scope: '+d.validation_scope);lines.push('Live trading still requires your explicit approval.');return lines.join('\n');}
-async function buildStrategy(){const out=document.getElementById('strategyOut');try{out.textContent='Generating strategy...';const c=await api('/api/customer/strategy-builder',{method:'POST',body:JSON.stringify({name:'Atlas Strategy Draft',prompt:document.getElementById('strategyPrompt').value})});out.textContent='Strategy created (candidate #'+c.candidate_id+'). Validating...';const v=await api(`/api/customer/strategy-lab/candidates/${c.candidate_id}/validate`,{method:'POST'});out.textContent=summarizeValidation(v);await loadCandidates();}catch(e){out.textContent=e.message;}}
+async function buildStrategy(){
+  const out=document.getElementById('strategyOut');
+  const consent=document.getElementById('strategyBenchmarkOptIn');
+  const benchmarkOptIn=!!consent?.checked;
+  if(consent)consent.checked=false;
+  try{
+    out.textContent='Generating strategy...';
+    const c=await api('/api/customer/strategy-builder',{
+      method:'POST',
+      body:JSON.stringify({
+        name:'Atlas Strategy Draft',
+        prompt:document.getElementById('strategyPrompt').value,
+        benchmark_opt_in:benchmarkOptIn
+      })
+    });
+    const capture=c.benchmark_capture?.status==='STORED'
+      ?' Opted-in prompt and Native AI output were encrypted for up to 90 days.'
+      :c.benchmark_capture?.status&&c.benchmark_capture.status!=='NOT_REQUESTED'
+        ?' Benchmark capture was not stored ('+c.benchmark_capture.status+').':'';
+    out.textContent='Strategy created (candidate #'+c.candidate_id+').'+capture+' Validating...';
+    const v=await api('/api/customer/strategy-lab/candidates/'+c.candidate_id+'/validate',{method:'POST'});
+    out.textContent=summarizeValidation(v)+capture;
+    await loadCandidates();
+    await loadBenchmarkCaptureStatus();
+  }catch(e){
+    out.textContent=e.message;
+  }
+}
+document.getElementById('strategyPrompt')?.addEventListener('input',()=>{
+  const consent=document.getElementById('strategyBenchmarkOptIn');
+  if(consent)consent.checked=false;
+});
+
 async function loadDeposit(){try{const d=await api('/api/customer/usdt/deposit');const box=document.getElementById('depositBox');box.replaceChildren();const card=document.createElement('div');card.className='card';for(const [label,value] of [['USDT NETWORK','TRON (TRC-20)'],['Deposit address',d.deposit_address]]){const small=document.createElement('small');small.textContent=label;card.appendChild(small);if(label==='Deposit address'){const addr=document.createElement('div');addr.style='word-break:break-all;font-family:monospace';addr.textContent=d.deposit_address;card.appendChild(addr);}}const btn=document.createElement('button');btn.className='secondary';btn.textContent='Copy address';btn.addEventListener('click',()=>navigator.clipboard.writeText(String(d.deposit_address||'')));card.appendChild(btn);box.appendChild(card);}catch(e){document.getElementById('depositBox').textContent=e.message;}}
 async function sendWithdrawalOtp(){try{const email=document.getElementById('otpEmail').value.trim(),amount=Number(document.getElementById('wdAmount').value),destination=document.getElementById('wdDestination').value.trim();if(!amount||!destination){document.getElementById('otpOut').textContent='Enter the withdrawal amount and TRON destination before requesting OTP.';return}const d=await api('/api/auth/otp/send',{method:'POST',body:JSON.stringify({email,create_user:false,purpose:'withdrawal',amount,destination,network:'TRON'})});sessionStorage.setItem('atlas_withdrawal_otp_intent',d.otp_intent);document.getElementById('otpOut').textContent='OTP sent. Verify the code for this exact withdrawal request.';}catch(e){document.getElementById('otpOut').textContent=e.message;}}
 async function verifyWithdrawalOtp(){try{const email=document.getElementById('otpEmail').value.trim(),token=document.getElementById('withdrawalOtp').value.trim(),amount=Number(document.getElementById('wdAmount').value),destination=document.getElementById('wdDestination').value.trim(),intent=sessionStorage.getItem('atlas_withdrawal_otp_intent')||'';if(!amount||!destination||!intent){document.getElementById('otpOut').textContent='Request a fresh OTP for the exact withdrawal details first.';return}const d=await api('/api/auth/otp/verify',{method:'POST',body:JSON.stringify({email,token,purpose:'withdrawal',amount,destination,network:'TRON',otp_intent_token:intent})});sessionStorage.setItem('atlas_withdrawal_step_up',d.step_up_token);sessionStorage.removeItem('atlas_withdrawal_otp_intent');document.getElementById('otpOut').textContent='Withdrawal verification active for '+Math.round(d.expires_in/60)+' minutes.';}catch(e){document.getElementById('otpOut').textContent=e.message;}}
 async function requestWithdrawal(){const amount=Number(document.getElementById('wdAmount').value),destination=document.getElementById('wdDestination').value.trim();if(!amount||!destination){document.getElementById('wdOut').textContent='Enter an amount and TRON address.';return}if(!confirm(`Request ${amount.toFixed(6)} USDT to ${destination.slice(0,8)}…${destination.slice(-6)}?`))return;try{const idemPayload=JSON.stringify({amount,destination}),savedPayload=sessionStorage.getItem('atlas_withdrawal_idem_payload');let idemKey=sessionStorage.getItem('atlas_withdrawal_idem');if(!idemKey||savedPayload!==idemPayload){idemKey=crypto.randomUUID();sessionStorage.setItem('atlas_withdrawal_idem',idemKey);sessionStorage.setItem('atlas_withdrawal_idem_payload',idemPayload);}const d=await api('/api/customer/withdrawals',{method:'POST',headers:{'X-Withdrawal-Step-Up':sessionStorage.getItem('atlas_withdrawal_step_up')||'','Idempotency-Key':idemKey},body:JSON.stringify({amount,destination,network:'TRON'})});document.getElementById('wdOut').textContent=JSON.stringify(d,null,2);document.getElementById('wdAmount').value='';document.getElementById('wdDestination').value='';sessionStorage.removeItem('atlas_withdrawal_step_up');sessionStorage.removeItem('atlas_withdrawal_otp_intent');sessionStorage.removeItem('atlas_withdrawal_idem');sessionStorage.removeItem('atlas_withdrawal_idem_payload');document.getElementById('withdrawalOtp').value='';document.getElementById('otpOut').textContent='Verification consumed. A new OTP is required for another withdrawal.';await loadAccount();}catch(e){document.getElementById('wdOut').textContent=e.message;}}
 async function loadWithdrawals(){try{const rows=await api('/api/customer/withdrawals');const box=document.getElementById('withdrawals');box.replaceChildren();if(!rows.length){const p=document.createElement('p');p.className='muted';p.textContent='No withdrawal requests yet.';box.appendChild(p);return;}for(const w of rows){const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=`${Number(w.amount).toFixed(6)} ${w.currency}`;const n=document.createElement('small');n.textContent=`${w.network} · ${w.destination_masked}`;const st=document.createElement('small');st.textContent=`Status: ${w.status} · Approval ${w.approval_count}/${w.required_approvals}`;card.append(b,n,st);if(w.rejection_reason){const r=document.createElement('small');r.textContent=`Reason: ${w.rejection_reason}`;card.appendChild(r);}box.appendChild(card);}}catch(e){document.getElementById('withdrawals').textContent=e.message;}}
-async function loadAccount(){try{const me=await api('/api/customer/me');document.getElementById('customerEmail').textContent=me.email||'Customer';document.getElementById('customerStatus').textContent=me.status;const wallets=await api('/api/customer/wallets');let total=0;const walletBox=document.getElementById('wallets');walletBox.replaceChildren();if(wallets.length){for(const w of wallets){total+=Number(w.available_balance);const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=w.currency;const st=document.createElement('strong');st.textContent=Number(w.available_balance).toFixed(6);const sm=document.createElement('small');sm.textContent=`${w.wallet_type} · ${w.status} · ${w.network||''}`;card.append(b,st,sm);walletBox.appendChild(card);}}else{const p=document.createElement('p');p.className='muted';p.textContent='No trading wallet yet.';walletBox.appendChild(p);}document.getElementById('walletTotal').textContent=total.toFixed(6);const fs=await api('/api/customer/funding');const fundingBox=document.getElementById('funding');fundingBox.replaceChildren();if(fs.length){for(const f of fs){const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=`${f.currency} ${Number(f.amount).toFixed(6)}`;const sm=document.createElement('small');sm.textContent=`${f.provider} · ${f.status}`;card.append(b,sm);fundingBox.appendChild(card);}}else{const p=document.createElement('p');p.className='muted';p.textContent='No funding transactions yet.';fundingBox.appendChild(p);}await loadDeposit();await loadWithdrawals();}catch(e){sessionStorage.removeItem(tokenKey);document.getElementById('authOut').textContent=e.message;document.getElementById('auth').style.display='block';document.getElementById('account').style.display='none';}}
-async function logout(){try{await api('/api/auth/logout',{method:'POST'});}catch(e){}sessionStorage.removeItem(tokenKey);location.reload();}
+async function loadAccount(){try{const me=await api('/api/customer/me');document.getElementById('customerEmail').textContent=me.email||'Customer';document.getElementById('customerStatus').textContent=me.status;const wallets=await api('/api/customer/wallets');let total=0;const walletBox=document.getElementById('wallets');walletBox.replaceChildren();if(wallets.length){for(const w of wallets){total+=Number(w.available_balance);const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=w.currency;const st=document.createElement('strong');st.textContent=Number(w.available_balance).toFixed(6);const sm=document.createElement('small');sm.textContent=`${w.wallet_type} · ${w.status} · ${w.network||''}`;card.append(b,st,sm);walletBox.appendChild(card);}}else{const p=document.createElement('p');p.className='muted';p.textContent='No trading wallet yet.';walletBox.appendChild(p);}document.getElementById('walletTotal').textContent=total.toFixed(6);const fs=await api('/api/customer/funding');const fundingBox=document.getElementById('funding');fundingBox.replaceChildren();if(fs.length){for(const f of fs){const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=`${f.currency} ${Number(f.amount).toFixed(6)}`;const sm=document.createElement('small');sm.textContent=`${f.provider} · ${f.status}`;card.append(b,sm);fundingBox.appendChild(card);}}else{const p=document.createElement('p');p.className='muted';p.textContent='No funding transactions yet.';fundingBox.appendChild(p);}await loadDeposit();await loadWithdrawals();await loadBenchmarkCaptureStatus();}catch(e){sessionStorage.removeItem(tokenKey);document.getElementById('authOut').textContent=e.message;document.getElementById('auth').style.display='block';document.getElementById('account').style.display='none';}}
+function logout(){
+  const token=sessionStorage.getItem(tokenKey);
+  // Clear this browser's authenticated state immediately. Remote revocation is
+  // best-effort and must never hold the customer on a signed-in screen.
+  sessionStorage.removeItem(tokenKey);
+  window.mfaFactorId=null;
+  window.mfaChallengeId=null;
+  if(token){
+    try{
+      const revocation=fetch('/api/auth/logout',{
+        method:'POST',
+        headers:{'Accept':'application/json','Content-Type':'application/json','Authorization':'Bearer '+token},
+        body:'{}',
+        keepalive:true
+      });
+      void revocation.catch(()=>{});
+    }catch(_error){}
+  }
+  location.reload();
+}
 if(sessionStorage.getItem(tokenKey))continueLoginSecurity();
 
 
-// Atlas UI layer: responsive navigation and local display preferences.
+// Atlas UI layer: responsive navigation and account-synced display preferences.
 const uiSections={overview:['Your command center','Monitor balances, markets and customer-scoped trading tools.'],markets:['Market overview','Follow Atlas signals and customer-scoped market intelligence.'],trade:['Trade desk','Build paper trades and analyze setups before execution.'],wallet:['Wallet','Fund, monitor and protect your USDT trading wallet.'],security:['Security','Manage withdrawal verification and account protection.'],settings:['Settings','Preferences, billing, referrals and session controls.']};
 function setActiveSection(id){document.querySelectorAll('.nav-link').forEach(a=>a.classList.toggle('active',a.dataset.section===id));const meta=uiSections[id];if(meta){document.getElementById('pageTitle').textContent=meta[0];document.getElementById('pageSubtitle').textContent=meta[1];}}
 document.querySelectorAll('.nav-link').forEach(a=>a.addEventListener('click',()=>{setActiveSection(a.dataset.section);document.getElementById('appShell').classList.remove('nav-open');}));
@@ -54,13 +105,78 @@ document.querySelectorAll('[data-market-filter]').forEach(btn=>btn.addEventListe
 document.getElementById('menuBtn')?.addEventListener('click',()=>document.getElementById('appShell').classList.toggle('nav-open'));
 window.addEventListener('hashchange',()=>setActiveSection(location.hash.replace('#','')||'overview'));
 if(location.hash)setActiveSection(location.hash.replace('#',''));
-document.querySelectorAll('[data-setting]').forEach(el=>{const saved=localStorage.getItem('atlas_ui_'+el.dataset.setting);if(saved!==null)el.checked=saved==='1';el.addEventListener('change',()=>{localStorage.setItem('atlas_ui_'+el.dataset.setting,el.checked?'1':'0');if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);});});
+const WORKSPACE_SETTING_FIELDS={reduceMotion:'reduce_motion',compactMarkets:'compact_markets',touchFeedback:'touch_feedback'};
+/*
+ * Older builds used origin-wide localStorage keys for account preferences. Those
+ * values are shared by every customer in this browser, so remove them and never
+ * import or cache them. The signed-in account's API row is the only source of truth.
+ */
+try{
+  for(const setting of Object.keys(WORKSPACE_SETTING_FIELDS)){
+    localStorage.removeItem(`atlas_ui_${setting}`);
+  }
+}catch(_storageError){}
+let workspacePreferenceSaveQueue=Promise.resolve();
+function applyWorkspacePreference(el,value){
+  el.checked=!!value;
+  if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);
+  if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);
+  if(el.id==='touchFeedback')document.body.classList.toggle('touch-feedback-enabled',el.checked);
+}
+function applyWorkspacePreferences(preferences){
+  document.querySelectorAll('[data-setting]').forEach(el=>{
+    const field=WORKSPACE_SETTING_FIELDS[el.dataset.setting];
+    if(field&&Object.prototype.hasOwnProperty.call(preferences||{},field)){
+      applyWorkspacePreference(el,preferences[field]);
+    }
+  });
+}
+const DEFAULT_WORKSPACE_PREFERENCES={
+  reduce_motion:false,
+  compact_markets:false,
+  touch_feedback:true
+};
+async function loadWorkspacePreferences(){
+  try{
+    const saved=await api('/api/customer/workspace-preferences');
+    applyWorkspacePreferences(saved.preferences||DEFAULT_WORKSPACE_PREFERENCES);
+    const status=document.getElementById('workspacePreferencesStatus');
+    if(status)status.textContent=saved.configured
+      ? 'Saved to your Atlas account.'
+      : 'Using your account defaults.';
+  }catch(error){
+    // A failed account read must not reuse the previous customer's browser state.
+    applyWorkspacePreferences(DEFAULT_WORKSPACE_PREFERENCES);
+    const status=document.getElementById('workspacePreferencesStatus');
+    if(status)status.textContent='Account preferences could not be loaded; safe defaults are shown.';
+  }
+}
+document.querySelectorAll('[data-setting]').forEach(el=>{
+  el.addEventListener('change',()=>{
+    const field=WORKSPACE_SETTING_FIELDS[el.dataset.setting];
+    if(!field)return;
+    applyWorkspacePreference(el,el.checked);
+    if(!sessionStorage.getItem(tokenKey))return;
+    const value=el.checked;
+    workspacePreferenceSaveQueue=workspacePreferenceSaveQueue.catch(()=>{}).then(async()=>{
+      await api('/api/customer/workspace-preferences',{
+        method:'PATCH',body:JSON.stringify({[field]:value})
+      });
+      const status=document.getElementById('workspacePreferencesStatus');
+      if(status)status.textContent='Saved to your Atlas account.';
+    }).catch(()=>{
+      const status=document.getElementById('workspacePreferencesStatus');
+      if(status)status.textContent='Could not sync this preference. The saved account value will be restored on next load.';
+    });
+  });
+});
 /* Keep one wrapper per lifecycle function: predictable, testable, and easy to maintain. */
 async function showAccount(){
   document.getElementById('auth').style.display='none';
   document.getElementById('mfaBox').style.display='none';
   document.getElementById('account').style.display='block';
   await loadAccount();
+  await loadWorkspacePreferences();
   await loadProductWorkspace();
   for(const fn of [loadBilling,loadCandidates,loadExecutors,refreshBotStatus]){try{await fn();}catch(e){}}
   syncUiAccount();
@@ -117,7 +233,47 @@ loadProductWorkspace=async function(){
 const _loadDeposit=loadDeposit;
 loadDeposit=async function(){await _loadDeposit();document.getElementById('depositBox')?.classList.add('loaded');};
 
-async function createLabCandidate(){try{const d=await api('/api/customer/strategy-lab/candidates',{method:'POST',body:JSON.stringify({name:document.getElementById('labName').value,prompt:document.getElementById('labPrompt').value,asset:document.getElementById('labAsset').value,symbol:document.getElementById('labSymbol').value,exchange:document.getElementById('labAsset').value==='crypto'?'binance':'oanda',timeframe:document.getElementById('labTf').value||null,days:365})});document.getElementById('labOut').textContent='Candidate #'+d.id+' created. Validating...';await validateCandidate(d.id);}catch(e){document.getElementById('labOut').textContent=e.message;}}
+async function createLabCandidate(){
+  const consent=document.getElementById('labBenchmarkOptIn');
+  const benchmarkOptIn=!!consent?.checked;
+  if(consent)consent.checked=false;
+  try{
+    const d=await api('/api/customer/strategy-lab/candidates',{
+      method:'POST',
+      body:JSON.stringify({
+        name:document.getElementById('labName').value,
+        prompt:document.getElementById('labPrompt').value,
+        asset:document.getElementById('labAsset').value,
+        symbol:document.getElementById('labSymbol').value,
+        exchange:document.getElementById('labAsset').value==='crypto'?'binance':'oanda',
+        timeframe:document.getElementById('labTf').value||null,
+        days:365,
+        benchmark_opt_in:benchmarkOptIn
+      })
+    });
+    const capture=d.benchmark_capture?.status==='STORED'
+      ?'This submission was encrypted and stored for up to 90 days.'
+      :d.benchmark_capture?.status&&d.benchmark_capture.status!=='NOT_REQUESTED'
+        ?'This submission was not stored ('+d.benchmark_capture.status+').'
+        :'Benchmark capture was not requested for this submission.';
+    const captureResult=document.getElementById('labBenchmarkCaptureResult');
+    if(captureResult)captureResult.textContent=capture;
+    document.getElementById('labOut').textContent='Candidate #'+d.id+' created. Validating...';
+    await validateCandidate(d.id);
+    await loadBenchmarkCaptureStatus();
+  }catch(e){
+    const captureResult=document.getElementById('labBenchmarkCaptureResult');
+    if(captureResult&&benchmarkOptIn)captureResult.textContent='Capture status could not be confirmed for this submission.';
+    document.getElementById('labOut').textContent=e.message;
+  }
+}
+document.getElementById('labPrompt')?.addEventListener('input',()=>{
+  const consent=document.getElementById('labBenchmarkOptIn');
+  if(consent)consent.checked=false;
+});
+
+async function loadBenchmarkCaptureStatus(){const el=document.getElementById('benchmarkCaptureStatus');if(!el)return;try{const d=await api('/api/customer/benchmark-captures');if(d.status!=='AVAILABLE'){el.textContent='Benchmark submission status is unavailable in this read-only runtime.';return;}el.textContent=d.count+' saved benchmark submission(s); each expires after '+d.retention_days+' days.';}catch(e){el.textContent='Benchmark submission status unavailable.';}}
+async function deleteBenchmarkCaptures(){const out=document.getElementById('benchmarkCaptureStatus');if(!window.confirm('Permanently delete all of your saved benchmark submissions? This cannot be undone.'))return;try{const d=await api('/api/customer/benchmark-captures',{method:'DELETE'});if(out)out.textContent='Deleted '+d.deleted+' benchmark submission(s).';}catch(e){if(out)out.textContent=e.message;}}
 async function validateCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/validate`,{method:'POST'});document.getElementById('labOut').textContent=summarizeValidation(d);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
 async function approveCandidate(id){try{const d=await api(`/api/customer/strategy-lab/candidates/${id}/approve-live`,{method:'POST'});document.getElementById('labOut').textContent=JSON.stringify(d,null,2);await loadCandidates();}catch(e){document.getElementById('labOut').textContent=e.message;}}
 async function showCandidateHistory(id){const out=document.getElementById('labOut');try{const rows=await api(`/api/customer/strategy-lab/candidates/${id}/runs`);if(!rows.length){out.textContent='No validation attempts recorded yet.';return;}out.textContent=rows.map(r=>{const g=r.gate||{};const dl=r.delta_vs_previous;const delta=dl?` | vs previous: Sharpe ${dl.sharpe>=0?'+':''}${fmtNum(dl.sharpe)}, return ${dl.total_return>=0?'+':''}${fmtPct(dl.total_return)}`:'';return `Attempt ${r.attempt} (${r.created_at.slice(0,16).replace('T',' ')}): ${r.passed?'PASSED':'REJECTED'} | Sharpe ${fmtNum(g.sharpe)} | DD ${fmtPct(g.max_drawdown)} | Return ${fmtPct(g.total_return)}${delta}`;}).join('\n');}catch(e){out.textContent=e.message;}}
@@ -138,7 +294,7 @@ let cachedJournals = [];
 
 function setPerfTimeframe(days) {
   perfDays = days;
-  document.getElementById('perfTitle').textContent = `Portfolio Performance · ${days} days`;
+  document.getElementById('perfTitle').textContent = `Realised trading P&L · ${days} days`;
   const btn7 = document.getElementById('btnTf7');
   const btn30 = document.getElementById('btnTf30');
   if (btn7 && btn30) {
@@ -159,30 +315,17 @@ function renderPerformance(journals){
   const rows=journals.filter(j=>(j.type==='TRADE_SETTLEMENT'||j.type==='TRADING_FEE')&&Date.parse(j.at)>=cutoff).sort((a,b)=>Date.parse(a.at)-Date.parse(b.at));
   box.replaceChildren();
   if(!rows.length){
-    // If no closed trades in DB yet, show the calibrated 30-day trend curve
-    renderMock30DayCurve(box, sub, perfDays);
+    sub.textContent='No persisted trade-settlement history is available for this period. Total historical equity is not yet verified.';
+    const empty=document.createElement('div');
+    empty.className='chart-empty';
+    empty.textContent='Verified performance history is not available yet.';
+    box.appendChild(empty);
     return;
   }
   let run=0;
   const points=rows.map(j=>{run+=j.net;return {at:j.at,v:run};});
   const total=run,vals=points.map(x=>x.v),min=Math.min(0,...vals),max=Math.max(0,...vals),range=Math.max(max-min,1),w=720,h=210,pad=18;
-  sub.textContent='Net '+fmtUsd(total,true)+' realised after fees ('+perfDays+' days). Deposits and withdrawals are excluded.';
-  drawRechartsAreaChart(box, points, min, range, total, w, h, pad);
-}
-
-function renderMock30DayCurve(box, sub, days) {
-  const count = days === 7 ? 7 : 30;
-  const changes = [
-    4.20, 8.50, -3.10, 6.40, 12.30, -5.20, 9.10,
-    14.50, -4.80, 11.20, 7.60, -6.10, 18.40, 10.50,
-    -7.20, 15.30, 8.90, -4.50, 13.20, 16.80, -8.10,
-    12.40, 9.50, -3.80, 14.60, 17.20, -5.40, 12.80,
-    10.60, 9.50
-  ].slice(-count);
-  let run = 0;
-  const points = changes.map((c, i) => { run += c; return { at: `Day ${i+1}`, v: run }; });
-  const total = run, vals = points.map(x=>x.v), min = Math.min(0, ...vals), max = Math.max(0, ...vals), range = Math.max(max - min, 1), w = 720, h = 210, pad = 18;
-  sub.textContent = 'Simulated net +' + fmtUsd(total, false) + ' realised profit trend (' + days + ' days). 2.0x cost stress active.';
+  sub.textContent='Net realised trading P&L '+fmtUsd(total,true)+' after fees ('+perfDays+' days). Ledger-derived; deposits and withdrawals excluded. This is not total portfolio equity.';
   drawRechartsAreaChart(box, points, min, range, total, w, h, pad);
 }
 
@@ -249,7 +392,7 @@ document.addEventListener('click',event=>{
     'load-product-workspace':loadProductWorkspace,'create-smart-trade':createSmartTrade,'start-bot':startBot,
     'refresh-bot-status':refreshBotStatus,'stop-autonomous-bot':stopAutonomousBot,'connect-oanda':connectOanda,
     'connect-deriv':connectDeriv,'preflight-deriv':preflightDeriv,'create-dca-bot':createDcaBot,'build-strategy':buildStrategy,
-    'load-candidates':loadCandidates,'create-lab-candidate':createLabCandidate,'create-paper-executor':()=>createExecutor('PAPER'),
+    'load-candidates':loadCandidates,'create-lab-candidate':createLabCandidate,'delete-benchmark-captures':deleteBenchmarkCaptures,'refresh-benchmark-capture-status':loadBenchmarkCaptureStatus,'create-paper-executor':()=>createExecutor('PAPER'),
     'request-live-executor':requestLiveExecutor,'load-account':loadAccount,'load-deposit':loadDeposit,'load-withdrawals':loadWithdrawals,
     'send-withdrawal-otp':sendWithdrawalOtp,'verify-withdrawal-otp':verifyWithdrawalOtp,'request-withdrawal':requestWithdrawal,
     'load-billing':loadBilling,'claim-referral':claimReferral,'create-referral-code':createReferralCode,'logout':logout

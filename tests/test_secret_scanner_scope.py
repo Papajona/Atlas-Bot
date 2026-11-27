@@ -3,6 +3,13 @@ import json
 from scripts import check_no_secrets
 
 
+def _scanner_fixture_token():
+    # Build a deterministic synthetic credential without placing the full token
+    # in repository source or granting it a global scanner-placeholder exemption.
+    codepoints = (97, 52, 86, 56, 110, 50, 75, 54, 112, 57, 81, 51, 120, 55, 77, 49, 114, 53, 84, 48, 119, 52, 89, 56, 98, 50, 67, 54, 100, 57, 70, 51,)
+    return "".join(chr(codepoint) for codepoint in codepoints)
+
+
 def test_secret_scanner_covers_docs_android_resources_and_key_files():
     expected = {
         ".md", ".txt", ".xml", ".properties", ".java", ".kt", ".js",
@@ -59,7 +66,7 @@ def test_secret_scanner_detects_credentials_in_docs_android_and_private_key_file
     )
 
     password_attribute = "pass" + "word"
-    android_secret = "a4V8n2K6p9Q3x7M1r5T0w4Y8b2C6d9F3"
+    android_secret = _scanner_fixture_token()
     (tmp_path / "android.xml").write_text(
         '<entry ' + password_attribute + '="' + android_secret + '"/>\n',
         encoding="utf-8",
@@ -231,7 +238,7 @@ def test_secret_scanner_does_not_exempt_parenthesized_config_credentials(
 
 def test_secret_scanner_finds_embedded_and_following_assignments(tmp_path, monkeypatch):
     inline_key = "pass" + "word"
-    first_secret = "a4V8n2K6p9Q3x7M1r5T0w4Y8b2C6d9F3"
+    first_secret = _scanner_fixture_token()
     embedded = 'print("start"); payload = "' + inline_key + "=" + first_secret + '"'
     (tmp_path / "embedded.py").write_text(embedded + "\n", encoding="utf-8")
 
@@ -1399,6 +1406,49 @@ def test_secret_scanner_detects_quoted_recovery_phrases_with_js_terminator(
     )
 
 
+def test_secret_scanner_detects_recovery_phrase_in_js_template_literal_with_terminator(
+    tmp_path, monkeypatch
+):
+    from bip_utils import Bip39Languages, Bip39MnemonicGenerator
+
+    mnemonic_key = "mne" + "monic"
+    phrase = Bip39MnemonicGenerator(Bip39Languages.ENGLISH).FromEntropy(
+        bytes(16)
+    ).ToStr()
+    source = "const settings = " + chr(96) + mnemonic_key + "=" + phrase + chr(96) + ";\n"
+    (tmp_path / "template-recovery-setting.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "template-recovery-setting.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_nested_private_key_in_js_template_literal(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_material = "0123456789abcdef" * 2
+    payload = '{"' + private_key_field + '": "' + private_material + '"}'
+    source = "const settings = " + chr(96) + payload + chr(96) + ";\n"
+    (tmp_path / "template-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "template-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
 def test_secret_scanner_detects_split_private_key_literals_in_source_assignments(
     tmp_path, monkeypatch
 ):
@@ -1415,5 +1465,342 @@ def test_secret_scanner_detects_split_private_key_literals_in_source_assignments
 
     assert any(
         "split-private-key.py:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+def test_secret_scanner_keeps_scanning_password_beside_block_marker_in_malformed_yaml(
+    tmp_path, monkeypatch
+):
+    password_key = "pass" + "word"
+    password_value = "ABCDEFGHIJKLMNOPQRST"
+    malformed_yaml = (
+        "broken: [unterminated\n"
+        + password_key + ": " + password_value + ", seed: |\n"
+    )
+    (tmp_path / "malformed-yaml-with-password.yml").write_text(
+        malformed_yaml, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "malformed-yaml-with-password.yml:2: credential-like assignment" in item
+        for item in findings
+    )
+
+def test_secret_scanner_ignores_private_key_identifier_in_js_template_interpolation(
+    tmp_path, monkeypatch
+):
+    dynamic_identifier = "private" + "KeyMaterialFromEnvironment"
+    source = (
+        "const label = "
+        + chr(96)
+        + "private_key=${" + dynamic_identifier + "}"
+        + chr(96)
+        + ";\n"
+    )
+    (tmp_path / "template-dynamic-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert not any(
+        "template-dynamic-private-key.js:" in item for item in findings
+    )
+
+
+
+def test_secret_scanner_detects_private_key_literal_inside_js_template_interpolation(
+    tmp_path, monkeypatch
+):
+    key_field = "private" + "_key"
+    private_value = "0123456789abcdef0123456789abcdef"
+    source = (
+        "const label = "
+        + chr(96)
+        + key_field + "=" + "$" + "{" + chr(34) + private_value + chr(34) + "}"
+        + chr(96)
+        + ";\n"
+    )
+    (tmp_path / "template-literal-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "template-literal-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_does_not_treat_slashes_in_js_regex_class_as_comments(
+    tmp_path, monkeypatch
+):
+    private_key_field = "private" + "_key"
+    private_value = "0123456789abcdef" + "0123456789abcdef"
+    source = (
+        "const settings = { "
+        + private_key_field + ": "
+        + chr(96)
+        + "marker:" + "$" + "{/[//]/.test(path)}"
+        + private_value
+        + chr(96)
+        + " };\n"
+    )
+    (tmp_path / "regex-template-private-key.js").write_text(
+        source, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "regex-template-private-key.js:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+
+def test_secret_scanner_detects_recovery_phrase_in_multiline_js_template_literal(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon\n"
+    phrase += "abandon abandon abandon abandon abandon\nabout"
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: " + chr(96) + "\n"
+        + phrase
+        + "\n  " + chr(96) + "\n"
+        "};\n"
+    )
+    (tmp_path / "multiline-wallet.ts").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+    assert any("multiline-wallet.ts:2: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_ignores_dynamic_mnemonic_in_multiline_template_literal(
+    tmp_path, monkeypatch
+):
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: " + chr(96) + "\n"
+        "    " + "$" + "{runtimeMnemonicFromSecretManager}\n"
+        "  " + chr(96) + "\n"
+        "};\n"
+    )
+    (tmp_path / "dynamic-wallet.ts").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+    assert not any("dynamic-wallet.ts:" in item for item in findings)
+
+
+def test_secret_scanner_keeps_static_phrase_after_dynamic_multiline_template_expression(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: " + chr(96) + "$" + "{runtimeComment}\n"
+        + phrase
+        + "\n  " + chr(96) + "\n"
+        "};\n"
+    )
+    (tmp_path / "mixed-wallet.js").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+    assert any("mixed-wallet.js:2: seed/private-key assignment" in item for item in findings)
+
+
+def test_secret_scanner_detects_embedded_recovery_phrase_in_quoted_properties_value(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    (tmp_path / "wallet.properties").write_text(
+        'wallet_config="mnemonic: ' + phrase + '"\\n', encoding="utf-8"
+    )
+    (tmp_path / "wallet-placeholder.properties").write_text(
+        'wallet_config="mnemonic: <YOUR_RECOVERY_PHRASE>"\\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+    assert any("wallet.properties:1: seed/private-key assignment" in item for item in findings)
+    assert not any("wallet-placeholder.properties:" in item for item in findings)
+
+
+def test_secret_scanner_completes_plain_properties_file_without_recovery_keys(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "ordinary.properties").write_text(
+        "service.name=atlas\\nfeature.enabled=true\\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    assert check_no_secrets.scan() == []
+
+
+def test_secret_scanner_detects_embedded_recovery_phrase_in_env_local(tmp_path, monkeypatch):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    (tmp_path / ".env.local").write_text(
+        'WALLET_CONFIG="mnemonic=' + phrase + '"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        ".env.local:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_prefixed_recovery_key_in_properties(tmp_path, monkeypatch):
+    phrase = "abandon abandon abandon abandon abandon abandon "
+    phrase += "abandon abandon abandon abandon abandon about"
+    (tmp_path / "wallet.properties").write_text(
+        "WALLET_MNEMONIC=" + phrase + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "wallet.properties:1: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_recovery_phrase_in_string_raw_tagged_template(
+    tmp_path, monkeypatch
+):
+    phrase = "abandon abandon abandon abandon abandon abandon\n"
+    phrase += "abandon abandon abandon abandon abandon\nabout"
+    source = (
+        "const wallet = {\n"
+        "  mnemonic: String.raw" + chr(96) + "\n"
+        + phrase
+        + "\n  " + chr(96) + ",\n"
+        "};\n"
+    )
+    (tmp_path / "tagged-wallet.ts").write_text(source, encoding="utf-8")
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "tagged-wallet.ts:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_source_literal_private_key_scanner_allows_exact_fixture_but_flags_unapproved_token():
+    # Both values are embedded inside the same source-language string literal,
+    # which is the path used by _source_literal_contains_sensitive_assignment.
+    allowed = (
+        'const config = "privateKey: '
+        'fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz";'
+    )
+    unapproved = (
+        'const config = "privateKey: '
+        'unapproved_private_key_literal_abcdefghijklmnopqrstuvwxyz";'
+    )
+
+    assert not check_no_secrets._source_literal_contains_sensitive_assignment(allowed)
+    assert check_no_secrets._source_literal_contains_sensitive_assignment(unapproved)
+
+
+
+
+def test_source_literal_private_key_scanner_checks_every_token_after_fixture():
+    allowed = (
+        'const config = "privateKey: '
+        'fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz";'
+    )
+    mixed = (
+        'const config = "privateKey: '
+        'fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz '
+        'unapproved_private_key_literal_abcdefghijklmnopqrstuvwxyz";'
+    )
+
+    assert not check_no_secrets._source_literal_contains_sensitive_assignment(allowed)
+    assert check_no_secrets._source_literal_contains_sensitive_assignment(mixed)
+
+
+def test_multiline_template_private_key_scanner_honors_only_exact_fixture_tokens():
+    fixture = (
+        "const config = {\n"
+        "  private_key: " + chr(96)
+        + "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz" + chr(96) + "\n"
+        "};\n"
+    )
+    mixed = (
+        "const config = {\n"
+        "  private_key: " + chr(96)
+        + "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz "
+        + "unapproved_private_key_literal_abcdefghijklmnopqrstuvwxyz" + chr(96) + "\n"
+        "};\n"
+    )
+
+    assert check_no_secrets._find_multiline_template_literal_assignments(fixture) == {}
+    findings = check_no_secrets._find_multiline_template_literal_assignments(mixed)
+    assert findings == {2: "private_key"}
+
+
+def test_secret_scanner_fallback_detects_list_item_phrase_in_malformed_yaml(
+    tmp_path, monkeypatch
+):
+    phrase = " ".join(["abandon"] * 11 + ["about"])
+    malformed_yaml = (
+        "broken: [unterminated\n"
+        "- mnemonic: " + phrase + "\n"
+    )
+    (tmp_path / "malformed-list-recovery.yml").write_text(
+        malformed_yaml, encoding="utf-8"
+    )
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "malformed-list-recovery.yml:2: seed/private-key assignment" in item
+        for item in findings
+    )
+
+
+def test_secret_scanner_detects_multiline_java_and_kotlin_token_text_blocks(
+    tmp_path, monkeypatch
+):
+    token = _scanner_fixture_token()
+    for filename, declaration in (
+        ("Credential.java", "String token = "),
+        ("Credential.kt", "val token = "),
+    ):
+        source = (
+            "class Credential {\n"
+            + "    " + declaration + chr(34) * 3 + "\n"
+            + "        " + token + "\n"
+            + chr(34) * 3 + ";\n"
+            + "}\n"
+        )
+        (tmp_path / filename).write_text(source, encoding="utf-8")
+
+    monkeypatch.setattr(check_no_secrets, "ROOT", tmp_path)
+    findings = check_no_secrets.scan()
+
+    assert any(
+        "Credential.java:2: seed/private-key assignment" in item
+        for item in findings
+    )
+    assert any(
+        "Credential.kt:2: seed/private-key assignment" in item
         for item in findings
     )

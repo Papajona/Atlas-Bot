@@ -55,6 +55,7 @@ def test_restore_inputs_accept_only_explicit_staging_target_and_immutable_backup
         ({"backup_reference": "gs://atlas-staging-510915-db-backups/restore-imports/abc.sql#1750000000000000"}, "import-staging object"),
     ],
 )
+
 def test_restore_inputs_fail_closed(overrides, message):
     values = {
         "project_id": "atlas-staging-510915",
@@ -96,6 +97,7 @@ def test_backup_metadata_requires_exact_generation_checksum_and_locked_retention
         ({"retentionExpirationTime": "2026-11-16T00:00:00+00:00"}, {}, "already expired"),
     ],
 )
+
 def test_backup_metadata_rejects_unpinned_or_unretained_source(object_change, bucket_change, message):
     now = datetime(2026, 11, 17, tzinfo=timezone.utc)
     object_metadata = {
@@ -126,6 +128,7 @@ def test_backup_metadata_rejects_unpinned_or_unretained_source(object_change, bu
         ({"retain_until_time": "2030-01-01T00:00:00Z"}, "2030-01-01T00:00:00Z"),
     ],
 )
+
 def test_provider_metadata_alias_picker_supports_snake_case_and_camel_case(document, expected):
     assert _pick(document, "md5_hash", "md5Hash", "crc32c_hash", "crc32c", "retain_until_time", "retainUntilTime") == expected
 
@@ -342,6 +345,11 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
     assert "postgresql-pgdg-archive.list" in installer
     assert "find_pinned_package_version" in installer
     assert "both signed PGDG main and archive suites" in installer
+    assert "packages[.]microsoft[.]com" in installer
+    assert "atlas-apt-sources" in installer
+    assert "APT_SOURCE_QUARANTINE_DIR" in installer
+    assert "trap restore_unrelated_apt_sources EXIT" in installer
+    assert "restore_unrelated_apt_sources" in installer
     assert 'client_package="postgresql-client-${POSTGRES_CLIENT_MAJOR}"' in installer
     assert '"$client_package=${package_version}"' in installer
     assert "dpkg-query -W" in installer

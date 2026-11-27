@@ -1,3 +1,7 @@
+# LOCAL/SINGLE-HOST USE ONLY. This file starts the API role only: there is no worker service, so
+# reconciliation, custody scanning, continuous risk enforcement and withdrawal recovery do not run
+# (they run only with PROCESS_ROLE=worker). The supported production topology is the Cloud Run
+# service plus worker pool described in deploy/DEPLOY_WORKFLOW.md.
 services:
   redis:
     image: redis:8-alpine

@@ -2,20 +2,22 @@
 set -euo pipefail
 umask 077
 
-# One-time operator bootstrap for the paper-only staging service.
-# Run ONLY after both DB roles/schema have been provisioned and their passwords saved
-# securely. Passwords and the Supabase API key are read without echo and sent to
-# Secret Manager through stdin; they are never placed in command arguments or printed.
+# Operator bootstrap for the paper-only staging service.
+# Default mode requires both DB roles/schema to be provisioned first. Passwords and
+# the Supabase API key are read without echo and sent to Secret Manager through stdin;
+# they are never placed in command arguments or printed.
+# --repair-secret-access is an IAM-only recovery path for existing service accounts
+# and secrets; it does not require DB passwords or access secret version contents.
 
-PROJECT_ID="atlas-staging-510915"
-PROJECT_NUMBER="350896810949"
+readonly PROJECT_ID="atlas-staging-510915"
+readonly PROJECT_NUMBER="350896810949"
 REGION="europe-west1"
 POOL_ID="atlas-bot-staging"
 PROVIDER_ID="github-main"
 
-DEPLOY_SA_ID="atlas-staging-deploy"
-PREFLIGHT_SA_ID="atlas-staging-preflight"
-RUNTIME_SA_ID="atlas-staging-runtime"
+readonly DEPLOY_SA_ID="atlas-staging-deploy"
+readonly PREFLIGHT_SA_ID="atlas-staging-preflight"
+readonly RUNTIME_SA_ID="atlas-staging-runtime"
 ARTIFACT_REPOSITORY="atlas-staging"
 CLOUD_RUN_SERVICE="atlas-paper-staging"
 
@@ -24,6 +26,86 @@ SUPABASE_DB_HOST="aws-0-eu-west-1.pooler.supabase.com"
 PRIMARY_SECRET="atlas-staging-primary-db-url"
 PAPER_SECRET="atlas-staging-customer-paper-db-url"
 ANON_KEY_SECRET="atlas-staging-supabase-anon-key"
+
+readonly DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+readonly PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+readonly RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
+
+verify_secret_accessor_binding() {
+  local secret_name="$1"
+  local principal="$2"
+  local policy
+  policy="$(gcloud secrets get-iam-policy "$secret_name" \
+    --project="$PROJECT_ID" --format=json)"
+  if ! SECRET_IAM_POLICY="$policy" python - "$secret_name" "$principal" <<'PY'
+import json
+import os
+import sys
+
+secret_name, principal = sys.argv[1:3]
+try:
+    policy = json.loads(os.environ["SECRET_IAM_POLICY"])
+except (json.JSONDecodeError, KeyError, TypeError) as exc:
+    raise SystemExit(f"BLOCKED: could not verify Secret Manager IAM policy for {secret_name}: {exc}")
+iam_member = f"serviceAccount:{principal}"
+if not any(
+    binding.get("role") == "roles/secretmanager.secretAccessor"
+    and iam_member in binding.get("members", [])
+    and not binding.get("condition")
+    for binding in policy.get("bindings", [])
+):
+    raise SystemExit(f"BLOCKED: {iam_member} is missing unconditional Secret Accessor on {secret_name}")
+PY
+  then
+    return 1
+  fi
+}
+
+grant_secret_accessor() {
+  local secret_name="$1"
+  local principal="$2"
+  gcloud secrets describe "$secret_name" --project="$PROJECT_ID" >/dev/null || return $?
+  gcloud secrets add-iam-policy-binding "$secret_name" \
+    --project="$PROJECT_ID" \
+    --member="serviceAccount:${principal}" \
+    --role="roles/secretmanager.secretAccessor" --quiet || return $?
+  verify_secret_accessor_binding "$secret_name" "$principal" || return $?
+}
+
+repair_secret_access_only() {
+  if [[ "$#" -ne 1 || "$1" != "--repair-secret-access" ]]; then
+    echo "BLOCKED: invalid secret-access repair invocation." >&2
+    return 2
+  fi
+  gcloud config set project "$PROJECT_ID" >/dev/null || return $?
+  local actual_project_number
+  actual_project_number="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')" || return $?
+  if [[ "$actual_project_number" != "$PROJECT_NUMBER" ]]; then
+    echo "BLOCKED: unexpected Google Cloud project number." >&2
+    return 1
+  fi
+  # This repair mode never reads or rotates secret versions and does not create
+  # service accounts. It repairs only the five exact per-secret IAM bindings.
+  gcloud iam service-accounts describe "$RUNTIME_SA" --project="$PROJECT_ID" >/dev/null || return $?
+  gcloud iam service-accounts describe "$PREFLIGHT_SA" --project="$PROJECT_ID" >/dev/null || return $?
+  local secret_name
+  for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
+    grant_secret_accessor "$secret_name" "$RUNTIME_SA" || return $?
+  done
+  for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do
+    grant_secret_accessor "$secret_name" "$PREFLIGHT_SA" || return $?
+  done
+  echo "PASS: runtime and preflight Secret Manager access is present on only the required staging secrets."
+}
+
+if [[ "${1:-}" == "--repair-secret-access" ]]; then
+  repair_secret_access_only "$@"
+  exit $?
+fi
+if [[ "$#" -ne 0 ]]; then
+  echo "Usage: $0 [--repair-secret-access]" >&2
+  exit 2
+fi
 
 gcloud config set project "$PROJECT_ID" >/dev/null
 gcloud services enable \
@@ -64,10 +146,6 @@ ensure_service_account() {
 ensure_service_account "$DEPLOY_SA_ID" "Atlas paper staging GitHub deploy"
 ensure_service_account "$PREFLIGHT_SA_ID" "Atlas staging identity preflight"
 ensure_service_account "$RUNTIME_SA_ID" "Atlas paper-only Cloud Run runtime"
-
-DEPLOY_SA="${DEPLOY_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-PREFLIGHT_SA="${PREFLIGHT_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
-RUNTIME_SA="${RUNTIME_SA_ID}@${PROJECT_ID}.iam.gserviceaccount.com"
 
 if ! gcloud artifacts repositories describe "$ARTIFACT_REPOSITORY" \
     --location="$REGION" --project="$PROJECT_ID" >/dev/null 2>&1; then
@@ -268,18 +346,12 @@ fi
 
 # Cloud Run can read only its three explicitly referenced secret values.
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET" "$ANON_KEY_SECRET"; do
-  gcloud secrets add-iam-policy-binding "$secret_name" \
-    --project="$PROJECT_ID" \
-    --member="serviceAccount:${RUNTIME_SA}" \
-    --role="roles/secretmanager.secretAccessor" --quiet
+  grant_secret_accessor "$secret_name" "$RUNTIME_SA"
 done
 
 # The read-only preflight identity may inspect the two DB URLs but not the Supabase key.
 for secret_name in "$PRIMARY_SECRET" "$PAPER_SECRET"; do
-  gcloud secrets add-iam-policy-binding "$secret_name" \
-    --project="$PROJECT_ID" \
-    --member="serviceAccount:${PREFLIGHT_SA}" \
-    --role="roles/secretmanager.secretAccessor" --quiet
+  grant_secret_accessor "$secret_name" "$PREFLIGHT_SA"
 done
 
 echo

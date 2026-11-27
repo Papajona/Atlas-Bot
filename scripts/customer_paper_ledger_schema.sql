@@ -230,6 +230,35 @@ CREATE TABLE IF NOT EXISTS customer_paper.position_events (
     UNIQUE (customer_id, reversal_of_fill_id)
 );
 
+-- Customer equity samples are recorded only when the paper portfolio can be
+-- valued from cash with no open positions. Unknown/unmarked positions produce no sample.
+CREATE TABLE IF NOT EXISTS customer_paper.equity_snapshots (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    customer_id bigint NOT NULL CHECK (customer_id > 0),
+    bucket_at timestamptz NOT NULL,
+    observed_at timestamptz NOT NULL DEFAULT now(),
+    equity numeric(38,18) NOT NULL CHECK (equity >= 0),
+    cash_equity numeric(38,18),
+    currency varchar(12) NOT NULL CHECK (currency = 'USDT'),
+    valuation_source varchar(40) NOT NULL CHECK (valuation_source = 'PAPER_LEDGER_CASH_ONLY'),
+    UNIQUE (customer_id, bucket_at)
+);
+CREATE INDEX IF NOT EXISTS ix_customer_paper_equity_customer_observed
+    ON customer_paper.equity_snapshots (customer_id, observed_at);
+
+-- These are display-only values. Execution, risk, funding and security policies
+-- are deliberately excluded from this customer preference record.
+CREATE TABLE IF NOT EXISTS customer_paper.workspace_preferences (
+    customer_id bigint PRIMARY KEY CHECK (customer_id > 0),
+    reduce_motion boolean NOT NULL DEFAULT false,
+    compact_markets boolean NOT NULL DEFAULT false,
+    touch_feedback boolean NOT NULL DEFAULT true,
+    mobile_default_timeframe_days integer NOT NULL DEFAULT 30
+        CHECK (mobile_default_timeframe_days IN (7, 30)),
+    mobile_chart_crosshair_enabled boolean NOT NULL DEFAULT true,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 -- Index the child-side columns of composite foreign keys. PostgreSQL does not
 -- create these automatically, and these access paths support order/journal/fill
 -- lookups and referenced-row maintenance without changing ledger semantics.
@@ -469,7 +498,7 @@ DO $paper_immutable_triggers$
 DECLARE table_name text;
 BEGIN
     FOREACH table_name IN ARRAY ARRAY[
-        'accounts','journals','journal_lines','orders','order_events','fills','position_events','market_bar_budgets','market_bar_allocations'
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events','equity_snapshots','market_bar_budgets','market_bar_allocations'
     ] LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS trg_customer_paper_%I_immutable ON customer_paper.%I', table_name, table_name);
         EXECUTE format('CREATE TRIGGER trg_customer_paper_%I_immutable BEFORE UPDATE OR DELETE ON customer_paper.%I FOR EACH ROW EXECUTE FUNCTION customer_paper.reject_mutation()', table_name, table_name);
@@ -491,6 +520,10 @@ ALTER TABLE customer_paper.fills ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.fills FORCE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.position_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.position_events FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.equity_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.equity_snapshots FORCE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.workspace_preferences ENABLE ROW LEVEL SECURITY;
+ALTER TABLE customer_paper.workspace_preferences FORCE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.market_bar_budgets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.market_bar_budgets FORCE ROW LEVEL SECURITY;
 ALTER TABLE customer_paper.market_bar_allocations ENABLE ROW LEVEL SECURITY;
@@ -521,9 +554,14 @@ BEGIN
     EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
     EXECUTE format('GRANT USAGE ON SCHEMA customer_paper TO %I', role_name);
     FOREACH policy_table IN ARRAY ARRAY[
-        'accounts','journals','journal_lines','orders','order_events','fills','position_events'
+        'accounts','journals','journal_lines','orders','order_events','fills','position_events',
+        'equity_snapshots','workspace_preferences'
     ] LOOP
-        EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
+        IF policy_table = 'workspace_preferences' THEN
+            EXECUTE format('GRANT SELECT, INSERT, UPDATE ON customer_paper.%I TO %I', policy_table, role_name);
+        ELSE
+            EXECUTE format('GRANT SELECT, INSERT ON customer_paper.%I TO %I', policy_table, role_name);
+        END IF;
         EXECUTE format('DROP POLICY IF EXISTS customer_paper_tenant ON customer_paper.%I', policy_table);
         EXECUTE format(
             'CREATE POLICY customer_paper_tenant ON customer_paper.%I FOR ALL TO %I USING (customer_id = (SELECT NULLIF(current_setting(''app.customer_id'', true), '''')::bigint)) WITH CHECK (customer_id = (SELECT NULLIF(current_setting(''app.customer_id'', true), '''')::bigint))',

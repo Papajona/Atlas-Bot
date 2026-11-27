@@ -1,8 +1,22 @@
 from pathlib import Path
+import tomllib
 import os
 import subprocess
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _customer_profile_provision_jwt_verification_enabled(config_text: str) -> bool:
+    config = tomllib.loads(config_text)
+    functions = config.get("functions", {})
+    if not isinstance(functions, dict):
+        return False
+    function_config = functions.get("customer-profile-provision", {})
+    return (
+        isinstance(function_config, dict)
+        and function_config.get("verify_jwt") is True
+    )
 
 
 def test_android_release_never_uses_debug_keystore():
@@ -203,7 +217,10 @@ def test_tron_broadcast_result_cannot_overwrite_terminal_or_unknown_outcomes():
     assert "terminal_sweep_states" in block
     assert 'sweep.status != "READY_FOR_SIGNER"' in block
     assert "A rejection cannot override a prior timeout or known transaction" in block
-    assert 'sweep.status == "SUBMITTED" and sweep.transaction_id == txid' in block
+    assert 'stored_txid = str(sweep.transaction_id or "").strip().lower()' in block
+    assert 'sweep.status == "SUBMITTED" and stored_txid == txid' in block
+    assert 'func.lower(TronSweep.transaction_id) == txid' in block
+    assert 'sweep.transaction_id = txid' in block
 
 
 def test_production_deploy_requires_an_explicit_valid_administrator_bootstrap():
@@ -422,6 +439,27 @@ def test_supabase_future_default_grants_are_opt_in():
     assert "migration unexpectedly removed service_role access from an existing table" in workflow
     assert "has_table_privilege('service_role', 'public.atlas_default_acl_probe', 'SELECT')" in workflow
 
+def test_supabase_service_role_existing_public_grants_are_restricted():
+    migration = (
+        ROOT / "alembic" / "versions" / "0067_service_role_customer_profiles_acl.py"
+    ).read_text(encoding="utf-8")
+    assert 'revision = "0067_service_role_customer_profiles_acl"' in migration
+    assert 'down_revision = "0066_pin_research_trigger_path"' in migration
+    assert "GRANT SELECT, INSERT ON TABLE public.customer_profiles TO service_role" in migration
+    assert "GRANT USAGE, SELECT ON SEQUENCE public.customer_profiles_id_seq TO service_role" in migration
+    assert "GRANT UPDATE" not in migration
+    assert "c.relowner = migration_role_oid" in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public" not in migration
+    assert "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public" not in migration
+    assert "FROM pg_default_acl" in migration
+    assert "aclexplode(defaults.defaclacl)" in migration
+    assert "acl.grantee IN (service_role_oid, 0)" in migration
+    assert "COALESCE(grantee_role.rolname, 'PUBLIC')" in migration
+    assert "0067 refuses to continue" in migration
+    assert "current_setting('server_version_num')::integer >= 170000" in migration
+    assert "EXECUTE $atlas_service_role_maintain_check$" in migration
+
+
 def test_paper_staging_deployment_is_restricted_and_keeps_risk_features_off():
     deploy = (ROOT / ".github" / "workflows" / "staging-paper-deploy.yml").read_text(encoding="utf-8")
     preflight = (ROOT / ".github" / "workflows" / "staging-identity-preflight.yml").read_text(encoding="utf-8")
@@ -583,28 +621,21 @@ def test_staging_deployment_runs_for_every_main_push_and_waits_for_exact_commit_
     assert "actions: write" in deploy
 
 
-def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
-    ruby = r"""
-require "yaml"
-deploy = YAML.load_file(ARGV.fetch(0))
-preflight = YAML.load_file(ARGV.fetch(1))
-acceptance = YAML.load_file(ARGV.fetch(2))
-abort("paper staging deploy job missing") unless deploy.fetch("jobs").key?("deploy-paper-staging")
-abort("staging identity preflight job missing") unless preflight.fetch("jobs").key?("verify-staging-identity")
-abort("customer paper acceptance job missing") unless acceptance.fetch("jobs").key?("customer-paper-acceptance")
-"""
-    result = subprocess.run(
-        [
-            "ruby", "-e", ruby,
-            str(ROOT / ".github" / "workflows" / "staging-paper-deploy.yml"),
-            str(ROOT / ".github" / "workflows" / "staging-identity-preflight.yml"),
-            str(ROOT / ".github" / "workflows" / "customer-paper-staging-acceptance.yml"),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+def _load_workflow(name: str) -> dict:
+    loaded = yaml.safe_load(
+        (ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
     )
-    assert result.returncode == 0, result.stderr or result.stdout
+    assert isinstance(loaded, dict), f"{name} is not a YAML mapping"
+    return loaded
+
+
+def test_staging_workflows_are_valid_yaml_with_the_expected_named_jobs():
+    deploy = _load_workflow("staging-paper-deploy.yml")
+    preflight = _load_workflow("staging-identity-preflight.yml")
+    acceptance = _load_workflow("customer-paper-staging-acceptance.yml")
+    assert "deploy-paper-staging" in deploy["jobs"], "paper staging deploy job missing"
+    assert "verify-staging-identity" in preflight["jobs"], "staging identity preflight job missing"
+    assert "customer-paper-acceptance" in acceptance["jobs"], "customer paper acceptance job missing"
 
 def test_paper_reader_provisioning_is_no_write_and_no_public_schema_create():
     sql = (ROOT / "scripts" / "provision_atlas_paper_reader.sql").read_text(encoding="utf-8")
@@ -690,24 +721,16 @@ def test_production_staging_gate_accepts_successful_exact_commit_job(tmp_path: P
 
 
 def test_production_deploy_workflow_is_valid_yaml_with_unique_named_steps():
-    workflow_path = ROOT / ".github" / "workflows" / "production-deploy.yml"
-    ruby = r"""
-require "yaml"
-workflow = YAML.load_file(ARGV.fetch(0))
-steps = workflow.fetch("jobs").values.flat_map { |job| job.fetch("steps", []) }
-names = steps.map { |step| step["name"] }.compact
-duplicates = names.group_by(&:itself).select { |_, occurrences| occurrences.length > 1 }.keys
-abort("duplicate production deployment step names: #{duplicates.join(', ')}") unless duplicates.empty?
-abort("exact staging identity job gate missing") unless names.include?("Require all release CI gates on this exact commit")
-"""
-    result = subprocess.run(
-        ["ruby", "-e", ruby, str(workflow_path)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr or result.stdout
+    workflow = _load_workflow("production-deploy.yml")
+    steps = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+    ]
+    names = [step["name"] for step in steps if isinstance(step, dict) and step.get("name")]
+    duplicates = sorted({name for name in names if names.count(name) > 1})
+    assert not duplicates, f"duplicate production deployment step names: {', '.join(duplicates)}"
+    assert "Require all release CI gates on this exact commit" in names, "exact staging identity job gate missing"
 
 
 
@@ -827,6 +850,9 @@ def test_audit_reader_provisioning_is_strictly_read_only_and_separate_from_paper
     assert "REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_audit_reader" in sql
     assert "ALTER ROLE atlas_audit_reader SET default_transaction_read_only = on" in sql
     assert "GRANT SELECT (created_at, request_id, provider_id, provider, amount, currency, status, provider_status)" in sql
+    assert "GRANT SELECT (id, entry_type, idempotency_key, reference_type, reference_id, created_at)" in sql
+    verifier = (ROOT / "scripts" / "verify_staging_restore.py").read_text(encoding="utf-8")
+    assert '"ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id", "created_at")' in verifier
     assert "GRANT SELECT ON TABLE" not in sql
     for forbidden in ("GRANT INSERT", "GRANT UPDATE", "GRANT DELETE", "GRANT TRUNCATE", "GRANT EXECUTE"):
         assert forbidden not in sql
@@ -857,6 +883,7 @@ def test_production_api_role_is_dedicated_and_does_not_receive_ddl_or_immutable_
     assert "'trades'" in generic_grants
     assert "ledger_delete" in sql and "withdrawal_delete" in sql and "trades_delete" in sql
     assert "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public" in sql
+    assert "CASE WHEN c.relkind='S' THEN has_sequence_privilege(r.rolname,c.oid,'UPDATE') ELSE false END" in sql
     for forbidden in ("GRANT TRUNCATE", "GRANT REFERENCES", "GRANT TRIGGER", "GRANT EXECUTE", "GRANT CREATE"):
         assert forbidden not in sql
     workflow = (ROOT / ".github" / "workflows" / "production-deploy.yml").read_text(encoding="utf-8")
@@ -912,21 +939,163 @@ def test_api_runtime_grants_preserve_financial_custody_execution_and_audit_histo
     assert "GRANT SELECT, INSERT ON TABLE public.revenue_ledger, public.cost_ledger TO atlas_api_runtime" in provisioner
 
 
-def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
+def _assert_bypassrls_grant_loops_exclude_audit_reader(migrations: Path) -> None:
     import re
 
-    migrations = ROOT / "alembic" / "versions"
+    loop_pattern = re.compile(
+        r"(?is)\bFOR\s+\w+\s+IN\s+(?P<kind>SELECT|EXECUTE)\b"
+        r"(?P<query>.*?)\bLOOP\b(?P<body>.*?)\bEND\s+LOOP\b"
+    )
     for path in sorted(migrations.glob("*.py")):
         source = path.read_text(encoding="utf-8")
         revision = re.search(r'(?m)^revision\s*=\s*["\'](\d{4})_', source)
         if not revision or int(revision.group(1)) <= 59:
             continue
-        if "rolbypassrls" in source and re.search(r"\bGRANT\b", source, re.IGNORECASE):
-            assert "atlas_audit_reader" in source, (
-                f"{path.name} grants privileges to BYPASSRLS roles but does not exclude atlas_audit_reader"
+
+        for match in loop_pattern.finditer(source):
+            kind = match.group("kind").upper()
+            raw_query = match.group("query")
+            loop_body = match.group("body")
+            if not re.search(r"(?i)\bGRANT\b", loop_body):
+                continue
+
+            if kind == "EXECUTE":
+                # Inspect only statically declared SQL string fragments. Dynamic
+                # identifiers/variables or opaque builders fail closed so a
+                # future GRANT loop cannot silently evade this release gate.
+                literals = re.findall(r"'((?:''|[^'])*)'", raw_query)
+                remainder = re.sub(r"'(?:''|[^'])*'", "", raw_query)
+                if remainder.replace("||", "").strip() or not literals:
+                    raise AssertionError(
+                        f"{path.name} contains a dynamic GRANT loop whose role query cannot be statically verified"
+                    )
+                role_query = " ".join(part.replace("''", "'") for part in literals)
+                if not re.search(
+                    r"(?i)\bFROM\s+(?:pg_catalog\.)?pg_roles\b",
+                    role_query,
+                ):
+                    raise AssertionError(
+                        f"{path.name} contains a dynamic GRANT loop whose role query cannot be statically verified"
+                    )
+            else:
+                role_query = raw_query
+
+            selects_login_bypass_roles = (
+                re.search(r"(?i)\bFROM\s+(?:pg_catalog\.)?pg_roles\b", role_query)
+                and re.search(r"(?i)\brolcanlogin\b", role_query)
+                and re.search(r"(?i)\brolbypassrls\b", role_query)
+                and not re.search(r"(?i)\bNOT\s+(?:\w+\.)?rolbypassrls\b", role_query)
             )
+            if kind == "EXECUTE" and not selects_login_bypass_roles:
+                raise AssertionError(
+                    f"{path.name} contains a dynamic GRANT loop whose role query is not restricted to login BYPASSRLS roles"
+                )
+
+            if selects_login_bypass_roles:
+                excludes_audit_reader = re.search(
+                    r"(?is)\brolname\b\s+NOT\s+IN\s*\([^)]*['\"]atlas_audit_reader['\"]",
+                    role_query,
+                ) or re.search(
+                    r"(?is)\brolname\b\s*(?:<>|!=)\s*['\"]atlas_audit_reader['\"]",
+                    role_query,
+                )
+                assert excludes_audit_reader, (
+                    f"{path.name} grants privileges to BYPASSRLS login roles without excluding atlas_audit_reader"
+                )
+
+def test_future_bypassrls_grant_loop_migrations_must_exclude_audit_reader():
+    _assert_bypassrls_grant_loops_exclude_audit_reader(ROOT / "alembic" / "versions")
 
 
+def test_bypassrls_guard_detects_from_before_where_future_grant_query(tmp_path):
+    import pytest
+
+    (tmp_path / "0066_future_role_grant.py").write_text(
+        '''
+revision = "0066_future_role_grant"
+sql = """
+FOR role_name IN
+    SELECT r.rolname
+    FROM pg_roles r
+    WHERE r.rolcanlogin AND r.rolbypassrls
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="without excluding atlas_audit_reader",
+    ):
+        _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
+
+
+
+def test_bypassrls_guard_detects_execute_dynamic_future_grant_query(tmp_path):
+    import pytest
+
+    (tmp_path / "0066_dynamic_role_grant.py").write_text(
+        '''
+revision = "0066_dynamic_role_grant"
+sql = """
+FOR role_name IN EXECUTE
+    'SELECT r.rolname FROM pg_roles r '
+    'WHERE r.rolcanlogin AND r.rolbypassrls'
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="without excluding atlas_audit_reader",
+    ):
+        _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
+
+
+def test_bypassrls_guard_accepts_execute_dynamic_query_excluding_audit_reader(tmp_path):
+    (tmp_path / "0066_safe_dynamic_role_grant.py").write_text(
+        '''
+revision = "0066_safe_dynamic_role_grant"
+sql = """
+FOR role_name IN EXECUTE
+    'SELECT r.rolname FROM pg_roles r '
+    'WHERE r.rolcanlogin AND r.rolbypassrls '
+    'AND r.rolname NOT IN (''atlas_audit_reader'')'
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
+
+
+def test_bypassrls_guard_fails_closed_for_uninspectable_dynamic_grant_query(tmp_path):
+    import pytest
+
+    (tmp_path / "0066_opaque_dynamic_role_grant.py").write_text(
+        '''
+revision = "0066_opaque_dynamic_role_grant"
+sql = """
+FOR role_name IN EXECUTE role_query
+LOOP
+    EXECUTE format('GRANT USAGE ON SCHEMA public TO %I', role_name);
+END LOOP;
+"""
+''',
+        encoding="utf-8",
+    )
+    with pytest.raises(
+        AssertionError,
+        match="role query cannot be statically verified",
+    ):
+        _assert_bypassrls_grant_loops_exclude_audit_reader(tmp_path)
 
 def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
     src = (ROOT / "app" / "config.py").read_text(encoding="utf-8")
@@ -934,3 +1103,68 @@ def test_production_metrics_docs_and_body_limits_have_explicit_source_guards():
     assert 'if self.environment == "production" and self.docs_enabled:' in src
     assert 'if self.max_request_body_bytes < 0:' in src
     assert 'if self.environment in {"staging", "production"} and self.max_request_body_bytes == 0:' in src
+
+
+def test_research_trigger_functions_are_acl_isolated_from_runtime_and_api_roles():
+    archive = (
+        ROOT / "alembic" / "versions" / "0051_research_trial_archive.py"
+    ).read_text(encoding="utf-8")
+    integrity = (
+        ROOT / "alembic" / "versions" / "0065_ledger_trigger_owner_isolation.py"
+    ).read_text(encoding="utf-8")
+
+    assert "REVOKE EXECUTE ON FUNCTION public.atlas_research_trial_archive_immutable() FROM PUBLIC" in archive
+    assert "'atlas_api_runtime', 'atlas_audit_reader'" in archive
+
+    for function_name in (
+        "atlas_block_ledger_mutation()",
+        "atlas_ledger_journal_deferred_check()",
+        "atlas_validate_ledger_journal(integer)",
+        "atlas_research_trial_archive_immutable()",
+        "atlas_research_holdout_registry_immutable()",
+    ):
+        assert f"public.{function_name}" in integrity
+    assert "atlas_ledger_trigger_owner" in integrity
+    assert "NOLOGIN NOINHERIT NOBYPASSRLS" in integrity
+    assert "CREATE POLICY atlas_ledger_trigger_owner_select" in integrity
+    assert "AND NOT rolbypassrls" in integrity
+    assert "SECURITY DEFINER" in integrity
+    assert "SET search_path = pg_catalog, public, pg_temp" in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_ledger_trigger_owner" in integrity
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'INSERT')" in integrity
+    assert "has_table_privilege(role_name, 'public.ledger_journals', 'UPDATE')" in integrity
+    assert "has_schema_privilege(role_name, 'public', 'CREATE')" in integrity
+    assert "atlas_api_runtime" in integrity and "atlas_audit_reader" in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_api_runtime" not in integrity
+    assert "GRANT EXECUTE ON FUNCTION public.atlas_validate_ledger_journal(integer) TO atlas_audit_reader" not in integrity
+
+
+def test_customer_profile_provision_edge_function_keeps_platform_jwt_verification_enabled():
+    config_text = (ROOT / "supabase" / "config.toml").read_text(encoding="utf-8")
+    assert _customer_profile_provision_jwt_verification_enabled(config_text)
+
+
+def test_customer_profile_provision_jwt_guard_does_not_read_another_function_setting():
+    unsafe_configs = (
+        """
+[functions.customer-profile-provision]
+verify_jwt = false
+
+[functions.unrelated-public-function]
+verify_jwt = true
+""",
+        """
+[functions.unrelated-public-function]
+verify_jwt = true
+""",
+        """
+[functions.customer-profile-provision]
+verify_jwt = \"true\"
+
+[functions.unrelated-public-function]
+verify_jwt = true
+""",
+    )
+    for config_text in unsafe_configs:
+        assert not _customer_profile_provision_jwt_verification_enabled(config_text)
+

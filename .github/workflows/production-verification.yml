@@ -115,11 +115,35 @@ jobs:
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
           SQL
-      - name: Apply and verify migration head
+      - name: Apply migrations through 0068 for mandatory rollback regression
+        env:
+          ENVIRONMENT: production
+          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+        run: |
+          python -m alembic upgrade 0068_tron_sweep_txid_casefold_unique
+          python -m alembic current
+          python -m alembic heads
+      - name: Run legacy 0065-0066 rollback regressions against fresh 0068 database (mandatory)
+        env:
+          ENVIRONMENT: development
+          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          REDIS_URL: ""
+        run: |
+          python -m pytest tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-0065-rollback.xml
+          python scripts/assert_no_skips.py postgres-0065-rollback.xml
+      - name: Restore production verification database to current migration head after rollback regression
+        if: always()
+        env:
+          ENVIRONMENT: production
+          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
         run: |
           python -m alembic upgrade head
           python -m alembic current
           python -m alembic heads
+
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: Atlas Native AI offline verification (no provider calls)
@@ -184,14 +208,14 @@ jobs:
         run: |
           python -m pytest -m "not postgres" -q -rs --junitxml=full-suite.xml
           python scripts/assert_no_skips.py full-suite.xml
-      - name: Run all PostgreSQL-marked integration tests (mandatory, no skips)
+      - name: Run remaining PostgreSQL-marked integration tests at current migration head (mandatory, no skips)
         env:
           ENVIRONMENT: development
           DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
           ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
           REDIS_URL: ""
         run: |
-          python -m pytest -m postgres -q -rs --junitxml=postgres-marked.xml
+          python -m pytest -m postgres --ignore=tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-marked.xml
           python scripts/assert_no_skips.py postgres-marked.xml
       - name: Report Atlas Native AI verification result
         if: always()

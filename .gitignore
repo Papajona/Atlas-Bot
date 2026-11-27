@@ -18,6 +18,8 @@ htmlcov/
 
 # Databases and local runtime state
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 data/
@@ -36,3 +38,12 @@ dist/
 .DS_Store
 
 .venv/
+
+# Local Android signing material and machine-specific build config; .gitignore only affects untracked files.
+# Already-tracked sensitive files must be explicitly removed with git rm --cached.
+*.jks
+*.keystore
+*.p12
+*.pfx
+local.properties
+keystore.properties

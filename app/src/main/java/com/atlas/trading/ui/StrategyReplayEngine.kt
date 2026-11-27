@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
@@ -32,8 +33,11 @@ import kotlin.math.min
 import kotlin.math.sqrt
 
 /**
- * On-Device Strategy Replay & Backtesting Simulation Engine
- * Runs vectorless candle replay and realistic trade simulation with execution modeling.
+ * Deterministic synthetic scenario generator for UI and execution-stress demonstrations.
+ *
+ * This does not load historical candles, execute strategy rules, model an exchange order
+ * book, or reproduce actual customer orders. Its outputs are illustrative assumptions only
+ * and must never be presented as a historical backtest or promotion evidence.
  */
 data class ReplayTrade(
     val id: Int,
@@ -52,41 +56,51 @@ data class ReplayTrade(
 data class ReplaySummary(
     val strategyName: String,
     val marketCondition: String,
-    val initialCapital: Double = 100.0,
-    val endingCapital: Double = 104.82,
-    val totalTrades: Int = 40,
-    val winningTrades: Int = 23,
-    val losingTrades: Int = 17,
-    val winRatePct: Double = 57.5,
-    val grossProfit: Double = 9.42,
-    val grossLoss: Double = -4.60,
-    val netProfit: Double = 4.82,
-    val netReturnPct: Double = 4.82,
-    val profitFactor: Double = 2.05,
-    val maxDrawdownPct: Double = 3.65,
-    val sharpeRatio: Double = 1.92,
-    val calmarRatio: Double = 2.45,
-    val sortinoRatio: Double = 2.68,
-    val trades: List<ReplayTrade> = emptyList()
+    val initialCapital: Double = 0.0,
+    val endingCapital: Double = 0.0,
+    val totalTrades: Int = 0,
+    val winningTrades: Int = 0,
+    val losingTrades: Int = 0,
+    val winRatePct: Double = 0.0,
+    val grossProfit: Double = 0.0,
+    val grossLoss: Double = 0.0,
+    val netProfit: Double = 0.0,
+    val netReturnPct: Double = 0.0,
+    val profitFactor: Double = 0.0,
+    val maxDrawdownPct: Double = 0.0,
+    val sharpeRatio: Double = 0.0,
+    val calmarRatio: Double = 0.0,
+    val sortinoRatio: Double = 0.0,
+    val trades: List<ReplayTrade> = emptyList(),
+    val evidenceStatus: String = "SYNTHETIC_SCENARIO_ONLY",
+    val historicalBarsUsed: Int = 0,
+    val strategyRulesExecuted: Boolean = false
 )
 
 object ReplaySimulator {
 
     /**
-     * Executes an on-device quantitative replay simulation across historical market scenarios.
-     * Calibrated for a $100 initial capital stake with 2.0x cost-stress fee headroom modeled.
+     * Generates deterministic illustrative outcomes from fixed, scenario-specific assumptions.
+     * No historical market data or customer strategy rules are loaded or evaluated.
      */
     suspend fun runSimulation(
         strategy: String,
         scenario: String,
         initialCapital: Double = 100.0
     ): ReplaySummary = withContext(Dispatchers.Default) {
+        require(initialCapital.isFinite() && initialCapital > 0.0) {
+            "Initial capital must be a finite positive amount"
+        }
+        require(strategy.isNotBlank()) { "A market profile label is required" }
+        require(scenario in setOf("Trending Bull", "Choppy Range", "High-Vol Shock", "Flash Crash Recovery")) {
+            "Unsupported synthetic stress scenario"
+        }
         val trades = mutableListOf<ReplayTrade>()
         var capital = initialCapital
         var peakCapital = initialCapital
         var maxDrawdownDollars = 0.0
 
-        // Parameterize scenario drift and volatility
+        // These hard-coded rates are illustrative scenario assumptions, not measured data.
         val (baseWinRate, avgWinBps, avgLossBps, numTrades) = when (scenario) {
             "Trending Bull" -> listOf(0.62, 175.0, -110.0, 42)
             "Choppy Range" -> listOf(0.48, 115.0, -125.0, 38)
@@ -107,7 +121,8 @@ object ReplaySimulator {
         val returnsList = mutableListOf<Double>()
         val downsideReturns = mutableListOf<Double>()
 
-        // Deterministic pseudo-random seed for repeatable, verifiable test runs
+        // Deterministic pseudo-random seed makes synthetic UI tests reproducible.
+        // This is not a market-data seed or a reproducibility hash for an actual backtest.
         var seed = (strategy.hashCode() xor scenario.hashCode() xor initialCapital.toBits().toInt()).toLong()
         fun nextRand(): Double {
             seed = (seed * 6364136223846793005L + 1442695040888963407L)
@@ -216,7 +231,10 @@ object ReplaySimulator {
             sharpeRatio = Math.round(sharpe * 100.0) / 100.0,
             calmarRatio = Math.round(calmar * 100.0) / 100.0,
             sortinoRatio = Math.round(sortino * 100.0) / 100.0,
-            trades = trades
+            trades = trades,
+            evidenceStatus = "SYNTHETIC_SCENARIO_ONLY",
+            historicalBarsUsed = 0,
+            strategyRulesExecuted = false
         )
     }
 }
@@ -272,14 +290,14 @@ fun StrategyReplaySection(
             ) {
                 Column {
                     Text(
-                        text = "QUANT STRATEGY REPLAY",
+                        text = "SYNTHETIC SCENARIO STRESS TEST",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         color = accentCyan,
                         letterSpacing = 1.2.sp
                     )
                     Text(
-                        text = "Simulation: $${String.format(java.util.Locale.US, "%.0f", selectedCapital)} Stake (2x Fee Stress)",
+                        text = "Illustrative synthetic scenario: $${String.format(java.util.Locale.US, "%.0f", selectedCapital)} Stake (2x Fee Stress)",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = textPrimary
@@ -317,13 +335,37 @@ fun StrategyReplaySection(
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Replay",
+                            text = "Generate sample",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
                         )
                     }
                 }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(theme.cardInnerSurface)
+                    .padding(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = "Synthetic data notice",
+                    tint = accentCyan,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "Synthetic only: outcomes are generated from fixed assumptions. No historical candles, strategy rules, exchange fills, or customer orders are used. These figures are not a backtest or trading-performance evidence.",
+                    fontSize = 10.sp,
+                    color = textMuted
+                )
             }
 
             Spacer(modifier = Modifier.height(10.dp))
@@ -364,7 +406,7 @@ fun StrategyReplaySection(
             Spacer(modifier = Modifier.height(10.dp))
 
             // Strategy Selector Chips
-            Text(text = "Production Strategy (4H / Daily Horizon):", fontSize = 11.sp, color = textMuted)
+            Text(text = "Market profile label (no strategy rules are executed):", fontSize = 11.sp, color = textMuted)
             Spacer(modifier = Modifier.height(4.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -431,7 +473,7 @@ fun StrategyReplaySection(
             Spacer(modifier = Modifier.height(10.dp))
 
             // Scenario Selectors
-            Text(text = "Market Scenario:", fontSize = 11.sp, color = textMuted)
+            Text(text = "Assumed stress scenario (not observed market conditions):", fontSize = 11.sp, color = textMuted)
             Spacer(modifier = Modifier.height(4.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -465,7 +507,7 @@ fun StrategyReplaySection(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Simulation Performance Highlights
+            // Synthetic scenario illustration only — never use as research or promotion evidence.
             val res = simulationResult
             if (res != null) {
                 Row(
@@ -473,21 +515,21 @@ fun StrategyReplaySection(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     PerformanceStatBadge(
-                        label = "NET PROFIT",
+                        label = "MODELED P&L",
                         value = "${if (res.netProfit >= 0) "+" else ""}$${String.format(java.util.Locale.US, "%.2f", res.netProfit)}",
                         subValue = "${if (res.netReturnPct >= 0) "+" else ""}${String.format(java.util.Locale.US, "%.2f", res.netReturnPct)}%",
                         color = if (res.netProfit >= 0) emeraldPass else redDanger,
                         modifier = Modifier.weight(1f)
                     )
                     PerformanceStatBadge(
-                        label = "WIN RATE",
+                        label = "GENERATED WIN RATE",
                         value = "${res.winRatePct}%",
                         subValue = "${res.winningTrades}W / ${res.losingTrades}L",
                         color = if (res.winRatePct >= 50.0) emeraldPass else redDanger,
                         modifier = Modifier.weight(1f)
                     )
                     PerformanceStatBadge(
-                        label = "PROFIT FACTOR",
+                        label = "ASSUMED PROFIT FACTOR",
                         value = "${res.profitFactor}",
                         subValue = "Max DD: ${res.maxDrawdownPct}%",
                         color = if (res.profitFactor >= 1.5) accentCyan else textPrimary,
@@ -514,7 +556,7 @@ fun StrategyReplaySection(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "Trade Execution Log (${res.trades.size})",
+                        text = "Generated outcome examples — not order history (${res.trades.size})",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = textPrimary

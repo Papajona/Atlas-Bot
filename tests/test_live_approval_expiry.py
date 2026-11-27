@@ -16,6 +16,11 @@ def test_production_admin_mfa_cannot_be_disabled():
         Settings(_env_file=None, environment="production", admin_totp_required=False)
 
 
+def test_production_customer_mfa_cannot_be_disabled():
+    with pytest.raises(ValidationError, match="CUSTOMER_TOTP_REQUIRED must remain true in production"):
+        Settings(_env_file=None, environment="production", customer_totp_required=False)
+
+
 def test_live_enable_request_ttl_must_be_positive():
     with pytest.raises(ValidationError, match="LIVE_ENABLE_REQUEST_TTL_MINUTES must be >= 1"):
         Settings(_env_file=None, environment="test", live_enable_request_ttl_minutes=0)

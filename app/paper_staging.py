@@ -2,22 +2,24 @@
 
 This app deliberately does not run app.main's lifespan: that startup initializes the
 general application schema and writes billing state in the primary public schema.
-Only explicit health/readiness, Supabase customer Auth, customer summary, and
-customer-paper ledger routes are exposed by this ASGI app.
+Only explicit health/readiness, Supabase customer Auth, customer summary, read-only
+market scanning, and customer-paper ledger routes are exposed by this ASGI app.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import hmac
+import logging
 import time
 import uuid
 from decimal import Decimal
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import Field
 from sqlalchemy import select, text
 
@@ -27,17 +29,26 @@ from .monitoring import TelemetryMiddleware
 from .db import AppState, CustomerProfile, SessionLocal, engine
 from .customer_paper_api import _paper_feature_flags, build_customer_paper_router
 from .customer_paper_ledger import (
+    CustomerPaperLedgerBlocked,
     get_customer_paper_balances,
+    get_customer_paper_equity_history,
+    get_customer_paper_workspace_preferences,
     preflight_isolated_customer_paper_ledger,
+    record_customer_paper_equity_snapshot,
+    update_customer_paper_workspace_preferences,
 )
 from .customer_paper_lifecycle import get_customer_paper_positions
+from .data import fetch_forex, fetch_forex_oanda
 from .schemas import CustomerCredentials, MfaChallengeRequest, MfaVerifyRequest
 # Import only the existing Auth/JWT helpers and market-data adapter. The main ASGI
 # app is not mounted or served; its startup/lifespan is never executed in this process.
 from .main import (
-    MarketRequest, _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
-    _customer_paper_group_mark_prices, _supabase_request, _supabase_user,
-    _trusted_client_ip, api_rate_limit, customer_claims, market_data,
+    MarketRequest, _SCANNER_MAX_CONCURRENT_FETCHES, _scanner_metrics,
+    _scanner_normalize_symbols, _scanner_scan_symbols,
+    _bearer_token, _customer_mfa_factor_ids, _customer_mfa_state,
+    _customer_paper_group_mark_prices, _normalize_oanda_instrument,
+    _supabase_request, _supabase_user, _trusted_client_ip, api_rate_limit,
+    customer_claims, market_data,
 )
 
 
@@ -53,12 +64,14 @@ _PAPER_API_RATE_WINDOW_SECONDS = 60.0
 _PAPER_API_RATE_LIMIT_PER_MINUTE = 60
 _PAPER_API_IP_RATE_LIMIT_PER_MINUTE = 600
 _PAPER_ORDER_RATE_LIMIT_PER_MINUTE = 12
+_PAPER_MARKET_SCANNER_RATE_LIMIT_PER_MINUTE = 12
 _PAPER_READINESS_RATE_LIMIT_PER_MINUTE = 30
 _PAPER_API_RATE_MAX_BUCKETS = 8192
 _paper_preflight_cache_result: dict[str, Any] | None = None
 _paper_preflight_cache_at = 0.0
 _paper_preflight_cache_lock = asyncio.Lock()
 _paper_api_request_times: dict[str, list[float]] = {}
+_PAPER_SCANNER_SEMAPHORE = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT_FETCHES)
 
 
 # Test fixture for the PostgreSQL membership regression tests. The production preflight
@@ -294,6 +307,43 @@ async def _paper_runtime_preflight() -> dict[str, Any]:
     }
 
 
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Check for one non-UUID legacy identity without materializing the profile table."""
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect == "postgresql":
+        uuid_pattern = r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$"
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            CustomerProfile.auth_user_id.op("!~*")(uuid_pattern),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    if dialect == "sqlite":
+        uuid_glob = (
+            "[0-9a-fA-F]" * 8 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 4 + "-"
+            + "[0-9a-fA-F]" * 12
+        )
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            ~CustomerProfile.auth_user_id.op("GLOB")(uuid_glob),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    # Unknown dialects retain a conservative compatibility path.
+    legacy_refs = (await db.execute(
+        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
+    )).scalars().all()
+    for reference in legacy_refs:
+        try:
+            uuid.UUID(str(reference))
+        except (ValueError, TypeError, AttributeError):
+            return True
+    return False
+
+
 async def get_existing_customer(
     authorization: str | None,
     db,
@@ -313,6 +363,9 @@ async def get_existing_customer(
                 CustomerProfile.id,
                 CustomerProfile.auth_user_id,
                 CustomerProfile.status,
+                (
+                    ~(CustomerProfile.email.is_(None) | (CustomerProfile.email == ""))
+                ).label("has_stored_email"),
             ).where(CustomerProfile.auth_user_id == uid)
         )
     ).one_or_none()
@@ -321,34 +374,30 @@ async def get_existing_customer(
             403,
             "Customer profile must already exist before paper-only staging access",
         )
-    # The legacy rows have non-UUID Auth references and blank encrypted PII.
-    # Until those identities are mapped, no UUID-linked paper account can be
-    # proven distinct from them. Do not allow trading against a potentially
-    # duplicate customer profile.
-    legacy_auth_refs = (
-        await db.execute(
-            select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != uid)
+    # Never select/decrypt email in this keyless service. SQL returns only a
+    # boolean presence expression; ciphertext is not materialized by the ORM.
+    # Pending identities remain pending until the key-bearing customer service
+    # makes a verified decision. Active profiles with no stored email fail closed
+    # when any unmapped legacy Auth identity remains.
+    status = str(row.status or "").upper()
+    has_stored_email = bool(getattr(row, "has_stored_email", False))
+    identity_review_required = status == "PENDING_IDENTITY_REVIEW"
+    if status == "ACTIVE" and not has_stored_email:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+    effective_status = row.status
+    if identity_review_required and not allow_identity_review_summary:
+        raise HTTPException(
+            409,
+            "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
+            headers={"X-Atlas-Paper-Gate": "blocked"},
         )
-    ).scalars().all()
-    identity_review_required = str(row.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    for legacy_auth_ref in legacy_auth_refs:
-        try:
-            uuid.UUID(str(legacy_auth_ref))
-        except (ValueError, TypeError, AttributeError):
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                raise HTTPException(
-                    409,
-                    "Paper access is paused until legacy customer identities are manually reviewed. Contact support.",
-                )
-            break
 
     # Keep PII/encrypted columns out of the query: this service has no encryption
     # keyring and only needs the numeric tenant ID and active status.
     profile = SimpleNamespace(
         id=row.id,
         auth_user_id=row.auth_user_id,
-        status=row.status,
+        status=effective_status,
         identity_review_required=identity_review_required,
     )
     if str(getattr(profile, "status", "")).upper() != "ACTIVE" and not (
@@ -363,14 +412,27 @@ async def get_existing_customer(
 async def _paper_state_guard() -> None:
     """Check database and paper-ledger gates, then honor the persisted kill switch."""
     result = await _cached_paper_runtime_preflight()
+    gate_headers = {"X-Atlas-Paper-Gate": "blocked"}
     if result.get("status") != "PASS":
-        raise HTTPException(503, "Paper-only staging preflight is blocked: " + str(result.get("reason") or "UNKNOWN"))
+        raise HTTPException(
+            503,
+            "Paper-only staging preflight is blocked: " + str(result.get("reason") or "UNKNOWN"),
+            headers=gate_headers,
+        )
     async with SessionLocal() as db:
         state = await db.get(AppState, 1)
     if state is None:
-        raise HTTPException(503, "Paper-only staging risk state has not been provisioned")
+        raise HTTPException(
+            503,
+            "Paper-only staging risk state has not been provisioned",
+            headers=gate_headers,
+        )
     if state.kill_switch:
-        raise HTTPException(409, "Customer paper trading is halted by platform risk state")
+        raise HTTPException(
+            409,
+            "Customer paper trading is halted by platform risk state",
+            headers=gate_headers,
+        )
 
 
 app = FastAPI(
@@ -380,6 +442,39 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+_PAPER_STAGING_UI_DIR = Path(__file__).resolve().parent / "paper_staging_ui"
+
+
+@app.get("/", include_in_schema=True)
+async def paper_staging_home():
+    """Serve the dedicated browser console for the restricted paper-only API."""
+    return FileResponse(
+        _PAPER_STAGING_UI_DIR / "index.html",
+        media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/paper-staging.js", include_in_schema=True)
+async def paper_staging_javascript():
+    """Serve same-origin browser code under the staging Content Security Policy."""
+    return FileResponse(
+        _PAPER_STAGING_UI_DIR / "paper-staging.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/paper-staging.css", include_in_schema=True)
+async def paper_staging_stylesheet():
+    """Serve the small responsive stylesheet for the paper testing console."""
+    return FileResponse(
+        _PAPER_STAGING_UI_DIR / "paper-staging.css",
+        media_type="text/css; charset=utf-8",
+        headers={"Cache-Control": "no-store"},
+    )
+
 
 # Reject oversized customer-paper request bodies before auth/route handlers buffer them.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
@@ -392,12 +487,15 @@ app.middleware("http")(api_rate_limit)
 @app.middleware("http")
 async def _paper_customer_api_rate_limit(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/api/customer/paper/"):
-        request_class = (
-            "order"
-            if request.method.upper() == "POST" and "/orders" in path
-            else "general"
-        )
+    if path.startswith("/api/customer/paper/") or path == "/api/customer/market-scanner":
+        if path == "/api/customer/market-scanner":
+            request_class = "market"
+        else:
+            request_class = (
+                "order"
+                if request.method.upper() == "POST" and "/orders" in path
+                else "general"
+            )
         raw_authorization = str(request.headers.get("authorization") or "").strip()
         if raw_authorization.lower().startswith("bearer "):
             # Match _bearer_token exactly: case-insensitive scheme, split once, trim token.
@@ -410,6 +508,8 @@ async def _paper_customer_api_rate_limit(request: Request, call_next):
         limit = (
             _PAPER_ORDER_RATE_LIMIT_PER_MINUTE
             if request_class == "order"
+            else _PAPER_MARKET_SCANNER_RATE_LIMIT_PER_MINUTE
+            if request_class == "market"
             else _PAPER_API_RATE_LIMIT_PER_MINUTE
         )
         if not _allow_paper_api_request(
@@ -494,6 +594,21 @@ async def paper_customer_login(req: CustomerCredentials):
         "/auth/v1/token?grant_type=password",
         payload={"email": req.email.strip().lower(), "password": req.password},
     )
+
+
+@app.post("/api/auth/logout")
+async def paper_customer_logout(authorization: str | None = Header(default=None)):
+    """Revoke the caller's current Supabase Auth session during browser sign-out."""
+    token = _bearer_token(authorization)
+    # Resolve the user first so this endpoint cannot be used as an unauthenticated
+    # Auth-service relay. Supabase invalidates the session associated with this JWT.
+    await _supabase_user(token)
+    await _supabase_request(
+        "/auth/v1/logout?scope=local",
+        payload={},
+        access_token=token,
+    )
+    return {"status": "SIGNED_OUT"}
 
 
 @app.get("/api/auth/mfa/status")
@@ -622,31 +737,254 @@ async def paper_customer_me(authorization: str | None = Header(default=None)):
     }
 
 
+@app.get("/api/customer/market-scanner")
+async def paper_customer_market_scanner(
+    exchange: str = "binance",
+    asset_class: str = "crypto",
+    symbols: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Serve bounded, read-only customer scanner data without creating paper orders."""
+    if not settings.paper_staging_market_scanner_enabled:
+        raise HTTPException(404, "Market scanner is not enabled in this environment")
+
+    async with SessionLocal() as db:
+        await get_existing_customer(authorization, db, require_aal2=True)
+
+    asset = str(asset_class or "crypto").strip().lower()
+    if asset not in {"crypto", "forex", "commodity"}:
+        raise HTTPException(422, "Unsupported scanner asset class")
+    defaults = {
+        "crypto": "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT",
+        "forex": "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD",
+        "commodity": "XAU_USD,XAG_USD,WTICO_USD,BCO_USD,NATGAS_USD",
+    }
+    requested = _scanner_normalize_symbols(
+        symbols if symbols is not None else defaults[asset]
+    )
+    if not requested:
+        raise HTTPException(422, "At least one valid market symbol is required")
+
+    if asset == "crypto":
+        import ccxt
+        if exchange not in ccxt.exchanges:
+            raise HTTPException(422, "Unsupported exchange")
+        provider = exchange
+        fetch = lambda symbol: market_data(
+            MarketRequest(
+                asset="crypto",
+                symbol=symbol,
+                exchange=exchange,
+                timeframe="15m",
+                days=30,
+            )
+        )
+    else:
+        if asset == "forex":
+            allowed_fx = {
+                _normalize_oanda_instrument(symbol)
+                for symbol in settings.adaptive_established_fx_symbols.split(",")
+                if symbol.strip()
+            }
+            requested = list(dict.fromkeys(
+                _normalize_oanda_instrument(symbol) for symbol in requested
+            ))
+            if not requested or any(symbol not in allowed_fx for symbol in requested):
+                raise HTTPException(422, "FX scanner symbols must belong to the configured major currency universe")
+        use_oanda_practice = bool(
+            settings.forex_broker == "oanda"
+            and settings.oanda_practice
+            and settings.oanda_account_id
+            and settings.oanda_api_token
+        )
+        if asset == "commodity":
+            if not use_oanda_practice:
+                raise HTTPException(
+                    503,
+                    "Commodity scanning requires explicitly configured OANDA practice credentials; no live provider is used",
+                )
+            allowed_commodities = {
+                _normalize_oanda_instrument(symbol)
+                for symbol in settings.adaptive_established_commodity_symbols.split(",")
+                if symbol.strip()
+            }
+            requested = list(dict.fromkeys(
+                _normalize_oanda_instrument(symbol) for symbol in requested
+            ))
+            if not requested or any(symbol not in allowed_commodities for symbol in requested):
+                raise HTTPException(422, "Commodity scanner symbols must belong to the configured established instrument universe")
+        if use_oanda_practice:
+            provider = "oanda_practice"
+            fetch = lambda symbol: fetch_forex_oanda(
+                _normalize_oanda_instrument(symbol), "15m", 30
+            )
+        else:
+            provider = "yfinance_fx"
+            fetch = lambda symbol: fetch_forex(symbol, "15m", 30)
+
+    results = await _scanner_scan_symbols(
+        requested,
+        fetch=fetch,
+        metrics=_scanner_metrics,
+        semaphore=_PAPER_SCANNER_SEMAPHORE,
+        logger=logging.getLogger(__name__),
+    )
+    for result in results:
+        result["asset_class"] = asset
+        result["data_source"] = provider
+    results.sort(
+        key=lambda row: abs(float(row.get("score", 0.0) or 0.0)),
+        reverse=True,
+    )
+    return {
+        "asset_class": asset,
+        "exchange": provider,
+        "timeframe": "15m",
+        "data_source": provider,
+        "read_only": True,
+        "results": results,
+    }
+
+async def _record_paper_equity_snapshot_best_effort(
+    *,
+    customer_id: int,
+    equity: Decimal,
+    cash_equity: Decimal,
+    currency: str,
+) -> bool:
+    """Keep the paper portfolio read available when its optional history insert fails."""
+    try:
+        await record_customer_paper_equity_snapshot(
+            customer_id=customer_id,
+            equity=equity,
+            cash_equity=cash_equity,
+            currency=currency,
+        )
+        return True
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Customer paper equity snapshot failed; returning portfolio without a new history point"
+        )
+        return False
+
+
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
-    await _paper_state_guard()
+    # Authenticate first so unauthenticated callers cannot probe preflight or
+    # kill-switch state. Keep the paper gate before any balance/portfolio read.
     async with SessionLocal() as db:
         profile, _claims = await get_existing_customer(authorization, db)
+    await _paper_state_guard()
     balances = await get_customer_paper_balances(customer_id=int(profile.id))
     positions = await get_customer_paper_positions(customer_id=int(profile.id))
-    by_code = {
-        str(row.get("account_code") or ""): Decimal(str(row.get("balance") or "0"))
-        for row in balances
-    }
-    cash = by_code.get("PAPER_CASH")
-    # Open positions require a current, verified mark to calculate total equity.
-    # Never substitute cost basis or a stale value and label it as market equity.
-    equity = (
-        float(cash)
-        if cash is not None and not positions
+    cash_rows = [
+        row for row in balances
+        if str(row.get("account_code") or "") == "PAPER_CASH"
+    ]
+    # Only a single USDT cash balance with no open positions has a verified
+    # portfolio valuation in this paper-only path. Positions without fresh marks
+    # remain unavailable; cost basis is never substituted for current equity.
+    candidate_cash = (
+        Decimal(str(cash_rows[0].get("balance") or "0"))
+        if len(cash_rows) == 1
+        and str(cash_rows[0].get("currency") or "").upper() == "USDT"
         else None
     )
+    cash = (
+        candidate_cash
+        if candidate_cash is not None and candidate_cash.is_finite() and candidate_cash >= 0
+        else None
+    )
+    equity = float(cash) if cash is not None and not positions else None
+    if equity is not None:
+        await _record_paper_equity_snapshot_best_effort(
+            customer_id=int(profile.id),
+            equity=cash,
+            cash_equity=cash,
+            currency="USDT",
+        )
     return {
         "equity": equity,
         "cash_equity": float(cash) if cash is not None else None,
+        "currency": "USDT" if cash is not None else None,
         "positions": positions,
         "virtual_only": True,
-        "valuation_status": "CASH_ONLY" if not positions else "CURRENT_MARK_REQUIRED",
+        "valuation_status": "CASH_ONLY" if equity is not None else (
+            "CURRENT_MARK_REQUIRED" if positions else "CASH_BALANCE_UNAVAILABLE"
+        ),
+    }
+
+
+@app.get("/api/customer/portfolio/equity-history")
+async def paper_customer_portfolio_equity_history(
+    days: int = 30,
+    authorization: str | None = Header(default=None),
+):
+    if days not in {7, 30}:
+        raise HTTPException(422, "Equity history window must be 7 or 30 days")
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    await _paper_state_guard()
+    try:
+        points = await get_customer_paper_equity_history(
+            customer_id=int(profile.id),
+            days=days,
+        )
+    except (CustomerPaperLedgerBlocked, ValueError) as exc:
+        raise HTTPException(503, "Verified paper equity history is unavailable") from exc
+    return {
+        "scope": "customer_only",
+        "days": days,
+        "points": points,
+        "history_available": bool(points),
+        "history_complete": False,
+        "sampling_interval_minutes": 15,
+        "sampling_description": (
+            "Observed paper cash equity only while there are no open positions; "
+            "unpriced positions and unobserved intervals are not interpolated."
+        ),
+    }
+
+
+@app.get("/api/customer/workspace-preferences")
+async def paper_customer_get_workspace_preferences(
+    authorization: str | None = Header(default=None),
+):
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    try:
+        result = await get_customer_paper_workspace_preferences(
+            customer_id=int(profile.id)
+        )
+    except CustomerPaperLedgerBlocked as exc:
+        raise HTTPException(503, "Customer workspace preferences are unavailable") from exc
+    return {
+        "scope": "customer_only",
+        "configured": result["configured"],
+        "preferences": result["preferences"],
+    }
+
+
+@app.patch("/api/customer/workspace-preferences")
+async def paper_customer_update_workspace_preferences(
+    req: dict,
+    authorization: str | None = Header(default=None),
+):
+    async with SessionLocal() as db:
+        profile, _claims = await get_existing_customer(authorization, db)
+    try:
+        result = await update_customer_paper_workspace_preferences(
+            customer_id=int(profile.id),
+            updates=req,
+        )
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except CustomerPaperLedgerBlocked as exc:
+        raise HTTPException(503, "Customer workspace preferences are unavailable") from exc
+    return {
+        "scope": "customer_only",
+        "configured": result["configured"],
+        "preferences": result["preferences"],
     }
 
 

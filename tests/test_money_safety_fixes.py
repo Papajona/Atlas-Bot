@@ -414,7 +414,8 @@ def test_tron_sweep_is_bound_to_custody_transfer_and_unique_txid():
     main = Path("app/main.py").read_text()
     migration = Path("alembic/versions/0033b_sweep_reconciliation_integrity.py").read_text()
     assert "custody_transfer_id" in db
-    assert "uq_tron_sweep_transaction_id_nonempty" in db
+    assert "uq_tron_sweep_transaction_id_ci_nonempty" in db
+    assert "lower(transaction_id)" in db
     assert "create_custody_transfer" in main
     assert "transition_custody_transfer" in main
     assert "an in-flight sweep already exists for this deposit wallet" in main
@@ -590,7 +591,7 @@ def test_old_completed_learning_replays_are_reprocessed_after_version_change(mon
 
         import app.db as db_module
         import app.trade_learning as learning
-        from app.db import TradeLearningEpisode
+        from app.db import StrategyOutcome, TradeLearningEpisode
 
         monkeypatch.setattr(db_module, "SessionLocal", sessions)
         monkeypatch.setattr(
@@ -620,6 +621,19 @@ def test_old_completed_learning_replays_are_reprocessed_after_version_change(mon
                 entry_quantity=1.0,
             )
             db.add(episode)
+            db.add(StrategyOutcome(
+                trade_id=987654,
+                closing_trade_id=987655,
+                strategy="test",
+                asset="crypto",
+                symbol="BTC/USDT",
+                timeframe="1h",
+                side="buy",
+                lifecycle_status="CLOSED",
+                closing_quantity=1.0,
+                closing_notional=101.0,
+                fee_basis_complete=True,
+            ))
             await db.commit()
             episode_id = episode.id
 

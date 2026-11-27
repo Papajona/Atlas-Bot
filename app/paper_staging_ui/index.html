@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#101a2e">
+  <title>Atlas · Paper Testing</title>
+  <link rel="stylesheet" href="/paper-staging.css">
+  <script src="/paper-staging.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Atlas Paper Testing home">
+      <span class="brand-mark">A</span>
+      <span><strong>ATLAS</strong><small>Paper testing workspace</small></span>
+    </a>
+    <div class="mode"><span class="pulse"></span> PAPER ONLY</div>
+  </header>
+
+  <main class="shell">
+    <section class="intro">
+      <p class="eyebrow">RESTRICTED STAGING CONSOLE</p>
+      <h1>Test the paper-trading workflow.</h1>
+      <p class="lede">This workspace connects only to Atlas customer authentication and the isolated virtual paper ledger. It does not deposit, withdraw, or place orders with an exchange.</p>
+      <div class="safety-row">
+        <span><b>Live trading</b> Disabled</span>
+        <span><b>Live payouts</b> Disabled</span>
+        <span><b>Broker mode</b> Sandbox</span>
+      </div>
+    </section>
+
+    <section class="panel auth-panel" aria-labelledby="auth-heading">
+      <div class="panel-head">
+        <div><p class="eyebrow">01 · CUSTOMER ACCESS</p><h2 id="auth-heading">Sign in or create a test account</h2></div>
+        <span class="step-state" id="auth-state">Not signed in</span>
+      </div>
+      <form id="auth-form" autocomplete="off">
+        <div class="field-grid">
+          <label>Email address<input id="email" type="email" autocomplete="off" required maxlength="254" placeholder="you@example.com"></label>
+          <label>Password<input id="password" type="password" autocomplete="off" required minlength="8" maxlength="128" placeholder="Your account password"></label>
+        </div>
+        <div class="button-row">
+          <button class="primary" id="login-button" type="button">Sign in</button>
+          <button class="secondary" id="signup-button" type="button">Create account</button>
+          <button class="quiet" id="signout-button" type="button" disabled>Sign out</button>
+        </div>
+      </form>
+      <p class="hint">Email confirmation may be required before you can finish setup. Use a test identity, not a real customer account.</p>
+      <div class="notice" id="auth-message" role="status" aria-live="polite">Sign in with a confirmed test account to continue.</div>
+
+      <div id="mfa-panel" class="subpanel" hidden>
+        <div class="panel-head compact">
+          <div><p class="eyebrow">02 · ACCOUNT SECURITY</p><h3>Google Authenticator / TOTP</h3></div>
+          <span class="step-state" id="mfa-state">Required</span>
+        </div>
+        <p id="mfa-instructions" class="hint">Complete authenticator verification before paper access is enabled.</p>
+        <div id="totp-setup" class="totp-setup" hidden>
+          <p>Scan the QR code with your authenticator app, or enter the setup key manually.</p>
+          <img id="totp-qr" alt="Authenticator setup QR code" hidden>
+          <label>Manual setup key<code id="totp-secret">—</code></label>
+        </div>
+        <div class="field-grid">
+          <label>6-digit authenticator code<input id="totp-code" inputmode="numeric" autocomplete="off" pattern="[0-9]{6}" maxlength="6" placeholder="000000"></label>
+        </div>
+        <div class="button-row">
+          <button class="secondary" id="enroll-button" type="button" hidden>Set up authenticator</button>
+          <button class="primary" id="verify-button" type="button" disabled>Verify code</button>
+        </div>
+        <div class="notice" id="mfa-message" role="status" aria-live="polite">Authenticator verification is required.</div>
+      </div>
+    </section>
+
+    <section id="workspace" class="workspace" hidden>
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">03 · TEST ACCOUNT</p><h2 id="welcome">Paper account</h2><p class="hint" id="profile-summary">Authenticated test customer</p></div>
+          <button class="secondary" id="refresh-button" type="button">Refresh data</button>
+        </div>
+        <div class="metrics">
+          <article class="metric"><span>Virtual cash</span><strong id="cash-balance">—</strong><small>USDT · simulated</small></article>
+          <article class="metric"><span>Account equity</span><strong id="equity">—</strong><small id="valuation">Waiting for account setup</small></article>
+          <article class="metric"><span>Open positions</span><strong id="position-count">—</strong><small>Paper ledger only</small></article>
+          <article class="metric"><span>Open orders</span><strong id="order-count">—</strong><small>Completed-bar execution</small></article>
+        </div>
+        <div class="button-row">
+          <button class="primary" id="initialize-button" type="button">Initialize virtual paper balance</button>
+          <span class="hint" id="initialize-note">This creates simulated starting cash. It is not a deposit.</span>
+        </div>
+      </section>
+
+      <section class="panel scanner-panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">04 · READ-ONLY MARKET DATA</p><h2>Market scanner</h2></div>
+          <span class="step-state">Advisory only · 15m</span>
+        </div>
+        <label class="scanner-label">Spot markets, comma-separated
+          <input id="scanner-symbols" type="text" maxlength="320" value="BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT" autocomplete="off" spellcheck="false">
+        </label>
+        <p class="hint">Reads public market candles for up to eight symbols. Signals are rule-based test indicators, not AI advice or trade instructions. This tool never places or advances orders.</p>
+        <div class="button-row">
+          <button class="secondary" id="scanner-button" type="button">Scan markets</button>
+        </div>
+        <div class="notice info" id="scanner-message" role="status" aria-live="polite">Run a scan to load current public market indicators.</div>
+        <div id="scanner-results" class="table-wrap"><p class="empty">No market scan loaded.</p></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">05 · SPOT PAPER ORDER</p><h2>Submit a test order</h2></div>
+          <span class="step-state">No exchange order</span>
+        </div>
+        <form id="order-form">
+          <div class="field-grid order-grid">
+            <label>Market<select id="symbol"><option>BTC/USDT</option><option>ETH/USDT</option><option>SOL/USDT</option><option>BNB/USDT</option><option>XRP/USDT</option></select></label>
+            <label>Side<select id="side"><option value="BUY">Buy</option><option value="SELL">Sell</option></select></label>
+            <label>Order type<select id="order-type"><option value="MARKET">Market</option><option value="LIMIT">Limit</option></select></label>
+            <label>Quantity<input id="quantity" type="number" min="0.00000001" max="100000000" step="any" required placeholder="0.001"></label>
+            <label id="limit-field" hidden>Limit price<input id="limit-price" type="number" min="0.00000001" step="any" placeholder="Price in USDT"></label>
+            <label>Completed-bar timeframe<select id="timeframe"><option>15m</option><option selected>1h</option><option>4h</option><option>1d</option></select></label>
+          </div>
+          <p class="hint">Orders use verified Binance spot market candles for simulated fills. A market-data failure blocks the order; no fill price can be supplied by the browser.</p>
+          <div class="button-row"><button class="primary" id="submit-order" type="submit">Submit paper order</button></div>
+        </form>
+        <div class="notice" id="order-message" role="status" aria-live="polite">Initialize the virtual account before submitting an order.</div>
+      </section>
+
+      <div class="data-grid">
+        <section class="panel">
+          <div class="panel-head"><div><p class="eyebrow">06 · VIRTUAL POSITIONS</p><h2>Positions</h2></div></div>
+          <div id="positions" class="table-wrap"><p class="empty">No positions loaded.</p></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><div><p class="eyebrow">07 · ORDER LIFECYCLE</p><h2>Open orders</h2></div></div>
+          <div id="orders" class="table-wrap"><p class="empty">No orders loaded.</p></div>
+        </section>
+      </div>
+      <section class="panel history-panel">
+        <div class="panel-head">
+          <div><p class="eyebrow">08 · PAPER EXECUTION HISTORY</p><h2>Recent orders and fills</h2></div>
+          <span class="step-state">Last 50 · tenant scoped</span>
+        </div>
+        <p class="hint">Includes submitted, filled, cancelled, expired and rejected paper orders. Fill prices and quantities come from the isolated paper ledger.</p>
+        <div id="history" class="table-wrap"><p class="empty">No order history loaded.</p></div>
+      </section>
+      <p class="footnote">Paper results are simulated and are not evidence of future performance. Do not transfer funds or use customer credentials in this environment.</p>
+    </section>
+
+    <section class="panel" id="blocked-state" hidden>
+      <p class="eyebrow">STAGING SAFETY GATE</p>
+      <h2>Paper trading is not available yet.</h2>
+      <p class="hint">The server must pass its read-only identity checks, isolated-ledger preflight, and paper-only kill-switch checks before account operations are accepted.</p>
+      <div class="button-row">
+        <button class="secondary" id="retry-preflight" type="button">Recheck staging readiness</button>
+      </div>
+    </section>
+
+    <footer><span>Atlas · restricted staging</span><a href="/livez">Service liveness</a></footer>
+  </main>
+</body>
+</html>

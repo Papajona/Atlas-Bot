@@ -8,6 +8,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -35,6 +39,24 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
+ * Parse ISO-8601 server timestamps with either a Z suffix or an explicit UTC offset.
+ *
+ * OffsetDateTime handles Python datetime.isoformat() output such as +00:00 across
+ * Android's supported java.time implementations; Instant.parse is less portable
+ * for that representation on older Android runtimes.
+ */
+internal fun parseEquityObservationEpochMillis(value: String): Long? =
+    runCatching {
+        java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli()
+    }.getOrNull()
+
+/** Keep a scrub selection inside the current timeframe's point list. */
+internal fun safeEquityChartSelectedIndex(selectedIndex: Int?, pointCount: Int): Int? {
+    if (pointCount <= 0) return null
+    return (selectedIndex ?: pointCount - 1).coerceIn(0, pointCount - 1)
+}
+
+/**
  * Historical daily equity and profit data point for 30-day visualization.
  */
 data class EquityPoint(
@@ -42,7 +64,8 @@ data class EquityPoint(
     val dateLabel: String,
     val equity: Double,
     val dailyPnl: Double,
-    val cumProfit: Double
+    val cumProfit: Double,
+    val observedAtEpochMillis: Long
 )
 
 enum class DashboardTab {
@@ -52,11 +75,15 @@ enum class DashboardTab {
     SETTINGS
 }
 
-enum class AssetClass(val label: String, val badge: String) {
-    ALL("All Markets", "🌐"),
-    CRYPTO("Crypto", "🪙"),
-    FOREX("Forex", "💱"),
-    COMMODITIES("Commodities", "🥇")
+enum class AssetClass(
+    val label: String,
+    val badge: String,
+    val scannerAssetClass: String
+) {
+    ALL("All Markets", "🌐", "crypto"),
+    CRYPTO("Crypto", "🪙", "crypto"),
+    FOREX("Forex", "💱", "forex"),
+    COMMODITIES("Commodities", "🥇", "commodity")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -71,7 +98,16 @@ fun UserDashboardScreen(
     var currentTab by remember { mutableStateOf(DashboardTab.HOME) }
     var selectedAssetClass by remember { mutableStateOf(AssetClass.ALL) }
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
+    var chartCrosshairEnabled by remember { mutableStateOf(true) }
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
+    var showPaperTradeDialog by remember { mutableStateOf(false) }
+    var paperOrders by remember { mutableStateOf<List<CustomerDataClient.PaperOrder>>(emptyList()) }
+    var paperBalances by remember { mutableStateOf<List<CustomerDataClient.PaperBalance>>(emptyList()) }
+    var paperOrdersBusy by remember { mutableStateOf(false) }
+    var paperOrderBusy by remember { mutableStateOf(false) }
+    var paperOrderFeedback by remember { mutableStateOf<String?>(null) }
+    var paperOrderError by remember { mutableStateOf<String?>(null) }
+    var paperOrdersRefreshKey by remember { mutableIntStateOf(0) }
     var activeCustomerToken by remember { mutableStateOf(customerAccessToken) }
     var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
     var customerSignInError by remember { mutableStateOf<String?>(null) }
@@ -82,24 +118,106 @@ fun UserDashboardScreen(
     var pendingCustomerSession by remember { mutableStateOf<CustomerAuthClient.Session?>(null) }
     val customerAuthScope = rememberCoroutineScope()
 
-    LaunchedEffect(backendUrl, activeCustomerToken) {
+    LaunchedEffect(backendUrl, activeCustomerToken, selectedAssetClass) {
         val token = activeCustomerToken?.takeIf { it.isNotBlank() }
         customerSnapshot = if (token == null || backendUrl.isBlank()) {
             null
         } else {
-            runCatching { CustomerDataClient(backendUrl).loadSnapshot(token) }.getOrNull()
+            runCatching {
+                CustomerDataClient(backendUrl).loadSnapshot(
+                    token,
+                    scannerAssetClass = selectedAssetClass.scannerAssetClass
+                )
+            }.getOrNull()
         }
     }
 
-    // Do not fabricate account history. The authenticated customer API must supply it.
-    val equityHistory = remember { emptyList<EquityPoint>() }
+    LaunchedEffect(backendUrl, activeCustomerToken, paperOrdersRefreshKey) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+        if (token == null || backendUrl.isBlank()) {
+            paperOrders = emptyList()
+            paperBalances = emptyList()
+            paperOrdersBusy = false
+            paperOrderError = null
+        } else {
+            paperOrdersBusy = true
+            val client = CustomerDataClient(backendUrl)
+            val balancesResult = runCatching { client.loadPaperBalances(token) }
+            val ordersResult = runCatching { client.loadOpenPaperOrders(token) }
+            if (activeCustomerToken == token) {
+                balancesResult.onSuccess { paperBalances = it }
+                ordersResult.onSuccess { paperOrders = it }
+                val errors = listOfNotNull(
+                    balancesResult.exceptionOrNull()?.message,
+                    ordersResult.exceptionOrNull()?.message,
+                )
+                paperOrderError = errors.firstOrNull()
+                paperOrdersBusy = false
+            }
+        }
+    }
+
+    LaunchedEffect(backendUrl, activeCustomerToken) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+        if (token == null || backendUrl.isBlank()) {
+            selectedTimeframeDays = 30
+            chartCrosshairEnabled = true
+        } else {
+            runCatching {
+                CustomerDataClient(backendUrl).loadWorkspacePreferences(token)
+            }.onSuccess { preferences ->
+                selectedTimeframeDays = preferences.defaultChartWindowDays
+                chartCrosshairEnabled = preferences.chartCrosshairEnabled
+            }
+        }
+    }
+
+    fun saveChartPreferences(
+        defaultChartWindowDays: Int? = null,
+        crosshairEnabled: Boolean? = null
+    ) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() } ?: return
+        if (backendUrl.isBlank()) return
+        customerAuthScope.launch {
+            runCatching {
+                CustomerDataClient(backendUrl).updateWorkspacePreferences(
+                    token,
+                    defaultChartWindowDays = defaultChartWindowDays,
+                    chartCrosshairEnabled = crosshairEnabled
+                )
+            }.onFailure {
+                customerInfoMessage = "Could not sync chart preferences. Your current selection remains active on this screen."
+            }
+        }
+    }
+
+    // Only server-persisted, customer-scoped observations are eligible for the chart.
+    // The API records at most one observation per 15-minute bucket when portfolio data is read.
+    val equityHistory = remember(customerSnapshot?.equityHistory) {
+        val observations = customerSnapshot?.equityHistory.orEmpty()
+        val firstEquity = observations.firstOrNull()?.equity
+        var previousEquity: Double? = null
+        observations.mapIndexedNotNull { index, point ->
+            val timestamp = runCatching {
+                parseEquityObservationEpochMillis(point.observedAt)
+            }.getOrNull() ?: return@mapIndexedNotNull null
+            val dailyChange = previousEquity?.let { point.equity - it } ?: 0.0
+            previousEquity = point.equity
+            EquityPoint(
+                day = index + 1,
+                dateLabel = point.observedAt.take(16).replace('T', ' ') + " UTC",
+                equity = point.equity,
+                dailyPnl = dailyChange,
+                cumProfit = point.equity - (firstEquity ?: point.equity),
+                observedAtEpochMillis = timestamp
+            )
+        }
+    }
 
     val displayPoints = remember(selectedTimeframeDays, equityHistory) {
-        if (selectedTimeframeDays == 7) {
-            equityHistory.takeLast(7)
-        } else {
-            equityHistory
-        }
+        val cutoff = System.currentTimeMillis() -
+            selectedTimeframeDays.toLong() * 24L * 60L * 60L * 1000L
+        equityHistory.filter { it.observedAtEpochMillis >= cutoff }
     }
 
     // Dynamically retrieve theme colors supporting Light and Dark modes
@@ -283,7 +401,11 @@ fun UserDashboardScreen(
                                 points = displayPoints,
                                 selectedTimeframe = selectedTimeframeDays,
                                 selectedAssetClass = selectedAssetClass,
-                                onTimeframeChange = { selectedTimeframeDays = it },
+                                onTimeframeChange = {
+                                    selectedTimeframeDays = it
+                                    saveChartPreferences(defaultChartWindowDays = it)
+                                },
+                                crosshairEnabled = chartCrosshairEnabled,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -295,7 +417,8 @@ fun UserDashboardScreen(
                         // Recent Activity Card (Multi-Asset)
                         item {
                             RecentActivityCard(
-                                selectedAssetClass = selectedAssetClass,
+                                trades = customerSnapshot?.recentTrades.orEmpty(),
+                                unavailableReason = customerSnapshot?.recentTradesUnavailableReason,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -313,9 +436,17 @@ fun UserDashboardScreen(
                                 textPrimary = textPrimary,
                                 onAction = { actionName ->
                                     when (actionName) {
-                                        "New Trade" -> actionDialogMessage = "New Paper Trade:\nSelect asset to place disciplined trade:\n• Crypto: BTC/USDT, ETH/USDT\n• Forex: EUR/USD, GBP/USD (OANDA demo)\n• Commodities: Gold XAU/USD (OANDA demo)"
-                                        "Deposit" -> actionDialogMessage = "Deposit USDT: Dedicated TRC-20 omnibus deposit addresses enabled."
-                                        "Withdraw" -> actionDialogMessage = "Withdrawal Portal: 2-man approval and AAL2 step-up authentication required."
+                                        "New Trade" -> {
+                                            if (activeCustomerToken.isNullOrBlank()) {
+                                                actionDialogMessage = "Sign in and verify your authenticator before opening the customer paper-order ticket."
+                                            } else {
+                                                paperOrderFeedback = null
+                                                paperOrderError = null
+                                                showPaperTradeDialog = true
+                                            }
+                                        }
+                                        "Deposit" -> actionDialogMessage = "Customer funding is disabled in this build. No deposit address is provided here. Do not send funds based on this screen."
+                                        "Withdraw" -> actionDialogMessage = "Customer withdrawals are disabled in this build. No payout will be submitted from this screen."
                                         "Analytics" -> currentTab = DashboardTab.PORTFOLIO
                                     }
                                 }
@@ -381,7 +512,11 @@ fun UserDashboardScreen(
                                 points = displayPoints,
                                 selectedTimeframe = selectedTimeframeDays,
                                 selectedAssetClass = selectedAssetClass,
-                                onTimeframeChange = { selectedTimeframeDays = it },
+                                onTimeframeChange = {
+                                    selectedTimeframeDays = it
+                                    saveChartPreferences(defaultChartWindowDays = it)
+                                },
+                                crosshairEnabled = chartCrosshairEnabled,
                                 cardSurface = cardSurface,
                                 cardBorder = cardBorder,
                                 textPrimary = textPrimary,
@@ -462,10 +597,17 @@ fun UserDashboardScreen(
                                         color = textPrimary
                                     )
                                     Spacer(modifier = Modifier.height(8.dp))
+                                    val scannerMessage = customerSnapshot?.marketQuotes
+                                        ?.takeIf { it.isNotEmpty() }
+                                        ?.joinToString("\n") {
+                                            "${it.symbol}: ${it.price} • ${it.signal}"
+                                        } ?: when (selectedAssetClass) {
+                                            AssetClass.FOREX -> "FX quotes unavailable. Confirm the scanner entitlement and read-only provider response."
+                                            AssetClass.COMMODITIES -> "Commodity quotes unavailable. This scanner requires configured OANDA practice credentials and supported instruments."
+                                            else -> "Crypto market data unavailable. Sign in to an authorized customer account and confirm the market-scanner entitlement and provider."
+                                        }
                                     Text(
-                                        text = customerSnapshot?.marketQuotes?.takeIf { it.isNotEmpty() }?.joinToString("\n") {
-                                    "${it.symbol}: ${it.price} • ${it.signal}"
-                                } ?: "Live market data unavailable. Sign in to an authorized customer account and ensure the market-scanner entitlement and provider are available.",
+                                        text = scannerMessage,
                                         fontSize = 13.sp,
                                         color = textMuted,
                                         lineHeight = 22.sp
@@ -483,11 +625,131 @@ fun UserDashboardScreen(
                         userEmail = customerSnapshot?.profile?.email ?: "Unavailable until account sign-in",
                         onOpenOperatorConsole = onOpenOperatorConsole,
                         onOpenPortal = onOpenPortal,
+                        planName = customerSnapshot?.planName,
+                        subscriptionStatus = customerSnapshot?.subscriptionStatus,
+                        defaultChartWindowDays = selectedTimeframeDays,
+                        onDefaultChartWindowChange = {
+                            selectedTimeframeDays = it
+                            saveChartPreferences(defaultChartWindowDays = it)
+                        },
+                        chartCrosshairEnabled = chartCrosshairEnabled,
+                        onChartCrosshairChange = {
+                            chartCrosshairEnabled = it
+                            saveChartPreferences(crosshairEnabled = it)
+                        },
+                        onSignOut = {
+                            // End the local session immediately. The remote revocation
+                            // request is best-effort and must never keep the signed-in UI usable.
+                            val token = activeCustomerToken
+                            activeCustomerToken = null
+                            customerSnapshot = null
+                            customerMfaSetupSecret = null
+                            customerMfaChallenge = null
+                            pendingCustomerSession = null
+                            customerInfoMessage = "Signed out on this device."
+                            currentTab = DashboardTab.HOME
+
+                            if (!token.isNullOrBlank() && backendUrl.isNotBlank()) {
+                                customerAuthScope.launch {
+                                    runCatching {
+                                        CustomerAuthClient(backendUrl).logout(token)
+                                    }.onFailure {
+                                        // Do not overwrite the message or state of a new session
+                                        // if the customer signs in while this request is in flight.
+                                        if (activeCustomerToken == null) {
+                                            customerInfoMessage =
+                                                "Signed out on this device. Remote token revocation could not be confirmed."
+                                        }
+                                    }
+                                }
+                            }
+                        },
                         modifier = Modifier.padding(innerPadding)
                     )
                 }
             }
         }
+    }
+
+    if (showPaperTradeDialog) {
+        PaperTradeDialog(
+            orders = paperOrders,
+            balances = paperBalances,
+            ordersBusy = paperOrdersBusy,
+            submittingOrUpdating = paperOrderBusy,
+            feedback = paperOrderFeedback,
+            error = paperOrderError,
+            onDismiss = { showPaperTradeDialog = false },
+            onRefresh = { paperOrdersRefreshKey += 1 },
+            onSubmit = { symbol, side, quantity, orderType, limitPrice ->
+                val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+                if (token == null || backendUrl.isBlank()) {
+                    paperOrderError = "Customer sign-in is required to submit a paper order."
+                } else {
+                    paperOrderBusy = true
+                    paperOrderError = null
+                    paperOrderFeedback = null
+                    customerAuthScope.launch {
+                        runCatching {
+                            CustomerDataClient(backendUrl).submitPaperOrder(
+                                accessToken = token,
+                                symbol = symbol,
+                                side = side,
+                                quantity = quantity,
+                                orderType = orderType,
+                                limitPrice = limitPrice,
+                                timeframe = "1h"
+                            )
+                        }.onSuccess { action ->
+                            paperOrderFeedback = "Paper order " + action.status.lowercase().replace('_', ' ') +
+                                (action.order?.let { ". Current status: " + it.status } ?: "") +
+                                (action.fillNote?.let { ". " + it } ?: "")
+                            paperOrdersRefreshKey += 1
+                        }.onFailure { error ->
+                            paperOrderError = error.message ?: "Paper order submission failed"
+                        }
+                        paperOrderBusy = false
+                    }
+                }
+            },
+            onAdvance = { clientOrderId ->
+                val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+                if (token != null && backendUrl.isNotBlank()) {
+                    paperOrderBusy = true
+                    paperOrderError = null
+                    customerAuthScope.launch {
+                        runCatching {
+                            CustomerDataClient(backendUrl).advancePaperOrder(token, clientOrderId)
+                        }.onSuccess { action ->
+                            paperOrderFeedback = "Paper order " + action.status.lowercase().replace('_', ' ') +
+                                (action.order?.let { ". Filled " + it.filledQuantity + " of " + it.quantity + "." } ?: "")
+                            paperOrdersRefreshKey += 1
+                        }.onFailure { error ->
+                            paperOrderError = error.message ?: "Could not refresh paper order"
+                        }
+                        paperOrderBusy = false
+                    }
+                }
+            },
+            onCancel = { clientOrderId ->
+                val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+                if (token != null && backendUrl.isNotBlank()) {
+                    paperOrderBusy = true
+                    paperOrderError = null
+                    customerAuthScope.launch {
+                        runCatching {
+                            CustomerDataClient(backendUrl).cancelPaperOrder(token, clientOrderId)
+                        }.onSuccess { action ->
+                            paperOrderFeedback = "Paper order " + action.status.lowercase().replace('_', ' ') + "."
+                            paperOrdersRefreshKey += 1
+                        }.onFailure { error ->
+                            paperOrderError = error.message ?: "Paper order cancellation failed"
+                        }
+                        paperOrderBusy = false
+                    }
+                }
+            }
+        )
     }
 
     if (actionDialogMessage != null) {
@@ -507,6 +769,211 @@ fun UserDashboardScreen(
             containerColor = cardSurface
         )
     }
+}
+
+@Composable
+private fun PaperTradeDialog(
+    orders: List<CustomerDataClient.PaperOrder>,
+    balances: List<CustomerDataClient.PaperBalance>,
+    ordersBusy: Boolean,
+    submittingOrUpdating: Boolean,
+    feedback: String?,
+    error: String?,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onSubmit: (String, String, String, String, String?) -> Unit,
+    onAdvance: (String) -> Unit,
+    onCancel: (String) -> Unit
+) {
+    var symbol by remember { mutableStateOf("BTC/USDT") }
+    var side by remember { mutableStateOf("BUY") }
+    var orderType by remember { mutableStateOf("MARKET") }
+    var quantity by remember { mutableStateOf("0.001") }
+    var limitPrice by remember { mutableStateOf("") }
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
+    val quantityValid = quantity.toBigDecimalOrNull()?.signum() == 1
+    val limitValid = orderType != "LIMIT" || limitPrice.toBigDecimalOrNull()?.signum() == 1
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("New paper order", fontWeight = FontWeight.Bold, color = theme.textPrimary)
+                Text("Virtual USDT ledger • Crypto spot only", fontSize = 12.sp, color = theme.textMuted)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "This ticket submits only to Atlas's isolated customer paper ledger. It does not place a broker order, move real funds, or enable live trading. Paper fills require a later verified completed market bar.",
+                    fontSize = 12.sp,
+                    color = theme.textMuted
+                )
+                val virtualCash = balances.firstOrNull {
+                    it.accountCode == "PAPER_CASH" && it.currency == "USDT"
+                }?.balance
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = theme.cardSurface),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(theme.cardBorder))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Virtual cash balance", color = theme.textMuted, fontSize = 12.sp)
+                        Text(
+                            virtualCash?.let { "$it USDT" } ?: "Unavailable",
+                            color = theme.textPrimary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+                Text("Market", fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("BTC/USDT", "ETH/USDT").forEach { candidate ->
+                        FilterChip(
+                            selected = symbol == candidate,
+                            onClick = { symbol = candidate },
+                            label = { Text(candidate) },
+                            enabled = !submittingOrUpdating
+                        )
+                    }
+                }
+                Text("Side", fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = side == "BUY",
+                        onClick = { side = "BUY" },
+                        label = { Text("Buy") },
+                        enabled = !submittingOrUpdating
+                    )
+                    FilterChip(
+                        selected = side == "SELL",
+                        onClick = { side = "SELL" },
+                        label = { Text("Sell") },
+                        enabled = !submittingOrUpdating
+                    )
+                }
+                Text("Order type", fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = orderType == "MARKET",
+                        onClick = { orderType = "MARKET"; limitPrice = "" },
+                        label = { Text("Market") },
+                        enabled = !submittingOrUpdating
+                    )
+                    FilterChip(
+                        selected = orderType == "LIMIT",
+                        onClick = { orderType = "LIMIT" },
+                        label = { Text("Limit") },
+                        enabled = !submittingOrUpdating
+                    )
+                }
+                OutlinedTextField(
+                    value = quantity,
+                    onValueChange = { quantity = it.filter { ch -> ch.isDigit() || ch == '.' }.take(24) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Quantity in base asset") },
+                    supportingText = { Text("Example: 0.001 BTC") },
+                    singleLine = true,
+                    enabled = !submittingOrUpdating,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                )
+                if (orderType == "LIMIT") {
+                    OutlinedTextField(
+                        value = limitPrice,
+                        onValueChange = { limitPrice = it.filter { ch -> ch.isDigit() || ch == '.' }.take(24) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Limit price (USDT)") },
+                        singleLine = true,
+                        enabled = !submittingOrUpdating,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                    )
+                }
+                if (!feedback.isNullOrBlank()) {
+                    Text(feedback, color = theme.emeraldAccent, fontSize = 12.sp)
+                }
+                if (!error.isNullOrBlank()) {
+                    Text(error, color = theme.redDanger, fontSize = 12.sp)
+                }
+                Button(
+                    onClick = {
+                        onSubmit(symbol, side, quantity, orderType, limitPrice.takeIf { orderType == "LIMIT" })
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !submittingOrUpdating && quantityValid && limitValid
+                ) {
+                    if (submittingOrUpdating) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (submittingOrUpdating) "Processing…" else "Submit virtual paper order")
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Open paper orders", fontWeight = FontWeight.Bold, color = theme.textPrimary)
+                    TextButton(onClick = onRefresh, enabled = !ordersBusy && !submittingOrUpdating) {
+                        Text(if (ordersBusy) "Refreshing…" else "Refresh")
+                    }
+                }
+                if (orders.isEmpty()) {
+                    Text(
+                        if (ordersBusy) "Loading open paper orders…" else "No open paper orders.",
+                        color = theme.textMuted,
+                        fontSize = 12.sp
+                    )
+                } else {
+                    orders.forEach { order ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = theme.cardSurface),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(theme.cardBorder))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    "${order.side} ${order.quantity} ${order.symbol}",
+                                    color = theme.textPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "${order.orderType} • ${order.status} • Filled ${order.filledQuantity}/${order.quantity}",
+                                    color = theme.textMuted,
+                                    fontSize = 11.sp
+                                )
+                                if (order.status in setOf("SUBMITTED", "PARTIALLY_FILLED")) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        TextButton(
+                                            enabled = !submittingOrUpdating,
+                                            onClick = { onAdvance(order.clientOrderId) }
+                                        ) { Text("Check next bar") }
+                                        TextButton(
+                                            enabled = !submittingOrUpdating,
+                                            onClick = { onCancel(order.clientOrderId) }
+                                        ) { Text("Cancel order", color = theme.redDanger) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done", color = theme.brandTeal) }
+        },
+        containerColor = theme.cardSurface
+    )
 }
 
 @Composable
@@ -870,6 +1337,7 @@ private fun PortfolioPerformanceCard(
     selectedTimeframe: Int,
     selectedAssetClass: AssetClass = AssetClass.ALL,
     onTimeframeChange: (Int) -> Unit,
+    crosshairEnabled: Boolean = true,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -877,6 +1345,10 @@ private fun PortfolioPerformanceCard(
     emeraldAccent: Color
 ) {
     var selectedIndex by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(points) { selectedIndex = null }
+    LaunchedEffect(crosshairEnabled) {
+        if (!crosshairEnabled) selectedIndex = null
+    }
 
     Card(
         modifier = Modifier
@@ -893,9 +1365,8 @@ private fun PortfolioPerformanceCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val assetSuffix = if (selectedAssetClass != AssetClass.ALL) " • ${selectedAssetClass.label}" else ""
                 Text(
-                    text = "Portfolio Performance (${selectedTimeframe}D$assetSuffix)",
+                    text = "Portfolio Equity (${selectedTimeframe}D)",
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = textPrimary
@@ -944,13 +1415,13 @@ private fun PortfolioPerformanceCard(
                 ) {
                     Column {
                         Text(
-                            text = "$${String.format(Locale.US, "%,.2f", activePoint.equity)}",
+                            text = "${String.format(Locale.US, "%,.2f", activePoint.equity)} USDT",
                             fontSize = 20.sp,
                             fontWeight = FontWeight.Bold,
                             color = textPrimary
                         )
                         Text(
-                            text = "${activePoint.dateLabel} • Cum. PnL: +$${String.format(Locale.US, "%.2f", activePoint.cumProfit)}",
+                            text = "${activePoint.dateLabel} • Change: ${String.format(Locale.US, "%+.2f", activePoint.cumProfit)} USDT",
                             fontSize = 11.sp,
                             color = emeraldAccent
                         )
@@ -978,6 +1449,7 @@ private fun PortfolioPerformanceCard(
                 points = points,
                 selectedIndex = selectedIndex,
                 onSelectIndex = { selectedIndex = it },
+                crosshairEnabled = crosshairEnabled,
                 accentColor = emeraldAccent,
                 modifier = Modifier
                     .fillMaxWidth()
@@ -992,6 +1464,7 @@ private fun RechartsMonotoneAreaCanvas(
     points: List<EquityPoint>,
     selectedIndex: Int?,
     onSelectIndex: (Int?) -> Unit,
+    crosshairEnabled: Boolean = true,
     accentColor: Color,
     modifier: Modifier = Modifier
 ) {
@@ -1001,8 +1474,8 @@ private fun RechartsMonotoneAreaCanvas(
     val maxEquity = points.maxOf { it.equity } * 1.015
     val equityRange = max(1.0, maxEquity - minEquity)
 
-    Canvas(
-        modifier = modifier
+    val interactionModifier = if (crosshairEnabled) {
+        Modifier
             .pointerInput(points) {
                 detectTapGestures(
                     onPress = { offset ->
@@ -1029,11 +1502,26 @@ private fun RechartsMonotoneAreaCanvas(
                     }
                 )
             }
-    ) {
+    } else {
+        Modifier
+    }
+
+    Canvas(modifier = modifier.then(interactionModifier)) {
         val width = size.width
         val height = size.height
         val n = points.size
 
+        // A single persisted observation is still useful account history. Show its
+        // exact sample as a point instead of leaving the chart area visually blank;
+        // do not invent a line or interpolate missing observations.
+        if (n == 1) {
+            drawCircle(
+                color = accentColor,
+                radius = 6.dp.toPx(),
+                center = Offset(width / 2f, height / 2f)
+            )
+            return@Canvas
+        }
         if (n < 2) return@Canvas
 
         val stepX = width / (n - 1)
@@ -1096,11 +1584,11 @@ private fun RechartsMonotoneAreaCanvas(
         )
 
         // 3. Draw active point or scrub indicator
-        val activeIdx = selectedIndex ?: (points.size - 1)
+        val activeIdx = safeEquityChartSelectedIndex(selectedIndex, points.size) ?: return@Canvas
         val activeCoord = computedCoords[activeIdx]
 
         // Guide vertical line if scrubbing
-        if (selectedIndex != null) {
+        if (crosshairEnabled && selectedIndex != null) {
             drawLine(
                 color = accentColor.copy(alpha = 0.4f),
                 start = Offset(activeCoord.x, 0f),
@@ -1131,7 +1619,8 @@ private fun RechartsMonotoneAreaCanvas(
 
 @Composable
 private fun RecentActivityCard(
-    selectedAssetClass: AssetClass = AssetClass.ALL,
+    trades: List<CustomerDataClient.RecentTrade>,
+    unavailableReason: String?,
     cardSurface: Color,
     cardBorder: Color,
     textPrimary: Color,
@@ -1146,13 +1635,65 @@ private fun RecentActivityCard(
         border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(cardBorder))
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
-            Text("Recent Activity", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+            Text("Recent customer trades", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
             Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                "Unavailable — recent trades require an authenticated customer account and verified trade history.",
-                fontSize = 12.sp,
-                color = textMuted
-            )
+            when {
+                trades.isNotEmpty() -> {
+                    trades.take(5).forEachIndexed { index, trade ->
+                        if (index > 0) Spacer(modifier = Modifier.height(8.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = trade.symbol,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = textPrimary,
+                                    maxLines = 1
+                                )
+                                Text(
+                                    text = "${trade.side} • ${trade.mode} • ${trade.filledQuantity} filled",
+                                    fontSize = 10.sp,
+                                    color = textMuted,
+                                    maxLines = 1
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = trade.status.replace('_', ' '),
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when (trade.status) {
+                                    "FILLED", "CLOSED", "SETTLED" -> emeraldAccent
+                                    "REJECTED", "FAILED", "CANCELLED" -> redDanger
+                                    else -> textMuted
+                                },
+                                maxLines = 1
+                            )
+                        }
+                        if (trade.averageFillPrice != "0" && trade.averageFillPrice != "0.0") {
+                            Text(
+                                text = "Average fill: ${trade.averageFillPrice}",
+                                fontSize = 10.sp,
+                                color = textMuted
+                            )
+                        }
+                    }
+                }
+                unavailableReason != null -> Text(
+                    text = unavailableReason,
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+                else -> Text(
+                    text = "No persisted trade activity yet. Completed or pending customer orders will appear here.",
+                    fontSize = 12.sp,
+                    color = textMuted
+                )
+            }
         }
     }
 }
@@ -1277,20 +1818,67 @@ private fun WatchlistCard(
                 color = textPrimary
             )
             Spacer(modifier = Modifier.height(8.dp))
-            if (marketQuotes.isEmpty()) {
-                Text(
-                    "Live prices unavailable — sign in to an authorized customer account and confirm market-scanner access. No placeholder prices are shown.",
-                    fontSize = 12.sp,
-                    color = textMuted
-                )
-            } else {
-                marketQuotes.forEach { quote ->
-                    Text(
-                        "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
-                        fontSize = 13.sp,
-                        color = textPrimary,
-                        modifier = Modifier.padding(vertical = 4.dp)
-                    )
+            when (selectedAssetClass) {
+                AssetClass.FOREX -> {
+                    if (marketQuotes.isEmpty()) {
+                        Text(
+                            "No verified FX quotes are available. The scanner uses read-only FX market data.",
+                            fontSize = 12.sp,
+                            color = textMuted
+                        )
+                    } else {
+                        marketQuotes.forEach { quote ->
+                            Text(
+                                "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                                fontSize = 13.sp,
+                                color = textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+                AssetClass.COMMODITIES -> {
+                    if (marketQuotes.isEmpty()) {
+                        Text(
+                            "No verified commodity quotes are available from the configured OANDA practice feed.",
+                            fontSize = 12.sp,
+                            color = textMuted
+                        )
+                    } else {
+                        marketQuotes.forEach { quote ->
+                            Text(
+                                "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                                fontSize = 13.sp,
+                                color = textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    if (selectedAssetClass == AssetClass.ALL) {
+                        Text(
+                            "Showing the crypto feed. Select Forex or Commodities to load their read-only scanner data.",
+                            fontSize = 10.sp,
+                            color = textMuted
+                        )
+                    }
+                    if (marketQuotes.isEmpty()) {
+                        Text(
+                            "Crypto prices unavailable — sign in to an authorized customer account and confirm market-scanner access. No placeholder prices are shown.",
+                            fontSize = 12.sp,
+                            color = textMuted
+                        )
+                    } else {
+                        marketQuotes.forEach { quote ->
+                            Text(
+                                "${quote.symbol}  ${quote.price}  •  ${quote.signal}",
+                                fontSize = 13.sp,
+                                color = textPrimary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1424,6 +2012,6 @@ private fun DashboardBottomNavigation(
 }
 
 /**
- * Generates realistic 30-day daily historical equity progression with positive trend.
+ * Synthetic equity history is intentionally never generated; charts use persisted customer observations.
  */
 internal fun generate30DayEquityData(): List<EquityPoint> = emptyList()

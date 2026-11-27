@@ -7,17 +7,41 @@ const { chromium } = require("playwright");
 const ROOT = process.cwd();
 const ADMIN_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
 const CUSTOMER_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'";
+const PAPER_CSP = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 function send(res, status, type, body, headers = {}) {
   res.writeHead(status, { "content-type": type, "x-content-type-options": "nosniff", ...headers });
   res.end(body);
 }
-function json(route, value, status = 200) {
-  return route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+function json(route, value, status = 200, headers = {}) {
+  return route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
+}
+
+function paperTestSession(label) {
+  // Build deterministic synthetic bearer values at runtime; never embed credential-shaped literals.
+  return ["synthetic", "paper", label].join("-");
 }
 
 const server = http.createServer((req, res) => {
   const pathname = new URL(req.url, "http://127.0.0.1").pathname;
+  if (pathname === "/") {
+    return send(res, 200, "text/html; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/paper_staging_ui/index.html")), {
+      "content-security-policy": PAPER_CSP,
+      "cache-control": "no-store",
+    });
+  }
+  if (pathname === "/paper-staging.js") {
+    return send(res, 200, "application/javascript; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/paper_staging_ui/paper-staging.js")), {
+      "content-security-policy": PAPER_CSP,
+      "cache-control": "no-store",
+    });
+  }
+  if (pathname === "/paper-staging.css") {
+    return send(res, 200, "text/css; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/paper_staging_ui/paper-staging.css")), {
+      "content-security-policy": PAPER_CSP,
+      "cache-control": "no-store",
+    });
+  }
   if (pathname === "/admin" || pathname === "/admin/") {
     return send(res, 200, "text/html; charset=utf-8", fs.readFileSync(path.join(ROOT, "app/templates/dashboard.html")), {
       "content-security-policy": ADMIN_CSP,
@@ -603,6 +627,716 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
   await page.close();
 }
 
+async function testPaperStagingWorkspace(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  let verified = false;
+  let ready = false;
+  let initialized = false;
+  let paperOrders = [];
+  let orderPost = null;
+  let advanceCalls = 0;
+  let cancelRequest = null;
+  let scannerRequest = null;
+  let orderAttempts = 0;
+  let orderAccepted = false;
+  const logoutCalls = [];
+  const calls = [];
+  await page.addInitScript(() => {
+    window.__cspViolations = [];
+    window.addEventListener("securitypolicyviolation", event => {
+      window.__cspViolations.push(event.violatedDirective + ": " + event.blockedURI);
+    });
+  });
+  page.on("pageerror", error => pageErrors.push(error.message));
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const p = url.pathname;
+    const method = req.method();
+    const headers = req.headers();
+    calls.push({ path: p, method, authorization: headers.authorization || "" });
+
+    if (p === "/api/auth/signup" && method === "POST") {
+      const body = req.postDataJSON();
+      assert.equal(body.email, "paper@example.invalid");
+      assert.equal(body.password, "test-only-password");
+      return json(route, { status: "CONFIRMATION_REQUIRED" });
+    }
+    if (p === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push({ authorization: headers.authorization || "" });
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    if (p === "/api/auth/login" && method === "POST") {
+      return json(route, { access_token: "paper-aal1-token" });
+    }
+    if (p === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, verified
+        ? {
+            enabled: true,
+            aal: "aal2",
+            factor_count: 1,
+            factor_ids: ["paper-test-factor"],
+          }
+        : {
+            enabled: false,
+            aal: "aal1",
+            factor_count: 0,
+            factor_ids: [],
+          });
+    }
+    if (p === "/api/auth/mfa/enroll" && method === "POST") {
+      return json(route, {
+        id: "paper-test-factor",
+        totp: {
+          secret: "TEST-ONLY-TOTP-SECRET",
+          qr_code: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="black"/></svg>',
+        },
+      });
+    }
+    if (p === "/api/auth/mfa/challenge" && method === "POST") {
+      return json(route, { id: "paper-test-challenge" });
+    }
+    if (p === "/api/auth/mfa/verify" && method === "POST") {
+      const body = req.postDataJSON();
+      assert.equal(body.factor_id, "paper-test-factor");
+      assert.equal(body.challenge_id, "paper-test-challenge");
+      assert.equal(body.code, "123456");
+      verified = true;
+      return json(route, { access_token: "paper-aal2-token" });
+    }
+    if (p === "/api/auth/profile/provision" && method === "POST") {
+      return json(route, { status: "PROVISIONED" });
+    }
+    if (p === "/api/customer/me" && method === "GET") {
+      return json(route, { id: 42, display_name: "Paper Test Customer", email: "paper@example.invalid", status: "ACTIVE" });
+    }
+    if (p === "/api/customer/portfolio" && method === "GET") {
+      if (!ready) return json(
+        route,
+        { detail: "PAPER_LEDGER_PREFLIGHT_BLOCKED" },
+        503,
+        { "X-Atlas-Paper-Gate": "blocked" }
+      );
+      return json(route, {
+        equity: initialized ? 10000 : 0,
+        cash_equity: initialized ? 10000 : 0,
+        positions: [],
+        virtual_only: true,
+        valuation_status: "CASH_ONLY",
+      });
+    }
+    if (p === "/api/customer/market-scanner" && method === "GET") {
+      scannerRequest = {
+        authorization: headers.authorization || "",
+        exchange: url.searchParams.get("exchange"),
+        symbols: url.searchParams.get("symbols"),
+      };
+      return json(route, {
+        exchange: "binance",
+        timeframe: "15m",
+        results: [
+          {
+            symbol: "BTC/USDT",
+            signal: "WATCH",
+            score: 0.65,
+            price: 65000.25,
+            rsi: 61.5,
+            atr: 425.75,
+            volume_ratio: 1.25,
+          },
+          {
+            symbol: "ETH/USDT",
+            signal: "LONG <img src=x onerror=alert(1)>",
+            score: 0.4,
+            price: 3200.5,
+            rsi: 58,
+            atr: 30.25,
+            volume_ratio: 1.1,
+          },
+        ],
+      });
+    }
+    if (p === "/api/customer/paper/balances" && method === "GET") {
+      return json(route, {
+        balances: initialized ? [{
+          account_code: "PAPER_CASH",
+          currency: "USDT",
+          balance: "10000",
+        }] : [],
+      });
+    }
+    if (p === "/api/customer/paper/positions" && method === "GET") {
+      return json(route, {
+        positions: [{
+          venue: "binance",
+          market_type: "spot",
+          symbol: "BTC/USDT",
+          quantity: "0.001",
+          average_entry_price: "60000.5",
+          cost_basis: "60.0005",
+          realized_pnl: "0",
+          timeframe: "1h",
+        }],
+      });
+    }
+    if (p === "/api/customer/paper/history" && method === "GET") {
+      assert.equal(url.searchParams.get("limit"), "50");
+      return json(route, {
+        virtual_only: true,
+        orders: [{
+          order_id: "paper-history-order-1",
+          client_order_id: "paper-history-client-1",
+          symbol: "ETH/USDT",
+          side: "BUY",
+          quantity: "0.1",
+          filled_quantity: "0.1",
+          average_fill_price: "3200.25",
+          fill_count: 2,
+          status: "FILLED",
+          created_at: "2026-11-25T10:00:00+00:00",
+        }],
+      });
+    }
+    if (p === "/api/customer/paper/orders" && method === "GET") {
+      return json(route, { orders: paperOrders.slice() });
+    }
+    if (p === "/api/customer/paper/account/initialize" && method === "POST") {
+      initialized = true;
+      return json(route, {
+        status: "INITIALIZED",
+        starting_cash: 10000,
+        currency: "USDT",
+        note: "Virtual test balance initialized.",
+      });
+    }
+    if (p === "/api/customer/paper/orders" && method === "POST") {
+      orderAttempts += 1;
+      orderPost = { body: req.postDataJSON(), authorization: headers.authorization || "" };
+      if (orderAttempts === 1) {
+        // A normal business conflict is not a platform readiness/risk gate.
+        return json(route, { detail: "Order was rejected because the paper account has insufficient available balance." }, 409);
+      }
+      orderAccepted = true;
+      paperOrders = [{
+        client_order_id: "mock-paper-order-1",
+        symbol: orderPost.body.symbol,
+        side: orderPost.body.side,
+        quantity: orderPost.body.quantity,
+        status: "OPEN",
+      }];
+      return json(route, { status: "SUBMITTED", fill_note: "Awaiting a verified completed bar." });
+    }
+    if (p === "/api/customer/paper/orders/mock-paper-order-1/advance" && method === "POST") {
+      advanceCalls += 1;
+      return json(route, { status: "ADVANCED" });
+    }
+    if (p === "/api/customer/paper/orders/mock-paper-order-1/cancel" && method === "POST") {
+      cancelRequest = { body: req.postDataJSON(), authorization: headers.authorization || "" };
+      paperOrders = [];
+      return json(route, { status: "CANCELLED" });
+    }
+    return json(route, { detail: "Unexpected paper-staging test request" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200, "paper-staging browser workspace should load");
+  const csp = response.headers()["content-security-policy"];
+  assert.match(csp, /script-src 'self';/);
+  assert.doesNotMatch(csp, /script-src[^;]*'unsafe-inline'/);
+
+  await page.locator("#email").fill("paper@example.invalid");
+  await page.locator("#password").fill("test-only-password");
+  await page.locator("#signup-button").click();
+  await waitUntil(async () => (await page.locator("#auth-message").innerText()).includes("Confirm the email"));
+  assert.equal(await page.locator("#workspace").isHidden(), true, "signup without a confirmed session must not open the paper workspace");
+
+  // Simulate returning after the test identity's Supabase confirmation email is verified.
+  await page.locator("#login-button").click();
+  await page.locator("#mfa-panel").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#enroll-button").isVisible(), true, "a customer without a TOTP factor must be offered enrollment");
+  await page.locator("#enroll-button").click();
+  await page.locator("#totp-setup").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#totp-secret").innerText(), "TEST-ONLY-TOTP-SECRET");
+  assert.equal(await page.locator("#totp-qr").isVisible(), true, "first-time TOTP enrollment must display the QR code");
+  assert.equal(await page.locator("#verify-button").isEnabled(), true);
+  await page.locator("#totp-code").fill("123456");
+  await page.locator("#verify-button").click();
+
+  await page.locator("#blocked-state").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#workspace").isHidden(), true, "paper actions must stay hidden while readiness is blocked");
+  assert.match(await page.locator("#auth-message").innerText(), /PAPER_LEDGER_PREFLIGHT_BLOCKED/);
+  assert.equal(verified, true, "the browser must complete TOTP before customer paper access");
+
+  ready = true;
+  await page.locator("#retry-preflight").click();
+  await page.locator("#workspace").waitFor({ state: "visible", timeout: 10000 });
+  assert.equal(await page.locator("#blocked-state").isHidden(), true, "successful readiness retry should restore the workspace");
+  assert.match(await page.locator("#positions").innerText(), /BTC\/USDT/);
+  assert.match(await page.locator("#positions").innerText(), /60\.0005/);
+  assert.match(await page.locator("#positions").innerText(), /1h/);
+  assert.match(await page.locator("#history").innerText(), /ETH\/USDT/);
+  assert.match(await page.locator("#history").innerText(), /FILLED/);
+  assert.match(await page.locator("#history").innerText(), /0\.1 \/ 0\.1/);
+  assert.match(await page.locator("#history").innerText(), /3,200\.25/);
+
+  await page.locator("#scanner-button").click();
+  await waitUntil(async () => scannerRequest !== null && (await page.locator("#scanner-results tbody tr").count()) === 2);
+  assert.equal(scannerRequest.authorization, "Bearer paper-aal2-token");
+  assert.equal(scannerRequest.exchange, "binance");
+  assert.equal(scannerRequest.symbols, "BTC/USDT,ETH/USDT,SOL/USDT,XRP/USDT");
+  assert.match(await page.locator("#scanner-results").innerText(), /BTC\/USDT/);
+  assert.match(await page.locator("#scanner-results").innerText(), /65%/);
+  assert.match(await page.locator("#scanner-results").innerText(), /LONG <img src=x onerror=alert\(1\)>/);
+  assert.equal(await page.locator("#scanner-results img").count(), 0, "scanner values must be rendered as text");
+  await page.locator("#scanner-symbols").fill(
+    Array.from({ length: 9 }, (_, index) => "ASSET" + index + "/USDT").join(",")
+  );
+  await page.locator("#scanner-button").click();
+  assert.match(await page.locator("#scanner-message").innerText(), /between one and eight/);
+  assert.equal(calls.filter(call => call.path === "/api/customer/market-scanner").length, 1, "invalid symbol lists must be rejected before a network request");
+
+  await page.locator("#initialize-button").click();
+  await waitUntil(async () => initialized && (await page.locator("#cash-balance").innerText()).includes("10,000"));
+  assert.equal(await page.locator("#initialize-button").isDisabled(), true, "initialized virtual account must not offer duplicate initialization");
+
+  await page.locator("#quantity").fill("0.001");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => (await page.locator("#order-message").innerText()).includes("insufficient available balance"));
+  assert.equal(await page.locator("#workspace").isVisible(), true, "ordinary order rejection must leave the paper workspace usable");
+  assert.equal(await page.locator("#blocked-state").isHidden(), true, "ordinary 409 order rejection must not be misreported as a staging outage");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => orderAccepted && (await page.locator("#order-count").innerText()) === "1");
+  assert.equal(orderPost.body.symbol, "BTC/USDT");
+  assert.equal(orderPost.body.side, "BUY");
+  assert.equal(orderPost.body.order_type, "MARKET");
+  assert.equal(orderPost.body.quantity, "0.001");
+  assert.equal(orderPost.body.timeframe, "1h");
+  assert.equal("price" in orderPost.body, false, "the browser must not supply a fill or market price");
+  assert.equal(orderPost.authorization, "Bearer paper-aal2-token");
+
+  await page.locator('[data-advance="mock-paper-order-1"]').click();
+  await waitUntil(async () => advanceCalls === 1);
+  assert.equal(await page.locator("#order-count").innerText(), "1");
+
+  let confirmation = "";
+  page.once("dialog", async dialog => { confirmation = dialog.message(); await dialog.accept(); });
+  await page.locator('[data-cancel="mock-paper-order-1"]').click();
+  await waitUntil(async () => cancelRequest !== null && (await page.locator("#order-count").innerText()) === "0");
+  assert.match(confirmation, /Cancel this open virtual paper order/);
+  assert.match(cancelRequest.body.idempotency_key, /^paper-ui-cancel-/);
+  assert.equal(cancelRequest.authorization, "Bearer paper-aal2-token");
+
+  const forbiddenCalls = calls.filter(call =>
+    call.path.includes("/withdraw") || call.path.includes("/broker/") || call.path.includes("/payout")
+  );
+  assert.deepEqual(forbiddenCalls, [], "paper-only workspace must never call live-money endpoints");
+  assert.ok(
+    calls.filter(call => call.path.startsWith("/api/customer/paper/")).every(call => call.authorization === "Bearer paper-aal2-token"),
+    "all paper ledger routes must use the verified AAL2 token"
+  );
+  assert.deepEqual(
+    await page.evaluate(() => ({ local: localStorage.length, session: sessionStorage.length })),
+    { local: 0, session: 0 },
+    "customer tokens must not be persisted in browser storage"
+  );
+  const mobileLayout = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    document: document.documentElement.scrollWidth,
+  }));
+  assert.ok(mobileLayout.document <= mobileLayout.viewport + 2, "paper staging workspace must fit mobile screens: " + JSON.stringify(mobileLayout));
+  assert.deepEqual(await page.evaluate(() => window.__cspViolations), [], "paper staging workspace must have no CSP violations");
+  assert.deepEqual(pageErrors, [], "paper staging browser flow must not throw JavaScript errors");
+
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0].authorization, "Bearer paper-aal2-token", "sign-out must revoke the verified Supabase session");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+  assert.equal(await page.locator("#mfa-panel").isHidden(), true);
+  assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
+  assert.equal(await page.locator("#email").inputValue(), "", "sign-out must clear the email field");
+  assert.equal(await page.locator("#password").inputValue(), "", "sign-out must clear the password field");
+  assert.equal(await page.locator("#totp-code").inputValue(), "", "sign-out must clear the authenticator code");
+  assert.equal(await page.locator("#totp-secret").innerText(), "—", "sign-out must clear the TOTP setup secret");
+  assert.equal(await page.locator("#totp-qr").getAttribute("src"), null, "sign-out must remove the TOTP QR payload");
+  const callsAtSignOut = calls.length;
+  await page.waitForTimeout(100);
+  assert.equal(calls.length, callsAtSignOut, "the signed-out workspace must not issue more customer API requests");
+  await page.close();
+
+  await testPaperStagingSignOutDuringPendingMfa(browser, baseUrl);
+}
+
+async function testPaperStagingSignOutDuringPendingMfa(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  const logoutCalls = [];
+  const authCalls = [];
+  let verifyStarted = false;
+  let releaseVerify;
+  page.on("pageerror", error => pageErrors.push(error.message));
+
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const path = url.pathname;
+    const method = req.method();
+    const headers = req.headers();
+    authCalls.push({ path, method, authorization: headers.authorization || "" });
+
+    if (path === "/api/auth/login" && method === "POST") {
+      return json(route, { access_token: paperTestSession("race-aal1") });
+    }
+    if (path === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: "aal1",
+        factor_count: 1,
+        factor_ids: ["paper-race-factor"],
+      });
+    }
+    if (path === "/api/auth/mfa/challenge" && method === "POST") {
+      return json(route, { id: "paper-race-challenge" });
+    }
+    if (path === "/api/auth/mfa/verify" && method === "POST") {
+      verifyStarted = true;
+      await new Promise(resolve => { releaseVerify = resolve; });
+      return json(route, { access_token: paperTestSession("late-aal2") });
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push(headers.authorization || "");
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    return json(route, { detail: "Unexpected request after sign-out" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200);
+  await page.locator("#email").fill("race@example.invalid");
+  await page.locator("#password").fill("race-test-password");
+  await page.locator("#login-button").click();
+  await page.locator("#mfa-panel").waitFor({ state: "visible" });
+  await page.locator("#totp-code").fill("123456");
+  await page.locator("#verify-button").click();
+  await waitUntil(async () => verifyStarted && typeof releaseVerify === "function");
+
+  // Sign out while the MFA verification request is still unresolved.
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0], "Bearer " + paperTestSession("race-aal1"));
+  assert.equal(await page.locator("#password").inputValue(), "");
+  assert.equal(await page.locator("#totp-code").inputValue(), "");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+
+  releaseVerify();
+  await waitUntil(async () => logoutCalls.length === 2);
+  assert.equal(logoutCalls[1], "Bearer " + paperTestSession("late-aal2"), "a late MFA token must be revoked rather than stored");
+  await page.waitForTimeout(100);
+  assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+  assert.equal(await page.locator("#password").inputValue(), "");
+  assert.equal(await page.locator("#totp-code").inputValue(), "");
+  assert.equal(authCalls.some(call => call.path === "/api/auth/profile/provision"), false, "late MFA completion must not provision a customer");
+  assert.equal(authCalls.some(call => call.path.startsWith("/api/customer/")), false, "late MFA completion must not load customer data");
+  assert.deepEqual(pageErrors, [], "sign-out during MFA must not throw browser errors");
+  await page.close();
+}
+
+
+async function testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  const logoutCalls = [];
+  let verified = false;
+  let portfolioStarted = false;
+  let releasePortfolio;
+  page.on("pageerror", error => pageErrors.push(error.message));
+
+  // Record when the application itself has parsed the delayed portfolio body.
+  // This makes the race assertion depend on an observed browser response, not
+  // on a fixed sleep after the test releases the mocked request.
+  await page.addInitScript(() => {
+    window.__atlasPortfolioJsonResponses = [];
+    const originalJson = Response.prototype.json;
+    Response.prototype.json = async function (...args) {
+      const payload = await originalJson.apply(this, args);
+      if (this.url && new URL(this.url, window.location.href).pathname === "/api/customer/portfolio") {
+        window.__atlasPortfolioJsonResponses.push({
+          equity: payload && payload.equity,
+          cash_equity: payload && payload.cash_equity,
+        });
+      }
+      return payload;
+    };
+  });
+
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    const method = route.request().method();
+    const headers = route.request().headers();
+
+    if (path === "/api/auth/login" && method === "POST") {
+      return json(route, { access_token: paperTestSession("refresh-race-aal1") });
+    }
+    if (path === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: verified ? "aal2" : "aal1",
+        factor_count: 1,
+        factor_ids: ["paper-refresh-race-factor"],
+      });
+    }
+    if (path === "/api/auth/mfa/challenge" && method === "POST") {
+      return json(route, { id: "paper-refresh-race-challenge" });
+    }
+    if (path === "/api/auth/mfa/verify" && method === "POST") {
+      verified = true;
+      return json(route, { access_token: paperTestSession("refresh-race-aal2") });
+    }
+    if (path === "/api/auth/profile/provision" && method === "POST") {
+      return json(route, { status: "PROVISIONED" });
+    }
+    if (path === "/api/customer/me" && method === "GET") {
+      return json(route, { id: 73, display_name: "Refresh Race Customer", email: "refresh-race@example.invalid" });
+    }
+    if (path === "/api/customer/portfolio" && method === "GET") {
+      portfolioStarted = true;
+      await new Promise(resolve => { releasePortfolio = resolve; });
+      return json(route, {
+        equity: 987654.32,
+        cash_equity: 987654.32,
+        positions: [],
+        valuation_status: "CASH_ONLY",
+      });
+    }
+    if (path === "/api/customer/paper/balances" && method === "GET") {
+      return json(route, { balances: [] });
+    }
+    if (path === "/api/customer/paper/positions" && method === "GET") {
+      return json(route, { positions: [] });
+    }
+    if (path === "/api/customer/paper/orders" && method === "GET") {
+      return json(route, { orders: [] });
+    }
+    if (path === "/api/customer/paper/history" && method === "GET") {
+      return json(route, { orders: [] });
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push(headers.authorization || "");
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    return json(route, { detail: "Unexpected stale-refresh test request" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200);
+  await page.locator("#email").fill("refresh-race@example.invalid");
+  await page.locator("#password").fill("refresh-race-password");
+  await page.locator("#login-button").click();
+  await page.locator("#mfa-panel").waitFor({ state: "visible" });
+  await page.locator("#totp-code").fill("123456");
+  await page.locator("#verify-button").click();
+  await waitUntil(async () => portfolioStarted && typeof releasePortfolio === "function");
+  await page.locator("#workspace").waitFor({ state: "visible" });
+
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0], "Bearer " + paperTestSession("refresh-race-aal2"));
+
+  releasePortfolio();
+  await waitUntil(async () => await page.evaluate(
+    () => window.__atlasPortfolioJsonResponses.length === 1
+  ));
+  const observedPortfolio = await page.evaluate(() => window.__atlasPortfolioJsonResponses);
+  assert.deepEqual(observedPortfolio, [{
+    equity: 987654.32,
+    cash_equity: 987654.32,
+  }], "the browser must parse the actual delayed portfolio response before stale-session assertions run");
+  // Allow all promise continuations from the parsed response to complete and
+  // reach a paint before checking that the signed-out UI remains cleared.
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  }));
+  assert.equal(await page.locator("#auth-state").innerText(), "Not signed in");
+  assert.equal(await page.locator("#workspace").isHidden(), true);
+  assert.equal(await page.locator("#equity").innerText(), "—", "late portfolio data must not repaint the cleared session");
+  assert.equal(await page.locator("#cash-balance").innerText(), "—", "late balance refresh must not repaint the cleared session");
+  assert.equal(await page.locator("#profile-summary").innerText(), "");
+  assert.deepEqual(pageErrors, [], "sign-out during portfolio refresh must not throw browser errors");
+  await page.close();
+}
+
+async function testPaperStagingSignOutReleasesPendingPaperControls(browser, baseUrl) {
+  const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const pageErrors = [];
+  let loginCount = 0;
+  let releaseFirstScan;
+  let releaseSecondScan;
+  let firstScanStarted = false;
+  let secondScanStarted = false;
+  let firstScanResponded = false;
+  let secondScanResponded = false;
+  let releaseSecondSessionOrder;
+  let releaseThirdSessionOrder;
+  let secondOrderStarted = false;
+  let thirdOrderStarted = false;
+  let secondOrderResponded = false;
+  let thirdOrderResponded = false;
+  const tokens = [];
+  const logoutCalls = [];
+  page.on("pageerror", error => pageErrors.push(error.message));
+
+  await page.route("**/api/**", async route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const path = url.pathname;
+    const method = req.method();
+    const headers = req.headers();
+    const authorization = headers.authorization || "";
+
+    if (path === "/api/auth/login" && method === "POST") {
+      loginCount += 1;
+      const token = paperTestSession("busy-session-" + loginCount);
+      tokens.push(token);
+      return json(route, { access_token: token });
+    }
+    if (path === "/api/auth/mfa/status" && method === "GET") {
+      return json(route, {
+        enabled: true,
+        aal: "aal2",
+        factor_count: 1,
+        factor_ids: ["paper-busy-factor"],
+      });
+    }
+    if (path === "/api/auth/profile/provision" && method === "POST") {
+      return json(route, { status: "PROVISIONED" });
+    }
+    if (path === "/api/customer/me" && method === "GET") {
+      return json(route, {
+        id: 81 + loginCount,
+        display_name: "Paper Busy-State Customer",
+        email: "busy-state@example.invalid",
+      });
+    }
+    if (path === "/api/customer/portfolio" && method === "GET") {
+      return json(route, { equity: 10000, cash_equity: 10000, positions: [], valuation_status: "CASH_ONLY" });
+    }
+    if (path === "/api/customer/paper/balances" && method === "GET") {
+      return json(route, { balances: [{ account_code: "PAPER_CASH", currency: "USDT", balance: "10000" }] });
+    }
+    if (path === "/api/customer/paper/positions" && method === "GET") {
+      return json(route, { positions: [] });
+    }
+    if (path === "/api/customer/paper/orders" && method === "GET") {
+      return json(route, { orders: [] });
+    }
+    if (path === "/api/customer/paper/history" && method === "GET") {
+      return json(route, { virtual_only: true, orders: [] });
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      logoutCalls.push(authorization);
+      return json(route, { status: "SIGNED_OUT" });
+    }
+    if (path === "/api/customer/market-scanner" && method === "GET") {
+      if (authorization === "Bearer " + tokens[0]) {
+        firstScanStarted = true;
+        await new Promise(resolve => { releaseFirstScan = resolve; });
+        await json(route, { exchange: "binance", timeframe: "15m", results: [] });
+        firstScanResponded = true;
+        return;
+      }
+      if (authorization === "Bearer " + tokens[1]) {
+        secondScanStarted = true;
+        await new Promise(resolve => { releaseSecondScan = resolve; });
+        await json(route, { exchange: "binance", timeframe: "15m", results: [] });
+        secondScanResponded = true;
+        return;
+      }
+      return json(route, { detail: "Unexpected scanner session" }, 401);
+    }
+    if (path === "/api/customer/paper/orders" && method === "POST") {
+      if (authorization === "Bearer " + tokens[1]) {
+        secondOrderStarted = true;
+        await new Promise(resolve => { releaseSecondSessionOrder = resolve; });
+        await json(route, { status: "SUBMITTED", fill_note: "Mocked paper order." });
+        secondOrderResponded = true;
+        return;
+      }
+      if (authorization === "Bearer " + tokens[2]) {
+        thirdOrderStarted = true;
+        await new Promise(resolve => { releaseThirdSessionOrder = resolve; });
+        await json(route, { status: "SUBMITTED", fill_note: "Mocked paper order." });
+        thirdOrderResponded = true;
+        return;
+      }
+      return json(route, { detail: "Unexpected order session" }, 401);
+    }
+    return json(route, { detail: "Unexpected paper busy-state test request" }, 404);
+  });
+
+  const response = await page.goto(baseUrl + "/");
+  assert.equal(response.status(), 200);
+  await page.locator("#email").fill("busy-state@example.invalid");
+  await page.locator("#password").fill("busy-state-password");
+  await page.locator("#login-button").click();
+  await page.locator("#workspace").waitFor({ state: "visible" });
+  assert.equal(loginCount, 1);
+
+  // Session 1 holds a scanner request open while the customer signs out.
+  await page.locator("#scanner-button").click();
+  await waitUntil(async () => firstScanStarted && typeof releaseFirstScan === "function");
+  assert.equal(await page.locator("#scanner-button").isDisabled(), true);
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 1);
+  assert.equal(logoutCalls[0], "Bearer " + tokens[0]);
+  for (const id of ["#refresh-button", "#initialize-button", "#scanner-button", "#submit-order"]) {
+    assert.equal(await page.locator(id).isEnabled(), true, "sign-out must release stale busy state on " + id);
+  }
+
+  // Session 2 starts a new scan before the old response is released. The stale
+  // session's finally block must not unlock the control owned by session 2.
+  await page.locator("#email").fill("busy-state@example.invalid");
+  await page.locator("#password").fill("busy-state-password");
+  await page.locator("#login-button").click();
+  await page.locator("#workspace").waitFor({ state: "visible" });
+  await page.locator("#scanner-button").click();
+  await waitUntil(async () => secondScanStarted && typeof releaseSecondScan === "function");
+  releaseFirstScan();
+  await waitUntil(async () => firstScanResponded);
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator("#scanner-button").isDisabled(), true, "a stale scan must not unlock the newer session's active scan");
+  releaseSecondScan();
+  await waitUntil(async () => secondScanResponded && await page.locator("#scanner-button").isEnabled());
+
+  // Hold a session-2 order, sign out, then start a session-3 order. Releasing
+  // the stale order must not clear the newer order's busy state.
+  await page.locator("#quantity").fill("0.001");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => secondOrderStarted && typeof releaseSecondSessionOrder === "function");
+  await page.locator("#signout-button").click();
+  await waitUntil(async () => logoutCalls.length === 2);
+  assert.equal(await page.locator("#submit-order").isEnabled(), true, "sign-out must re-enable the pending order control");
+
+  await page.locator("#email").fill("busy-state@example.invalid");
+  await page.locator("#password").fill("busy-state-password");
+  await page.locator("#login-button").click();
+  await page.locator("#workspace").waitFor({ state: "visible" });
+  await page.locator("#quantity").fill("0.002");
+  await page.locator("#submit-order").click();
+  await waitUntil(async () => thirdOrderStarted && typeof releaseThirdSessionOrder === "function");
+  releaseSecondSessionOrder();
+  await waitUntil(async () => secondOrderResponded);
+  await page.waitForTimeout(50);
+  assert.equal(await page.locator("#submit-order").isDisabled(), true, "a stale order must not unlock the newer session's active order");
+  releaseThirdSessionOrder();
+  await waitUntil(async () => thirdOrderResponded && await page.locator("#submit-order").isEnabled());
+
+  assert.equal(loginCount, 3);
+  assert.deepEqual(pageErrors, [], "sign-out during paper actions must not throw browser errors");
+  await page.close();
+}
+
+
 (async () => {
   await new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -620,7 +1354,10 @@ async function testCustomerMfaOtpWithdrawalFlow(browser, baseUrl) {
     await testCustomerMfaEnrollmentQr(browser, baseUrl);
     await testCustomerHostileData(browser, baseUrl);
     await testCustomerMfaOtpWithdrawalFlow(browser, baseUrl);
-    console.log("PASS: supplied v27 hostile-data regressions, logged-out polling, admin/customer MFA QR under strict CSP, payout confirmation, 12x100-row refresh stress, and mocked customer MFA/OTP/withdrawal flow.");
+    await testPaperStagingWorkspace(browser, baseUrl);
+    await testPaperStagingSignOutDuringPortfolioRefresh(browser, baseUrl);
+    await testPaperStagingSignOutReleasesPendingPaperControls(browser, baseUrl);
+    console.log("PASS: admin/customer browser regressions, strict CSP, hostile-data rendering, 12x100-row refresh stress, customer MFA/OTP flow, paper staging readiness/order lifecycle, stale-session races, and paper-action busy-state recovery.");
   } finally {
     await browser.close();
     await new Promise(resolve => server.close(resolve));

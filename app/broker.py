@@ -183,6 +183,20 @@ class Broker:
                 return []
             return c.fetch_orders(symbol) if symbol else c.fetch_orders()
 
+    def fetch_my_trades(
+        self,
+        symbol: str | None = None,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch exchange fills when the adapter advertises authoritative trade history."""
+        with self._read_lock:
+            client = self._c()
+            if not client.has.get("fetchMyTrades"):
+                return []
+            return client.fetch_my_trades(symbol, since, limit, params or {})
+
     def fetch_balance(self) -> dict[str, Any]:
         with self._read_lock:
             return self._c().fetch_balance()

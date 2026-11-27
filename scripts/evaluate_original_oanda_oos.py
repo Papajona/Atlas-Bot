@@ -12,6 +12,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -462,7 +463,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "result": "PASS" if gate["passed"] else "FAIL",
         "promotion_authorized": bool(gate["passed"]),
         "not_live_trading_evidence": True,
-        "commit_sha": __import__("os").environ.get("GITHUB_SHA", ""),
+        "commit_sha": os.environ.get("GITHUB_SHA", ""),
         "dataset_provenance": provenance,
         "trial_history": trial_evidence,
         "evaluation": metrics,

@@ -245,3 +245,47 @@ def test_cli_entrypoint_succeeds_for_the_effective_runtime_backend(tmp_path: Pat
         "backend_url": "https://atlas.example.com",
         "backend_origin": "https://atlas.example.com",
     }
+
+
+def test_pull_request_android_build_publishes_a_verified_debug_apk_artifact():
+    assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4" in ANDROID_RELEASE_WORKFLOW
+    assert "atlas-android-debug-pr-${{ github.event.pull_request.number }}-${{ github.sha }}" in ANDROID_RELEASE_WORKFLOW
+    assert 'APK="app/build/outputs/apk/debug/app-debug.apk"' in ANDROID_RELEASE_WORKFLOW
+    assert '(cd "$(dirname "$APK")" && sha256sum "$(basename "$APK")" > "$(basename "$APK").sha256")' in ANDROID_RELEASE_WORKFLOW
+    assert "app/build/outputs/apk/debug/app-debug.apk.sha256" in ANDROID_RELEASE_WORKFLOW
+    assert "if-no-files-found: error" in ANDROID_RELEASE_WORKFLOW
+    assert "retention-days: 7" in ANDROID_RELEASE_WORKFLOW
+    assert ANDROID_RELEASE_WORKFLOW.index("Verify packaged runtime backend resource in debug APK") < ANDROID_RELEASE_WORKFLOW.index("Publish emulator debug APK for testing")
+
+
+def test_debug_apk_checksum_verifies_after_artifact_files_are_flattened(tmp_path: Path):
+    apk_directory = tmp_path / "app" / "build" / "outputs" / "apk" / "debug"
+    apk_directory.mkdir(parents=True)
+    apk = apk_directory / "app-debug.apk"
+    apk.write_bytes(b"deterministic emulator debug apk fixture")
+    command = r'''set -euo pipefail
+APK="app/build/outputs/apk/debug/app-debug.apk"
+test -s "$APK"
+(cd "$(dirname "$APK")" && sha256sum "$(basename "$APK")" > "$(basename "$APK").sha256")
+'''
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    checksum = apk_directory / "app-debug.apk.sha256"
+    assert checksum.is_file()
+    assert checksum.read_text(encoding="utf-8").split(maxsplit=1)[1].strip() == "app-debug.apk"
+    verified = subprocess.run(
+        ["sha256sum", "-c", "app-debug.apk.sha256"],
+        cwd=apk_directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert verified.returncode == 0, verified.stderr
+    assert "app-debug.apk: OK" in verified.stdout

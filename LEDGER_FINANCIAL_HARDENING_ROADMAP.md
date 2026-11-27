@@ -1,5 +1,8 @@
 # Ledger Financial Hardening Roadmap — Complete Implementation Guide
 
+> **Status update (final-audit-completion):** `post_deposit`, `reserve_trading`, `release_trading`, `reserve_withdrawal`, `release_withdrawal` and `settle_withdrawal` in `app/customer_funds.py` already take `SELECT ... FOR UPDATE` row locks. Fresh reads come from `get_or_create_ledger()` (`FOR UPDATE` + `populate_existing`) followed by a locked re-select. Unchecked items below that mention these functions are historical; PostgreSQL concurrency tests still need to run in CI with the PostgreSQL URLs set.
+
+
 **Status:** Phase 1 In Progress, Phases 2-4 Planned  
 **Target:** Production safety certification within 4 weeks  
 **Owner:** Papajona/Atlas-Bot  

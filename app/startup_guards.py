@@ -67,9 +67,15 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND NOT c.relrowsecurity) "
                 " AS tables_without_rls, "
-                "(NOT has_schema_privilege('anon', 'public', 'USAGE') "
-                " AND NOT has_schema_privilege('authenticated', 'public', 'USAGE')) "
-                " AS api_schema_access_blocked, "
+                "has_schema_privilege('anon', 'public', 'USAGE') AS anon_schema_usage, "
+                "has_schema_privilege('authenticated', 'public', 'USAGE') AS authenticated_schema_usage, "
+                "(SELECT nspacl::text FROM pg_namespace WHERE nspname = 'public') AS public_schema_acl, "
+                "(SELECT coalesce(jsonb_agg(jsonb_build_object('member', member_role.rolname, "
+                "'role', granted_role.rolname) ORDER BY member_role.rolname, granted_role.rolname), '[]'::jsonb) "
+                " FROM pg_auth_members AS membership "
+                " JOIN pg_roles AS member_role ON member_role.oid = membership.member "
+                " JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid "
+                " WHERE member_role.rolname IN ('anon', 'authenticated')) AS api_role_memberships, "
                 "(SELECT count(*) FROM pg_class AS c JOIN pg_namespace AS n ON n.oid = c.relnamespace "
                 " WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') AND c.relowner = r.oid) "
                 " AS owned_public_table_count, "
@@ -81,10 +87,17 @@ async def assert_database_role_compatible_with_rls_lockdown() -> None:
             raise RuntimeError("Unable to identify the current PostgreSQL application role")
         if str(row["login_role"]) != str(row["role_name"]):
             raise RuntimeError("Database login role differs from current role; SET ROLE is not allowed for Atlas runtime")
-        if not bool(row["api_schema_access_blocked"]):
+        api_roles_with_schema_usage = [
+            role_name
+            for role_name in ("anon", "authenticated")
+            if bool(row[f"{role_name}_schema_usage"])
+        ]
+        if api_roles_with_schema_usage:
             raise RuntimeError(
-                "Public schema is still accessible to anon/authenticated; "
-                "the public-schema lockdown must revoke schema USAGE before Atlas starts."
+                "Public schema is still accessible to Supabase API roles "
+                f"{api_roles_with_schema_usage}; revoke schema USAGE before Atlas starts. "
+                f"public_schema_acl={row['public_schema_acl']!r}; "
+                f"api_role_memberships={row['api_role_memberships']!r}"
             )
         require_public_schema_rls_complete(
             int(row["public_table_count"]), int(row["tables_without_rls"])

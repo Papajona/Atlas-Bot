@@ -1,18 +1,34 @@
 """Second-copy security audit sink for Cloud Logging / external log retention."""
 from __future__ import annotations
-import json, logging, sys
+import json, logging, sys, re
 from datetime import datetime, timezone
 from .config import settings
 
 _log = logging.getLogger("atlas.security_audit")
 
-_SENSITIVE_KEY_PARTS = ("token", "secret", "password", "api_key", "api_secret", "authorization", "private_key", "seed", "mnemonic", "ciphertext")
+_SENSITIVE_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "apikey",
+    "apisecret",
+    "authorization",
+    "privatekey",
+    "signingkey",
+    "encryptionkey",
+    "servicerole",
+    "seed",
+    "mnemonic",
+    "ciphertext",
+    "cookie",
+    "jwt",
+)
 
 def _redact(value):
     if isinstance(value, dict):
         out = {}
         for key, item in value.items():
-            key_text = str(key).lower()
+            key_text = re.sub(r"[^a-z0-9]", "", str(key).lower())
             if any(part in key_text for part in _SENSITIVE_KEY_PARTS):
                 out[str(key)] = "[REDACTED]"
             else:

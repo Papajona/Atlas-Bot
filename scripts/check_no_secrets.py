@@ -56,14 +56,15 @@ SOURCE_STRING_CONCATENATION = re.compile(
     )""",
     re.VERBOSE,
 )
+# Include JavaScript/TypeScript template literals as well as quoted strings.
 SOURCE_STRING_LITERAL = re.compile(
-    r"""(?P<quote>["'])(?P<value>(?:\\.|[^\\])*?)\1"""
+    r"""(?P<quote>["'\x60])(?P<value>(?:\\.|[^\\])*?)\1"""
 )
 
 # Match complete Python-style triple-quoted credential assignments before the
 # line-oriented scanner sees only the opening pair of quotes.
 TRIPLE_QUOTED_SOURCE_ASSIGNMENT = re.compile(
-    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>(?:[A-Za-z_][A-Za-z0-9_]*_)?(?:mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key|api[_-]?key|api[_-]?secret|secret[_-]?key|encryption[_-]?key|signing[_-]?key|service[_-]?role[_-]?key|password|token))["']?\s*[:=]\s*(?P<prefix>br|rb|fr|rf|r|u|b|f)?(?P<quote>["']{3})(?P<value>.*?)(?P=quote)"""
 )
 
 PLACEHOLDERS = {
@@ -77,6 +78,11 @@ PLACEHOLDERS = {
     "fixture_service_role_value_abcdefghijklmnopqrstuvwxyz",
     "fixture_signing_value_abcdefghijklmnopqrstuvwxyz",
     "fixture_encryption_value_abcdefghijklmnopqrstuvwxyz",
+    "fixture_api_key_camel_abcdefghijklmnopqrstuvwxyz",
+    "fixture_service_role_camel_abcdefghijklmnopqrstuvwxyz",
+    "fixture_private_key_camel_abcdefghijklmnopqrstuvwxyz",
+    "fixture_signing_key_camel_abcdefghijklmnopqrstuvwxyz",
+    "fixture_encryption_key_camel_abcdefghijklmnopqrstuvwxyz",
     "upgraded-test-refresh",
     "mock-customer-aal1-token",
     "ci-only-keystore-password",
@@ -123,6 +129,21 @@ ANGLE_PLACEHOLDER = re.compile(
     r"not[-_ ]set|secret|private[-_ ]key|api[-_ ]key|token|value|version|ref|v)>$"
 )
 
+_PRIVATE_KEY_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])"
+)
+
+
+def _contains_unapproved_private_key_material(value: str) -> bool:
+    """Detect PEM material or any non-placeholder long private-key token."""
+    if PRIVATE_KEY.search(value):
+        return True
+    return any(
+        match.group(0).lower() not in PLACEHOLDERS
+        and not ANGLE_PLACEHOLDER.fullmatch(match.group(0))
+        for match in _PRIVATE_KEY_TOKEN.finditer(value)
+    )
+
 
 def _is_helper_call(value: str, remainder: str) -> bool:
     """Recognize a call expression without exempting a literal with a parenthesized note."""
@@ -142,12 +163,151 @@ def _is_helper_call(value: str, remainder: str) -> bool:
     return bool(re.match(r"\d+\s*[,\)\]]", arguments))
 
 
+def _mask_template_interpolations(value: str, _depth: int = 0) -> str:
+    """Ignore dynamic template expressions but retain quoted literal material within them."""
+    if "$" + "{" not in value:
+        return value
+    # Bound nested template parsing. At the limit, leave the source visible so
+    # conservative secret checks fail closed rather than silently hiding it.
+    if _depth >= 64:
+        return value
+
+    def skip_quoted(position: int, quote: str) -> int:
+        position += 1
+        while position < len(value):
+            if value[position] == "\\":
+                position += 2
+            elif value[position] == quote:
+                return position + 1
+            else:
+                position += 1
+        return len(value)
+
+    def regex_literal_start(position: int) -> bool:
+        prefix = value[:position].rstrip()
+        if not prefix:
+            return True
+        if prefix[-1] in "([{=,:;!?&|+-*%^~<>":
+            return True
+        return re.search(
+            r"\b(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await)\s*$",
+            prefix,
+        ) is not None
+
+    def skip_regex_literal(position: int) -> int | None:
+        """Skip a JavaScript regex, respecting escapes and slash-containing character classes."""
+        position += 1
+        in_character_class = False
+        while position < len(value):
+            char = value[position]
+            if char in {"\n", "\r"}:
+                return None
+            if char == "\\":
+                position += 2
+                continue
+            if char == "[" and not in_character_class:
+                in_character_class = True
+            elif char == "]" and in_character_class:
+                in_character_class = False
+            elif char == "/" and not in_character_class:
+                position += 1
+                while position < len(value) and value[position].isalpha():
+                    position += 1
+                return position
+            position += 1
+        return None
+
+    def skip_interpolation(position: int) -> tuple[int, str]:
+        brace_depth = 1
+        position += 2
+        literal_parts: list[str] = []
+        while position < len(value):
+            char = value[position]
+            if char in {"'", '"'}:
+                literal_start = position
+                position = skip_quoted(position, char)
+                literal_parts.append(value[literal_start + 1:position - 1])
+                continue
+            if char == chr(96):
+                literal_start = position
+                position = skip_quoted(position, char)
+                nested_template = value[literal_start + 1:position - 1]
+                literal_parts.append(
+                    _mask_template_interpolations(nested_template, _depth + 1)
+                )
+                continue
+            if char == "/" and regex_literal_start(position):
+                regex_end = skip_regex_literal(position)
+                if regex_end is not None:
+                    position = regex_end
+                    continue
+                # Invalid or unterminated regex syntax is preserved as literal
+                # material through the current line. This prevents malformed
+                # patterns from hiding credential-like text behind comment markers.
+                newline = value.find("\n", position)
+                literal_end = len(value) if newline < 0 else newline
+                literal_parts.append(value[position:literal_end])
+                position = literal_end
+                continue
+            if value.startswith("//", position):
+                newline = value.find("\n", position + 2)
+                position = len(value) if newline < 0 else newline + 1
+                continue
+            if value.startswith("/*", position):
+                closing = value.find("*/", position + 2)
+                position = len(value) if closing < 0 else closing + 2
+                continue
+            if char == "{":
+                brace_depth += 1
+                if brace_depth > 256:
+                    return len(value), "".join(literal_parts)
+            elif char == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    return position + 1, "".join(literal_parts)
+            elif char in {"=", ":"}:
+                # Preserve assignment punctuation between literal pieces, but
+                # discard identifiers and operators from dynamic expressions.
+                literal_parts.append(char)
+            position += 1
+        # An incomplete interpolation is not trusted as literal key material.
+        return len(value), "".join(literal_parts)
+
+    pieces: list[str] = []
+    segment_start = 0
+    position = 0
+    while position < len(value):
+        if value[position] == "\\":
+            # Escaped interpolation syntax is ordinary template text.
+            position += 2
+            continue
+        if value.startswith("$" + "{", position):
+            end, literal_material = skip_interpolation(position)
+            pieces.extend((value[segment_start:position], " ", literal_material, " "))
+            position = end
+            segment_start = end
+            continue
+        position += 1
+    pieces.append(value[segment_start:])
+    return "".join(pieces)
+
+def _is_inside_template_literal(line: str, position: int) -> bool:
+    """Return whether a source assignment begins inside a backtick literal."""
+    return any(
+        literal.group("quote") == "`"
+        and literal.start() < position < literal.end()
+        for literal in SOURCE_STRING_LITERAL.finditer(line)
+    )
+
+
 def _has_sensitive_source_literal(key: str, expression: str) -> bool:
     """Detect seed/private-key material in quoted pieces of a source concatenation."""
-    components = [
-        match.group("value")
-        for match in SOURCE_STRING_LITERAL.finditer(expression)
-    ]
+    components = []
+    for match in SOURCE_STRING_LITERAL.finditer(expression):
+        component = match.group("value")
+        if match.group("quote") == "`":
+            component = _mask_template_interpolations(component)
+        components.append(component)
     if not components:
         # An identifier-only mnemonic/private-key expression cannot be proven
         # harmless from this line; fail closed rather than trusting unknown values.
@@ -160,7 +320,11 @@ def _has_sensitive_source_literal(key: str, expression: str) -> bool:
 
     # Private keys may be split across adjacent quoted components. Join them
     # without separators before checking for a long key-like token.
-    combined = "".join(components)
+    combined = "".join(components).strip()
+    # Exact fixture values may also appear inside source-language literals.
+    # Keep the exception exact: do not exempt a substring or a generated secret.
+    if combined.lower() in PLACEHOLDERS or ANGLE_PLACEHOLDER.fullmatch(combined):
+        return False
     return re.search(
         r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=-]{20,}(?![A-Za-z0-9])",
         combined,
@@ -306,25 +470,42 @@ def _nonempty_private_scalar(value: str) -> bool:
     return True
 
 
+def _looks_like_private_key_material(value: str) -> bool:
+    """Recognize long key-like scalars in nested private objects."""
+    candidate = value.strip().strip('"').strip("'").strip()
+    return (
+        _nonempty_private_scalar(candidate)
+        and re.search(
+            r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
+            candidate,
+        ) is not None
+    )
+
+
 PUBLIC_JWK_METADATA_FIELDS = {
     "n", "e", "x", "y", "crv", "kty", "keyops", "use", "alg", "kid",
-    "x5c", "x5t", "x5tu", "x5ts256",
+    "x5c", "x5t", "x5tu", "x5ts256", "metadata",
 }
 
 
 def _structured_private_object_has_material(value) -> bool:
     """Detect nested private JWK material while preserving public metadata exceptions."""
-    # A root array under private_key has private scalar entries, but objects
-    # inside that array may be public JWKs. Do not propagate the array's scalar
-    # rule into unknown fields of those objects.
-    stack = [(value, isinstance(value, list), isinstance(value, dict))]
-    visited: set[tuple[int, bool, bool]] = set()
+    # A root array under private_key may contain public JWK objects with
+    # provider-specific private siblings. Keep private context for those object
+    # siblings, while the public JWK metadata allowlist prevents false positives.
+    stack = [(value, isinstance(value, list), isinstance(value, (dict, list)), False)]
+    visited: set[tuple[int, bool, bool, bool]] = set()
     visits = 0
     while stack:
-        current, scalar_items_are_private, private_context = stack.pop()
+        current, scalar_items_are_private, private_context, public_metadata_mapping = stack.pop()
         if not isinstance(current, (dict, list)):
             continue
-        identity = (id(current), scalar_items_are_private, private_context)
+        identity = (
+            id(current),
+            scalar_items_are_private,
+            private_context,
+            public_metadata_mapping,
+        )
         if identity in visited:
             continue
         visited.add(identity)
@@ -338,35 +519,57 @@ def _structured_private_object_has_material(value) -> bool:
                 normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
                 field_is_private = normalized_key in PRIVATE_JWK_MATERIAL_FIELDS
                 field_is_public = normalized_key in PUBLIC_JWK_METADATA_FIELDS
-                if field_is_private:
-                    if isinstance(item, str) and _nonempty_private_scalar(item):
+                if isinstance(item, str):
+                    if field_is_private and _nonempty_private_scalar(item):
                         return True
-                    if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    # Direct values in a recognized metadata mapping are public
+                    # descriptive metadata. Nested containers still inherit the
+                    # surrounding private context and are inspected recursively.
+                    if (
+                        private_context
+                        and not public_metadata_mapping
+                        and not field_is_public
+                        and _looks_like_private_key_material(item)
+                    ):
                         return True
+                if field_is_private and isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
+                    return True
                 if isinstance(item, (dict, list)):
-                    # Preserve private traversal through containers entered by a
-                    # recognized private field (or within an already-private object).
-                    # Public JWK members always reset that context.
-                    child_private = False if field_is_public else (
-                        private_context or field_is_private
-                    )
-                    child_scalar_items_private = child_private and isinstance(item, list)
-                    stack.append((item, child_scalar_items_private, child_private))
+                    if normalized_key == "metadata" and field_is_public:
+                        child_private = private_context
+                        child_scalar_items_private = False
+                        child_public_metadata_mapping = True
+                    else:
+                        child_private = False if field_is_public else (
+                            private_context or field_is_private
+                        )
+                        child_scalar_items_private = (
+                            child_private and isinstance(item, list)
+                        )
+                        child_public_metadata_mapping = False
+                    stack.append((
+                        item,
+                        child_scalar_items_private,
+                        child_private,
+                        child_public_metadata_mapping,
+                    ))
         else:
             for item in current:
                 if isinstance(item, dict):
-                    # The containing array makes direct scalar entries sensitive,
-                    # not arbitrary metadata values inside an object element.
-                    stack.append((item, False, private_context))
+                    stack.append((item, False, private_context, False))
                 elif isinstance(item, list):
-                    stack.append((item, scalar_items_are_private, private_context))
+                    stack.append((
+                        item,
+                        scalar_items_are_private,
+                        private_context,
+                        False,
+                    ))
                 elif scalar_items_are_private:
                     if isinstance(item, str) and _nonempty_private_scalar(item):
                         return True
                     if isinstance(item, (int, float)) and not isinstance(item, bool) and item != 0:
                         return True
     return False
-
 
 def _yaml_node_has_private_material(
     node,
@@ -614,6 +817,8 @@ def _source_literal_contains_sensitive_assignment(line: str) -> bool:
             literal_value = literal.group("value")
         if not isinstance(literal_value, str):
             continue
+        if literal.group("quote") == "`":
+            literal_value = _mask_template_interpolations(literal_value)
         for embedded in TRON_SEED_IN_SOURCE.finditer(literal_value):
             key_kind = _credential_key_kind(embedded.group("key"))
             candidate = embedded.group("value").strip().strip('"').strip("'").strip()
@@ -621,13 +826,7 @@ def _source_literal_contains_sensitive_assignment(line: str) -> bool:
                 if _is_likely_recovery_phrase(candidate):
                     return True
             elif key_kind == "privatekey":
-                if (
-                    PRIVATE_KEY.search(candidate)
-                    or re.search(
-                        r"(?<![A-Za-z0-9])[A-Za-z0-9_+/=.-]{20,}(?![A-Za-z0-9])",
-                        candidate,
-                    )
-                ):
+                if _contains_unapproved_private_key_material(candidate):
                     return True
     return False
 
@@ -656,9 +855,59 @@ def _find_triple_quoted_source_assignments(source: str) -> set[int]:
                     ) is not None
                 )
         else:
-            sensitive = False
+            # Generic API keys, passwords and tokens need the same literal-token
+            # check as private-key assignments; placeholders remain exempt.
+            sensitive = _contains_unapproved_private_key_material(value)
         if sensitive:
             findings.add(source.count("\n", 0, match.start()) + 1)
+    return findings
+
+
+
+EMBEDDED_RECOVERY_SUFFIXES = {".env", ".toml", ".ini", ".conf", ".cfg", ".properties"}
+EMBEDDED_RECOVERY_ASSIGNMENT = re.compile(
+    r"""(?i)(?<![A-Za-z0-9])(?P<key>(?:[A-Za-z_][A-Za-z0-9_.-]*[._-])?(?:mnemonic|seed(?:[_-]?phrase)?|recovery[_-]?phrase))\s*[:=]\s*(?P<value>[^#\r\n]+)"""
+)
+
+JS_TEMPLATE_LITERAL_SUFFIXES = {".js", ".ts", ".tsx", ".mjs", ".cjs"}
+TEMPLATE_LITERAL_SOURCE_ASSIGNMENT = re.compile(
+    r"""(?is)(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\.)*(?:export\s+)?["']?(?P<key>mnemonic|seed|seed[_-]?phrase|recovery[_-]?phrase|private[_-]?key)["']?\s*[:=]\s*(?:(?:[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*)\s*)?\x60(?P<value>(?:\\.|[^\x60\\]){0,65536}?)\x60"""
+)
+
+
+def _find_embedded_recovery_assignments(lines: list[str]) -> dict[int, str]:
+    """Find likely recovery phrases embedded in quoted property/config values."""
+    findings: dict[int, str] = {}
+    for lineno, line in enumerate(lines, 1):
+        for match in EMBEDDED_RECOVERY_ASSIGNMENT.finditer(line):
+            key = _credential_key_kind(match.group("key"))
+            if key not in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+                continue
+            value = match.group("value").strip()
+            if value.startswith(('"', "'")):
+                quote = value[0]
+                candidate = value[1:].split(quote, 1)[0]
+            else:
+                candidate = re.split(r"""["']""", value, maxsplit=1)[0]
+            if _is_likely_recovery_phrase(candidate.strip()):
+                findings[lineno] = key
+                break
+    return findings
+
+
+def _find_multiline_template_literal_assignments(source: str) -> dict[int, str]:
+    """Find credential values assigned with multiline JavaScript template literals."""
+    findings: dict[int, str] = {}
+    for match in TEMPLATE_LITERAL_SOURCE_ASSIGNMENT.finditer(source):
+        key = match.group("key")
+        value = _mask_template_interpolations(match.group("value")).strip()
+        key_kind = _credential_key_kind(key)
+        if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
+            sensitive = _is_likely_recovery_phrase(value)
+        else:
+            sensitive = _contains_unapproved_private_key_material(value)
+        if sensitive:
+            findings[source.count("\n", 0, match.start("key")) + 1] = key
     return findings
 
 
@@ -695,6 +944,14 @@ def scan() -> list[str]:
             _find_triple_quoted_source_assignments(text)
             if suffix in SOURCE_CODE_SUFFIXES else set()
         )
+        embedded_recovery_findings = (
+            _find_embedded_recovery_assignments(lines)
+            if suffix in EMBEDDED_RECOVERY_SUFFIXES or name.lower().startswith(".env") else {}
+        )
+        template_literal_findings = (
+            _find_multiline_template_literal_assignments(text)
+            if suffix in JS_TEMPLATE_LITERAL_SUFFIXES else {}
+        )
         documented_recovery_findings = (
             _find_documented_recovery_assignments(lines)
             if suffix in {".md", ".txt"} else {}
@@ -705,6 +962,13 @@ def scan() -> list[str]:
                 continue
             multiline_seed_key = multiline_seed_findings.get(lineno)
             if multiline_seed_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
+            embedded_recovery_key = embedded_recovery_findings.get(lineno)
+            if embedded_recovery_key:
+                findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
+                continue
+            if lineno in template_literal_findings:
                 findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                 continue
             documented_recovery_key = documented_recovery_findings.get(lineno)
@@ -725,7 +989,6 @@ def scan() -> list[str]:
                 else ([TRON_SEED.search(line)] if not is_yaml or not yaml_parsed else [])
             )
             seed_assignment_found = False
-            yaml_block_scalar_found = False
             if "re.compile" not in line:
                 # A source object can contain several credential properties on
                 # one physical line. Inspect every match so an innocuous first
@@ -741,14 +1004,17 @@ def scan() -> list[str]:
                     )
                     if yaml_block_scalar:
                         # The indented block was already scanned as a whole above;
-                        # the YAML marker itself is not credential material.
-                        yaml_block_scalar_found = True
+                        # ignore this marker as seed material, but keep scanning
+                        # other credentials that may share the same malformed line.
                         break
                     computed_source_value = (
                         source_code
                         and SOURCE_STRING_CONCATENATION.search(raw_seed_value) is not None
                     )
                     if source_code:
+                        inside_template_literal = _is_inside_template_literal(
+                            line, seed_match.start()
+                        )
                         # In source code, only literal material (including literals
                         # inside concatenations/arrays) is a checked-in secret.
                         # Numeric RNG seeds, parameter defaults, variable references
@@ -768,7 +1034,14 @@ def scan() -> list[str]:
                             # raw_seed_value begins after the inner key and may only
                             # have a closing quote. Normalize both ends before the
                             # recovery-phrase/long-token check.
-                            bare_source_value = raw_seed_value.strip().strip('"').strip("'").strip()
+                            bare_source_value = raw_seed_value
+                            if inside_template_literal:
+                                bare_source_value = _mask_template_interpolations(
+                                    bare_source_value
+                                )
+                            bare_source_value = (
+                                bare_source_value.strip().strip("`").strip('"').strip("'").strip()
+                            )
                             key_kind = _credential_key_kind(seed_match.group("key"))
                             if key_kind in {"mnemonic", "seed", "seedphrase", "recoveryphrase"}:
                                 sensitive_source_value = _is_likely_recovery_phrase(
@@ -803,7 +1076,7 @@ def scan() -> list[str]:
                         findings.append(f"{path.relative_to(ROOT)}:{lineno}: seed/private-key assignment")
                         seed_assignment_found = True
                         break
-            if seed_assignment_found or yaml_block_scalar_found:
+            if seed_assignment_found:
                 continue
             for match in ASSIGNMENT.finditer(line):
                 if is_yaml and yaml_parsed:

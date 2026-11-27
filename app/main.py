@@ -26,13 +26,15 @@ from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocke
 from fastapi.responses import HTMLResponse, Response, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select, desc, or_, func, case, cast, Numeric, Text, update
+from sqlalchemy import select, desc, or_, exists, func, case, cast, Numeric, Text, update, delete, tuple_
+from sqlalchemy.orm import aliased
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from .config import settings
 from .paper_execution_model import configured_paper_execution_settings
-from .db import init_db, SessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, AdminRole, Incident, quantize_money
+from .db import _UUID_AUTH_REFERENCE_PATTERN, _UUID_AUTH_REFERENCE_GLOB, dispose_identity_quarantine_engine
+from .db import init_db, SessionLocal, IdentityQuarantineSessionLocal, AppState, TradingAccount, Trade, Position, AuditLog, CustomerPaperSubmissionAuditRetry, Withdrawal, CustomerProfile, Wallet, FundingTransaction, WithdrawalStepUpToken, WithdrawalOtpIntent, ServiceHeartbeat, OandaReconciliationState, Plan, Subscription, ReferralCode, Referral, ReferralCommission, RevenueLedger, CostLedger, SmartTrade, DcaBot, CustomerAlert, StrategyDraft, ArbitrageOpportunity, CustomerLedgerAccount, TronDepositCursor, TronSweep, CustomerBinanceAccount, LiveExecutionLease, CustomerOandaAccount, CustomerDerivAccount, GridBot, AdaptiveTradingBot, StrategyCandidate, StrategyCandidateRun, TradeExecutor, WebhookEndpoint, WebhookEvent, ExchangeConnector, ModelExperiment, ResearchRun, StrategyOutcome, TradeLearningEpisode, TradeReplayResult, BenchmarkPromptCapture, CustomerEquitySnapshot, CustomerWorkspacePreference, AdminRole, Incident, quantize_money
 from .data import fetch_crypto, fetch_forex, fetch_forex_oanda
 from .trading_core import train_model, predict_latest, ai_walk_forward_backtest
 from .adaptive_bot import AdaptiveModelPolicy, ensure_adaptive_model, adaptive_model_status
@@ -64,6 +66,8 @@ from .tron_sweep import build_sweep_intent, serialize_sweep_intent, SweepError, 
 from .custody_locations import create_custody_transfer, transition_custody_transfer, flag_stale_custody_transfers
 from .customer_funds import record_ledger_incident, persist_withdrawal_replay_mismatch, WithdrawalReplayMismatch, get_or_create_ledger, post_deposit, sync_wallet_from_ledger, customer_balance, customer_balance_api, ledger_statement, ledger_statement_export_bounds, reserve_withdrawal, release_withdrawal as ledger_release_withdrawal, settle_withdrawal, verify_existing_withdrawal_action_replay, verify_customer_ledger_balances_match_journals
 from .distributed import allow_rate_limit, check_redis, acquire_lock, release_lock, refresh_lock
+from .market_scanner import MAX_CONCURRENT_FETCHES as _SCANNER_MAX_CONCURRENT_FETCHES, normalize_symbols as _scanner_normalize_symbols, scan_symbols as _scanner_scan_symbols
+from .request_limits import read_limited_body
 from .withdrawal_risk import score_withdrawal
 from .security_audit import emit_security_audit
 from .incidents import open_incident
@@ -1444,12 +1448,19 @@ async def app_lifespan(app: FastAPI):
         await shutdown()
 
 
+_CUSTOMER_WEBHOOK_MAX_BODY_BYTES = 64 * 1024
+
+
 app = FastAPI(title=settings.app_name, version=settings.app_version, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url, lifespan=app_lifespan)
 _APP_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(_APP_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(_APP_DIR / "static")), name="static")
 # Keep telemetry outside the body limiter so 413 responses receive the normal security headers.
-app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_body_bytes)
+app.add_middleware(
+    BodySizeLimitMiddleware,
+    max_bytes=settings.max_request_body_bytes,
+    path_prefix_limits={"/api/webhooks/": _CUSTOMER_WEBHOOK_MAX_BODY_BYTES},
+)
 app.add_middleware(TelemetryMiddleware)
 
 _instance_id = os.getenv("K_REVISION", "local") + ":" + uuid.uuid4().hex[:12]
@@ -1604,6 +1615,38 @@ def _trusted_client_ip(request: Request) -> str:
     return str(chain[0]) if chain else peer
 
 
+async def _benchmark_capture_retention_loop() -> None:
+    """Delete expired consent captures hourly, even when pg_cron is unavailable."""
+    from .benchmark_capture import (
+        benchmark_capture_permissions,
+        purge_expired_benchmark_captures,
+    )
+
+    while True:
+        try:
+            async with SessionLocal() as db:
+                permissions = await benchmark_capture_permissions(db)
+                if permissions["can_delete"]:
+                    deleted = await purge_expired_benchmark_captures(db)
+                    await db.commit()
+                    _mark_worker_loop_success("benchmark-capture-retention")
+                else:
+                    state = _worker_loop_health.setdefault(
+                        "benchmark-capture-retention", {"restart_count": 0}
+                    )
+                    state["status"] = "DISABLED"
+                    state["reason"] = "database_role_has_no_benchmark_capture_delete"
+                    deleted = 0
+            if deleted:
+                logger.info("benchmark_capture_retention_deleted count=%s", deleted)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            _mark_worker_loop_failure("benchmark-capture-retention", exc)
+            logger.exception("benchmark_capture_retention_cleanup_failed")
+        await asyncio.sleep(60 * 60)
+
+
 async def startup():
     global _background_task, _usdt_task
     assert_multidict_safe_backend()
@@ -1694,6 +1737,16 @@ async def startup():
         _track_worker_task(_heartbeat_loop())
 
 
+    # Keep consented captures on the same bounded application-side expiry path
+    # on plans where pg_cron is unavailable. Read-only runtimes self-disable.
+    _track_worker_task(
+        _supervise_worker_loop(
+            _benchmark_capture_retention_loop,
+            "benchmark-capture-retention",
+        )
+    )
+
+
 async def shutdown():
     """Cancel worker loops and allow up to 30 seconds for cancellation cleanup.
 
@@ -1726,6 +1779,10 @@ async def shutdown():
     _worker_tasks.clear()
     _background_task = None
     _usdt_task = None
+    try:
+        await dispose_identity_quarantine_engine()
+    except Exception:
+        logger.exception("identity_quarantine_pool_dispose_failed")
 
 
 async def _record_model_experiment(model_path: str, asset: str, result: dict) -> None:
@@ -1782,6 +1839,9 @@ def _customer_paper_configuration_ready() -> bool:
         and settings.broker_sandbox
         and not getattr(settings, "deriv_live_enabled", False)
         and not settings.usdt_tron_enabled
+        and not getattr(settings, "usdt_tron_sweep_enabled", False)
+        and not getattr(settings, "forex_live_enabled", False)
+        and not getattr(settings, "binance_arbitrage_live_enabled", False)
         and settings.customer_paper_ledger_enabled
         and str(settings.customer_paper_database_url or "").strip()
     )
@@ -1816,7 +1876,7 @@ async def _adaptive_bot_runtime_gate(bot_id: int, customer_id: int, trading_acco
         state = await db.get(AppState, 1)
         if not bot or bot.status != "RUNNING":
             return False, True, "bot_stopped"
-        if not profile or profile.status != "ACTIVE":
+        if not profile or not await _customer_profile_effectively_active(db, profile):
             return False, True, "customer_inactive"
         if not account or account.status != "ACTIVE":
             return False, True, "trading_account_inactive"
@@ -2113,7 +2173,7 @@ async def _adaptive_bot_controller_loop():
                             row.last_stage = str(result.get("stage", "execution"))
                             row.last_model_version = str((result.get("ml_signal") or {}).get("model_version", ""))
                             if row.status == "RUNNING":
-                                row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
+                                row.next_run_at = now + timedelta(seconds=max(60, interval_seconds))
                                 row.last_error = ""
                                 row.consecutive_errors = 0
                             elif row.status == "STOPPED":
@@ -2148,7 +2208,7 @@ async def _adaptive_bot_controller_loop():
                                 row.status = "STOPPED"
                                 row.next_run_at = None
                             else:
-                                row.next_run_at = now + __import__("datetime").timedelta(seconds=max(60, interval_seconds))
+                                row.next_run_at = now + timedelta(seconds=max(60, interval_seconds))
                             row.last_decision = "ERROR"
                             row.last_stage = "controller"
                             row.last_error = str(exc)[:2000]
@@ -2203,7 +2263,19 @@ async def _run_persisted_adaptive_bot_cycle(
         profile = await db.get(CustomerProfile, bot.customer_id)
         account = await db.get(TradingAccount, bot.trading_account_id)
         state = await db.get(AppState, 1)
-        if not profile or not account or account.status != "ACTIVE" or not state or state.kill_switch:
+        if not profile or not await _customer_profile_effectively_active(db, profile):
+            bot.status = "STOPPED"
+            bot.next_run_at = None
+            bot.last_error = "Customer identity is pending manual review or remains conflicted"
+            bot.last_decision = "NO_TRADE"
+            bot.last_stage = "customer_identity"
+            await db.commit()
+            return {
+                "decision": "NO_TRADE",
+                "stage": "customer_identity",
+                "reason": "Customer identity must be verified before another persisted bot cycle",
+            }
+        if not account or account.status != "ACTIVE" or not state or state.kill_switch:
             return {"decision": "NO_TRADE", "stage": "risk_state"}
         # Do not mask malformed or non-finite equity by clamping it to zero.
         # Customer-paper cycles replace this value with their isolated paper cash below.
@@ -2688,13 +2760,26 @@ async def _executor_controller_loop():
                         target = float(row.target_quantity or 0)
                         mode = str(row.mode or "PAPER").upper()
                         live_approved = bool(row.live_approved)
+                        profile = await db.get(CustomerProfile, cid) if cid is not None else None
+                        if cid is not None and (
+                            not profile
+                            or not await _customer_profile_effectively_active(db, profile)
+                        ):
+                            row.status = "STOPPED"
+                            row.next_run_at = None
+                            row.last_error = "Customer identity is pending manual review or remains conflicted"
+                            await db.commit()
+                            continue
                         if mode == "LIVE":
-                            profile = await db.get(CustomerProfile, cid)
                             account = await db.get(TradingAccount, row.trading_account_id)
                             state = await db.get(AppState, 1)
                             plan, _ = await _subscription_entitlements(db, cid)
+                            profile_active = bool(
+                                profile
+                                and await _customer_profile_effectively_active(db, profile)
+                            )
                             live_ok = bool(
-                                live_approved and profile and profile.status == "ACTIVE" and account and account.status == "ACTIVE"
+                                live_approved and profile_active and account and account.status == "ACTIVE"
                                 and state and not state.kill_switch and state.live_enabled
                                 and settings.customer_live_trading_enabled and settings.live_trading_enabled and not settings.paper_trading
                                 and not settings.broker_sandbox and bool(plan.get("live"))
@@ -2744,14 +2829,14 @@ async def _executor_controller_loop():
                             row = await db.get(TradeExecutor, eid, with_for_update=True)
                             if row:
                                 row.last_error = "No live fill confirmed; executor did not advance progress"
-                                row.last_run_at = now; row.next_run_at = now + __import__("datetime").timedelta(seconds=60); await db.commit()
+                                row.last_run_at = now; row.next_run_at = now + timedelta(seconds=60); await db.commit()
                         continue
                     async with SessionLocal() as db:
                         row = await db.get(TradeExecutor, eid, with_for_update=True)
                         if row:
                             row.executed_quantity = min(float(row.target_quantity or 0), float(row.executed_quantity or 0) + actual_filled)
                             row.last_run_at = now
-                            row.next_run_at = now + __import__("datetime").timedelta(seconds=max(1, int(cfg.get("interval_seconds", 60))))
+                            row.next_run_at = now + timedelta(seconds=max(1, int(cfg.get("interval_seconds", 60))))
                             if row.executed_quantity + 1e-12 >= row.target_quantity:
                                 row.status = "COMPLETED"; row.next_run_at = None
                             row.last_error = ""
@@ -2762,7 +2847,7 @@ async def _executor_controller_loop():
                     async with SessionLocal() as db:
                         row = await db.get(TradeExecutor, eid, with_for_update=True)
                         if row:
-                            row.last_error = str(exc)[:2000]; row.last_run_at = now; row.next_run_at = now + __import__("datetime").timedelta(seconds=60); await db.commit()
+                            row.last_error = str(exc)[:2000]; row.last_run_at = now; row.next_run_at = now + timedelta(seconds=60); await db.commit()
                 finally:
                     await release_lock(lock_key)
         except asyncio.CancelledError:
@@ -3207,7 +3292,10 @@ async def _reconciliation_loop():
                             Trade.customer_id.is_(None),
                             Trade.mode == "LIVE",
                             Trade.exchange == settings.default_exchange,
-                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                            or_(
+                                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                                Trade.fee_reconciliation_pending.is_(True),
+                            ),
                         ).limit(1)
                     )).scalar_one_or_none()
                 if unresolved_platform_live_order is None:
@@ -3269,7 +3357,10 @@ async def _reconciliation_loop():
                 customer_exchanges = (await db.execute(
                     select(Trade.exchange).where(
                         Trade.customer_id.is_not(None),
-                        Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                        or_(
+                            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                            Trade.fee_reconciliation_pending.is_(True),
+                        ),
                     ).distinct()
                 )).scalars().all()
             selected = [
@@ -3826,10 +3917,41 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     if not normalized:
         return False
     try:
-        rows = (await db.execute(
-            select(CustomerProfile.auth_user_id, CustomerProfile.email)
-            .where(CustomerProfile.auth_user_id != auth_user_id)
-        )).all()
+        bind_getter = getattr(db, "get_bind", None)
+        bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+        dialect = getattr(getattr(bind, "dialect", None), "name", "")
+        statement = select(
+            CustomerProfile.auth_user_id, CustomerProfile.email
+        ).where(CustomerProfile.auth_user_id != auth_user_id)
+        if dialect == "postgresql":
+            # Match revision 0060's partial-index predicate exactly. The fixed
+            # literal lets PostgreSQL prove the query implies the index predicate;
+            # a bind parameter may prevent partial-index selection.
+            from sqlalchemy import literal_column
+
+            uuid_pattern = _UUID_AUTH_REFERENCE_PATTERN
+            statement = statement.where(
+                CustomerProfile.auth_user_id.op("!~*")(
+                    literal_column(f"'{uuid_pattern}'")
+                )
+            )
+        elif dialect == "sqlite":
+            # Match the SQLite partial index expression and predicate exactly.
+            from sqlalchemy import literal_column
+
+            uuid_glob = (
+                "[0-9a-f]" * 8 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 4 + "-"
+                + "[0-9a-f]" * 12
+            )
+            statement = statement.where(
+                func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
+                    literal_column(f"'{uuid_glob}'")
+                )
+            )
+        rows = (await db.execute(statement)).all()
     except Exception as exc:
         logger.exception("legacy_customer_identity_lookup_failed")
         raise HTTPException(503, "Customer identity verification is temporarily unavailable") from exc
@@ -3848,6 +3970,71 @@ async def _legacy_customer_email_conflict(db, auth_user_id: str, email: str) -> 
     return False
 
 
+async def _has_unmapped_legacy_customer_profile(db, auth_user_id: str) -> bool:
+    """Return whether any non-UUID legacy Auth reference remains unmapped."""
+    bind_getter = getattr(db, "get_bind", None)
+    bind = bind_getter() if callable(bind_getter) else getattr(db, "bind", None)
+    dialect = getattr(getattr(bind, "dialect", None), "name", "")
+    if dialect == "postgresql":
+        from sqlalchemy import literal_column
+
+        uuid_pattern = _UUID_AUTH_REFERENCE_PATTERN
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            CustomerProfile.auth_user_id.op("!~*")(
+                literal_column(f"'{uuid_pattern}'")
+            ),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    if dialect == "sqlite":
+        from sqlalchemy import literal_column
+
+        uuid_glob = _UUID_AUTH_REFERENCE_GLOB
+        statement = select(CustomerProfile.id).where(
+            CustomerProfile.auth_user_id != auth_user_id,
+            func.lower(CustomerProfile.auth_user_id).op("NOT GLOB")(
+                literal_column(f"'{uuid_glob}'")
+            ),
+        ).limit(1)
+        return (await db.execute(statement)).scalar_one_or_none() is not None
+    # Conservative fallback for a non-production/test dialect.
+    references = (await db.execute(
+        select(CustomerProfile.auth_user_id).where(CustomerProfile.auth_user_id != auth_user_id)
+    )).scalars().all()
+    for reference in references:
+        try:
+            uuid.UUID(str(reference))
+        except (ValueError, TypeError, AttributeError):
+            return True
+    return False
+
+
+async def _customer_profile_effectively_active(_db, profile) -> bool:
+    """Only an explicitly persisted ACTIVE status authorizes background execution.
+
+    Clearing a legacy identity conflict is not an audited reactivation. A profile
+    that remains PENDING_IDENTITY_REVIEW stays blocked until a reviewed flow
+    persists status=ACTIVE.
+    """
+    return str(getattr(profile, "status", "") or "").upper() == "ACTIVE"
+
+
+async def _quarantine_customer_identity_review(profile_id: int) -> bool:
+    """Persist an identity conflict in an isolated transaction, not the request session."""
+    async with IdentityQuarantineSessionLocal() as quarantine_db:
+        profile = await quarantine_db.get(
+            CustomerProfile, int(profile_id), with_for_update=True
+        )
+        if profile is None:
+            return False
+        status = str(profile.status or "").upper()
+        if status == "ACTIVE":
+            profile.status = "PENDING_IDENTITY_REVIEW"
+            await quarantine_db.commit()
+            return True
+        return status == "PENDING_IDENTITY_REVIEW"
+
+
 async def get_customer(
     authorization: str | None,
     db,
@@ -3863,52 +4050,77 @@ async def get_customer(
     )).scalar_one_or_none()
 
     email = str(claims.get("email") or "").strip().lower()[:320]
+    jwt_email_missing = not email
     metadata = claims.get("user_metadata") if isinstance(claims.get("user_metadata"), dict) else {}
     name = str(metadata.get("full_name") or metadata.get("name") or "").strip()[:160]
 
-    # Edge provisioning deliberately leaves EncryptedText PII empty. Resolve the
-    # verified Auth identity here, then let the ORM encrypt values on write.
-    if (profile is not None and (
-        not str(profile.email or "").strip() or not str(profile.display_name or "").strip()
-    )) or not email:
+    # Prefer already-persisted encrypted PII when the verified JWT omits a
+    # field. A missing display name is not a reason to call Supabase Auth:
+    # users without name metadata would otherwise trigger an Auth request on
+    # every customer endpoint.
+    if profile is not None:
+        email = email or str(profile.email or "").strip().lower()[:320]
+        name = name or str(profile.display_name or "").strip()[:160]
+
+    # Keyless Edge provisioning leaves encrypted PII empty. Verify Auth and
+    # backfill the email when the existing profile has no encrypted email.
+    # Every Auth-backed identity lookup or email backfill requires a confirmed
+    # Auth email; active profiles with an already-persisted email avoid this call.
+    needs_auth_identity = (
+        jwt_email_missing
+        or profile is None
+        or not str(profile.email or "").strip()
+    )
+    if needs_auth_identity:
         user = await _supabase_user(_bearer_token(authorization))
         if str(user.get("id") or "") != uid:
             raise HTTPException(401, "Customer Auth identity could not be verified")
-        if not user.get("email_confirmed_at"):
+        auth_email = str(user.get("email") or "").strip().lower()[:320]
+        if not auth_email or not user.get("email_confirmed_at"):
             raise HTTPException(403, "A confirmed email address is required")
-        email = str(user.get("email") or email).strip().lower()[:320]
+        email = auth_email or email
         user_metadata = user.get("user_metadata") if isinstance(user.get("user_metadata"), dict) else {}
         name = str(user_metadata.get("full_name") or user_metadata.get("name") or name).strip()[:160]
     if not email:
         raise HTTPException(403, "A confirmed email address is required")
 
-    identity_review_required = (
-        profile is not None
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
-    )
-    if identity_review_required and not allow_identity_review_summary:
-        raise HTTPException(
-            409,
-            "This customer identity is pending manual review. Contact support before using the account.",
-        )
+    # New provisioning is paused while legacy non-UUID identities remain.
+    # Existing customers are evaluated per identity, not against a global legacy
+    # count that would incorrectly lock every unrelated customer account.
+    if profile is None:
+        identity_review_required = await _has_unmapped_legacy_customer_profile(db, uid)
+        if identity_review_required:
+            raise HTTPException(
+                409,
+                "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
+            )
+    else:
+        identity_review_required = False
+        pending_review = str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+        # Only a pending identity or an Auth-backed email backfill needs a
+        # legacy comparison. Active profiles with an existing email must not be
+        # blocked by other customers' unmapped legacy references.
+        if pending_review or needs_auth_identity:
+            identity_review_required = (
+                await _legacy_customer_email_conflict(db, uid, email)
+                if email
+                else await _has_unmapped_legacy_customer_profile(db, uid)
+            )
+        if identity_review_required and str(profile.status or "").upper() == "ACTIVE":
+            # Commit the quarantine through a dedicated transaction. get_customer
+            # is also called by read handlers that may share a session with
+            # unrelated writes; never commit the caller's request transaction.
+            quarantined = await _quarantine_customer_identity_review(profile.id)
+            if quarantined:
+                profile.status = "PENDING_IDENTITY_REVIEW"
+        profile.identity_review_required = identity_review_required
+        profile.auth_identity_email = email if identity_review_required else ""
 
-    # Check legacy non-UUID identities before inserting or activating a new
-    # Supabase profile. A match is quarantined, never auto-linked or rewritten.
-    if profile is None or not str(profile.email or "").strip():
-        if await _legacy_customer_email_conflict(db, uid, email):
-            if profile is None:
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
-            profile.status = "PENDING_IDENTITY_REVIEW"
-            identity_review_required = True
-            if not allow_identity_review_summary:
-                await db.commit()
-                raise HTTPException(
-                    409,
-                    "An unmapped legacy customer identity prevents safe provisioning. Manual identity review is required before creating this profile.",
-                )
+        if identity_review_required and not allow_identity_review_summary:
+            raise HTTPException(
+                409,
+                "This customer identity conflicts with an unmapped legacy profile. Manual identity review is required before using this account.",
+            )
 
     if profile is None:
         # Concurrent first requests can both observe no profile. Use a savepoint so
@@ -3936,19 +4148,29 @@ async def get_customer(
                 profile.display_name = name
             await db.flush()
     else:
-        if not profile.email:
-            profile.email = email
-        if not profile.display_name:
-            profile.display_name = name
-        await db.flush()
+        # Never persist an email that matched an unmapped legacy identity; keeping
+        # it transient ensures the next request cannot bypass the manual review.
+        if not identity_review_required:
+            if not profile.email:
+                profile.email = email
+            if not profile.display_name:
+                profile.display_name = name
+            await db.flush()
 
-    if profile.status != "ACTIVE" and not (
-        allow_identity_review_summary
-        and identity_review_required
-        and str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    pending_identity_quarantine = (
+        str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+    )
+    if str(profile.status or "").upper() != "ACTIVE" and not (
+        allow_identity_review_summary and pending_identity_quarantine
     ):
+        # A cleared legacy conflict is not an approval to reactivate the account.
+        # Protected customer APIs remain blocked until an audited flow persists
+        # an explicit transition back to ACTIVE.
         raise HTTPException(403, "Customer account is not active")
-    if not identity_review_required:
+    if (
+        str(profile.status or "").upper() == "ACTIVE"
+        and not identity_review_required
+    ):
         await _ensure_customer_subscription(db, profile)
     return profile, claims
 
@@ -4349,7 +4571,13 @@ def _strategy_router_validation_gate(
     }
 
 
-def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
+def _market_data_quality(
+    df,
+    timeframe: str,
+    asset: str = "crypto",
+    *,
+    completed_bar_close: bool = False,
+) -> tuple[bool, list[str]]:
     reasons: list[str] = []
     if df is None or len(df) < settings.min_bars:
         reasons.append("insufficient_bars")
@@ -4378,15 +4606,51 @@ def _market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[boo
         reasons.append("duplicate_timestamps")
     last = df.index[-1]
     try:
-        age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
-        tf = pd.Timedelta(timeframe).total_seconds()
-        # Completed-bar data is expected to be no older than 3 bars or the configured hard ceiling.
-        allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf * 3.5))
-        if age > allowed:
-            reasons.append("stale_market_data")
+        timeframe_delta = pd.Timedelta(timeframe)
+        tf_seconds = timeframe_delta.total_seconds()
+        if not math.isfinite(tf_seconds) or tf_seconds <= 0:
+            raise ValueError("invalid timeframe")
+        if completed_bar_close:
+            # OHLCV indices label candle opens. Use the completed close boundary so
+            # fresh 4-hour and daily candles are not rejected because their open is old.
+            last_open = pd.Timestamp(last)
+            if last_open.tzinfo is None:
+                raise ValueError("naive market timestamp")
+            last_close = last_open + timeframe_delta
+            close_age = (pd.Timestamp(datetime.now(timezone.utc)) - last_close).total_seconds()
+            if close_age < 0:
+                reasons.append("incomplete_latest_bar")
+            elif close_age > _customer_paper_max_bar_age_seconds(tf_seconds):
+                reasons.append("stale_market_data")
+        else:
+            age = (datetime.now(timezone.utc) - last.to_pydatetime()).total_seconds()
+            # Preserve the legacy open-time freshness rule for other consumers.
+            allowed = min(float(settings.stale_data_minutes * 60), max(60.0, tf_seconds * 3.5))
+            if age > allowed:
+                reasons.append("stale_market_data")
     except Exception:
         reasons.append("invalid_market_timestamp")
     return not reasons, reasons
+
+
+def _require_strategy_market_data_quality(df, req) -> None:
+    passed, reasons = _market_data_quality(
+        df, req.timeframe, req.asset, completed_bar_close=True
+    )
+    if not passed:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Market data failed the strategy quality gate", "reasons": reasons},
+        )
+
+
+def _customer_paper_router_taker_bps(
+    *, needs_customer_paper: bool, asset: str
+) -> float:
+    """Keep customer-paper crypto-spot routing cost assumptions aligned with fills."""
+    if needs_customer_paper and str(asset or "").strip().lower() == "crypto":
+        return float(settings.customer_paper_spot_taker_bps)
+    return float(settings.research_taker_bps)
 
 
 def _customer_paper_market_data_quality(df, timeframe: str, asset: str = "crypto") -> tuple[bool, list[str]]:
@@ -4458,8 +4722,10 @@ def _current_spread_bps(req: MarketRequest, customer_id: int | None = None) -> f
         # quote retrieval is handled by the autonomous caller before live execution.
         return None
     if settings.oanda_account_id and settings.oanda_api_token:
-        broker = __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaBroker(
-            __import__("app.forex_oanda", fromlist=["OandaBroker", "OandaConfig"]).OandaConfig(
+        from .forex_oanda import OandaBroker, OandaConfig
+
+        broker = OandaBroker(
+            OandaConfig(
                 settings.oanda_account_id, settings.oanda_api_token, settings.oanda_practice, settings.oanda_timeout_seconds))
         try:
             ticker = broker.ticker(_normalize_oanda_instrument(req.symbol))
@@ -4651,15 +4917,19 @@ async def _ensure_customer_subscription(db, profile: CustomerProfile, referral_c
     now = datetime.now(timezone.utc)
     from datetime import timedelta
     trial_end = now + timedelta(days=max(0, settings.billing_trial_days))
-    try:
-        async with db.begin_nested():
-            sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
-            db.add(sub)
-            await db.flush()
-    except IntegrityError:
-        sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
-        if not sub:
-            raise
+    # A lapsed trial is downgraded to an expired free row that keeps this stable key, so look it up
+    # first; blindly inserting would hit the unique key (and burn a sequence value) on every call.
+    sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
+    if sub is None:
+        try:
+            async with db.begin_nested():
+                sub = Subscription(customer_id=profile.id, plan_code="pro" if settings.billing_trial_days else "free", billing_interval="monthly", status="trialing" if settings.billing_trial_days else "active", provider="internal", provider_subscription_id=f"atlas-free-{profile.id}", current_period_start=now, current_period_end=trial_end, trial_end=trial_end)
+                db.add(sub)
+                await db.flush()
+        except IntegrityError:
+            sub = (await db.execute(select(Subscription).where(Subscription.provider_subscription_id == f"atlas-free-{profile.id}").with_for_update())).scalar_one_or_none()
+            if not sub:
+                raise
     code = (referral_code or "").strip().upper()
     if code:
         rc = (await db.execute(select(ReferralCode).where(ReferralCode.code == code, ReferralCode.active == True))).scalar_one_or_none()
@@ -4763,9 +5033,26 @@ async def admin_prepare_tron_sweep(req: dict, authorization: str | None = Header
     """
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     try:
-        wallet_id = int(req.get("wallet_id"))
+        raw_wallet_id = req.get("wallet_id")
+        if isinstance(raw_wallet_id, bool):
+            raise ValueError("wallet_id must be an integer")
+        if isinstance(raw_wallet_id, int):
+            wallet_id = raw_wallet_id
+        elif isinstance(raw_wallet_id, str) and re.fullmatch(r"[0-9]+", raw_wallet_id.strip()):
+            wallet_id = int(raw_wallet_id.strip())
+        else:
+            raise ValueError("wallet_id must be an integer")
+        if wallet_id <= 0:
+            raise ValueError("wallet_id must be a positive integer")
         amount = req.get("amount_usdt")
+        if isinstance(amount, bool) or not Decimal(str(amount)).is_finite():
+            raise ValueError("amount_usdt must be a finite number")
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise HTTPException(422, "wallet_id (integer) and a finite amount_usdt are required") from exc
+    try:
         async with SessionLocal() as db:
             # Read owner identity first, then acquire locks in the global customer-cash
             # order: ledger -> wallet. Re-check wallet status/owner after locking it.
@@ -4832,8 +5119,13 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
     """Record a signer/broadcaster result without exposing signing material to Atlas."""
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "TREASURY")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     txid = str(req.get("transaction_id") or "").strip()
     outcome = str(req.get("outcome") or "").strip().upper()
+    if txid and not re.fullmatch(r"[0-9a-fA-F]{64}", txid):
+        raise HTTPException(400, "transaction_id must be a 64-character hexadecimal TRON transaction hash")
+    txid = txid.lower()
     if outcome not in {"", "TIMEOUT", "REJECTED"}:
         raise HTTPException(400, "unsupported broadcast outcome")
     if not txid and not outcome:
@@ -4868,14 +5160,16 @@ async def admin_record_tron_sweep_broadcast(sweep_id: int, req: dict, authorizat
                                                   detail={"broadcast_outcome": "REJECTED"})
             await db.commit()
             return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": ""}
-        if sweep.transaction_id and sweep.transaction_id != txid:
+        stored_txid = str(sweep.transaction_id or "").strip().lower()
+        if stored_txid and stored_txid != txid:
             raise HTTPException(409, "sweep already has a different transaction id")
-        if sweep.status == "SUBMITTED" and sweep.transaction_id == txid:
-            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": sweep.transaction_id, "idempotent": True}
+        if sweep.status == "SUBMITTED" and stored_txid == txid:
+            return {"sweep_id": sweep.id, "status": sweep.status, "transaction_id": txid, "idempotent": True}
         if sweep.status not in {"READY_FOR_SIGNER", "UNKNOWN", "SUBMITTED"}:
             raise HTTPException(409, f"Sweep is {sweep.status}; broadcast result cannot be recorded")
         duplicate = (await db.execute(select(TronSweep).where(
-            TronSweep.transaction_id == txid, TronSweep.id != sweep.id
+            func.lower(TronSweep.transaction_id) == txid,
+            TronSweep.id != sweep.id
         ).with_for_update())).scalar_one_or_none()
         if duplicate:
             raise HTTPException(409, "transaction id is already assigned to another sweep")
@@ -5081,9 +5375,13 @@ async def admin_verify_audit_chain(authorization: str | None = Header(default=No
 async def admin_set_role(req: dict, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "ADMINISTRATOR")
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     uid = str(req.get("auth_user_id") or "").strip()
     role = str(req.get("role") or "").strip().upper()
-    active = bool(req.get("active", True))
+    active = req.get("active", True)
+    if not isinstance(active, bool):
+        raise HTTPException(400, "active must be a JSON boolean (true or false)")
     if not uid or role not in ROLES:
         raise HTTPException(400, "auth_user_id and a valid role are required")
     row = await upsert_role(uid, role, active)
@@ -5314,11 +5612,49 @@ async def customer_otp_verify(req: OtpVerifyRequest, authorization: str | None =
     return {"ok": True, "purpose": "withdrawal", "step_up_token": token, "proposal_digest": expected_digest, "expires_in": settings.withdrawal_step_up_minutes * 60}
 
 
+def _is_valid_password_reset_email(email: str) -> bool:
+    """Accept a bounded dot-atom mailbox with a valid fully qualified domain."""
+    if not isinstance(email, str) or len(email) > 254 or email.count("@") != 1:
+        return False
+    local, domain = email.rsplit("@", 1)
+    if (
+        not local
+        or len(local) > 64
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in local
+        or not re.fullmatch(
+            r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*",
+            local,
+        )
+        or not domain
+    ):
+        return False
+    try:
+        domain = domain.encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    if len(domain) > 253:
+        return False
+    labels = domain.split(".")
+    if len(labels) < 2 or len(labels[-1]) < 2:
+        return False
+    return all(
+        1 <= len(label) <= 63
+        and re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?", label)
+        for label in labels
+    )
+
+
 @app.post("/api/auth/password-reset")
 async def customer_password_reset(req: dict):
+    if not isinstance(req, dict):
+        raise HTTPException(422, "A JSON object body is required")
     email = str(req.get("email") or "").strip()
     if not email:
         raise HTTPException(422, "Email is required")
+    if not _is_valid_password_reset_email(email):
+        raise HTTPException(422, "A valid email address is required")
     key = hashlib.sha256(email.lower().encode()).hexdigest()
     allowed, _ = await allow_rate_limit(f"password-reset:contact:{key}", max(1, settings.auth_rate_limit_per_minute))
     if not allowed:
@@ -5416,7 +5752,7 @@ async def admin_billing_revenue(req: RevenueEventRequest, authorization: str | N
 async def admin_billing_margin(months: int = 1, authorization: str | None = Header(default=None), x_admin_token: str | None = Header(default=None)):
     claims = await auth(x_admin_token, authorization)
     await require_role(claims, "FINANCE")
-    months=max(1,min(months,24)); cutoff=datetime.now(timezone.utc)-__import__('datetime').timedelta(days=31*months)
+    months=max(1,min(months,24)); cutoff=datetime.now(timezone.utc)-timedelta(days=31*months)
     async with SessionLocal() as db:
         revenue=float((await db.execute(select(func.coalesce(func.sum(RevenueLedger.net_amount),0.0)).where(RevenueLedger.created_at>=cutoff))).scalar_one() or 0)
         costs=float((await db.execute(select(func.coalesce(func.sum(CostLedger.amount),0.0)).where(CostLedger.created_at>=cutoff))).scalar_one() or 0)
@@ -5438,9 +5774,14 @@ async def customer_me(authorization: str | None = Header(default=None)):
         )
         sub = await _get_active_subscription(db, profile.id)
         await db.commit()
-        return {"id": profile.id, "auth_user_id": profile.auth_user_id, "email": profile.email,
-                "display_name": profile.display_name, "status": profile.status,
-                "identity_review_required": profile.status == "PENDING_IDENTITY_REVIEW",
+        return {"id": profile.id, "auth_user_id": profile.auth_user_id,
+                "email": getattr(profile, "auth_identity_email", "") or profile.email,
+                "display_name": profile.display_name, "status": (
+                    "PENDING_IDENTITY_REVIEW"
+                    if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW"
+                    else ("ACTIVE" if str(profile.status or "").upper() == "PENDING_IDENTITY_REVIEW" else profile.status)
+                ),
+                "identity_review_required": bool(getattr(profile, "identity_review_required", False)),
                 "plan": sub.plan_code if sub else "free", "subscription_status": sub.status if sub else "active"}
 
 
@@ -5693,6 +6034,42 @@ async def customer_ledger_export_csv(authorization: str | None = Header(default=
             "X-Atlas-Export-Truncated": "false",
         },
     )
+
+@app.get("/api/customer/trades/recent")
+async def customer_recent_trades(
+    limit: int = 20,
+    authorization: str | None = Header(default=None),
+):
+    """Return a bounded, customer-owned view of recent persisted trade orders."""
+    bounded_limit = max(1, min(int(limit), 50))
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        rows = (
+            await db.execute(
+                select(Trade)
+                .where(Trade.customer_id == profile.id)
+                .order_by(desc(Trade.created_at), desc(Trade.id))
+                .limit(bounded_limit)
+            )
+        ).scalars().all()
+        return {
+            "scope": "customer_only",
+            "trades": [
+                {
+                    "id": int(trade.id),
+                    "symbol": str(trade.symbol or ""),
+                    "side": str(trade.side or "").upper(),
+                    "mode": str(trade.mode or "").upper(),
+                    "status": str(trade.status or "").upper(),
+                    "filled_quantity": str(trade.filled_quantity or "0"),
+                    "average_fill_price": str(trade.average_fill_price or "0"),
+                    "created_at": trade.created_at.isoformat() if trade.created_at else None,
+                    "updated_at": trade.updated_at.isoformat() if trade.updated_at else None,
+                }
+                for trade in rows
+            ],
+        }
+
 
 @app.get("/api/customer/trades/{trade_id}/decision")
 async def customer_trade_decision(trade_id: int, authorization: str | None = Header(default=None)):
@@ -6272,7 +6649,9 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 build_research_execution_cost_context,
                 df,
                 settings=settings,
-                taker_bps=float(settings.research_taker_bps),
+                taker_bps=_customer_paper_router_taker_bps(
+                    needs_customer_paper=needs_customer_paper, asset=req.asset
+                ),
                 base_slippage_bps=float(settings.research_slippage_bps),
                 cost_stress_multiplier=float(settings.research_cost_stress_multiplier),
                 asset=req.asset,
@@ -6324,7 +6703,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 current_state = await guard_db.get(AppState, 1)
                 latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                 if (
-                    not current_profile or current_profile.status != "ACTIVE"
+                    not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
                     or not current_account or current_account.status != "ACTIVE"
                     or not current_state or current_state.kill_switch
                     or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -6415,7 +6794,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 outcomes = []
                 if profile.id:
                     outcomes = list((await state_db.execute(
-                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED")
+                        select(StrategyOutcome).where(StrategyOutcome.customer_id == profile.id, StrategyOutcome.asset == req.asset, StrategyOutcome.symbol == req.symbol, StrategyOutcome.lifecycle_status == "CLOSED", StrategyOutcome.closing_notional > 0, StrategyOutcome.fee_basis_complete.is_(True))
                         .order_by(desc(StrategyOutcome.created_at)).limit(200)
                     )).scalars().all())
                 current_strategy = bot_row.active_strategy if bot_row else None
@@ -6647,7 +7026,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                     current_state = await guard_db.get(AppState, 1)
                     latest_plan, _ = await _subscription_entitlements(guard_db, profile.id)
                     if (
-                        not current_profile or current_profile.status != "ACTIVE"
+                        not current_profile or not await _customer_profile_effectively_active(guard_db, current_profile)
                         or not current_account or current_account.status != "ACTIVE"
                         or not current_state or current_state.kill_switch
                         or "automated_entry_exit" not in latest_plan.get("features", [])
@@ -6785,7 +7164,7 @@ async def customer_start_bot(req: CustomerBotStartRequest, authorization: str | 
                 if row and row.status == "RUNNING":
                     now2 = datetime.now(timezone.utc)
                     row.last_run_at = now2
-                    row.next_run_at = now2 + __import__("datetime").timedelta(seconds=max(60, row.interval_seconds))
+                    row.next_run_at = now2 + timedelta(seconds=max(60, row.interval_seconds))
                     row.last_decision = "TRADE"
                     row.last_stage = "execution"
                     row.last_model_version = str((adaptive or {}).get("model_version", ""))
@@ -6892,6 +7271,92 @@ async def customer_subscription_entitlements(authorization: str | None = Header(
 
 
 
+async def _record_customer_equity_snapshot(
+    db,
+    *,
+    customer_id: int,
+    equity: float,
+    cash_equity: float | None,
+    observed_at: datetime | None = None,
+) -> None:
+    """Append one verified account-equity observation per customer per 15-minute bucket."""
+    equity_value = float(equity)
+    cash_value = float(cash_equity) if cash_equity is not None else None
+    if not math.isfinite(equity_value) or (
+        cash_value is not None and not math.isfinite(cash_value)
+    ):
+        return
+
+    observed = observed_at or datetime.now(timezone.utc)
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise ValueError("Customer equity observation time must be timezone-aware")
+    observed = observed.astimezone(timezone.utc)
+    bucket = observed.replace(
+        minute=(observed.minute // 15) * 15,
+        second=0,
+        microsecond=0,
+    )
+    values = {
+        "customer_id": int(customer_id),
+        "bucket_at": bucket,
+        "observed_at": observed,
+        "equity": equity_value,
+        "cash_equity": cash_value,
+        "currency": "USDT",
+        "valuation_source": "TRADING_ACCOUNT_EQUITY",
+    }
+    dialect = db.get_bind().dialect.name
+    if dialect == "postgresql":
+        statement = pg_insert(CustomerEquitySnapshot).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                CustomerEquitySnapshot.customer_id,
+                CustomerEquitySnapshot.bucket_at,
+            ]
+        )
+        await db.execute(statement)
+    elif dialect == "sqlite":
+        statement = sqlite_insert(CustomerEquitySnapshot).values(**values).on_conflict_do_nothing(
+            index_elements=[
+                CustomerEquitySnapshot.customer_id,
+                CustomerEquitySnapshot.bucket_at,
+            ]
+        )
+        await db.execute(statement)
+    else:
+        existing = await db.execute(
+            select(CustomerEquitySnapshot.id).where(
+                CustomerEquitySnapshot.customer_id == int(customer_id),
+                CustomerEquitySnapshot.bucket_at == bucket,
+            ).limit(1)
+        )
+        if existing.scalar_one_or_none() is None:
+            db.add(CustomerEquitySnapshot(**values))
+    await db.commit()
+
+
+async def _record_customer_equity_snapshot_best_effort(
+    *,
+    customer_id: int,
+    equity: float,
+    cash_equity: float | None,
+) -> bool:
+    """Record chart history in its own session without affecting portfolio reads."""
+    try:
+        async with SessionLocal() as snapshot_db:
+            await _record_customer_equity_snapshot(
+                snapshot_db,
+                customer_id=customer_id,
+                equity=equity,
+                cash_equity=cash_equity,
+            )
+        return True
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Customer portfolio equity snapshot failed; returning portfolio without a new history point"
+        )
+        return False
+
+
 @app.get("/api/customer/portfolio")
 async def customer_portfolio(authorization: str | None = Header(default=None)):
     async with SessionLocal() as db:
@@ -6917,6 +7382,12 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
                 "locked_minor_units": wallet_balance["locked_minor_units"],
                 "minor_units_scale": wallet_balance["minor_units_scale"],
             })
+        if account is not None:
+            await _record_customer_equity_snapshot_best_effort(
+                customer_id=profile.id,
+                equity=float(account.equity),
+                cash_equity=balance_api["available"],
+            )
         return {
             "equity": float(account.equity) if account else balance_api["total"],
             "cash_equity": balance_api["available"],
@@ -6934,6 +7405,167 @@ async def customer_portfolio(authorization: str | None = Header(default=None)):
             "positions": [{"id": p.id, "exchange": p.exchange, "symbol": p.symbol, "quantity": float(p.quantity),
                            "entry": float(p.average_entry_price), "mark": float(p.mark_price),
                            "unrealized_pnl": float(p.unrealized_pnl)} for p in positions],
+        }
+
+
+@app.get("/api/customer/portfolio/equity-history")
+async def customer_portfolio_equity_history(
+    days: int = 30,
+    authorization: str | None = Header(default=None),
+):
+    """Return observed customer account-equity snapshots; missing intervals stay missing."""
+    if days not in {7, 30}:
+        raise HTTPException(422, "Equity history window must be 7 or 30 days")
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        rows = (
+            await db.execute(
+                select(CustomerEquitySnapshot)
+                .where(
+                    CustomerEquitySnapshot.customer_id == profile.id,
+                    CustomerEquitySnapshot.observed_at >= since,
+                )
+                .order_by(desc(CustomerEquitySnapshot.observed_at))
+                .limit(3000)
+            )
+        ).scalars().all()
+        rows.reverse()
+        points = [
+            {
+                "observed_at": (
+                    row.observed_at.replace(tzinfo=timezone.utc)
+                    if row.observed_at.tzinfo is None
+                    else row.observed_at
+                ).isoformat(),
+                "equity": float(row.equity),
+                "cash_equity": float(row.cash_equity) if row.cash_equity is not None else None,
+                "currency": row.currency,
+                "valuation_source": row.valuation_source,
+            }
+            for row in rows
+            if math.isfinite(float(row.equity))
+        ]
+        return {
+            "scope": "customer_only",
+            "days": days,
+            "points": points,
+            "history_available": bool(points),
+            "history_complete": False,
+            "sampling_interval_minutes": 15,
+            "sampling_description": "At most one observed account-equity value per 15-minute bucket while the customer portfolio is refreshed; unobserved intervals are not interpolated.",
+        }
+
+
+_WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS = {
+    "reduce_motion": False,
+    "compact_markets": False,
+    "touch_feedback": True,
+    "mobile_chart_crosshair_enabled": True,
+}
+_WORKSPACE_INTEGER_PREFERENCE_CHOICES = {
+    "mobile_default_timeframe_days": {7, 30},
+}
+_WORKSPACE_PREFERENCE_FIELDS = {
+    **_WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS,
+    "mobile_default_timeframe_days": 30,
+}
+
+
+def _workspace_preferences_payload(row: CustomerWorkspacePreference | None) -> dict:
+    return {
+        **{
+            key: bool(getattr(row, key)) if row is not None else value
+            for key, value in _WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS.items()
+        },
+        **{
+            key: int(getattr(row, key)) if row is not None else 30
+            for key in _WORKSPACE_INTEGER_PREFERENCE_CHOICES
+        },
+    }
+
+
+@app.get("/api/customer/workspace-preferences")
+async def customer_get_workspace_preferences(
+    authorization: str | None = Header(default=None),
+):
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        row = await db.get(CustomerWorkspacePreference, profile.id)
+        return {
+            "scope": "customer_only",
+            "configured": row is not None,
+            "preferences": _workspace_preferences_payload(row),
+        }
+
+
+@app.patch("/api/customer/workspace-preferences")
+async def customer_update_workspace_preferences(
+    req: dict,
+    authorization: str | None = Header(default=None),
+):
+    if not isinstance(req, dict) or not req:
+        raise HTTPException(422, "At least one workspace preference is required")
+    unknown = set(req) - set(_WORKSPACE_PREFERENCE_FIELDS)
+    if unknown:
+        raise HTTPException(422, "Only supported display preferences may be changed here")
+    for key, value in req.items():
+        if key in _WORKSPACE_INTEGER_PREFERENCE_CHOICES:
+            if type(value) is not int or value not in _WORKSPACE_INTEGER_PREFERENCE_CHOICES[key]:
+                raise HTTPException(422, "Default chart window must be 7 or 30 days")
+        elif type(value) is not bool:
+            raise HTTPException(422, "Boolean workspace preferences require boolean values")
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        updated_at = datetime.now(timezone.utc)
+        values = {
+            "customer_id": profile.id,
+            "updated_at": updated_at,
+            **_WORKSPACE_BOOLEAN_PREFERENCE_DEFAULTS,
+            "mobile_default_timeframe_days": 30,
+            **req,
+        }
+        dialect = db.get_bind().dialect.name
+        if dialect == "postgresql":
+            statement = pg_insert(CustomerWorkspacePreference).values(**values).on_conflict_do_update(
+                index_elements=[CustomerWorkspacePreference.customer_id],
+                set_={**req, "updated_at": updated_at},
+            )
+            await db.execute(statement)
+            await db.commit()
+            row = await db.get(CustomerWorkspacePreference, profile.id)
+        elif dialect == "sqlite":
+            statement = sqlite_insert(CustomerWorkspacePreference).values(**values).on_conflict_do_update(
+                index_elements=[CustomerWorkspacePreference.customer_id],
+                set_={**req, "updated_at": updated_at},
+            )
+            await db.execute(statement)
+            await db.commit()
+            row = await db.get(CustomerWorkspacePreference, profile.id)
+        else:
+            # Keep a conservative fallback for alternate dialects without native upsert.
+            row = await db.get(CustomerWorkspacePreference, profile.id)
+            if row is None:
+                row = CustomerWorkspacePreference(
+                    customer_id=profile.id,
+                    reduce_motion=False,
+                    compact_markets=False,
+                    touch_feedback=True,
+                    mobile_default_timeframe_days=30,
+                    mobile_chart_crosshair_enabled=True,
+                )
+                db.add(row)
+            for key, value in req.items():
+                setattr(row, key, value)
+            row.updated_at = updated_at
+            await db.commit()
+        if row is None:
+            raise RuntimeError("Workspace preference upsert completed without a readable row")
+        await db.refresh(row)
+        return {
+            "scope": "customer_only",
+            "configured": True,
+            "preferences": _workspace_preferences_payload(row),
         }
 
 
@@ -7215,7 +7847,9 @@ async def list_customer_webhooks(authorization:str|None=Header(default=None)):
 
 @app.post("/api/webhooks/{endpoint_id}")
 async def receive_customer_webhook(endpoint_id:int, request:Request, x_atlas_webhook_token: str | None = Header(default=None), x_atlas_event_id:str|None=Header(default=None)):
-    raw=await request.body()
+    # Stream the payload and stop at the route-specific limit; never buffer an
+    # oversized webhook body before rejecting it.
+    raw = await read_limited_body(request, _CUSTOMER_WEBHOOK_MAX_BODY_BYTES)
     async with SessionLocal() as db:
         endpoint=(await db.execute(select(WebhookEndpoint).where(WebhookEndpoint.id==endpoint_id,WebhookEndpoint.status=="ACTIVE"))).scalar_one_or_none()
         if not endpoint: raise HTTPException(404,"Webhook endpoint not found")
@@ -7263,21 +7897,113 @@ def _scanner_metrics(df):
     return {"price":last,"rsi":rsi,"ema20":float(ema20),"ema50":float(ema50),"atr":float(atr),"volume_ratio":vol_ratio,"score":float(score),"signal":"LONG" if score>=0.35 else "SHORT" if score<=-0.35 else "WATCH"}
 
 
-@app.get("/api/customer/market-scanner")
-async def customer_market_scanner(exchange: str="binance", symbols: str="BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT", authorization: str | None = Header(default=None)):
-    async with SessionLocal() as db:
-        profile,_=await get_customer(authorization,db,require_aal2=False)
-        await _require_feature(db,profile.id,"market_scanner")
-    requested=[x.strip() for x in symbols.split(",") if x.strip()][:20]
-    async def one(sym):
-        try:
-            df=await asyncio.to_thread(fetch_crypto,sym,exchange,"15m",30,True)
-            return {"symbol":sym,**_scanner_metrics(df)}
-        except Exception as exc:
-            return {"symbol":sym,"signal":"ERROR","error":str(exc)[:180]}
-    results=await asyncio.gather(*(one(s) for s in requested))
-    return {"exchange":exchange,"timeframe":"15m","results":sorted(results,key=lambda x: abs(float(x.get("score",0))),reverse=True)}
+# Process-wide bound on concurrent scanner fetch threads (each builds its own CCXT client).
+_SCANNER_SEMAPHORE = asyncio.Semaphore(_SCANNER_MAX_CONCURRENT_FETCHES)
 
+
+@app.get("/api/customer/market-scanner")
+async def customer_market_scanner(
+    exchange: str = "binance",
+    asset_class: str = "crypto",
+    symbols: str | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Read-only customer scanner for crypto, FX, and practice-only commodities."""
+    async with SessionLocal() as db:
+        profile, _ = await get_customer(authorization, db, require_aal2=False)
+        await _require_feature(db, profile.id, "market_scanner")
+
+    asset = str(asset_class or "crypto").strip().lower()
+    if asset not in {"crypto", "forex", "commodity"}:
+        raise HTTPException(422, "Unsupported scanner asset class")
+    default_symbols = {
+        "crypto": "BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,XRP/USDT:USDT",
+        "forex": "EUR_USD,GBP_USD,USD_JPY,AUD_USD,USD_CAD",
+        "commodity": "XAU_USD,XAG_USD,WTICO_USD,BCO_USD,NATGAS_USD",
+    }[asset]
+    requested = _scanner_normalize_symbols(symbols if symbols is not None else default_symbols)
+    if not requested:
+        raise HTTPException(422, "At least one valid market symbol is required")
+
+    provider = ""
+    if asset == "crypto":
+        import ccxt
+        if exchange not in ccxt.exchanges:
+            raise HTTPException(422, "Unsupported exchange")
+        provider = exchange
+        fetch = lambda symbol: fetch_crypto(symbol, exchange, "15m", 30, True)
+    elif asset == "forex":
+        allowed_fx = {
+            _normalize_oanda_instrument(symbol)
+            for symbol in settings.adaptive_established_fx_symbols.split(",")
+            if symbol.strip()
+        }
+        normalized_symbols = list(dict.fromkeys(
+            _normalize_oanda_instrument(symbol) for symbol in requested
+        ))
+        if not normalized_symbols or any(symbol not in allowed_fx for symbol in normalized_symbols):
+            raise HTTPException(422, "FX scanner symbols must belong to the configured major currency universe")
+        requested = normalized_symbols
+        use_oanda_practice = bool(
+            settings.forex_broker == "oanda"
+            and settings.oanda_practice
+            and settings.oanda_account_id
+            and settings.oanda_api_token
+        )
+        if use_oanda_practice:
+            provider = "oanda_practice"
+            fetch = lambda symbol: fetch_forex_oanda(symbol, "15m", 30)
+        else:
+            provider = "yfinance_fx"
+            fetch = lambda symbol: fetch_forex(symbol, "15m", 30)
+    else:
+        use_oanda_practice = bool(
+            settings.forex_broker == "oanda"
+            and settings.oanda_practice
+            and settings.oanda_account_id
+            and settings.oanda_api_token
+        )
+        if not use_oanda_practice:
+            raise HTTPException(
+                503,
+                "Commodity market scanning requires explicitly configured OANDA practice credentials; no live provider is used",
+            )
+        allowed_commodities = {
+            _normalize_oanda_instrument(symbol)
+            for symbol in settings.adaptive_established_commodity_symbols.split(",")
+            if symbol.strip()
+        }
+        normalized_symbols = list(dict.fromkeys(
+            _normalize_oanda_instrument(symbol) for symbol in requested
+        ))
+        if not normalized_symbols or any(symbol not in allowed_commodities for symbol in normalized_symbols):
+            raise HTTPException(422, "Commodity scanner symbols must belong to the configured established instrument universe")
+        requested = normalized_symbols
+        provider = "oanda_practice"
+        fetch = lambda symbol: fetch_forex_oanda(symbol, "15m", 30)
+
+    results = await _scanner_scan_symbols(
+        requested,
+        fetch=fetch,
+        metrics=_scanner_metrics,
+        semaphore=_SCANNER_SEMAPHORE,
+        logger=logging.getLogger(__name__),
+    )
+    for result in results:
+        result["asset_class"] = asset
+        result["data_source"] = provider
+    return {
+        "asset_class": asset,
+        "exchange": provider,
+        "timeframe": "15m",
+        "data_source": provider,
+        "read_only": True,
+        "results": sorted(
+            results,
+            key=lambda item: abs(float(item.get("score", 0) or 0)),
+            reverse=True,
+        ),
+    }
 
 @app.get("/api/customer/market-intelligence")
 async def customer_market_intelligence(authorization: str | None = Header(default=None)):
@@ -7313,6 +8039,64 @@ async def list_alerts(authorization: str | None = Header(default=None)):
         profile,_=await get_customer(authorization,db,require_aal2=False)
         rows=(await db.execute(select(CustomerAlert).where(CustomerAlert.customer_id==profile.id).order_by(desc(CustomerAlert.created_at)).limit(100))).scalars().all()
         return [{"id":r.id,"type":r.alert_type,"symbol":r.symbol,"threshold":r.threshold,"condition":r.condition,"channel":r.channel,"status":r.status,"message":r.message,"triggered_at":r.triggered_at.isoformat() if r.triggered_at else None} for r in rows]
+
+
+_BENCHMARK_CAPTURE_RETENTION_DAYS = 90
+
+
+@app.get("/api/customer/benchmark-captures")
+async def customer_benchmark_capture_status(authorization: str | None = Header(default=None)):
+    """Return only the signed-in customer's count of unexpired opted-in captures."""
+    async with SessionLocal() as db:
+        profile, _claims = await get_customer(authorization, db, require_aal2=False)
+        from .benchmark_capture import benchmark_capture_permissions, purge_expired_benchmark_captures
+        permissions = await benchmark_capture_permissions(db)
+        if not permissions["can_select"] or not permissions["can_delete"]:
+            return {
+                "status": "UNAVAILABLE",
+                "count": None,
+                "retention_days": _BENCHMARK_CAPTURE_RETENTION_DAYS,
+                "consent_version": "atlas-strategy-benchmark-v1",
+                "reason": "benchmark capture storage is unavailable to this read-only runtime",
+            }
+        # Never expose platform-wide expiry-deletion totals in a customer response.
+        await purge_expired_benchmark_captures(db)
+        now = datetime.now(timezone.utc)
+        count = int((await db.execute(
+            select(func.count(BenchmarkPromptCapture.id)).where(
+                BenchmarkPromptCapture.customer_id == profile.id,
+                BenchmarkPromptCapture.expires_at > now,
+            )
+        )).scalar_one() or 0)
+        await db.commit()
+        return {
+            "status": "AVAILABLE", "count": count,
+            "retention_days": _BENCHMARK_CAPTURE_RETENTION_DAYS,
+            "consent_version": "atlas-strategy-benchmark-v1",
+        }
+
+
+@app.delete("/api/customer/benchmark-captures")
+async def customer_delete_benchmark_captures(authorization: str | None = Header(default=None)):
+    """Delete every benchmark submission owned by the authenticated customer."""
+    async with SessionLocal() as db:
+        profile, _claims = await get_customer(authorization, db, require_aal2=True)
+        from .benchmark_capture import benchmark_capture_permissions, lock_customer_benchmark_captures
+        permissions = await benchmark_capture_permissions(db)
+        if not permissions["can_delete"]:
+            raise HTTPException(
+                status_code=503,
+                detail="Benchmark submissions are unavailable in this read-only runtime",
+            )
+        async with db.begin_nested():
+            await lock_customer_benchmark_captures(db, int(profile.id))
+            result = await db.execute(
+                delete(BenchmarkPromptCapture).where(
+                    BenchmarkPromptCapture.customer_id == profile.id
+                )
+            )
+        await db.commit()
+        return {"deleted": int(result.rowcount or 0), "remaining": 0}
 
 
 @app.post("/api/customer/strategy-lab/candidates")
@@ -7356,9 +8140,22 @@ async def create_strategy_candidate(req: StrategyLabRequest, authorization: str 
         }
         spec["live_authority"] = False
         spec["ai_provider"] = generated["ai"]
+        benchmark_capture = {"status": "NOT_REQUESTED"}
+        if req.benchmark_opt_in:
+            from .benchmark_capture import capture_strategy_prompt
+            benchmark_capture = await capture_strategy_prompt(
+                db,
+                customer_id=int(profile.id),
+                prompt=req.prompt,
+                native_output={"strategy": spec, "ai": generated["ai"]},
+                asset=req.asset,
+                symbol=req.symbol,
+                exchange=req.exchange,
+                timeframe=candidate_timeframe,
+            )
         row=StrategyCandidate(customer_id=profile.id,name=req.name,asset=req.asset,symbol=req.symbol,exchange=req.exchange,timeframe=candidate_timeframe,spec_json=json.dumps(spec,separators=(",",":")))
         db.add(row); await db.commit(); await db.refresh(row)
-        return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST"}
+        return {"id":row.id,"status":row.status,"spec":spec,"next":"RUN_BACKTEST", "benchmark_capture": benchmark_capture}
 
 def _candidate_backtest_config(spec: dict[str, Any]) -> StrategyConfig:
     """Build the backtest config from the candidate's actual supported stop/target parameters."""
@@ -7429,7 +8226,11 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             "in_sample_max_drawdown": float(selected.get("max_drawdown", -1.0)),
             "in_sample_note": "Selected-on data. Diagnostic only; never a pass criterion.",
         }
-        from .strategy_lab_validation import strategy_lab_candidate_passes
+        from .strategy_lab_validation import (
+            record_validation_unavailable_reason,
+            strategy_lab_candidate_passes,
+            uncompiled_candidate_safeguards,
+        )
         passed, oos_metrics = strategy_lab_candidate_passes(
             oos_gate,
             validation_available=not validation_unavailable,
@@ -7439,6 +8240,26 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
             min_total_return=settings.adaptive_min_total_return,
         )
         gate["oos"] = oos_metrics
+        uncompiled_safeguards = uncompiled_candidate_safeguards(spec)
+        if uncompiled_safeguards:
+            # The current Strategy Lab backtest evaluates the supported family and
+            # stop/target configuration only. Do not let descriptive Native AI profile
+            # rules appear to have been validated when they were never executed.
+            passed = False
+            validation_unavailable = True
+            gate["validation_available"] = False
+            record_validation_unavailable_reason(
+                gate, "UNCOMPILED_STRATEGY_SAFEGUARDS"
+            )
+            gate["uncompiled_safeguards"] = uncompiled_safeguards
+            result["strategy_condition_validation"] = {
+                "status": "UNCOMPILED",
+                "blocked_conditions": uncompiled_safeguards,
+                "message": (
+                    "The Strategy Lab backtest did not execute these Native AI safeguards; "
+                    "this result is diagnostic only and cannot be VALIDATED."
+                ),
+            }
     except Exception as exc:
         result={"status":"ERROR","error":str(exc)}; gate={"validation_available":False,"validation_unavailable_reason":"RESEARCH_VALIDATION_ERROR"}; passed=False; oos={}; validation_unavailable=True
     async with SessionLocal() as db:
@@ -7451,7 +8272,7 @@ async def validate_strategy_candidate(candidate_id:int, authorization:str|None=H
         attempt=int(prior or 0)+1
         db.add(StrategyCandidateRun(candidate_id=candidate_id,attempt=attempt,backtest_json=json.dumps(result,default=str),oos_json=json.dumps(oos,default=str),gate_json=json.dumps(gate,default=str),passed=bool(passed)))
         await db.commit()
-    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family; AI custom conditions remain a research specification unless separately compiled.","real_money_execution":False}
+    return {"candidate_id":candidate_id,"attempt":attempt,"status":status,"gate":gate,"oos":oos,"promotion_requires_explicit_live_approval":True,"validation_scope":"Atlas-supported strategy family only; uncompiled Native AI profile safeguards block VALIDATED status and remain research specifications until the backtester executes them.","real_money_execution":False}
 
 @app.get("/api/customer/strategy-lab/candidates/{candidate_id}/runs")
 async def list_strategy_candidate_runs(candidate_id:int, authorization:str|None=Header(default=None)):
@@ -7563,7 +8384,8 @@ async def strategy_builder(req: StrategyBuilderRequest, authorization: str | Non
     # relying on create_strategy_candidate() as an implicit security side effect.
     await customer_claims(authorization, require_aal2=True)
     lab_req = StrategyLabRequest(name=req.name, prompt=req.prompt, asset=req.asset, symbol=req.symbol,
-                                 exchange=req.exchange, timeframe=req.timeframe)
+                                 exchange=req.exchange, timeframe=req.timeframe,
+                                  benchmark_opt_in=req.benchmark_opt_in)
     created = await create_strategy_candidate(lab_req, authorization)
     spec = created["spec"]
     return {
@@ -7573,6 +8395,7 @@ async def strategy_builder(req: StrategyBuilderRequest, authorization: str | Non
         "strategy": spec,
         "ai": spec.get("ai_provider"),
         "status": created["status"],
+        "benchmark_capture": created.get("benchmark_capture", {"status": "NOT_REQUESTED"}),
         "next_step": "POST /api/customer/strategy-lab/candidates/{id}/validate to backtest and walk-forward validate this strategy.".replace("{id}", str(created["id"])),
     }
 
@@ -7946,6 +8769,34 @@ async def state(x_admin_token: str | None = Header(default=None), authorization:
         }
 
 
+async def _recent_closed_platform_outcome_returns(db):
+    """Read the latest closed outcome per platform trade from a bounded sample."""
+    candidate = aliased(StrategyOutcome)
+    has_newer_lifecycle = exists(
+        select(StrategyOutcome.id).where(
+            StrategyOutcome.trade_id == candidate.trade_id,
+            StrategyOutcome.customer_id.is_(None),
+            StrategyOutcome.lifecycle_status == "CLOSED",
+            StrategyOutcome.closing_notional > 0,
+            StrategyOutcome.fee_basis_complete.is_(True),
+            tuple_(StrategyOutcome.created_at, StrategyOutcome.id)
+            > tuple_(candidate.created_at, candidate.id),
+        )
+    )
+    return (await db.execute(
+        select(candidate.net_return_bps, candidate.created_at)
+        .where(
+            candidate.customer_id.is_(None),
+            candidate.lifecycle_status == "CLOSED",
+            candidate.closing_notional > 0,
+            candidate.fee_basis_complete.is_(True),
+            ~has_newer_lifecycle,
+        )
+        .order_by(candidate.created_at.desc(), candidate.id.desc())
+        .limit(100)
+    )).all()
+
+
 @app.get("/api/risk-dashboard/metrics")
 async def risk_dashboard_metrics(
     x_admin_token: str | None = Header(default=None),
@@ -7971,32 +8822,7 @@ async def risk_dashboard_metrics(
         worker_health = await _worker_health_snapshot(db)
 
         # Annualise only from the observed cadence of closed strategy outcomes.
-        latest_closed = (
-            select(
-                StrategyOutcome.trade_id.label("trade_id"),
-                func.max(StrategyOutcome.sequence).label("latest_sequence"),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .group_by(StrategyOutcome.trade_id)
-            .subquery()
-        )
-        rows = (await db.execute(
-            select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-            .join(
-                latest_closed,
-                (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-            )
-            .where(
-                StrategyOutcome.customer_id.is_(None),
-                StrategyOutcome.lifecycle_status == "CLOSED",
-            )
-            .order_by(StrategyOutcome.created_at.desc())
-            .limit(100)
-        )).all()
+        rows = await _recent_closed_platform_outcome_returns(db)
         usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
         ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
         sharpe = ratios["sharpe"]
@@ -8111,32 +8937,7 @@ async def websocket_risk_telemetry(websocket: WebSocket, authorization: str | No
                 unrealized = float(s.unrealized_pnl) if s and s.unrealized_pnl is not None else 0.0
                 kill = bool(s.kill_switch) if s else True
                 worker_health = await _worker_health_snapshot(db)
-                latest_closed = (
-                    select(
-                        StrategyOutcome.trade_id.label("trade_id"),
-                        func.max(StrategyOutcome.sequence).label("latest_sequence"),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .group_by(StrategyOutcome.trade_id)
-                    .subquery()
-                )
-                rows = (await db.execute(
-                    select(StrategyOutcome.net_return_bps, StrategyOutcome.created_at)
-                    .join(
-                        latest_closed,
-                        (StrategyOutcome.trade_id == latest_closed.c.trade_id)
-                        & (StrategyOutcome.sequence == latest_closed.c.latest_sequence),
-                    )
-                    .where(
-                        StrategyOutcome.customer_id.is_(None),
-                        StrategyOutcome.lifecycle_status == "CLOSED",
-                    )
-                    .order_by(StrategyOutcome.created_at.desc())
-                    .limit(100)
-                )).all()
+                rows = await _recent_closed_platform_outcome_returns(db)
                 usable = [(row[0] / 10000.0, row[1]) for row in rows if row[0] is not None]
                 ratios = performance_ratios([row[0] for row in usable], [row[1] for row in usable], current_dd)
                 sharpe = ratios["sharpe"]
@@ -9190,6 +9991,7 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         raise HTTPException(403, "Strategy engine is disabled")
     try:
         df = await asyncio.to_thread(market_data, req)
+        _require_strategy_market_data_quality(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
             target_vol_annual=settings.strategy_target_vol_annual,
@@ -9200,6 +10002,8 @@ async def strategy_signal_api(req: MarketRequest, x_admin_token: str | None = He
         result = await asyncio.to_thread(strategy_signal, df, cfg, req.asset)
         result.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
 
@@ -9314,6 +10118,7 @@ async def research_review(req: ResearchMarketRequest, x_admin_token: str | None 
     await auth(x_admin_token, authorization)
     try:
         df = await asyncio.to_thread(market_data, req)
+        _require_strategy_market_data_quality(df, req)
         df = _attach_research_evidence(df, req)
         cfg = StrategyConfig(
             signal_threshold=settings.strategy_signal_threshold,
@@ -9330,6 +10135,8 @@ async def research_review(req: ResearchMarketRequest, x_admin_token: str | None 
         review.update({"exchange": req.exchange, "symbol": req.symbol, "timeframe": req.timeframe})
         review["trial_archive_write"] = trial_archive_write
         return review
+    except HTTPException:
+        raise
     except Exception as e:
         raise _safe_http_error(400, e, "Invalid request") from e
 
@@ -9466,6 +10273,24 @@ async def model_experiments_history(model_path: str | None = None, status: str |
         return out
 
 
+def _learning_episode_accounting_fields(episode, *, fee_basis_verified: bool = False):
+    """Expose fee-adjusted results only when all linked closing fees are authoritative."""
+    status = str(getattr(episode, "status", "") or "").upper()
+    verified = status == "COMPLETED" and bool(fee_basis_verified)
+    if verified:
+        fee_basis_status = "VERIFIED"
+    elif status == "FEE_PENDING" or status == "COMPLETED":
+        fee_basis_status = "PENDING_RECONCILIATION"
+    else:
+        fee_basis_status = "NOT_FINAL"
+    return {
+        "fee_basis_status": fee_basis_status,
+        "total_fees": episode.total_fees if verified else None,
+        "net_pnl": episode.net_pnl if verified else None,
+        "return_bps": episode.return_bps if verified else None,
+    }
+
+
 @app.get("/api/admin/learning/episodes")
 async def admin_learning_episodes(limit: int = 50, status: str | None = None, replay_status: str | None = None, x_admin_token: str | None = Header(default=None), authorization: str | None = Header(default=None)):
     """Operator view of Atlas trade memory and post-trade replay evidence."""
@@ -9479,18 +10304,33 @@ async def admin_learning_episodes(limit: int = 50, status: str | None = None, re
         if replay_status:
             q = q.where(TradeLearningEpisode.replay_status == replay_status)
         rows = (await db.execute(q.order_by(desc(TradeLearningEpisode.created_at)).limit(limit))).scalars().all()
+        entry_ids = [int(row.entry_trade_id) for row in rows]
+        fee_rows = (await db.execute(
+            select(StrategyOutcome.trade_id, StrategyOutcome.fee_basis_complete).where(
+                StrategyOutcome.trade_id.in_(entry_ids),
+                StrategyOutcome.closing_trade_id.is_not(None),
+            )
+        )).all() if entry_ids else []
+        fee_complete_by_entry: dict[int, bool] = {}
+        for trade_id, fee_complete in fee_rows:
+            key = int(trade_id)
+            fee_complete_by_entry[key] = fee_complete_by_entry.get(key, True) and bool(fee_complete)
         out = []
         for r in rows:
+            accounting = _learning_episode_accounting_fields(
+                r, fee_basis_verified=fee_complete_by_entry.get(int(r.entry_trade_id), False)
+            )
+            outcome_verified = accounting["fee_basis_status"] == "VERIFIED"
             out.append({
                 "id": r.id, "entry_trade_id": r.entry_trade_id, "closing_trade_id": r.closing_trade_id,
                 "customer_id": r.customer_id, "bot_id": r.bot_id, "symbol": r.symbol, "exchange": r.exchange,
                 "timeframe": r.timeframe, "strategy": r.strategy, "regime": r.regime, "side": r.side,
                 "status": r.status, "replay_status": r.replay_status, "replay_version": r.replay_version,
                 "entry_price": r.entry_price, "exit_price": r.exit_price, "gross_pnl": r.gross_pnl,
-                "total_fees": r.total_fees, "net_pnl": r.net_pnl, "return_bps": r.return_bps,
+                **accounting,
                 "bars_held": r.bars_held, "mfe_bps": r.mfe_bps, "mae_bps": r.mae_bps,
-                "market_flow": json.loads(r.market_flow_json or "{}"),
-                "memory": json.loads(r.learning_memory_json or "{}"),
+                "market_flow": json.loads(r.market_flow_json or "{}") if outcome_verified else {},
+                "memory": json.loads(r.learning_memory_json or "{}") if outcome_verified else {},
                 "created_at": r.created_at.isoformat(), "updated_at": r.updated_at.isoformat(),
             })
         return out
@@ -9504,19 +10344,32 @@ async def admin_learning_episode_detail(episode_id: int, x_admin_token: str | No
         ep = await db.get(TradeLearningEpisode, int(episode_id))
         if not ep:
             raise HTTPException(404, "Learning episode not found")
+        fee_rows = (await db.execute(
+            select(StrategyOutcome.fee_basis_complete).where(
+                StrategyOutcome.trade_id == int(ep.entry_trade_id),
+                StrategyOutcome.closing_trade_id.is_not(None),
+            )
+        )).scalars().all()
+        accounting = _learning_episode_accounting_fields(
+            ep, fee_basis_verified=bool(fee_rows) and all(bool(value) for value in fee_rows)
+        )
+        outcome_verified = accounting["fee_basis_status"] == "VERIFIED"
         replays = (await db.execute(select(TradeReplayResult).where(TradeReplayResult.episode_id == ep.id).order_by(TradeReplayResult.strategy))).scalars().all()
         return {
             "id": ep.id, "entry_trade_id": ep.entry_trade_id, "closing_trade_id": ep.closing_trade_id,
             "strategy": ep.strategy, "regime": ep.regime, "symbol": ep.symbol, "timeframe": ep.timeframe,
             "status": ep.status, "replay_status": ep.replay_status, "replay_error": ep.replay_error,
-            "gross_pnl": ep.gross_pnl, "total_fees": ep.total_fees, "net_pnl": ep.net_pnl,
-            "return_bps": ep.return_bps, "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
-            "market_flow": json.loads(ep.market_flow_json or "{}"),
-            "memory": json.loads(ep.learning_memory_json or "{}"),
-            "replays": [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
-                         "entry_decision_return_bps": x.entry_decision_return_bps,
-                         "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
-                         "comparison_scope": x.comparison_scope} for x in replays],
+            "gross_pnl": ep.gross_pnl, **accounting,
+            "mfe_bps": ep.mfe_bps, "mae_bps": ep.mae_bps,
+            "market_flow": json.loads(ep.market_flow_json or "{}") if outcome_verified else {},
+            "memory": json.loads(ep.learning_memory_json or "{}") if outcome_verified else {},
+            "replays": (
+                [{"strategy": x.strategy, "entry_signal": x.entry_signal, "entry_side": x.entry_side,
+                  "entry_decision_return_bps": x.entry_decision_return_bps,
+                  "policy_window_return_bps": x.policy_window_return_bps, "confidence": x.confidence,
+                  "comparison_scope": x.comparison_scope} for x in replays]
+                if outcome_verified else []
+            ),
         }
 
 

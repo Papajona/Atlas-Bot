@@ -18,7 +18,7 @@ def test_start_path_schedules_next_cycle_after_initial_run():
     end = src.index('@app.', start + 10)
     chunk = src[start:end]
     assert 'existing_bot.next_run_at = datetime.now(timezone.utc)' in chunk
-    assert 'row.next_run_at = now2 + __import__("datetime").timedelta' in chunk
+    assert 'row.next_run_at = now2 + timedelta(seconds=max(60, row.interval_seconds))' in chunk
 
 def test_challenger_cannot_materially_degrade_incumbent():
     src = (ROOT / 'app' / 'adaptive_bot.py').read_text()

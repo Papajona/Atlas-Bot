@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.config import settings
+from app import customer_paper_ledger as paper_ledger
 from app import customer_paper_lifecycle as paper_lifecycle
 from app.customer_paper_lifecycle import (
     CustomerPaperOrderConflict,
@@ -666,6 +667,11 @@ def test_customer_paper_lifecycle_rejects_derivatives_and_mismatched_quote_curre
     asyncio.run(run())
 
 
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not (os.getenv("ATLAS_PAPER_TEST_DATABASE_URL") and os.getenv("ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL")),
+    reason="requires the dedicated disposable PostgreSQL paper databases provisioned by CI",
+)
 def test_customer_paper_lifecycle_is_atomic_idempotent_and_recoverable(monkeypatch):
     customer_id = 92001
     monkeypatch.setattr(settings, "database_url", os.environ["ATLAS_PAPER_PRIMARY_TEST_DATABASE_URL"])
@@ -1712,3 +1718,87 @@ def test_reversing_sell_cannot_restore_exposure_above_shared_risk_budget(monkeyp
         assert restored_quantities["BTC/USDT"] == Decimal("1.000000000000000000")
 
     asyncio.run(run())
+
+def test_customer_paper_workspace_preference_upsert_binds_static_sql_and_only_updates_requested_fields(monkeypatch):
+    captured = {}
+
+    class Result:
+        def mappings(self):
+            return self
+
+        def one(self):
+            return {
+                "reduce_motion": False,
+                "compact_markets": False,
+                "touch_feedback": True,
+                "mobile_default_timeframe_days": 30,
+                "mobile_chart_crosshair_enabled": False,
+            }
+
+    class Connection:
+        async def execute(self, statement, parameters=None):
+            statement_text = str(statement)
+            if "set_config('app.customer_id'" in statement_text:
+                captured["tenant_context"] = parameters
+                return None
+            captured["statement"] = statement_text
+            captured["parameters"] = parameters
+            return Result()
+
+    class Transaction:
+        async def __aenter__(self):
+            return Connection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class Engine:
+        def begin(self):
+            return Transaction()
+
+        async def dispose(self):
+            captured["disposed"] = True
+
+    async def ready():
+        captured["ready"] = True
+
+    monkeypatch.setattr(paper_ledger, "_assert_customer_paper_ready", ready)
+    monkeypatch.setattr(paper_ledger, "_paper_engine", lambda: Engine())
+
+    result = asyncio.run(
+        paper_ledger.update_customer_paper_workspace_preferences(
+            customer_id=314,
+            updates={"mobile_chart_crosshair_enabled": False},
+        )
+    )
+
+    statement = captured["statement"]
+    parameters = captured["parameters"]
+    assert "ON CONFLICT (customer_id) DO UPDATE SET" in statement
+    assert "CASE WHEN :update_reduce_motion" in statement
+    assert "CASE WHEN :update_mobile_default_timeframe_days" in statement
+    assert parameters["customer_id"] == 314
+    assert parameters["reduce_motion"] is False
+    assert parameters["compact_markets"] is False
+    assert parameters["touch_feedback"] is True
+    assert parameters["mobile_default_timeframe_days"] == 30
+    assert parameters["mobile_chart_crosshair_enabled"] is False
+    assert parameters["update_reduce_motion"] is False
+    assert parameters["update_compact_markets"] is False
+    assert parameters["update_touch_feedback"] is False
+    assert parameters["update_mobile_default_timeframe_days"] is False
+    assert parameters["update_mobile_chart_crosshair_enabled"] is True
+    assert captured["tenant_context"] == {"customer_id": "314"}
+    assert captured["disposed"] is True
+    assert captured["ready"] is True
+    assert result == {
+        "configured": True,
+        "preferences": {
+            "reduce_motion": False,
+            "compact_markets": False,
+            "touch_feedback": True,
+            "mobile_default_timeframe_days": 30,
+            "mobile_chart_crosshair_enabled": False,
+        },
+    }
+

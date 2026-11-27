@@ -28,6 +28,7 @@ jobs:
   android-debug:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
@@ -40,14 +41,14 @@ jobs:
       # Exercise the same Android SDK package setup in PR CI, without exposing signing secrets.
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
         with:
-          packages: "platform-tools platforms;android-35 build-tools;35.0.0"
+          packages: "platform-tools platforms;android-35 build-tools;35.0.0 emulator system-images;android-35;google_apis;x86_64"
       - name: Run Kotlin unit tests
         env:
           ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000
         run: gradle --no-daemon :app:testDebugUnitTest
-      - name: Assemble debug APK
+      - name: Assemble debug APK for the verified paper-only staging service
         env:
-          ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000
+          ATLAS_DEV_BACKEND_URL: https://atlas-paper-staging-350896810949.europe-west1.run.app
         run: gradle --no-daemon :app:assembleDebug
       - name: Verify packaged runtime backend resource in debug APK
         shell: bash
@@ -77,7 +78,7 @@ jobs:
           if result.returncode != 0:
               raise SystemExit(f"BLOCKED: aapt could not decode the packaged APK resource table: {result.stderr.strip()}")
           actual = extract_runtime_backend_url_from_resource_dump(result.stdout)
-          expected = "http://10.0.2.2:8000"
+          expected = "https://atlas-paper-staging-350896810949.europe-west1.run.app"
           if actual != expected:
               raise SystemExit(
                   f"BLOCKED: packaged runtime backend resource mismatch: expected {expected!r}, got {actual!r}"
@@ -112,6 +113,121 @@ jobs:
             --apk "$APK" --aapt "$AAPT" --expected-url "$ATLAS_PROD_BACKEND_URL"
           rm -f "$ATLAS_RELEASE_STORE_FILE"
           echo "PASS: optimized release APK retains the effective runtime backend resource."
+
+
+      - name: Install and launch debug APK in Android 15 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/emulator:$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+          # GitHub-hosted runners expose /dev/kvm but may leave it inaccessible
+          # to the runner user. Fix device permissions before QEMU starts.
+          if [[ -e /dev/kvm ]]; then
+            sudo chmod 666 /dev/kvm
+            test -r /dev/kvm && test -w /dev/kvm
+          else
+            echo "BLOCKED: this runner does not expose /dev/kvm for the Android x86_64 emulator."
+            exit 1
+          fi
+          command -v avdmanager
+          command -v emulator
+          command -v adb
+          AVD_NAME="atlas-ci-api35"
+          export ANDROID_AVD_HOME="$RUNNER_TEMP/atlas-avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          printf "no\n" | avdmanager create avd \
+            --force \
+            --name "$AVD_NAME" \
+            --path "$ANDROID_AVD_HOME/$AVD_NAME.avd" \
+            --package "system-images;android-35;google_apis;x86_64" \
+            --device "pixel_2"
+          test -s "$ANDROID_AVD_HOME/$AVD_NAME.ini" || {
+            echo "BLOCKED: avdmanager did not create the expected AVD definition."
+            avdmanager list avd || true
+            find "$RUNNER_TEMP" -maxdepth 5 -iname "*atlas-ci-api35*" -print || true
+            exit 1
+          }
+          test -s "$ANDROID_AVD_HOME/$AVD_NAME.avd/config.ini" || {
+            echo "BLOCKED: AVD config.ini is missing."
+            find "$ANDROID_AVD_HOME" -maxdepth 4 -type f -print || true
+            exit 1
+          }
+          avdmanager list avd
+          emulator -avd "$AVD_NAME" \
+            -no-window -no-audio -no-boot-anim -no-snapshot -wipe-data \
+            -gpu swiftshader_indirect \
+            > "$RUNNER_TEMP/atlas-android-emulator.log" 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/atlas-android-emulator.pid"
+          timeout 180 adb wait-for-device || {
+            cat "$RUNNER_TEMP/atlas-android-emulator.log" || true
+            adb devices -l || true
+            echo "BLOCKED: Android emulator did not become visible to adb."
+            exit 1
+          }
+          booted=false
+          for attempt in $(seq 1 60); do
+            if [[ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+              booted=true
+              break
+            fi
+            sleep 5
+          done
+          if [[ "$booted" != true ]]; then
+            cat "$RUNNER_TEMP/atlas-android-emulator.log" || true
+            adb devices -l || true
+            echo "BLOCKED: Android emulator did not finish booting."
+            exit 1
+          fi
+          timeout 120 adb install -r "$APK"
+          timeout 60 adb shell am start -W -n com.atlas.trading/.MainActivity
+          sleep 8
+          timeout 30 adb shell pidof com.atlas.trading >/dev/null || {
+            adb logcat -d -t 10000 || true
+            echo "BLOCKED: Atlas process did not remain running after launch."
+            exit 1
+          }
+          python - <<'PY'
+          import subprocess
+
+          result = subprocess.run(
+              ["timeout", "30", "adb", "logcat", "-d", "-t", "10000"],
+              check=True,
+              capture_output=True,
+              text=True,
+              encoding="utf-8",
+              errors="replace",
+          )
+          lines = result.stdout.splitlines()
+          for index, line in enumerate(lines):
+              if "FATAL EXCEPTION" not in line:
+                  continue
+              block = "\n".join(lines[index:index + 20])
+              if "com.atlas.trading" in block:
+                  raise SystemExit(
+                      "BLOCKED: Atlas crashed during emulator startup:\n" + block
+                  )
+          print("PASS: debug APK installed and MainActivity remained running on Android 15 emulator.")
+          PY
+          timeout 30 adb shell am force-stop com.atlas.trading
+
+      - name: Create SHA-256 checksum for emulator debug APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          test -s "$APK"
+          (cd "$(dirname "$APK")" && sha256sum "$(basename "$APK")" > "$(basename "$APK").sha256")
+      - name: Publish emulator debug APK for testing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: atlas-android-debug-pr-${{ github.event.pull_request.number }}-${{ github.sha }}
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/outputs/apk/debug/app-debug.apk.sha256
+          if-no-files-found: error
+          retention-days: 7
 
   android-release:
     if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/android-v'))

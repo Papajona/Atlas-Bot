@@ -48,6 +48,35 @@ apt_with_retries() {
   return 1
 }
 
+# GitHub-hosted Ubuntu images can carry an unrelated Microsoft apt feed that
+# intermittently returns 403 and makes every apt-get update fail, even though the
+# Ubuntu and signed PGDG repositories are healthy. Temporarily quarantine only
+# source files that reference that external feed, then restore them on every exit.
+readonly APT_SOURCE_QUARANTINE_DIR="$(mktemp -d /tmp/atlas-apt-sources.XXXXXX)"
+
+restore_unrelated_apt_sources() {
+  local disabled_source original_source
+  for disabled_source in "$APT_SOURCE_QUARANTINE_DIR"/*; do
+    [[ -f "$disabled_source" ]] || continue
+    original_source="/etc/apt/sources.list.d/$(basename "$disabled_source")"
+    sudo mv "$disabled_source" "$original_source"
+  done
+  rmdir "$APT_SOURCE_QUARANTINE_DIR" 2>/dev/null || true
+}
+
+disable_unrelated_microsoft_apt_sources() {
+  local source_file
+  while IFS= read -r source_file; do
+    if sudo grep -Eqi 'https?://packages[.]microsoft[.]com(/|[[:space:]]|$)' "$source_file"; then
+      sudo mv "$source_file" "$APT_SOURCE_QUARANTINE_DIR/$(basename "$source_file")"
+      echo "Temporarily disabled unrelated Microsoft apt source: $(basename "$source_file")"
+    fi
+  done < <(sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -name '*.list' -o -name '*.sources' \) -print)
+}
+
+trap restore_unrelated_apt_sources EXIT
+disable_unrelated_microsoft_apt_sources
+
 apt_with_retries update
 apt_with_retries install --yes --no-install-recommends ca-certificates curl gnupg
 

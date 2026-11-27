@@ -22,7 +22,7 @@ AUDIT_REQUIRED_SELECT_COLUMNS = {
     "alembic_version": ("version_num",),
     "customer_ledger_accounts": ("available", "trading_reserved", "withdrawal_reserved"),
     "ledger_entries": ("debit", "credit", "amount"),
-    "ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id"),
+    "ledger_journals": ("id", "entry_type", "idempotency_key", "reference_type", "reference_id", "created_at"),
     "ledger_journal_lines": ("id", "journal_id", "debit", "credit"),
     "research_trial_archive": ("ledger_sequence", "ledger_entry_sha256"),
     "research_trial_ledger_head": ("id", "last_sequence", "last_entry_sha256"),
@@ -211,7 +211,7 @@ SELECT jsonb_build_object(
     SELECT coalesce(jsonb_agg(required.table_name ORDER BY required.table_name), '[]'::jsonb)
     FROM unnest(ARRAY[
       'accounts', 'journals', 'journal_lines', 'orders', 'fills',
-      'order_events', 'position_events', 'market_bar_budgets', 'market_bar_allocations'
+      'order_events', 'position_events', 'equity_snapshots', 'workspace_preferences', 'market_bar_budgets', 'market_bar_allocations'
     ]::text[]) AS required(table_name)
     WHERE to_regclass(format('customer_paper.%I', required.table_name)) IS NULL
   ),
@@ -219,7 +219,7 @@ SELECT jsonb_build_object(
     SELECT count(*)
     FROM unnest(ARRAY[
       'accounts', 'journals', 'journal_lines', 'orders', 'fills',
-      'order_events', 'position_events', 'market_bar_budgets', 'market_bar_allocations'
+      'order_events', 'position_events', 'equity_snapshots', 'workspace_preferences', 'market_bar_budgets', 'market_bar_allocations'
     ]::text[]) AS required(table_name)
     LEFT JOIN pg_class c
       ON c.oid = to_regclass(format('customer_paper.%I', required.table_name))
@@ -234,7 +234,7 @@ SELECT jsonb_build_object(
       AND policyname = 'customer_paper_tenant'
       AND tablename IN (
         'accounts', 'journals', 'journal_lines', 'orders', 'fills',
-        'order_events', 'position_events'
+        'order_events', 'position_events', 'equity_snapshots', 'workspace_preferences'
       )
   ),
   'customer_paper_backend_policies', (
@@ -277,7 +277,7 @@ SELECT jsonb_build_object(
         (policyname = 'customer_paper_tenant'
           AND tablename IN (
             'accounts', 'journals', 'journal_lines', 'orders', 'fills',
-            'order_events', 'position_events'
+            'order_events', 'position_events', 'equity_snapshots', 'workspace_preferences'
           )
           AND roles <> ARRAY['atlas_customer_paper']::name[])
         OR
@@ -353,7 +353,7 @@ SELECT jsonb_build_object(
     SELECT count(*)
     FROM unnest(ARRAY[
       'accounts', 'journals', 'journal_lines', 'orders', 'fills',
-      'order_events', 'position_events', 'market_bar_budgets', 'market_bar_allocations'
+      'order_events', 'position_events', 'equity_snapshots', 'workspace_preferences', 'market_bar_budgets', 'market_bar_allocations'
     ]::text[]) AS required(table_name)
     LEFT JOIN pg_class c
       ON c.oid = to_regclass(format('customer_paper.%I', required.table_name))
@@ -364,7 +364,13 @@ SELECT jsonb_build_object(
             WHEN c.oid IS NOT NULL AND runtime_role.oid IS NOT NULL THEN (
               NOT has_table_privilege(runtime_role.oid, c.oid, 'SELECT')
               OR NOT has_table_privilege(runtime_role.oid, c.oid, 'INSERT')
-              OR has_table_privilege(runtime_role.oid, c.oid, 'UPDATE')
+              OR (
+                (required.table_name = 'workspace_preferences'
+                  AND NOT has_table_privilege(runtime_role.oid, c.oid, 'UPDATE'))
+                OR
+                (required.table_name <> 'workspace_preferences'
+                  AND has_table_privilege(runtime_role.oid, c.oid, 'UPDATE'))
+              )
               OR has_table_privilege(runtime_role.oid, c.oid, 'DELETE')
               OR has_table_privilege(runtime_role.oid, c.oid, 'TRUNCATE')
               OR has_table_privilege(runtime_role.oid, c.oid, 'REFERENCES')
@@ -579,6 +585,7 @@ def required_table_failures(value: object) -> list[str]:
 
 CUSTOMER_PAPER_TENANT_TABLES = (
     "accounts", "journals", "journal_lines", "orders", "fills", "order_events", "position_events",
+    "equity_snapshots", "workspace_preferences",
 )
 CUSTOMER_PAPER_TENANT_ROLE = "atlas_customer_paper"
 _TENANT_PREDICATE_REFERENCE = (
@@ -722,13 +729,13 @@ def customer_paper_schema_failures(observed: object) -> list[str]:
 
     integer_checks = (
         ("customer_paper_tables_without_forced_rls", 0),
-        ("customer_paper_policy_count", 9),
-        ("customer_paper_tenant_policy_count", 7),
+        ("customer_paper_policy_count", 11),
+        ("customer_paper_tenant_policy_count", 9),
         ("customer_paper_backend_policy_count", 2),
         ("customer_paper_wrong_policy_role_count", 0),
         ("customer_paper_runtime_invalid_table_privileges", 0),
-        ("customer_paper_runtime_sequences", 4),
-        ("customer_paper_runtime_sequences_with_usage", 4),
+        ("customer_paper_runtime_sequences", 5),
+        ("customer_paper_runtime_sequences_with_usage", 5),
         ("customer_paper_runtime_sequences_with_forbidden_privileges", 0),
         ("customer_paper_runtime_public_financial_privileges", 0),
     )
@@ -965,7 +972,7 @@ def main() -> int:
     parser.add_argument("--verified-target-project-ref", default="", help="Supabase target ref verified from provider record")
     parser.add_argument("--verified-target-instance-connection-name", default="", help="Cloud SQL instance verified from provider record")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
-    parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
+    parser.add_argument("--expected-revision", default="0069_customer_equity_history_and_workspace_preferences")
     parser.add_argument("--output", default="staging-restore-audit.json")
     args = parser.parse_args()
     try:

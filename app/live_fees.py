@@ -10,7 +10,12 @@ from __future__ import annotations
 from typing import Any
 from decimal import Decimal, localcontext
 
-EXACT, CONVERTED, ESTIMATED = "exact", "converted", "estimated"
+EXACT, CONVERTED, ESTIMATED, UNVERIFIED = "exact", "converted", "estimated", "unverified"
+
+
+def fee_quality_is_verified(quality: str | None) -> bool:
+    """Only exchange-reported fees (or their deterministic quote conversion) are verified."""
+    return quality in {EXACT, CONVERTED}
 
 
 def split_symbol(symbol: str) -> tuple[str, str]:
@@ -67,27 +72,46 @@ def extract_order_fee_quote_decimal(
         try:
             cost = Decimal(str(entry.get("cost")))
         except (TypeError, ValueError, ArithmeticError):
-            note = "exchange returned an unparsable fee cost"
-            quality = ESTIMATED
+            # UNVERIFIED is a withholding decision, not a weak estimate. A later
+            # malformed record must not re-enable a customer charge.
+            if quality != UNVERIFIED:
+                note = "exchange returned an unparsable fee cost"
+                quality = ESTIMATED
             continue
         cur = str(entry.get("currency") or "").upper()
         if not cost.is_finite():
-            note = "exchange returned a non-finite fee cost"
-            quality = ESTIMATED
+            if quality != UNVERIFIED:
+                note = "exchange returned a non-finite fee cost"
+                quality = ESTIMATED
             continue
         if cost <= 0:
+            # A zero fee without an asset denomination is not authoritative:
+            # the venue may be omitting fee data from this snapshot. Keep it
+            # quarantined until a later snapshot supplies a currency explicitly.
+            if cost == 0 and not cur:
+                note = "exchange fee currency missing; customer charge withheld pending reconciliation"
+                quality = UNVERIFIED
             # Negative provider values are maker rebates; do not credit them.
             continue
         with localcontext() as context:
             context.prec = 50
-            if cur == quote or (not cur and quote):
+            if not cur:
+                # A reported fee with no asset denomination cannot be charged as
+                # quote currency or replaced by a larger taker-rate estimate. Hold it
+                # until a later broker snapshot supplies the authoritative currency.
+                note = "exchange fee currency missing; customer charge withheld pending reconciliation"
+                quality = UNVERIFIED
+            elif cur == quote:
                 total = total + cost
             elif cur == base:
                 total = total + cost * fill_price_d
                 quality = CONVERTED if quality == EXACT else quality
             else:
-                note = f"fee currency {cur or '?'} cannot be priced in {quote or '?'}"
-                quality = ESTIMATED
+                note = f"fee currency {cur} cannot be priced in {quote or '?'}; customer charge withheld pending reconciliation"
+                quality = UNVERIFIED
+    if quality == UNVERIFIED:
+        # Do not convert a reported non-quote amount into an estimated quote charge.
+        return total, UNVERIFIED, note
     if quality == ESTIMATED or not entries or malformed_fee_records:
         try:
             bps = Decimal(str(fallback_taker_bps))

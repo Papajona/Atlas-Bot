@@ -21,6 +21,14 @@ from app.schemas import CustomerPaperMarketRequest, MarketRequest
 from app.paper_staging import PaperMarketRequest
 
 
+def test_manual_customer_paper_fee_uses_shared_spot_fee_setting(monkeypatch):
+    monkeypatch.setattr(settings, "customer_paper_spot_taker_bps", 17.0)
+    monkeypatch.setattr(settings, "research_taker_bps", 5.5)
+    assert paper_api._manual_customer_paper_fee_bps() == Decimal("17.0")
+
+
+
+
 def _verified_bars(latest_bar_at: datetime, *, volume: str = "100") -> pd.DataFrame:
     index = pd.date_range(end=latest_bar_at, periods=25, freq="min")
     frame = pd.DataFrame(
@@ -1465,3 +1473,58 @@ def test_manual_paper_api_returns_conflict_for_failed_deferred_mark_loader(monke
     )
     assert database_error.status_code == 503
 
+
+
+def test_customer_paper_order_history_is_tenant_scoped_and_limit_bounded(monkeypatch):
+    calls = {"profile": [], "guard": 0, "history": []}
+
+    async def get_customer(authorization, _db, require_aal2=True):
+        calls["profile"].append((authorization, require_aal2))
+        return SimpleNamespace(id=99123), {"aal": "aal2"}
+
+    async def state_guard():
+        calls["guard"] += 1
+
+    async def order_history(*, customer_id, limit):
+        calls["history"].append((customer_id, limit))
+        return [{
+            "client_order_id": "paper-order-history-test",
+            "symbol": "BTC/USDT",
+            "side": "BUY",
+            "status": "FILLED",
+            "quantity": "0.1",
+            "filled_quantity": "0.1",
+            "average_fill_price": "65000",
+            "fill_count": 2,
+        }]
+
+    monkeypatch.setattr(paper_api, "_paper_feature_flags", lambda: None)
+    monkeypatch.setattr(
+        paper_api, "list_customer_paper_order_history", order_history
+    )
+    api_app = FastAPI()
+    api_app.include_router(paper_api.build_customer_paper_router(
+        get_customer=get_customer,
+        market_data=lambda _request: None,
+        market_request_type=MarketRequest,
+        state_guard=state_guard,
+    ))
+
+    response = TestClient(api_app).get(
+        "/api/customer/paper/history?limit=12",
+        headers={"Authorization": "Bearer history-customer"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["virtual_only"] is True
+    assert response.json()["orders"][0]["client_order_id"] == "paper-order-history-test"
+    assert calls["profile"] == [("Bearer history-customer", True)]
+    assert calls["guard"] == 1
+    assert calls["history"] == [(99123, 12)]
+
+    for invalid_limit in (0, 101):
+        rejected = TestClient(api_app).get(
+            f"/api/customer/paper/history?limit={invalid_limit}",
+            headers={"Authorization": "Bearer history-customer"},
+        )
+        assert rejected.status_code == 422, rejected.text
+    assert calls["history"] == [(99123, 12)]

@@ -88,15 +88,18 @@ SELECT
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE n.nspname='customer_paper' AND c.relkind IN ('r','p')
      AND c.relname IN ('accounts','journals','journal_lines','orders','fills','order_events',
-                       'position_events','market_bar_budgets','market_bar_allocations')) || '|' ||
+                       'position_events','equity_snapshots','workspace_preferences',
+                       'market_bar_budgets','market_bar_allocations')) || '|' ||
   (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
    WHERE n.nspname='customer_paper' AND c.relkind IN ('r','p')
-     AND c.relname IN ('accounts','journals','journal_lines','orders','fills','order_events','position_events')
+     AND c.relname IN ('accounts','journals','journal_lines','orders','fills','order_events','position_events',
+                       'equity_snapshots','workspace_preferences')
      AND c.relrowsecurity AND c.relforcerowsecurity) || '|' ||
   (SELECT count(*) FROM pg_policies WHERE schemaname='customer_paper') || '|' ||
   (SELECT count(*) FROM pg_policies
    WHERE schemaname='customer_paper' AND policyname='customer_paper_tenant'
-     AND tablename IN ('accounts','journals','journal_lines','orders','fills','order_events','position_events')) || '|' ||
+     AND tablename IN ('accounts','journals','journal_lines','orders','fills','order_events','position_events',
+                     'equity_snapshots','workspace_preferences')) || '|' ||
   (SELECT count(*) FROM pg_policies
    WHERE schemaname='customer_paper' AND policyname='customer_paper_bar_budget_backend'
      AND tablename IN ('market_bar_budgets','market_bar_allocations')) || '|' ||
@@ -134,7 +137,13 @@ SELECT
       AND (
         NOT has_table_privilege('atlas_customer_paper',c.oid,'SELECT')
         OR NOT has_table_privilege('atlas_customer_paper',c.oid,'INSERT')
-        OR has_table_privilege('atlas_customer_paper',c.oid,'UPDATE')
+        OR (
+          (c.relname = 'workspace_preferences'
+            AND NOT has_table_privilege('atlas_customer_paper',c.oid,'UPDATE'))
+          OR
+          (c.relname <> 'workspace_preferences'
+            AND has_table_privilege('atlas_customer_paper',c.oid,'UPDATE'))
+        )
         OR has_table_privilege('atlas_customer_paper',c.oid,'DELETE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'TRUNCATE')
         OR has_table_privilege('atlas_customer_paper',c.oid,'REFERENCES')
@@ -387,18 +396,18 @@ def main() -> int:
          backend_policy_count, schema_usage, schema_create_denied, public_create_denied,
          sequence_count, sequence_usage_count, real_tables_denied, paper_table_privileges_safe) = verification
         checks = {
-            "nine_paper_tables_only": table_count == "9" and expected_table_count == "9",
-            "forced_rls_on_seven_customer_tables": forced_rls_count == "7",
-            "nine_expected_policies": policy_count == "9",
-            "tenant_policy_on_seven_customer_tables": tenant_policy_count == "7",
+            "eleven_paper_tables_only": table_count == "11" and expected_table_count == "11",
+            "forced_rls_on_nine_customer_tables": forced_rls_count == "9",
+            "eleven_expected_policies": policy_count == "11",
+            "tenant_policy_on_nine_customer_tables": tenant_policy_count == "9",
             "backend_policy_on_two_capacity_tables": backend_policy_count == "2",
             "paper_schema_usage": schema_usage.strip().lower() in {"true", "t"},
             "paper_schema_create_denied": schema_create_denied.strip().lower() in {"true", "t"},
             "public_schema_create_denied": public_create_denied.strip().lower() in {"true", "t"},
-            "four_identity_sequences_only": sequence_count == "4",
-            "all_identity_sequences_have_usage": sequence_usage_count == "4",
+            "five_identity_sequences_only": sequence_count == "5",
+            "all_identity_sequences_have_usage": sequence_usage_count == "5",
             "real_money_table_privileges_denied": real_tables_denied.strip().lower() in {"true", "t"},
-            "paper_tables_allow_only_select_insert": paper_table_privileges_safe.strip().lower() in {"true", "t"},
+            "paper_tables_allow_only_select_insert_and_preferences_update": paper_table_privileges_safe.strip().lower() in {"true", "t"},
         }
         for name, passed in checks.items():
             print(f"{'PASS' if passed else 'FAIL'} {name}")

@@ -29,17 +29,24 @@ fun ModernSettingsScreen(
     userEmail: String = "Unavailable until account sign-in",
     onOpenOperatorConsole: () -> Unit = {},
     onOpenPortal: () -> Unit = {},
+    planName: String? = null,
+    subscriptionStatus: String? = null,
+    defaultChartWindowDays: Int = 30,
+    onDefaultChartWindowChange: (Int) -> Unit = {},
+    chartCrosshairEnabled: Boolean = true,
+    onChartCrosshairChange: (Boolean) -> Unit = {},
+    onSignOut: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
-    // Preferences State
-    var isPaperTrading by remember { mutableStateOf(true) }
+    // Only chart window and crosshair preferences are account-backed. Risk, broker,
+    // notification, biometric and lock controls remain explicitly unavailable until
+    // their respective backend/device integrations are implemented.
+
     var riskBudgetPct by remember { mutableStateOf("0.5%") }
     var autoTrailingStop by remember { mutableStateOf(true) }
     var costStressFilter by remember { mutableStateOf(true) }
     var slippageTolerance by remember { mutableStateOf("0.1%") }
 
-    var defaultTimeframe by remember { mutableStateOf("30 Days") }
-    var showCrosshair by remember { mutableStateOf(true) }
     var showSparklines by remember { mutableStateOf(true) }
     var baseCurrency by remember { mutableStateOf("USD ($)") }
 
@@ -87,6 +94,12 @@ fun ModernSettingsScreen(
                 Text(
                     text = "Account, risk discipline, theme & security",
                     fontSize = 13.sp,
+                    color = textMuted
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Chart window and crosshair sync to your account. Disabled preview controls do not change trading, alerts, security or device behaviour.",
+                    fontSize = 11.sp,
                     color = textMuted
                 )
             }
@@ -186,13 +199,29 @@ fun ModernSettingsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column {
-                            Text(text = "Account Tier", fontSize = 11.sp, color = textMuted)
-                            Text(text = "Tier 1 Multi-Asset Access", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+                            Text(text = "Subscription plan", fontSize = 11.sp, color = textMuted)
+                            Text(text = planName ?: "Unavailable", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = textPrimary)
+                            Text(
+                                text = "Status: ${subscriptionStatus ?: "Unavailable"}",
+                                fontSize = 10.sp,
+                                color = textMuted
+                            )
                         }
 
                         Column(horizontalAlignment = Alignment.End) {
-                            Text(text = "Trader ID", fontSize = 11.sp, color = textMuted)
-                            Text(text = "Unavailable", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
+                            Text(text = "Customer ID", fontSize = 11.sp, color = textMuted)
+                            Text(text = "Not exposed", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = brandTeal)
+                        }
+                    }
+                    if (onSignOut != null) {
+                        Spacer(modifier = Modifier.height(12.dp))
+                        HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
+                        Spacer(modifier = Modifier.height(8.dp))
+                        TextButton(
+                            onClick = onSignOut,
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Sign out", color = brandTeal, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -210,10 +239,11 @@ fun ModernSettingsScreen(
                 SettingsSwitchRow(
                     icon = Icons.Default.PlayArrow,
                     iconTint = brandTeal,
-                    title = "Paper Trading Simulation",
-                    subtitle = if (isPaperTrading) "Safe demo execution (Zero financial risk)" else "Live order routing active",
-                    checked = isPaperTrading,
-                    onCheckedChange = { isPaperTrading = it },
+                    title = "Paper Trading Mode",
+                    subtitle = "Enforced by backend safety settings; live trading and payouts remain disabled",
+                    checked = true,
+                    onCheckedChange = {},
+                    enabled = false,
                     textPrimary = textPrimary,
                     textMuted = textMuted
                 )
@@ -224,13 +254,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Info,
                     iconTint = emeraldAccent,
                     title = "Risk Budget Per Trade",
-                    subtitle = "Capital allocated per trade (Audit recommends 0.5%)",
+                    subtitle = "Preview only — not connected to backend risk policy",
                     options = listOf("0.5%", "1.0%", "2.0%"),
                     selectedOption = riskBudgetPct,
                     onOptionSelected = { riskBudgetPct = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -239,11 +270,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.CheckCircle,
                     iconTint = emeraldAccent,
                     title = "Automated Trailing Stop-Loss",
-                    subtitle = "Dynamic ATR-based exit to preserve accumulated gains",
+                    subtitle = "Preview only — no customer trailing-stop configuration is submitted",
                     checked = autoTrailingStop,
                     onCheckedChange = { autoTrailingStop = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -252,11 +284,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Warning,
                     iconTint = Color(0xFFF59E0B),
                     title = "Cost-Stress Gate (2.0x Multiplier)",
-                    subtitle = "Strictly rejects setups without 2x fee/slippage headroom",
+                    subtitle = "Preview only — backend cost-stress controls remain authoritative",
                     checked = costStressFilter,
                     onCheckedChange = { costStressFilter = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -265,13 +298,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.ArrowDropDown,
                     iconTint = brandTeal,
                     title = "Max Slippage Tolerance",
-                    subtitle = "Maximum allowable deviation on market fills",
+                    subtitle = "Preview only — does not change server-side slippage or execution limits",
                     options = listOf("0.1%", "0.5%", "1.0%"),
                     selectedOption = slippageTolerance,
                     onOptionSelected = { slippageTolerance = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
             }
         }
@@ -290,8 +324,8 @@ fun ModernSettingsScreen(
                     title = "Default Chart Window",
                     subtitle = "Initial equity curve historical scope",
                     options = listOf("7 Days", "30 Days"),
-                    selectedOption = defaultTimeframe,
-                    onOptionSelected = { defaultTimeframe = it },
+                    selectedOption = if (defaultChartWindowDays == 7) "7 Days" else "30 Days",
+                    onOptionSelected = { onDefaultChartWindowChange(if (it == "7 Days") 7 else 30) },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
                     brandTeal = brandTeal
@@ -303,9 +337,9 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Search,
                     iconTint = brandTeal,
                     title = "Interactive Chart Crosshair",
-                    subtitle = "Touch & drag tooltip showing exact daily equity & PnL",
-                    checked = showCrosshair,
-                    onCheckedChange = { showCrosshair = it },
+                    subtitle = "Account-synced touch selection for persisted equity points",
+                    checked = chartCrosshairEnabled,
+                    onCheckedChange = onChartCrosshairChange,
                     textPrimary = textPrimary,
                     textMuted = textMuted
                 )
@@ -316,11 +350,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.ThumbUp,
                     iconTint = emeraldAccent,
                     title = "Live Market Sparklines",
-                    subtitle = "Display mini trendlines inside watchlist rows",
+                    subtitle = "Unavailable — verified sparkline history is not connected",
                     checked = showSparklines,
                     onCheckedChange = { showSparklines = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -329,13 +364,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.ShoppingCart,
                     iconTint = brandTeal,
                     title = "Display Currency",
-                    subtitle = "Base valuation for portfolios and reports",
+                    subtitle = "Unavailable — portfolio currency conversion is not implemented",
                     options = listOf("USD ($)", "EUR (€)", "GBP (£)"),
                     selectedOption = baseCurrency,
                     onOptionSelected = { baseCurrency = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
             }
         }
@@ -352,11 +388,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Notifications,
                     iconTint = brandTeal,
                     title = "Order Execution Alerts",
-                    subtitle = "Instant alert whenever a bot enters or exits a trade",
+                    subtitle = "Unavailable — customer push notification delivery is not connected",
                     checked = tradeExecutionAlerts,
                     onCheckedChange = { tradeExecutionAlerts = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -365,11 +402,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Info,
                     iconTint = emeraldAccent,
                     title = "Daily PnL Digest (00:00 UTC)",
-                    subtitle = "Summary of 24h win rate, profit factor, and net equity",
+                    subtitle = "Unavailable — scheduled customer digests are not connected",
                     checked = dailySummaryAlerts,
                     onCheckedChange = { dailySummaryAlerts = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -378,11 +416,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Warning,
                     iconTint = Color(0xFFEF4444),
                     title = "Circuit Breaker / Stop Alerts",
-                    subtitle = "High-priority notification if volatility breaker trips",
+                    subtitle = "Unavailable — circuit-breaker notification delivery is not connected",
                     checked = circuitBreakerAlerts,
                     onCheckedChange = { circuitBreakerAlerts = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -391,11 +430,12 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Refresh,
                     iconTint = brandTeal,
                     title = "Haptic Vibration Feedback",
-                    subtitle = "Vibrate on chart scrub, trade action, and alerts",
+                    subtitle = "Unavailable — haptic feedback is not wired to app interactions",
                     checked = hapticFeedback,
                     onCheckedChange = { hapticFeedback = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
             }
         }
@@ -416,7 +456,8 @@ fun ModernSettingsScreen(
                     checked = biometricLock,
                     onCheckedChange = { biometricLock = it },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -428,13 +469,14 @@ fun ModernSettingsScreen(
                     badge = "NOT VERIFIED HERE",
                     badgeBg = Color(0xFFFFF7ED),
                     badgeText = Color(0xFF9A3412),
-                    subtitle = "Check administrator MFA in the authenticated web console",
+                    subtitle = "Customer AAL2 enrollment and verification have not been accepted in this mobile test build",
                     onClick = {
                         activeDialogTitle = "Two-Factor Authentication"
-                        activeDialogContent = "This mobile settings screen does not verify current MFA enrollment or AAL2. Check the server-reported MFA status in the authenticated administrator console before privileged actions."
+                        activeDialogContent = "Customer AAL2 enrollment and verification have not been accepted in this mobile test build. This row does not change account security."
                     },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -443,13 +485,14 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Star,
                     iconTint = brandTeal,
                     title = "Auto-Lock Inactivity Timer",
-                    subtitle = "Lock screen after period of inactivity",
+                    subtitle = "Unavailable — app-level inactivity locking is not implemented",
                     options = listOf("5 min", "15 min", "30 min"),
                     selectedOption = autoLockTimer,
                     onOptionSelected = { autoLockTimer = it },
                     textPrimary = textPrimary,
                     textMuted = textMuted,
-                    brandTeal = brandTeal
+                    brandTeal = brandTeal,
+                    enabled = false
                 )
 
                 HorizontalDivider(color = Color(0xFFE2E8F0).copy(alpha = 0.6f))
@@ -467,7 +510,8 @@ fun ModernSettingsScreen(
                         activeDialogContent = "No live audit events are available in this build. Connect an authenticated account and backend audit API before displaying security events."
                     },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
             }
         }
@@ -589,13 +633,17 @@ fun ModernSettingsScreen(
                     icon = Icons.Default.Refresh,
                     iconTint = Color(0xFFEF4444),
                     title = "Reset Cache & Simulation Data",
-                    subtitle = "Clean on-device cache and restore default $100 stake",
+                    subtitle = "Unavailable — this build does not expose a cache reset operation",
+                    badge = "NOT CONNECTED",
+                    badgeBg = Color(0xFFFFF7ED),
+                    badgeText = Color(0xFF9A3412),
                     onClick = {
-                        activeDialogTitle = "Cache Cleaned"
-                        activeDialogContent = "Applet cache and historical temporary buffers have been purged successfully."
+                        activeDialogTitle = "Cache reset unavailable"
+                        activeDialogContent = "No cache or simulation data was changed. A supported reset operation is not connected in this build."
                     },
                     textPrimary = textPrimary,
-                    textMuted = textMuted
+                    textMuted = textMuted,
+                    enabled = false
                 )
             }
             Spacer(modifier = Modifier.height(24.dp))
@@ -668,12 +716,13 @@ private fun SettingsSwitchRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     textPrimary: Color,
-    textMuted: Color
+    textMuted: Color,
+    enabled: Boolean = true
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onCheckedChange(!checked) }
+            .clickable(enabled = enabled) { onCheckedChange(!checked) }
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -700,6 +749,7 @@ private fun SettingsSwitchRow(
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
+            enabled = enabled,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = Color.White,
                 checkedTrackColor = Color(0xFF0D9488)
@@ -719,7 +769,8 @@ private fun SettingsSegmentedRow(
     onOptionSelected: (String) -> Unit,
     textPrimary: Color,
     textMuted: Color,
-    brandTeal: Color
+    brandTeal: Color,
+    enabled: Boolean = true
 ) {
     Column(
         modifier = Modifier
@@ -757,7 +808,7 @@ private fun SettingsSegmentedRow(
                         .weight(1f)
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (isSelected) brandTeal else Color(0xFFF1F5F9))
-                        .clickable { onOptionSelected(option) }
+                        .clickable(enabled = enabled) { onOptionSelected(option) }
                         .padding(vertical = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -779,6 +830,7 @@ private fun SettingsNavigationRow(
     iconTint: Color,
     title: String,
     subtitle: String,
+    enabled: Boolean = true,
     badge: String? = null,
     badgeBg: Color = Color.Transparent,
     badgeText: Color = Color.Unspecified,
@@ -789,7 +841,7 @@ private fun SettingsNavigationRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

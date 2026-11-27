@@ -95,7 +95,13 @@ def load_provider_statement(path: Path) -> list[dict[str, str]]:
             parse_utc(row["event_time_utc"], f"event_time_utc line {line_no}")
             rows.append(row)
     if not rows:
-        raise ValueError("Provider statement contains no payout records; empty evidence cannot pass")
+        # A caller can manufacture a header-only CSV. Without an independent,
+        # verifiable provider-signed zero-activity attestation, it is not evidence
+        # that no payout transactions occurred in the selected window.
+        raise ValueError(
+            "Provider statement contains no payout records; zero-activity exports "
+            "require independent provider-authenticated evidence and cannot pass this workflow"
+        )
     return rows
 
 
@@ -132,6 +138,36 @@ def build_query(provider: str, from_utc: datetime, to_utc: datetime) -> str:
         WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity
       ),
       'audit_role', ({audit_role_observations_sql()}),
+      'withdrawal_journal_count', (
+        SELECT count(*) FROM public.ledger_journals j
+        WHERE j.created_at >= TIMESTAMPTZ '{start}'
+          AND j.created_at < TIMESTAMPTZ '{end}'
+          AND (
+            upper(coalesce(j.reference_type, '')) = 'WITHDRAWAL'
+            OR upper(coalesce(j.entry_type, '')) IN (
+              'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
+            )
+          )
+          AND EXISTS (
+            SELECT 1 FROM matching_withdrawals w
+            WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
+          )
+      ),
+      'unattributed_withdrawal_journal_count', (
+        SELECT count(*) FROM public.ledger_journals j
+        WHERE j.created_at >= TIMESTAMPTZ '{start}'
+          AND j.created_at < TIMESTAMPTZ '{end}'
+          AND (
+            upper(coalesce(j.reference_type, '')) = 'WITHDRAWAL'
+            OR upper(coalesce(j.entry_type, '')) IN (
+              'WITHDRAWAL_RESERVE', 'WITHDRAWAL_SETTLEMENT', 'WITHDRAWAL_RELEASE'
+            )
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM public.withdrawals w
+            WHERE j.reference_id IN (w.request_id, w.request_id || ':release')
+          )
+      ),
       'withdrawals', coalesce((
         SELECT json_agg(json_build_object(
           'request_id', w.request_id,
@@ -169,12 +205,20 @@ def reconcile_rows(
     statement_rows: list[dict[str, str]],
     database_rows: list[dict[str, Any]],
     provider: str,
+    withdrawal_journal_count: int = 0,
+    unattributed_withdrawal_journal_count: int = 0,
 ) -> tuple[int, int, list[str]]:
     """Compare provider payout rows to DB withdrawals and their terminal ledger journals."""
     failures: list[str] = []
+    if not statement_rows:
+        failures.append(
+            "zero activity cannot be independently verified without provider-authenticated evidence"
+        )
     provider_rows = {row["provider_id"]: row for row in statement_rows}
-    if not database_rows:
-        failures.append("no Atlas withdrawals found in the specified created_at window")
+    if unattributed_withdrawal_journal_count:
+        failures.append("withdrawal journals exist in the specified window without an attributable withdrawal record")
+    if not database_rows and withdrawal_journal_count:
+        failures.append("withdrawal journals exist in the specified window without matching withdrawal rows")
     db_by_id: dict[str, dict[str, Any]] = {}
     unresolved_no_id = 0
     for record in database_rows:
@@ -289,7 +333,24 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     ))
 
     db_rows = db.get("withdrawals") or []
-    matched, unresolved_no_id, reconciliation_failures = reconcile_rows(rows, db_rows, provider)
+    try:
+        withdrawal_journal_count = int(db.get("withdrawal_journal_count") or 0)
+        unattributed_withdrawal_journal_count = int(
+            db.get("unattributed_withdrawal_journal_count") or 0
+        )
+        if withdrawal_journal_count < 0 or unattributed_withdrawal_journal_count < 0:
+            raise ValueError("negative withdrawal journal count")
+    except (TypeError, ValueError):
+        withdrawal_journal_count = -1
+        unattributed_withdrawal_journal_count = -1
+        failures.append("invalid withdrawal journal count in database evidence")
+    matched, unresolved_no_id, reconciliation_failures = reconcile_rows(
+        rows,
+        db_rows,
+        provider,
+        withdrawal_journal_count=withdrawal_journal_count,
+        unattributed_withdrawal_journal_count=unattributed_withdrawal_journal_count,
+    )
     failures.extend(reconciliation_failures)
 
     return {
@@ -309,6 +370,8 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
         "provider_statement_sha256": sha256_file(path),
         "statement_records": len(rows),
         "staging_withdrawal_records": len(db_rows),
+        "staging_withdrawal_journal_records": withdrawal_journal_count,
+        "unattributed_withdrawal_journal_records": unattributed_withdrawal_journal_count,
         "matched_records": matched,
         "unresolved_without_provider_id": unresolved_no_id,
         "failures": failures,
@@ -328,7 +391,7 @@ def main() -> int:
     parser.add_argument("--staging-ref", default="")
     parser.add_argument("--production-ref", default="")
     parser.add_argument("--expected-audit-role", "--expected-runtime-role", dest="expected_audit_role", required=True)
-    parser.add_argument("--expected-revision", default="0059_research_integrity_controls")
+    parser.add_argument("--expected-revision", default="0069_customer_equity_history_and_workspace_preferences")
     parser.add_argument("--output", default="provider-ledger-reconciliation.json")
     args = parser.parse_args()
     import os

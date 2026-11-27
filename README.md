@@ -81,11 +81,11 @@ A transport timeout on order placement becomes `UNKNOWN`. Operators must reconci
 
 ## CCXT version
 
-The bundled requirements pin CCXT to `4.5.85` (see `requirements.txt`). Check https://github.com/ccxt/ccxt/releases and run the exchange drill tests before changing the pin.
+The bundled requirements and hash-verified lockfiles pin CCXT to `4.5.88` (see `requirements.txt`, `requirements.lock`, and `requirements-dev.lock`). Check https://github.com/ccxt/ccxt/releases and run the exchange drill tests before changing the pin.
 
 ## Production database
 
-SQLite is useful for local development. Production deployments should use PostgreSQL, backups, controlled migrations and managed secrets. The repository includes Alembic scaffolding and a migration helper for the shipped v2 SQLite schema.
+SQLite is useful for local development (the schema is created directly; the Alembic migration chain is PostgreSQL-only and fails at revision 0001 on SQLite). Production deployments should use PostgreSQL, backups, controlled migrations and managed secrets. The repository includes Alembic scaffolding and a migration helper for the shipped v2 SQLite schema.
 
 ## Security
 
@@ -115,7 +115,11 @@ This application can be engineered for production reliability, but software hard
 - `RUNBOOK.md` — incident, timeout, restart and model-response procedures.
 - `SECURITY.md` — security model and key handling.
 - `ARCHITECTURE.md` — system and CCXT integration design.
-- `scripts/smoke.py` — post-deployment HTTP smoke check.
+- `scripts/smoke.py` — post-deployment HTTP smoke check. The restricted paper-only staging app requires an authenticated readiness probe and does not expose `/metrics`. Keep the paper database URL in a protected file (for example, mode `0600`) and run:
+  ```bash
+  python scripts/smoke.py "$ATLAS_STAGING_URL" --paper-database-url-file "$ATLAS_STAGING_PAPER_DATABASE_URL_FILE" --skip-metrics
+  ```
+  For the full API, pass `--admin-token-file` with a protected file containing the admin Bearer token when `METRICS_REQUIRE_ADMIN=true`. The script never prints either secret.
 - `scripts/migrate_v2_sqlite.py` — best-effort v2 SQLite migration helper; back up first.
 
 

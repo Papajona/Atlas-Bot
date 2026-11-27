@@ -17,7 +17,7 @@ Scope: fact-check of the uploaded Atlas-Bot 3.10.47 patch and the local test rep
 | Paper-only ASGI app boot | `/livez` -> `mode: paper-only`; unauthenticated `/readyz` -> 401 |
 | Defaults | Live, customer-live, payouts, TRON, TRON sweep, Deriv off; sandbox on |
 
-Tests need fresh databases and the CI env (`ATLAS_PAPER_*` URLs, migrated primary schema, git repo, ruby). Missing those produces environment failures, not code failures.
+Tests need fresh databases and the CI env (`ATLAS_PAPER_*` URLs, migrated primary schema, git repo). Missing those produces environment failures, not code failures.
 
 ## Changes
 

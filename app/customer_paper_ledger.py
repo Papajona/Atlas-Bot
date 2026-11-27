@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation, localcontext
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
@@ -28,8 +29,9 @@ REAL_MONEY_TABLES = (
 PAPER_TABLES = (
     "customer_paper.accounts", "customer_paper.journals", "customer_paper.journal_lines",
     "customer_paper.orders", "customer_paper.order_events", "customer_paper.fills",
-    "customer_paper.position_events",
+    "customer_paper.position_events", "customer_paper.equity_snapshots",
 )
+PAPER_MUTABLE_TABLES = ("customer_paper.workspace_preferences",)
 # Shared market-bar budgets contain only public OHLCV provenance and aggregate capacity,
 # never customer identifiers or financial balances. They use a separate explicit policy.
 PAPER_GLOBAL_TABLES = ("customer_paper.market_bar_budgets", "customer_paper.market_bar_allocations")
@@ -360,15 +362,15 @@ async def preflight_isolated_customer_paper_ledger(
                 WHERE (n.nspname='customer_paper' AND c.relname = ANY(:paper_table_names))
                    OR (n.nspname='public' AND c.relname = ANY(:real_tables))
                 """),
-                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_GLOBAL_TABLES]},
+                {"real_tables": list(REAL_MONEY_TABLES), "paper_table_names": [name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_MUTABLE_TABLES + PAPER_GLOBAL_TABLES]},
             )).mappings().all()
             by_name = {str(row["table_name"]): row for row in table_rows}
-            missing_paper = sorted(set(PAPER_TABLES + PAPER_GLOBAL_TABLES) - set(by_name))
+            missing_paper = sorted(set(PAPER_TABLES + PAPER_MUTABLE_TABLES + PAPER_GLOBAL_TABLES) - set(by_name))
             if missing_paper:
                 return {"status": "BLOCKED", "reason": "PAPER_SCHEMA_NOT_PROVISIONED",
                         "missing_tables": missing_paper, "identity": {"database": db_name, "role": role_name}}
             insecure_paper = []
-            for name in PAPER_TABLES + PAPER_GLOBAL_TABLES:
+            for name in PAPER_TABLES + PAPER_MUTABLE_TABLES + PAPER_GLOBAL_TABLES:
                 row = by_name[name]
                 if row["relkind"] not in {"r", "p"}:
                     insecure_paper.append(f"{name}:NOT_A_TABLE")
@@ -376,7 +378,10 @@ async def preflight_isolated_customer_paper_ledger(
                     insecure_paper.append(f"{name}:RLS_NOT_FORCED")
                 if not bool(row["can_select"]) or not bool(row["can_insert"]):
                     insecure_paper.append(f"{name}:SELECT_OR_INSERT_MISSING")
-                if bool(row["can_update"]):
+                if name in PAPER_MUTABLE_TABLES:
+                    if not bool(row["can_update"]):
+                        insecure_paper.append(f"{name}:UPDATE_MISSING")
+                elif bool(row["can_update"]):
                     insecure_paper.append(f"{name}:UPDATE_ALLOWED")
                 if bool(row["can_delete"]):
                     insecure_paper.append(f"{name}:DELETE_ALLOWED")
@@ -392,7 +397,8 @@ async def preflight_isolated_customer_paper_ledger(
                       NULLIF(pg_get_serial_sequence('customer_paper.accounts', 'id'), '')::regclass,
                       NULLIF(pg_get_serial_sequence('customer_paper.journal_lines', 'id'), '')::regclass,
                       NULLIF(pg_get_serial_sequence('customer_paper.order_events', 'id'), '')::regclass,
-                      NULLIF(pg_get_serial_sequence('customer_paper.position_events', 'id'), '')::regclass
+                      NULLIF(pg_get_serial_sequence('customer_paper.position_events', 'id'), '')::regclass,
+                      NULLIF(pg_get_serial_sequence('customer_paper.equity_snapshots', 'id'), '')::regclass
                   )
                 """
             ))).mappings().all()
@@ -401,6 +407,7 @@ async def preflight_isolated_customer_paper_ledger(
                 "customer_paper.journal_lines_id_seq",
                 "customer_paper.order_events_id_seq",
                 "customer_paper.position_events_id_seq",
+                "customer_paper.equity_snapshots_id_seq",
             }
             observed_sequences = {str(row["sequence_name"]) for row in paper_sequence_rows}
             if (
@@ -426,7 +433,7 @@ async def preflight_isolated_customer_paper_ledger(
             policy_by_table: dict[str, list[Mapping[str, Any]]] = {}
             for policy in policy_rows:
                 policy_by_table.setdefault(str(policy["tablename"]), []).append(policy)
-            for table in (name.split(".", 1)[1] for name in PAPER_TABLES):
+            for table in (name.split(".", 1)[1] for name in PAPER_TABLES + PAPER_MUTABLE_TABLES):
                 candidates = policy_by_table.get(table, [])
                 row = candidates[0] if len(candidates) == 1 else None
                 policy_error = _tenant_policy_validation_error(row, str(role_name))
@@ -668,8 +675,8 @@ async def preflight_isolated_customer_paper_ledger(
                 "url_pair": pair,
                 "isolation_mode": pair["isolation_mode"],
                 "same_database_schema_isolation": same_database,
-                "paper_tables": sorted(PAPER_TABLES),
-                "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ALL_FOUR_IDENTITY_SEQUENCES",
+                "paper_tables": sorted(PAPER_TABLES + PAPER_MUTABLE_TABLES),
+                "paper_sequence_privileges": "USAGE_VERIFIED_FOR_ALL_FIVE_IDENTITY_SEQUENCES",
                 "real_money_table_privileges": "NONE_FOR_ALL_EXISTING_CHECKED_TABLES",
                 "primary_role_identity_check": (
                     "ROLE_PRESENT_PRIVILEGES_CHECKED"
@@ -1013,5 +1020,269 @@ async def get_customer_paper_balances(*, customer_id: int) -> list[dict[str, str
             }
             for row in rows
         ]
+    finally:
+        await engine.dispose()
+
+
+def _validate_paper_customer_id(customer_id: int) -> int:
+    if isinstance(customer_id, bool) or not isinstance(customer_id, int) or customer_id <= 0:
+        raise ValueError("customer_id must be a positive integer")
+    return customer_id
+
+
+async def record_customer_paper_equity_snapshot(
+    *,
+    customer_id: int,
+    equity: Decimal | float | str,
+    cash_equity: Decimal | float | str | None,
+    currency: str = "USDT",
+    observed_at: datetime | None = None,
+) -> bool:
+    """Append one cash-only, verified paper-equity observation for this tenant."""
+    tenant_id = _validate_paper_customer_id(customer_id)
+    equity_value = Decimal(str(equity))
+    cash_value = Decimal(str(cash_equity)) if cash_equity is not None else None
+    if not equity_value.is_finite() or equity_value < 0:
+        raise ValueError("paper equity must be finite and non-negative")
+    if cash_value is not None and (
+        not cash_value.is_finite() or cash_value < 0
+    ):
+        raise ValueError("paper cash equity must be finite and non-negative")
+    normalized_currency = str(currency or "").strip().upper()
+    if normalized_currency != "USDT":
+        raise ValueError("paper equity history currently supports USDT only")
+
+    observed = observed_at or datetime.now(timezone.utc)
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise ValueError("paper equity observation time must be timezone-aware")
+    observed = observed.astimezone(timezone.utc)
+    bucket = observed.replace(
+        minute=(observed.minute // 15) * 15,
+        second=0,
+        microsecond=0,
+    )
+
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(tenant_id)},
+            )
+            result = await conn.execute(
+                text(
+                    """
+                    INSERT INTO customer_paper.equity_snapshots (
+                        customer_id, bucket_at, observed_at, equity, cash_equity,
+                        currency, valuation_source
+                    )
+                    VALUES (
+                        :customer_id, :bucket_at, :observed_at, :equity, :cash_equity,
+                        'USDT', 'PAPER_LEDGER_CASH_ONLY'
+                    )
+                    ON CONFLICT (customer_id, bucket_at) DO NOTHING
+                    RETURNING id
+                    """
+                ),
+                {
+                    "customer_id": tenant_id,
+                    "bucket_at": bucket,
+                    "observed_at": observed,
+                    "equity": equity_value,
+                    "cash_equity": cash_value,
+                },
+            )
+            return result.scalar_one_or_none() is not None
+    finally:
+        await engine.dispose()
+
+
+async def get_customer_paper_equity_history(
+    *,
+    customer_id: int,
+    days: int = 30,
+) -> list[dict[str, Any]]:
+    """Return only persisted tenant observations; never interpolate missing intervals."""
+    tenant_id = _validate_paper_customer_id(customer_id)
+    if days not in {7, 30}:
+        raise ValueError("paper equity history window must be 7 or 30 days")
+    await _assert_customer_paper_ready()
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(tenant_id)},
+            )
+            rows = (await conn.execute(
+                text(
+                    """
+                    SELECT observed_at, equity, cash_equity, currency, valuation_source
+                    FROM customer_paper.equity_snapshots
+                    WHERE customer_id = :customer_id AND observed_at >= :since
+                    ORDER BY observed_at DESC
+                    LIMIT 3000
+                    """
+                ),
+                {"customer_id": tenant_id, "since": since},
+            )).mappings().all()
+        result = [
+            {
+                "observed_at": (
+                    row["observed_at"].replace(tzinfo=timezone.utc)
+                    if row["observed_at"].tzinfo is None
+                    else row["observed_at"]
+                ).isoformat(),
+                "equity": float(row["equity"]),
+                "cash_equity": (
+                    float(row["cash_equity"])
+                    if row["cash_equity"] is not None else None
+                ),
+                "currency": str(row["currency"]),
+                "valuation_source": str(row["valuation_source"]),
+            }
+            for row in reversed(rows)
+            if Decimal(str(row["equity"])).is_finite()
+        ]
+        return result
+    finally:
+        await engine.dispose()
+
+
+_PAPER_WORKSPACE_BOOLEAN_DEFAULTS = {
+    "reduce_motion": False,
+    "compact_markets": False,
+    "touch_feedback": True,
+    "mobile_chart_crosshair_enabled": True,
+}
+_PAPER_WORKSPACE_TIMEFRAME_DAYS = {7, 30}
+_PAPER_WORKSPACE_ALLOWED_FIELDS = set(_PAPER_WORKSPACE_BOOLEAN_DEFAULTS) | {
+    "mobile_default_timeframe_days"
+}
+
+
+def _paper_workspace_preferences_payload(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    result = {
+        key: bool(row[key]) if row is not None else default
+        for key, default in _PAPER_WORKSPACE_BOOLEAN_DEFAULTS.items()
+    }
+    result["mobile_default_timeframe_days"] = (
+        int(row["mobile_default_timeframe_days"]) if row is not None else 30
+    )
+    return result
+
+
+async def get_customer_paper_workspace_preferences(
+    *,
+    customer_id: int,
+) -> dict[str, Any]:
+    tenant_id = _validate_paper_customer_id(customer_id)
+    await _assert_customer_paper_ready()
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(tenant_id)},
+            )
+            row = (await conn.execute(
+                text(
+                    """
+                    SELECT reduce_motion, compact_markets, touch_feedback,
+                           mobile_default_timeframe_days, mobile_chart_crosshair_enabled
+                    FROM customer_paper.workspace_preferences
+                    WHERE customer_id = :customer_id
+                    """
+                ),
+                {"customer_id": tenant_id},
+            )).mappings().one_or_none()
+        return {
+            "configured": row is not None,
+            "preferences": _paper_workspace_preferences_payload(row),
+        }
+    finally:
+        await engine.dispose()
+
+
+async def update_customer_paper_workspace_preferences(
+    *,
+    customer_id: int,
+    updates: Mapping[str, Any],
+) -> dict[str, Any]:
+    tenant_id = _validate_paper_customer_id(customer_id)
+    if not isinstance(updates, Mapping) or not updates:
+        raise ValueError("at least one workspace preference is required")
+    unknown = set(updates) - _PAPER_WORKSPACE_ALLOWED_FIELDS
+    if unknown:
+        raise ValueError("only supported display preferences may be changed")
+    normalized: dict[str, Any] = {}
+    for key, value in updates.items():
+        if key == "mobile_default_timeframe_days":
+            if type(value) is not int or value not in _PAPER_WORKSPACE_TIMEFRAME_DAYS:
+                raise ValueError("default chart window must be 7 or 30 days")
+        elif type(value) is not bool:
+            raise ValueError("boolean workspace preferences require boolean values")
+        normalized[key] = value
+
+    await _assert_customer_paper_ready()
+    preferences = {
+        **_PAPER_WORKSPACE_BOOLEAN_DEFAULTS,
+        "mobile_default_timeframe_days": 30,
+        **normalized,
+    }
+    update_flags = {
+        f"update_{key}": key in normalized
+        for key in _PAPER_WORKSPACE_ALLOWED_FIELDS
+    }
+    statement = text(
+        """
+        INSERT INTO customer_paper.workspace_preferences (
+            customer_id, reduce_motion, compact_markets, touch_feedback,
+            mobile_default_timeframe_days, mobile_chart_crosshair_enabled
+        ) VALUES (
+            :customer_id, :reduce_motion, :compact_markets, :touch_feedback,
+            :mobile_default_timeframe_days, :mobile_chart_crosshair_enabled
+        )
+        ON CONFLICT (customer_id) DO UPDATE SET
+            reduce_motion = CASE WHEN :update_reduce_motion
+                THEN EXCLUDED.reduce_motion
+                ELSE customer_paper.workspace_preferences.reduce_motion END,
+            compact_markets = CASE WHEN :update_compact_markets
+                THEN EXCLUDED.compact_markets
+                ELSE customer_paper.workspace_preferences.compact_markets END,
+            touch_feedback = CASE WHEN :update_touch_feedback
+                THEN EXCLUDED.touch_feedback
+                ELSE customer_paper.workspace_preferences.touch_feedback END,
+            mobile_default_timeframe_days = CASE WHEN :update_mobile_default_timeframe_days
+                THEN EXCLUDED.mobile_default_timeframe_days
+                ELSE customer_paper.workspace_preferences.mobile_default_timeframe_days END,
+            mobile_chart_crosshair_enabled = CASE WHEN :update_mobile_chart_crosshair_enabled
+                THEN EXCLUDED.mobile_chart_crosshair_enabled
+                ELSE customer_paper.workspace_preferences.mobile_chart_crosshair_enabled END,
+            updated_at = now()
+        RETURNING reduce_motion, compact_markets, touch_feedback,
+                  mobile_default_timeframe_days, mobile_chart_crosshair_enabled
+        """
+    )
+    engine = _paper_engine()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text("SELECT set_config('app.customer_id', :customer_id, true)"),
+                {"customer_id": str(tenant_id)},
+            )
+            row = (await conn.execute(
+                statement, {
+                    "customer_id": tenant_id,
+                    **preferences,
+                    **update_flags,
+                }
+            )).mappings().one()
+        return {
+            "configured": True,
+            "preferences": _paper_workspace_preferences_payload(row),
+        }
     finally:
         await engine.dispose()

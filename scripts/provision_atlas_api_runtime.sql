@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 
 -- Dedicated server-side production API login. Run only after verified backup/restore
--- and Alembic head 0059. Set its password separately with psql's hidden \password
+-- and Alembic head 0069_customer_equity_history_and_workspace_preferences. Set its password separately with psql's hidden \password
 -- prompt; never store passwords in this file or place them in chat.
 BEGIN;
 
@@ -17,8 +17,8 @@ BEGIN
         RAISE EXCEPTION 'current role cannot provision the production API login';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM public.alembic_version
-                   WHERE version_num = '0059_research_integrity_controls') THEN
-        RAISE EXCEPTION 'database must be at 0059_research_integrity_controls before API role provisioning';
+                   WHERE version_num = '0069_customer_equity_history_and_workspace_preferences') THEN
+        RAISE EXCEPTION 'database must be at 0069_customer_equity_history_and_workspace_preferences before API role provisioning';
     END IF;
 
     SELECT array_agg(required.table_name ORDER BY required.table_name)
@@ -28,7 +28,8 @@ BEGIN
         'customer_paper_submission_audit_retries','customer_ledger_accounts',
         'ledger_entries','ledger_journals','ledger_journal_lines',
         'research_trial_archive','research_trial_ledger_head',
-        'research_holdout_registry','trades','withdrawals'
+        'research_holdout_registry','trades','withdrawals',
+        'customer_equity_snapshots','customer_workspace_preferences'
     ]::text[]) AS required(table_name)
     WHERE to_regclass(format('public.%I', required.table_name)) IS NULL;
     IF coalesce(array_length(missing_tables, 1), 0) > 0 THEN
@@ -56,8 +57,8 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM atlas_api_runtime;
 REVOKE ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public FROM atlas_api_runtime;
 
 -- Ordinary mutable application tables receive SELECT/INSERT/UPDATE only.
--- DELETE is intentionally not granted on any public table: application code
--- retains financial, custody, execution, and audit history rather than deleting it.
+-- DELETE is withheld from financial, custody, execution, and audit history.
+-- The sole exception is owner-scoped, TTL-governed customer benchmark capture data.
 DO $atlas_api_runtime_grants$
 DECLARE item record;
 BEGIN
@@ -72,7 +73,9 @@ BEGIN
             'research_trial_archive','research_trial_ledger_head','research_holdout_registry',
             'funding_transactions','custody_transfers','tron_sweeps',
             'revenue_ledger','cost_ledger','referral_commissions',
-            'positions','order_commands','audit_chain_state'
+            'positions','order_commands','audit_chain_state',
+            'customer_benchmark_captures',
+            'customer_equity_snapshots','customer_workspace_preferences'
           )
     LOOP
         EXECUTE format(
@@ -86,6 +89,9 @@ $atlas_api_runtime_grants$;
 -- Explicit append-only / controlled-state grants.
 -- Financial account and withdrawal history may be updated, never deleted.
 GRANT SELECT ON TABLE public.alembic_version TO atlas_api_runtime;
+GRANT SELECT, INSERT ON TABLE public.customer_equity_snapshots TO atlas_api_runtime;
+GRANT SELECT, INSERT, UPDATE ON TABLE public.customer_workspace_preferences TO atlas_api_runtime;
+GRANT USAGE, SELECT ON SEQUENCE public.customer_equity_snapshots_id_seq TO atlas_api_runtime;
 GRANT SELECT, INSERT, UPDATE ON TABLE
     public.customer_ledger_accounts, public.withdrawals, public.trades
 TO atlas_api_runtime;
@@ -119,10 +125,11 @@ BEGIN
     FROM pg_class c
     JOIN pg_namespace n ON n.oid=c.relnamespace
     WHERE n.nspname='public' AND c.relkind IN ('r','p')
+      AND c.relname <> 'customer_benchmark_captures'
       AND has_table_privilege('atlas_api_runtime', c.oid, 'DELETE');
     IF unexpected_delete_privileges <> 0 THEN
         RAISE EXCEPTION
-            'atlas_api_runtime has DELETE on % public tables; refusing to commit the production identity',
+            'atlas_api_runtime has DELETE on % public tables other than benchmark captures; refusing to commit the production identity',
             unexpected_delete_privileges;
     END IF;
 
@@ -140,6 +147,23 @@ END
 $atlas_api_runtime_privilege_guard$;
 
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO atlas_api_runtime;
+GRANT SELECT, INSERT, DELETE
+    ON TABLE public.customer_benchmark_captures TO atlas_api_runtime;
+GRANT USAGE, SELECT
+    ON SEQUENCE public.customer_benchmark_captures_id_seq TO atlas_api_runtime;
+
+DO $atlas_benchmark_capture_update_guard$
+BEGIN
+    IF has_table_privilege(
+        'atlas_api_runtime',
+        'public.customer_benchmark_captures',
+        'UPDATE'
+    ) THEN
+        RAISE EXCEPTION
+            'atlas_api_runtime must not UPDATE benchmark consent, ciphertext, or retention fields';
+    END IF;
+END
+$atlas_benchmark_capture_update_guard$;
 
 ALTER ROLE atlas_api_runtime SET default_transaction_read_only = off;
 ALTER ROLE atlas_api_runtime SET search_path = pg_catalog, public;
@@ -161,7 +185,10 @@ SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
        has_table_privilege(r.rolname,'public.trades','DELETE') AS trades_delete,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind IN ('r','p')
+          AND c.relname <> 'customer_benchmark_captures'
           AND has_table_privilege(r.rolname,c.oid,'DELETE')) AS public_tables_with_delete_privileges,
+       has_table_privilege(r.rolname,'public.customer_benchmark_captures','DELETE') AS benchmark_capture_delete,
+       has_table_privilege(r.rolname,'public.customer_benchmark_captures','UPDATE') AS benchmark_capture_update,
        has_table_privilege(r.rolname,'public.research_trial_ledger_head','UPDATE') AS trial_head_update,
        has_table_privilege(r.rolname,'public.research_holdout_registry','INSERT') AS holdout_insert,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -172,7 +199,7 @@ SELECT r.rolname, r.rolcanlogin, r.rolinherit, r.rolsuper, r.rolcreaterole,
         )) AS elevated_table_privileges,
        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='public' AND c.relkind='S'
-          AND has_sequence_privilege(r.rolname,c.oid,'UPDATE')) AS sequence_setval_privileges,
+          AND CASE WHEN c.relkind='S' THEN has_sequence_privilege(r.rolname,c.oid,'UPDATE') ELSE false END) AS sequence_setval_privileges,
        (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
         WHERE n.nspname='public' AND has_function_privilege(r.rolname,p.oid,'EXECUTE')) AS executable_public_functions
 FROM pg_roles r WHERE r.rolname='atlas_api_runtime';

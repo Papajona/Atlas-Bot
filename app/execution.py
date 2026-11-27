@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .broker import Broker, BrokerConfig
 from .customer_binance_execution import build_customer_binance_broker, CustomerBinanceExecutionError
-from .risk_governor import evaluate_trade
+from .risk_governor import bounded_risk_tolerance, evaluate_trade
 from .forex_oanda import OandaBroker, OandaConfig
 from .config import settings
 from .execution_costs import market_impact_bps
@@ -24,7 +24,7 @@ from .paper_execution_model import (
     configured_paper_execution_settings,
     estimate_paper_fill,
 )
-from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand,
+from .db import (SessionLocal, OandaReconciliationState, AppState, TradingAccount, Trade, Position, CustomerBinanceAccount, StrategyOutcome, TradeLearningEpisode, OrderCommand, Incident,
                   PaperOrderState, PaperBarState, PaperFillEvent, LiveExecutionLease, utcnow)
 from .trading_core import PROFILES
 from .customer_funds import get_or_create_ledger, reserve_trading, release_trading, sync_wallet_from_ledger, settle_realized_pnl, settle_trading_fee, customer_balance
@@ -33,7 +33,7 @@ from .incidents import open_incident
 from .research_validation import edge_decay_check
 from .ids import make_signal_id, client_order_id
 from .audit_chain import record_audit
-from .live_fees import extract_order_fee_quote_decimal, ESTIMATED
+from .live_fees import extract_order_fee_quote_decimal, fee_quality_is_verified, UNVERIFIED
 from .customer_funds import record_ledger_incident
 from .distributed import acquire_lock, release_lock
 
@@ -54,6 +54,97 @@ async def audit(event: str, detail: dict, actor_id: str = "system") -> None:
     except Exception:  # noqa: BLE001 - audit sink failure must not turn a fill into an ambiguous error
         import logging
         logging.getLogger(__name__).warning("audit_write_failed event=%s", event, exc_info=True)
+
+
+def _aggregate_completed_strategy_outcomes(outcomes):
+    """Collapse partial closing fills into one complete, weighted trade outcome."""
+    rows = sorted(list(outcomes), key=lambda item: (int(item.sequence or 0), int(item.id or 0)))
+    if not rows:
+        return None
+
+    final = rows[-1]
+    # Keep the final source fill values before this row is replaced by the
+    # lifecycle aggregate below. Fee reconciliation later relies on this
+    # exact per-fill quantity/notional for conservation and proration.
+    final_fill_closing_quantity = Decimal(
+        str(getattr(final, "closing_quantity", 0) or 0)
+    )
+    final_fill_closing_notional = Decimal(
+        str(getattr(final, "closing_notional", 0) or 0)
+    )
+    total_notional = sum(
+        (Decimal(str(row.closing_notional or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_quantity = sum(
+        (Decimal(str(getattr(row, "closing_quantity", 0) or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_net_pnl = sum(
+        (Decimal(str(row.net_pnl or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_realized_pnl = sum(
+        (Decimal(str(row.realized_pnl or 0)) for row in rows),
+        Decimal("0"),
+    )
+    total_fee = sum(
+        (Decimal(str(row.fee or 0)) for row in rows),
+        Decimal("0"),
+    )
+    # A missing fill notional makes the total return unknowable. Keep the
+    # completed trade for audit, but exclude it from return-ratio samples.
+    notional_complete = all(
+        Decimal(str(row.closing_notional or 0)) > 0
+        and Decimal(str(getattr(row, "closing_quantity", 0) or 0)) > 0
+        for row in rows
+    )
+    fee_basis_complete = all(
+        bool(getattr(row, "fee_basis_complete", False)) for row in rows
+    )
+    if notional_complete and total_notional > 0 and total_quantity > 0:
+        final.closing_quantity = total_quantity
+        final.closing_notional = total_notional
+        final.net_return_bps = (
+            float(total_net_pnl / total_notional * Decimal("10000"))
+            if fee_basis_complete else None
+        )
+        final.return_bps = float(total_realized_pnl / total_notional * Decimal("10000"))
+    else:
+        final.closing_quantity = Decimal("0")
+        final.closing_notional = Decimal("0")
+        # A missing notional is not a zero-percent return. Keep it unavailable.
+        final.net_return_bps = None
+        final.return_bps = 0.0
+    # Do not expose a partial sum as a completed net result when even one fill's
+    # fee denomination/basis is unverified. Gross P&L and fees remain auditable.
+    final.net_pnl = total_net_pnl if fee_basis_complete else None
+    final.realized_pnl = total_realized_pnl
+    final.fee = total_fee
+    final.fee_basis_complete = fee_basis_complete
+    for row in rows[:-1]:
+        row.lifecycle_status = "PARTIAL_CLOSED"
+    final.lifecycle_status = "CLOSED"
+    try:
+        metadata = json.loads(final.metadata_json or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    if isinstance(metadata, dict):
+        metadata["aggregate_fill_count"] = len(rows)
+        # Preserve the final fill's own slice before closing_quantity/notional
+        # are replaced with the lifecycle aggregate. Fee true-ups need source
+        # quantities, not the already-aggregated total, for correct allocation.
+        metadata["final_fill_closing_quantity"] = str(
+            final_fill_closing_quantity
+        )
+        metadata["final_fill_closing_notional"] = str(
+            final_fill_closing_notional
+        )
+        metadata["total_closing_notional"] = str(final.closing_notional)
+        metadata["net_pnl"] = str(final.net_pnl) if final.net_pnl is not None else None
+        metadata["aggregate_fee_basis_complete"] = bool(final.fee_basis_complete)
+        final.metadata_json = json.dumps(metadata, default=str)
+    return final
 
 
 class RiskBlocked(RuntimeError):
@@ -177,7 +268,7 @@ async def _acquire_live_execution_lease(ttl_seconds: int = 30) -> tuple[str, int
             raise RiskBlocked("Another live execution worker currently holds the submit lease")
         row.owner_id = _EXECUTION_OWNER
         row.fencing_token = int(row.fencing_token or 0) + 1
-        row.expires_at = now + __import__("datetime").timedelta(seconds=max(5, int(ttl_seconds)))
+        row.expires_at = now + timedelta(seconds=max(5, int(ttl_seconds)))
         row.updated_at = now
         token = int(row.fencing_token)
         await db.commit()
@@ -265,8 +356,15 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
     inferred and no threshold is silently substituted.
     """
     window = max(1, int(settings.execution_health_window_orders))
-    outcomes_q = select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(
-        int(settings.max_consecutive_losses)
+    outcomes_q = (
+        select(StrategyOutcome.net_return_bps)
+        .where(
+            StrategyOutcome.lifecycle_status == "CLOSED",
+            StrategyOutcome.closing_notional > 0,
+            StrategyOutcome.fee_basis_complete.is_(True),
+        )
+        .order_by(StrategyOutcome.created_at.desc())
+        .limit(int(settings.max_consecutive_losses))
     )
     if customer_id is not None:
         outcomes_q = outcomes_q.where(StrategyOutcome.customer_id == customer_id)
@@ -284,7 +382,7 @@ async def _execution_health_block(db, customer_id: int | None) -> str | None:
 
     recent_q = (
         select(OrderCommand)
-        .where(OrderCommand.updated_at >= datetime.now(timezone.utc) - __import__("datetime").timedelta(minutes=5))
+        .where(OrderCommand.updated_at >= datetime.now(timezone.utc) - timedelta(minutes=5))
         .order_by(OrderCommand.updated_at.desc())
         .limit(window)
     )
@@ -370,7 +468,7 @@ async def _has_unresolved_live_orders(
 
 async def risk_gate(symbol: str, price: float, quantity: float, live: bool = False,
                     signal_timestamp: str | None = None, side: str = "buy",
-                    customer_id: int | None = None, reservation_key: str | None = None,
+                    customer_id: int | None = None,
                     stop_loss_price: float | None = None, take_profit_price: float | None = None,
                     signal: dict | None = None, signal_id: str | None = None):
     if price <= 0 or quantity <= 0:
@@ -503,7 +601,16 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
         if settings.edge_decay_halt_enabled and not reducing:
             # Stop NEW entries when realized net returns are statistically negative (z <= -edge_decay_z_halt vs a zero-edge null).
             # Reducing/closing orders always pass. Resumes automatically once the rolling window recovers; a human decides about live.
-            qout = select(StrategyOutcome.net_return_bps).order_by(StrategyOutcome.created_at.desc()).limit(int(settings.edge_decay_window_trades))
+            qout = (
+                select(StrategyOutcome.net_return_bps)
+                .where(
+                    StrategyOutcome.lifecycle_status == "CLOSED",
+                    StrategyOutcome.closing_notional > 0,
+                    StrategyOutcome.fee_basis_complete.is_(True),
+                )
+                .order_by(StrategyOutcome.created_at.desc())
+                .limit(int(settings.edge_decay_window_trades))
+            )
             qout = qout.where(StrategyOutcome.customer_id == customer_id) if customer_id is not None else qout.where(StrategyOutcome.customer_id.is_(None))
             realized = [float(v) / 10_000.0 for v in (await db.execute(qout)).scalars().all() if v is not None]
             decay = edge_decay_check(realized, expected_mean=0.0, min_obs=int(settings.edge_decay_min_trades), z_halt=float(settings.edge_decay_z_halt))
@@ -569,7 +676,7 @@ async def risk_gate(symbol: str, price: float, quantity: float, live: bool = Fal
             if stop_loss_price is None or stop_loss_price <= 0:
                 raise RiskBlocked("Trading discipline requires a protective stop for new exposure")
             risk_cash = abs(price - float(stop_loss_price)) * quantity
-            allowed_risk = equity * settings.risk_per_trade * (1.0 + settings.discipline_risk_tolerance)
+            allowed_risk = equity * settings.risk_per_trade * (1.0 + bounded_risk_tolerance(settings.discipline_risk_tolerance))
             if not (risk_cash <= allowed_risk + 1e-9):
                 raise RiskBlocked("Per-trade risk exceeds the configured discipline limit")
         max_leverage = min(settings.max_leverage, pilot_max_leverage) if pilot_max_leverage is not None else settings.max_leverage
@@ -675,8 +782,8 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
     """Set cumulative broker fees with Decimal and return the exact delta to settle.
 
     Broker fees are cumulative per order, so only the increase over what was already
-    charged is settled. A fee is never lowered here (no automatic refunds); an estimate
-    that later proves too high is left for manual reconciliation.
+    charged is settled. A fee whose currency cannot be converted is withheld until a
+    later broker snapshot supplies its authoritative denomination.
     """
     prev = Decimal(str(trade.fee or 0)).quantize(
         Decimal("0.000001"), rounding=ROUND_HALF_EVEN
@@ -685,6 +792,22 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
     observed_cumulative, quality, note = extract_order_fee_quote_decimal(
         order or {}, trade.symbol, fill_price, filled, fallback_taker_bps=bps
     )
+    pending_fee = bool(getattr(trade, "fee_reconciliation_pending", False))
+    if float(filled or 0) <= 0 and pending_fee:
+        # A zero-fill snapshot says nothing about a fee withheld on an earlier
+        # partial fill. Never let it clear the reconciliation queue or incident.
+        quality = UNVERIFIED
+        note = (
+            "zero-filled snapshot cannot reconcile a previously withheld live fee"
+        )
+    if not fee_quality_is_verified(quality):
+        # Estimated amounts are not customer debits either. Queue them for a
+        # broker trade-history true-up just like an unknown denomination.
+        trade.fee_reconciliation_pending = True
+        return Decimal("0"), prev, quality, note
+    # Only an authoritative fee for an executed fill clears the pending state.
+    # The flag changes in the same transaction as ledger settlement.
+    trade.fee_reconciliation_pending = False
     # Match ledger Numeric(38,6) booking semantics on the cumulative amount, not
     # by rounding each raw delta independently. This avoids repeated sub-micro fees
     # accumulating a different total in the trade row than in the ledger.
@@ -697,17 +820,57 @@ def _prepare_live_fee(trade: Trade, order: dict[str, Any], filled: float, fill_p
 
 
 async def _post_live_fee(db, trade: Trade, delta: Decimal, cumulative: Decimal, quality: str, note: str) -> None:
-    """Charge the fee delta to the customer ledger (idempotent) and flag estimated fees for review."""
-    if trade.customer_id is None or delta <= 0:
+    """Settle only exchange-reported or deterministically converted fee amounts."""
+    if trade.customer_id is None:
         return
-    await settle_trading_fee(db, customer_id=trade.customer_id, fee=delta,
-                             reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}", strict=False)
-    if quality == ESTIMATED:
+    if not fee_quality_is_verified(quality):
+        withheld = quality == UNVERIFIED
+        incident_key = "LIVE_FEE_UNVERIFIED" if withheld else "LIVE_FEE_ESTIMATED"
+        summary = (
+            "Live fee denomination is unknown; customer settlement is withheld pending broker reconciliation"
+            if withheld
+            else "Live fill fee was estimated, not reported by the exchange; no estimated amount was debited"
+        )
         await record_ledger_incident(
-            db, key=f"LIVE_FEE_ESTIMATED:{trade.id}", severity="HIGH",
-            summary="Live fill fee was estimated, not reported by the exchange; true-up against fetch_my_trades",
-            detail={"trade_id": trade.id, "customer_id": trade.customer_id, "estimated_cumulative_fee": cumulative, "note": note},
-            customer_id=trade.customer_id)
+            db,
+            key=f"{incident_key}:{trade.id}",
+            severity="HIGH",
+            summary=summary,
+            detail={
+                "trade_id": trade.id,
+                "customer_id": trade.customer_id,
+                "cumulative_fee": cumulative,
+                "fee_quality": quality,
+                "note": note,
+            },
+            customer_id=trade.customer_id,
+        )
+        return
+    if delta > 0:
+        await settle_trading_fee(
+            db,
+            customer_id=trade.customer_id,
+            fee=delta,
+            reference_id=f"trade:{trade.id}:fee:{_money_ref(cumulative)}",
+            strict=False,
+        )
+    # The broker's authoritative denomination is now known and the fee delta
+    # has been settled successfully (or was already settled by idempotency).
+    # Resolve the matching incident in this same database transaction.
+    incidents = (await db.execute(
+        select(Incident).where(
+            Incident.incident_key.in_([
+                f"LIVE_FEE_UNVERIFIED:{trade.id}",
+                f"LIVE_FEE_ESTIMATED:{trade.id}",
+            ])
+        ).with_for_update()
+    )).scalars().all()
+    for incident in incidents:
+        if str(incident.status or "").upper() not in {"RESOLVED", "CLOSED"}:
+            incident.status = "RESOLVED"
+            incident.resolved_at = utcnow()
+            incident.resolved_by = "system:broker-fee-reconciliation"
+            incident.updated_at = utcnow()
 
 
 async def _refresh_live_customer_equity(db, customer_id: int) -> None:
@@ -737,9 +900,866 @@ async def _refresh_live_customer_equity(db, customer_id: int) -> None:
         account.daily_start_equity = account.equity
 
 
-async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_price: float):
+async def _apply_reconciled_live_fee_basis(
+    db, trade: Trade, fee_delta: Decimal | float, *,
+    include_verified_components: bool = False,
+) -> None:
+    """Apply an authoritative fee correction to every affected fill and aggregate.
+
+    A completed StrategyOutcome's final row stores the aggregate quantity/notional
+    for the whole lifecycle, while its metadata retains that row's own fill-level
+    fee allocation. Reconciliation must use the underlying fill quantities once,
+    update the component rows, and then refresh the aggregate row without counting
+    the aggregate a second time.
+    """
+    delta_fee = Decimal(str(fee_delta or 0))
+    if not delta_fee.is_finite() or delta_fee < 0:
+        raise ValueError("reconciled fee delta must be a finite non-negative amount")
+    rows = (await db.execute(
+        select(StrategyOutcome)
+        .where(or_(
+            StrategyOutcome.trade_id == trade.id,
+            StrategyOutcome.closing_trade_id == trade.id,
+        ))
+        .order_by(StrategyOutcome.trade_id, StrategyOutcome.sequence, StrategyOutcome.id)
+        .with_for_update()
+    )).scalars().all()
+    entry_rows = [row for row in rows if int(row.trade_id) == int(trade.id)]
+    closing_rows = [
+        row for row in rows
+        if row.closing_trade_id is not None
+        and int(row.closing_trade_id) == int(trade.id)
+    ]
+
+    compatible_customer_scope = (
+        Trade.customer_id.is_(None)
+        if trade.customer_id is None
+        else Trade.customer_id == trade.customer_id
+    )
+    compatible_entry_ids = select(Trade.id).where(
+        Trade.mode == trade.mode,
+        compatible_customer_scope,
+    )
+    position_customer_scope = (
+        Position.customer_id.is_(None)
+        if trade.customer_id is None
+        else Position.customer_id == trade.customer_id
+    )
+    positions = (await db.execute(
+        select(Position).where(
+            Position.symbol == trade.symbol,
+            Position.exchange == trade.exchange,
+            position_customer_scope,
+            Position.entry_trade_id.in_(compatible_entry_ids),
+        ).with_for_update()
+    )).scalars().all()
+    position = positions[0] if positions else None
+
+    def _qty(row) -> Decimal:
+        qty = Decimal(str(row.closing_quantity or 0))
+        if not qty.is_finite() or qty <= 0:
+            raise ValueError(
+                f"cannot allocate recovered fee: outcome {row.id} has no verified closing quantity"
+            )
+        return qty
+
+    def _metadata(row) -> dict[str, Any]:
+        try:
+            value = json.loads(row.metadata_json or "{}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"cannot allocate recovered fee: outcome {row.id} metadata is unreadable"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"cannot allocate recovered fee: outcome {row.id} metadata is not an object"
+            )
+        return value
+
+    def _unresolved_component_rows(
+        group: list[StrategyOutcome], verification_key: str
+    ) -> list[StrategyOutcome]:
+        unresolved = []
+        for row in group:
+            metadata = _metadata(row)
+            if verification_key not in metadata:
+                if bool(row.fee_basis_complete):
+                    # Older fully-verified rows are immutable fee evidence.
+                    continue
+                raise ValueError(
+                    f"cannot allocate recovered fee: outcome {row.id} lacks "
+                    f"per-fill {verification_key} provenance"
+                )
+            if not bool(metadata[verification_key]):
+                unresolved.append(row)
+        return unresolved
+
+    def _source_fill_quantities(group: list[StrategyOutcome]) -> dict[int, Decimal]:
+        """Recover per-fill quantities when the final row stores a lifecycle aggregate."""
+        ordered = sorted(group, key=lambda row: (int(row.sequence or 0), int(row.id or 0)))
+        if not ordered:
+            return {}
+        quantities = {int(row.id): _qty(row) for row in ordered}
+        final = ordered[-1]
+        final_meta = _metadata(final)
+        aggregate_count = final_meta.get("aggregate_fill_count")
+        try:
+            aggregate_count = int(aggregate_count) if aggregate_count is not None else 0
+        except (TypeError, ValueError):
+            aggregate_count = 0
+        if aggregate_count > 1:
+            aggregate_quantity = quantities[int(final.id)]
+            prior_quantity = sum(
+                (quantities[int(row.id)] for row in ordered[:-1]),
+                Decimal("0"),
+            )
+            # New writes preserve the original final-fill quantity. For existing
+            # aggregates, derive it from the aggregate total less the prior rows.
+            raw_final_quantity = final_meta.get("final_fill_closing_quantity")
+            final_quantity = (
+                Decimal(str(raw_final_quantity))
+                if raw_final_quantity is not None
+                else aggregate_quantity - prior_quantity
+            )
+            if (
+                not final_quantity.is_finite()
+                or final_quantity <= 0
+                or abs((prior_quantity + final_quantity) - aggregate_quantity)
+                    > Decimal("0.000001")
+            ):
+                raise ValueError(
+                    f"cannot safely allocate recovered fee: aggregate outcome {final.id} "
+                    "does not reconcile to its source fills"
+                )
+            quantities[int(final.id)] = final_quantity
+        return quantities
+
+    lifecycle_end_cache: dict[int, dict[int, int | None]] = {}
+    pending_fee_order_cache: dict[tuple[int, int | None], bool] = {}
+
+    async def _lifecycle_end_trade_id(
+        entry_trade: Trade | None, outcome_row_id: int
+    ) -> int | None:
+        """Return this outcome's terminal close ID, or None for the active lifecycle.
+
+        A missing terminal boundary is not treated as an unlimited history window:
+        only a row group anchored to the currently open Position can be considered
+        active. This prevents a later independent position from poisoning old returns.
+        """
+        if entry_trade is None:
+            return -1
+        entry_id = int(entry_trade.id)
+        if entry_id not in lifecycle_end_cache:
+            lifecycle_rows = (await db.execute(
+                select(StrategyOutcome).where(
+                    StrategyOutcome.trade_id == entry_id
+                ).order_by(StrategyOutcome.sequence, StrategyOutcome.id)
+            )).scalars().all()
+            row_ends: dict[int, int | None] = {}
+            group: list[StrategyOutcome] = []
+            for lifecycle_row in lifecycle_rows:
+                group.append(lifecycle_row)
+                if str(lifecycle_row.lifecycle_status or "").upper() == "CLOSED":
+                    close_ids = [
+                        int(item.closing_trade_id)
+                        for item in group
+                        if item.closing_trade_id is not None
+                    ]
+                    end_id = max(close_ids) if close_ids else -1
+                    for item in group:
+                        row_ends[int(item.id)] = end_id
+                    group = []
+
+            if group:
+                position_is_active = bool(
+                    position is not None
+                    and int(position.entry_trade_id or 0) == entry_id
+                    and abs(float(position.quantity or 0.0)) > 1e-12
+                )
+                end_id = None if position_is_active else -1
+                for item in group:
+                    row_ends[int(item.id)] = end_id
+            lifecycle_end_cache[entry_id] = row_ends
+        return lifecycle_end_cache[entry_id].get(int(outcome_row_id), -1)
+
+    async def _has_pending_fee_order(
+        entry_trade: Trade | None,
+        lifecycle_end_trade_id: int | None,
+    ) -> bool:
+        """Check unresolved opening/add-on fees only within this position lifecycle."""
+        if entry_trade is None or lifecycle_end_trade_id == -1:
+            return True
+        entry_id = int(entry_trade.id)
+        cache_key = (entry_id, lifecycle_end_trade_id)
+        if cache_key not in pending_fee_order_cache:
+            # Trade IDs describe order creation, not the order in which their
+            # fills joined a position. A same-side order can therefore be a
+            # legitimate add-on even when it was created after the close order.
+            # _apply_fill_to_position persists the exact position-entry anchor
+            # on each filled order so reconciliation does not infer fill order
+            # from unrelated auto-increment IDs.
+            candidates = (await db.execute(
+                select(Trade.id, Trade.reason, Trade.filled_quantity).where(
+                    Trade.id != trade.id,
+                    Trade.customer_id == entry_trade.customer_id,
+                    Trade.mode == entry_trade.mode,
+                    Trade.exchange == entry_trade.exchange,
+                    Trade.symbol == entry_trade.symbol,
+                    Trade.side == entry_trade.side,
+                    Trade.fee_reconciliation_pending.is_(True),
+                )
+            )).all()
+            pending = False
+            for candidate_id, reason, candidate_filled_quantity in candidates:
+                try:
+                    candidate_context = json.loads(reason or "{}")
+                except (TypeError, ValueError):
+                    candidate_context = {}
+                if not isinstance(candidate_context, dict):
+                    candidate_context = {}
+                lifecycle_ids = candidate_context.get(
+                    "fee_basis_lifecycle_entry_trade_ids", []
+                )
+                if not isinstance(lifecycle_ids, (list, tuple, set)):
+                    lifecycle_ids = []
+                parsed_lifecycle_ids: set[int] = set()
+                for lifecycle_id in lifecycle_ids:
+                    try:
+                        parsed_id = int(lifecycle_id)
+                        if parsed_id > 0:
+                            parsed_lifecycle_ids.add(parsed_id)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                associated = entry_id in parsed_lifecycle_ids
+                # An explicit anchor is authoritative even when it names a
+                # different lifecycle. Never let an ID-range guess override it:
+                # a newer position can be filled after this lifecycle's close
+                # even if its order was created between the entry and close.
+                # The legacy boundary is only for pre-anchor orders.
+                try:
+                    legacy_filled_quantity = Decimal(str(candidate_filled_quantity or 0))
+                except (TypeError, ValueError, ArithmeticError):
+                    legacy_filled_quantity = Decimal("0")
+                legacy_in_lifecycle = (
+                    not parsed_lifecycle_ids
+                    and legacy_filled_quantity.is_finite()
+                    and legacy_filled_quantity > 0
+                    and int(candidate_id) > entry_id
+                    and (
+                        lifecycle_end_trade_id is None
+                        or int(candidate_id) <= int(lifecycle_end_trade_id)
+                    )
+                )
+                if associated or legacy_in_lifecycle:
+                    pending = True
+                    break
+            pending_fee_order_cache[cache_key] = pending
+        return pending_fee_order_cache[cache_key]
+
+    entry_fill_quantities = _source_fill_quantities(entry_rows)
+    closing_fill_quantities = _source_fill_quantities(closing_rows)
+    entry_fee_by_row: dict[int, Decimal] = {}
+    closing_fee_by_row: dict[int, Decimal] = {}
+    position_entry_fee_delta = Decimal("0")
+    reversal_episode = (await db.execute(
+        select(TradeLearningEpisode).where(
+            TradeLearningEpisode.entry_trade_id == trade.id
+        ).with_for_update()
+    )).scalar_one_or_none()
+    reversal_lifecycle_quantity = Decimal("0")
+    if (
+        reversal_episode is not None
+        and str(reversal_episode.status or "").upper() in {"OPEN", "COMPLETED"}
+    ):
+        reversal_lifecycle_quantity = Decimal(
+            str(reversal_episode.entry_quantity or 0)
+        )
+        if not reversal_lifecycle_quantity.is_finite() or reversal_lifecycle_quantity < 0:
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "reversal lifecycle quantity is invalid"
+            )
+
+    trade_quantity = Decimal(str(trade.filled_quantity or 0))
+    if not trade_quantity.is_finite() or trade_quantity <= 0:
+        raise ValueError(
+            f"cannot safely allocate recovered fee for trade {trade.id}: "
+            "authoritative filled quantity is unavailable"
+        )
+
+    unresolved_entry_rows = _unresolved_component_rows(
+        entry_rows, "entry_fee_order_verified"
+    )
+    unresolved_closing_rows = _unresolved_component_rows(
+        closing_rows, "closing_fee_order_verified"
+    )
+    unresolved_entry_ids = {int(row.id) for row in unresolved_entry_rows}
+    unresolved_closing_ids = {int(row.id) for row in unresolved_closing_rows}
+    # Ordinary reconciliation allocates only to components whose provenance is
+    # unresolved. A later authoritative cumulative-fee correction must also be
+    # apportioned over components that were already verified.
+    allocation_entry_ids = (
+        set(entry_fill_quantities) if include_verified_components else unresolved_entry_ids
+    )
+    allocation_closing_ids = (
+        set(closing_fill_quantities) if include_verified_components else unresolved_closing_ids
+    )
+    remaining_quantity = Decimal("0")
+    has_entry_position = bool(
+        position is not None and int(position.entry_trade_id or 0) == int(trade.id)
+    )
+    if has_entry_position:
+        remaining_quantity = abs(Decimal(str(position.quantity or 0)))
+        if not remaining_quantity.is_finite():
+            raise ValueError(
+                f"cannot allocate recovered fee for trade {trade.id}: "
+                "remaining position quantity is invalid"
+            )
+
+    if entry_rows:
+        # A reused partially-filled entry order can span several position
+        # lifecycles. CLOSED groups are historical; only the trailing group and
+        # current position belong to the current learning episode.
+        closed_lifecycle_quantity = Decimal("0")
+        current_lifecycle_rows: list[StrategyOutcome] = []
+        for outcome in sorted(
+            entry_rows, key=lambda row: (int(row.sequence or 0), int(row.id or 0))
+        ):
+            current_lifecycle_rows.append(outcome)
+            if str(outcome.lifecycle_status or "").upper() == "CLOSED":
+                lifecycle_fill_quantity = sum(
+                    (
+                        entry_fill_quantities[int(item.id)]
+                        for item in current_lifecycle_rows
+                    ),
+                    Decimal("0"),
+                )
+                if not lifecycle_fill_quantity.is_finite() or lifecycle_fill_quantity <= 0:
+                    raise ValueError(
+                        f"cannot safely allocate recovered fee for trade {trade.id}: "
+                        "a closed position lifecycle has invalid fill quantity"
+                    )
+                closed_lifecycle_quantity += lifecycle_fill_quantity
+                current_lifecycle_rows = []
+
+        current_lifecycle_closed_quantity = sum(
+            (
+                entry_fill_quantities[int(item.id)]
+                for item in current_lifecycle_rows
+            ),
+            Decimal("0"),
+        )
+        if current_lifecycle_rows and not has_entry_position:
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "an open outcome lifecycle has no matching position"
+            )
+        current_lifecycle_quantity = (
+            current_lifecycle_closed_quantity + remaining_quantity
+            if has_entry_position else Decimal("0")
+        )
+        if has_entry_position:
+            expected_lifecycle_quantity = Decimal(str(
+                reversal_episode.entry_quantity
+                if reversal_episode is not None
+                else trade_quantity - closed_lifecycle_quantity
+            ))
+            if (
+                not expected_lifecycle_quantity.is_finite()
+                or expected_lifecycle_quantity <= 0
+                or abs(current_lifecycle_quantity - expected_lifecycle_quantity)
+                    > Decimal("0.000001")
+            ):
+                raise ValueError(
+                    f"cannot safely apportion recovered entry fee for trade {trade.id}: "
+                    "current open lifecycle quantities do not reconcile"
+                )
+
+        accounted_quantity = closed_lifecycle_quantity + current_lifecycle_quantity
+        expected_entry_side_quantity = trade_quantity - (
+            sum(closing_fill_quantities.values(), Decimal("0"))
+            if closing_rows else Decimal("0")
+        )
+        if (
+            not expected_entry_side_quantity.is_finite()
+            or expected_entry_side_quantity < 0
+            or abs(accounted_quantity - expected_entry_side_quantity)
+                > Decimal("0.000001")
+        ):
+            raise ValueError(
+                f"cannot safely apportion recovered entry fee for trade {trade.id}: "
+                "closed and open lifecycle quantities do not reconcile to the entry-side fills"
+            )
+        entry_side_lifecycle_quantity = accounted_quantity
+    else:
+        entry_side_lifecycle_quantity = None
+
+    reversal_quantity = (
+        entry_side_lifecycle_quantity
+        if entry_side_lifecycle_quantity is not None
+        else reversal_lifecycle_quantity
+    )
+    if closing_rows:
+        closed_quantity = sum(closing_fill_quantities.values(), Decimal("0"))
+        if (
+            not reversal_quantity.is_finite()
+            or abs((closed_quantity + reversal_quantity) - trade_quantity)
+                > Decimal("0.000001")
+        ):
+            raise ValueError(
+                f"cannot safely apportion recovered closing fee for trade {trade.id}: "
+                "closing and reversal quantities do not reconcile"
+            )
+        if (
+            not entry_rows
+            and reversal_quantity > 0
+            and position is not None
+            and int(position.entry_trade_id or 0) == int(trade.id)
+            and abs(remaining_quantity - reversal_quantity) > Decimal("0.000001")
+        ):
+            raise ValueError(
+                f"cannot safely apportion recovered reversal fee for trade {trade.id}: "
+                "remaining position does not match the reversal episode"
+            )
+
+    if entry_rows or closing_rows:
+        allocation_entry_quantity = sum(
+            (entry_fill_quantities[row_id] for row_id in allocation_entry_ids),
+            Decimal("0"),
+        )
+        allocation_closing_quantity = sum(
+            (closing_fill_quantities[row_id] for row_id in allocation_closing_ids),
+            Decimal("0"),
+        )
+        allocation_open_quantity = (
+            remaining_quantity if has_entry_position else Decimal("0")
+        )
+        allocation_total_quantity = (
+            allocation_entry_quantity
+            + allocation_closing_quantity
+            + allocation_open_quantity
+        )
+        if allocation_total_quantity <= Decimal("0.000000000001"):
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "no eligible fill quantity can be established"
+            )
+        if not allocation_total_quantity.is_finite():
+            raise ValueError(
+                f"cannot safely allocate recovered fee for trade {trade.id}: "
+                "eligible fill quantity is invalid"
+            )
+
+        for row_id in allocation_entry_ids:
+            quantity = entry_fill_quantities[row_id]
+            entry_fee_by_row[row_id] = delta_fee * quantity / allocation_total_quantity
+        for row_id in allocation_closing_ids:
+            quantity = closing_fill_quantities[row_id]
+            closing_fee_by_row[row_id] = delta_fee * quantity / allocation_total_quantity
+        if allocation_open_quantity > 0:
+            position_entry_fee_delta = (
+                delta_fee * allocation_open_quantity / allocation_total_quantity
+            )
+
+    add_on_fee_only = False
+    entry_fee_only = False
+    if not entry_rows and not closing_rows:
+        position_entry_id = int(position.entry_trade_id or 0) if position is not None else 0
+        position_quantity = (
+            Decimal(str(position.quantity or 0)) if position is not None
+            else Decimal("0")
+        )
+        if position is not None and position_entry_id == int(trade.id):
+            # The original entry can be reconciled before the first close has
+            # produced any StrategyOutcome rows. Its authoritative fee belongs
+            # to the still-open position; it is not an add-on order.
+            if (
+                not position_quantity.is_finite()
+                or abs(position_quantity) <= Decimal("0.000000000001")
+                or (str(trade.side).lower() == "buy") != (position_quantity > 0)
+            ):
+                raise ValueError(
+                    f"cannot reconcile entry fee for trade {trade.id}: "
+                    "the anchored open position is missing or has the wrong side"
+                )
+            position_entry_fee_delta = delta_fee
+            entry_fee_only = True
+        else:
+            # An add-on order has no outcome rows of its own: its exact fee belongs
+            # to the still-open aggregate position anchored to an earlier entry trade.
+            # It is safe only before any close outcomes exist; once lots have closed,
+            # the old schema cannot attribute that add-on fee across realized legs.
+            position_entry_trade = (
+                await db.get(Trade, position_entry_id) if position_entry_id > 0 else None
+            )
+            try:
+                add_on_context = json.loads(trade.reason or "{}")
+            except (TypeError, ValueError):
+                add_on_context = {}
+            if not isinstance(add_on_context, dict):
+                add_on_context = {}
+            raw_add_on_lifecycle_ids = add_on_context.get(
+                "fee_basis_lifecycle_entry_trade_ids", []
+            )
+            if not isinstance(raw_add_on_lifecycle_ids, (list, tuple, set)):
+                raw_add_on_lifecycle_ids = []
+            add_on_lifecycle_ids: set[int] = set()
+            for lifecycle_id in raw_add_on_lifecycle_ids:
+                try:
+                    parsed_id = int(lifecycle_id)
+                    if parsed_id > 0:
+                        add_on_lifecycle_ids.add(parsed_id)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            add_on_is_anchored = (
+                position_entry_id in add_on_lifecycle_ids
+                if add_on_lifecycle_ids
+                else int(trade.id) > position_entry_id
+            )
+            if (
+                position is None
+                or position_entry_trade is None
+                or not add_on_is_anchored
+                or str(trade.side).lower() != str(position_entry_trade.side).lower()
+                or abs(float(position.quantity or 0.0)) <= 1e-12
+                or (str(trade.side).lower() == "buy") != (float(position.quantity or 0.0) > 0)
+            ):
+                raise ValueError(
+                    f"cannot associate recovered fee for trade {trade.id} with its own open position lifecycle"
+                )
+            prior_outcomes = int((await db.execute(
+                select(func.count(StrategyOutcome.id)).where(
+                    StrategyOutcome.trade_id == int(position.entry_trade_id)
+                )
+            )).scalar_one() or 0)
+            if prior_outcomes:
+                raise ValueError(
+                    f"cannot safely allocate recovered add-on fee for trade {trade.id}: "
+                    "position already has closed outcome rows"
+                )
+            position_entry_fee_delta = delta_fee
+            add_on_fee_only = True
+
+    if position_entry_fee_delta or entry_fee_only or add_on_fee_only:
+        if position is None:
+            raise ValueError(
+                f"cannot attach recovered fee for trade {trade.id} to its position"
+            )
+        is_position_entry = int(position.entry_trade_id or 0) == int(trade.id)
+        if not is_position_entry and not add_on_fee_only:
+            raise ValueError(
+                f"cannot attach recovered fee for trade {trade.id} to its position"
+            )
+        position.entry_fee = (
+            Decimal(str(position.entry_fee or 0)) + position_entry_fee_delta
+        )
+        if is_position_entry or add_on_fee_only:
+            # The aggregate basis includes the opening order and every add-on/close
+            # order scoped to this position. Resolving one order must not clear an
+            # outstanding fee reconciliation for another order.
+            entry_trade = await db.get(Trade, position.entry_trade_id)
+            position.entry_fee_basis_known = bool(
+                entry_trade is not None
+                and not bool(entry_trade.fee_reconciliation_pending)
+                and not await _has_pending_fee_order(
+                    entry_trade, lifecycle_end_trade_id=None
+                )
+            )
+
+        if (add_on_fee_only or entry_fee_only) and bool(position.entry_fee_basis_known):
+            entry_episode = (await db.execute(
+                select(TradeLearningEpisode).where(
+                    TradeLearningEpisode.entry_trade_id == position.entry_trade_id
+                ).with_for_update()
+            )).scalar_one_or_none()
+            if entry_episode is not None:
+                # The open position's entry_fee is the complete verified total,
+                # including the original entry and all reconciled add-on fills.
+                entry_episode.total_fees = Decimal(str(position.entry_fee or 0))
+                entry_episode.net_pnl = (
+                    Decimal(str(entry_episode.gross_pnl or 0))
+                    - Decimal(str(entry_episode.total_fees))
+                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+                entry_notional = abs(
+                    Decimal(str(entry_episode.entry_quantity or 0))
+                    * Decimal(str(entry_episode.entry_price or 0))
+                )
+                entry_episode.return_bps = (
+                    float(Decimal(str(entry_episode.net_pnl)) / entry_notional * Decimal("10000"))
+                    if entry_notional > 0 else 0.0
+                )
+                entry_episode.updated_at = utcnow()
+
+    # A closing-order fee is separate from the remaining position's entry-fee
+    # basis. Once that close is reconciled, restore the open position's basis from
+    # its own entry/add-on orders; never let another pending close poison it.
+    if position is not None and abs(float(position.quantity or 0.0)) > 1e-12:
+        for closing_row in closing_rows:
+            if int(position.entry_trade_id or 0) != int(closing_row.trade_id):
+                continue
+            entry_trade = await db.get(Trade, closing_row.trade_id)
+            lifecycle_end = await _lifecycle_end_trade_id(
+                entry_trade, int(closing_row.id)
+            )
+            if lifecycle_end is not None:
+                continue
+            position.entry_fee_basis_known = bool(
+                entry_trade is not None
+                and not bool(entry_trade.fee_reconciliation_pending)
+                and not await _has_pending_fee_order(
+                    entry_trade, lifecycle_end_trade_id=None
+                )
+            )
+            break
+
+    changed_row_ids = set(entry_fee_by_row) | set(closing_fee_by_row)
+    affected_entry_ids: set[int] = set()
+    for row in rows:
+        if int(row.id) not in changed_row_ids:
+            continue
+        entry_add = entry_fee_by_row.get(int(row.id), Decimal("0"))
+        close_add = closing_fee_by_row.get(int(row.id), Decimal("0"))
+        meta = _metadata(row)
+        try:
+            allocated = Decimal(str(meta.get("allocated_entry_fee", "0"))) + entry_add
+            close_fee = Decimal(str(meta.get("closing_fee", "0"))) + close_add
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise ValueError(
+                f"cannot allocate recovered fee: outcome {row.id} has invalid fee metadata"
+            ) from exc
+        if (
+            not allocated.is_finite() or allocated < 0
+            or not close_fee.is_finite() or close_fee < 0
+        ):
+            raise ValueError(
+                f"cannot allocate recovered fee: outcome {row.id} has invalid fee amounts"
+            )
+        total_fee = allocated + close_fee
+        entry_trade = (
+            trade if int(row.trade_id) == int(trade.id)
+            else await db.get(Trade, row.trade_id)
+        )
+        close_trade = (
+            trade if int(row.closing_trade_id or 0) == int(trade.id)
+            else await db.get(Trade, row.closing_trade_id)
+        )
+        lifecycle_end = await _lifecycle_end_trade_id(
+            entry_trade, int(row.id)
+        )
+        has_pending_fee_order = await _has_pending_fee_order(
+            entry_trade, lifecycle_end
+        )
+        basis_known = bool(
+            entry_trade is not None
+            and close_trade is not None
+            and not bool(getattr(entry_trade, "fee_reconciliation_pending", False))
+            and not bool(getattr(close_trade, "fee_reconciliation_pending", False))
+            and not has_pending_fee_order
+        )
+        row.fee = total_fee
+        row.fee_basis_complete = basis_known
+        row.net_pnl = (
+            Decimal(str(row.realized_pnl or 0)) - total_fee
+            if basis_known else None
+        )
+        notional = Decimal(str(row.closing_notional or 0))
+        row.net_return_bps = (
+            float(row.net_pnl / notional * Decimal("10000"))
+            if basis_known and notional > 0 else None
+        )
+        meta["allocated_entry_fee"] = str(allocated)
+        meta["closing_fee"] = str(close_fee)
+        if int(row.id) in entry_fee_by_row:
+            # An authoritative zero cumulative fee is still proof that the
+            # previously withheld entry component for this fill is exactly zero.
+            meta["entry_fee_order_verified"] = True
+        if int(row.id) in closing_fee_by_row:
+            meta["closing_fee_order_verified"] = True
+        meta["fee_basis_complete"] = basis_known
+        meta["net_pnl"] = str(row.net_pnl) if basis_known else None
+        row.metadata_json = json.dumps(meta, separators=(",", ":"), default=str)
+        affected_entry_ids.add(int(row.trade_id))
+
+    # The final CLOSED row stores an aggregate across its PARTIAL_CLOSED peers.
+    # Rebuild its aggregate fee/net fields from per-fill metadata after correcting
+    # every component. The final row's fee metadata itself remains fill-scoped.
+    for entry_id in affected_entry_ids:
+        all_rows = (await db.execute(
+            select(StrategyOutcome).where(
+                StrategyOutcome.trade_id == entry_id,
+                StrategyOutcome.closing_trade_id.is_not(None),
+            ).order_by(StrategyOutcome.sequence, StrategyOutcome.id).with_for_update()
+        )).scalars().all()
+        if not all_rows:
+            continue
+        final = all_rows[-1]
+        final_meta = _metadata(final)
+        aggregate_count = final_meta.get("aggregate_fill_count")
+        try:
+            aggregate_count = int(aggregate_count) if aggregate_count is not None else 0
+        except (TypeError, ValueError):
+            aggregate_count = 0
+        if aggregate_count > 1:
+            component_fees = []
+            for row in all_rows:
+                meta = _metadata(row)
+                try:
+                    component_fees.append(
+                        Decimal(str(meta.get("allocated_entry_fee", "0")))
+                        + Decimal(str(meta.get("closing_fee", "0")))
+                    )
+                except (TypeError, ValueError, ArithmeticError) as exc:
+                    raise ValueError(
+                        f"cannot rebuild aggregate fee for outcome {row.id}: invalid component fee"
+                    ) from exc
+            aggregate_fee = sum(component_fees, Decimal("0"))
+            aggregate_basis_known = all(
+                bool(row.fee_basis_complete) for row in all_rows
+            )
+            final.fee = aggregate_fee
+            final.fee_basis_complete = aggregate_basis_known
+            final.net_pnl = (
+                Decimal(str(final.realized_pnl or 0)) - aggregate_fee
+                if aggregate_basis_known else None
+            )
+            aggregate_notional = Decimal(str(final.closing_notional or 0))
+            final.net_return_bps = (
+                float(final.net_pnl / aggregate_notional * Decimal("10000"))
+                if aggregate_basis_known and aggregate_notional > 0 else None
+            )
+            final_meta["aggregate_fee"] = str(aggregate_fee)
+            final_meta["aggregate_fee_basis_complete"] = aggregate_basis_known
+            final_meta["aggregate_net_pnl"] = (
+                str(final.net_pnl) if aggregate_basis_known else None
+            )
+            final_meta["net_pnl"] = (
+                str(final.net_pnl) if aggregate_basis_known else None
+            )
+            final.metadata_json = json.dumps(
+                final_meta, separators=(",", ":"), default=str
+            )
+
+        episode = (await db.execute(
+            select(TradeLearningEpisode).where(
+                TradeLearningEpisode.entry_trade_id == entry_id
+            ).with_for_update()
+        )).scalar_one_or_none()
+        if episode is None or not all(bool(row.fee_basis_complete) for row in all_rows):
+            continue
+        # Use per-fill metadata, never sum the final aggregate row's fee twice.
+        total_fees = Decimal("0")
+        for row in all_rows:
+            meta = _metadata(row)
+            try:
+                total_fees += (
+                    Decimal(str(meta.get("allocated_entry_fee", "0")))
+                    + Decimal(str(meta.get("closing_fee", "0")))
+                )
+            except (TypeError, ValueError, ArithmeticError) as exc:
+                raise ValueError(
+                    f"cannot rebuild learning-episode fee total for outcome {row.id}"
+                ) from exc
+        if position is not None and int(position.entry_trade_id or 0) == entry_id:
+            if not bool(position.entry_fee_basis_known):
+                continue
+            total_fees += Decimal(str(position.entry_fee or 0))
+        episode.total_fees = total_fees
+        episode.net_pnl = (
+            Decimal(str(episode.gross_pnl or 0)) - total_fees
+        ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+        episode_notional = abs(
+            Decimal(str(episode.entry_quantity or 0))
+            * Decimal(str(episode.entry_price or 0))
+        )
+        episode.return_bps = (
+            float(Decimal(str(episode.net_pnl)) / episode_notional * Decimal("10000"))
+            if episode_notional > 0 else 0.0
+        )
+        if any(
+            str(row.lifecycle_status or "").upper() == "CLOSED"
+            for row in all_rows
+        ):
+            # A completed lifecycle can enter replay only after every fill fee
+            # has an authoritative, reconciled basis.
+            episode.status = "COMPLETED"
+            # Fee true-up can make a previously quarantined episode replayable.
+            # Discard any replay calculated before the authoritative fee basis.
+            episode.replay_status = "PENDING"
+            episode.replay_version = ""
+            episode.replay_error = ""
+            episode.learning_memory_json = "{}"
+        episode.updated_at = utcnow()
+
+async def _position_has_pending_fee_order(
+    db, entry_trade: Trade, *, exclude_trade_id: int
+) -> bool:
+    """Return True when another unresolved fee order belongs to this position lifecycle."""
+    entry_id = int(entry_trade.id)
+    candidates = (await db.execute(
+        select(Trade).where(
+            Trade.id != int(exclude_trade_id),
+            Trade.customer_id == entry_trade.customer_id,
+            Trade.mode == entry_trade.mode,
+            Trade.exchange == entry_trade.exchange,
+            Trade.symbol == entry_trade.symbol,
+            Trade.side == entry_trade.side,
+            Trade.fee_reconciliation_pending.is_(True),
+        ).order_by(Trade.id)
+    )).scalars().all()
+    for candidate in candidates:
+        try:
+            context = json.loads(candidate.reason or "{}")
+        except (TypeError, ValueError):
+            context = {}
+        if not isinstance(context, dict):
+            context = {}
+        raw_ids = context.get("fee_basis_lifecycle_entry_trade_ids", [])
+        if not isinstance(raw_ids, (list, tuple, set)):
+            raw_ids = []
+        lifecycle_ids: set[int] = set()
+        for value in raw_ids:
+            try:
+                parsed = int(value)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if parsed > 0:
+                lifecycle_ids.add(parsed)
+        if lifecycle_ids:
+            if entry_id in lifecycle_ids:
+                return True
+        else:
+            try:
+                legacy_filled_quantity = Decimal(
+                    str(candidate.filled_quantity or 0)
+                )
+            except (TypeError, ValueError, ArithmeticError):
+                legacy_filled_quantity = Decimal("0")
+            if (
+                legacy_filled_quantity.is_finite()
+                and legacy_filled_quantity > 0
+                and int(candidate.id) > entry_id
+            ):
+                # Conservative compatibility for positively-filled legacy
+                # add-ons created before explicit lifecycle anchors were stored.
+                return True
+    return False
+
+async def _apply_fill_to_position(
+    db, trade: Trade, new_filled: float, fill_price: float,
+    *,
+    current_fill_fee: Decimal | float | None = None,
+    current_fill_fee_verified: bool = False,
+):
+    previous_filled_quantity = Decimal(str(trade.filled_quantity or 0))
     delta = max(0.0, new_filled - trade.filled_quantity)
     if delta <= 0 or fill_price <= 0:
+        if current_fill_fee_verified and Decimal(str(current_fill_fee or 0)) > 0:
+            await _apply_reconciled_live_fee_basis(
+                db, trade, Decimal(str(current_fill_fee)),
+                include_verified_components=(
+                    Decimal(str(new_filled)) == previous_filled_quantity
+                ),
+            )
         trade.filled_quantity = new_filled
         trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
         return 0.0
@@ -748,6 +1768,8 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     try:
         trade_context = json.loads(trade.reason or "{}")
     except Exception:
+        trade_context = {}
+    if not isinstance(trade_context, dict):
         trade_context = {}
     # Position ownership is mode/account scoped. Paper orders must update their own
     # paper position rather than missing it because the entry trade is not LIVE.
@@ -767,6 +1789,16 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
     realized_strategy = str(getattr(position, "strategy", "") or trade_context.get("strategy") or "unknown") if position else str(trade_context.get("strategy") or "unknown")
     realized_regime = str(getattr(position, "entry_regime", "UNKNOWN") or trade_context.get("regime") or "UNKNOWN") if position else str(trade_context.get("regime") or "UNKNOWN")
     entry_trade_id = getattr(position, "entry_trade_id", None) if position else trade.id
+    # Capture the existing lifecycle before a close or reversal mutates Position.
+    # This identity is persisted on the filled order below and is independent of
+    # the order's auto-increment ID or submission time.
+    position_lifecycle_entry_id = None
+    closing_decimal = Decimal("0")
+    old_qty = 0.0
+    current_fee_decimal = Decimal(str(current_fill_fee or 0))
+    position_flipped = False
+    allocated_entry_fee_decimal = Decimal("0")
+    closing_order_fee_decimal = Decimal("0")
     if not position:
         position = Position(customer_id=trade.customer_id, trading_account_id=trade.trading_account_id, exchange=trade.exchange, symbol=trade.symbol, quantity=signed,
                             average_entry_price=Decimal(str(fill_price)), mark_price=Decimal(str(fill_price)),
@@ -777,7 +1809,10 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                                 Decimal(str(delta)) * Decimal(str(fill_price))
                                 if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE"
                                 else Decimal("0")
-                            ))
+                            ),
+                            entry_fee=current_fee_decimal,
+                            entry_fee_basis_known=current_fill_fee_verified,
+                        )
         db.add(position)
         # The episode row is created with the order, but its timestamps and fill
         # facts must be populated from the first actual fill, not order submission.
@@ -804,7 +1839,18 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 "trade_learning_entry_record_failed trade_id=%s", trade.id, exc_info=True
             )
     else:
-        old_qty = position.quantity
+        # Position.quantity is float-backed in the ORM, but newly-created or
+        # unrefreshed identity-map objects can still contain a Decimal assigned
+        # by a caller/test fixture. Normalize before mixing with the float fill
+        # delta below; Decimal + float otherwise raises during an ordinary close.
+        try:
+            old_qty = float(position.quantity or 0.0)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("stored position quantity is not numeric") from exc
+        if not math.isfinite(old_qty):
+            raise ValueError("stored position quantity is not finite")
+        if abs(old_qty) > 1e-12 and position.entry_trade_id is not None:
+            position_lifecycle_entry_id = int(position.entry_trade_id)
         if old_qty == 0 or (old_qty > 0 and signed > 0) or (old_qty < 0 and signed < 0):
             if old_qty == 0:
                 # A flat Position row can remain after the previous lifecycle closes.
@@ -813,6 +1859,44 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 position.entry_trade_id = trade.id
                 position.strategy = str(trade_context.get("strategy") or "unknown")
                 position.entry_regime = str(trade_context.get("regime") or "UNKNOWN")
+                position.entry_fee = current_fee_decimal
+                position.entry_fee_basis_known = current_fill_fee_verified
+            else:
+                position.entry_fee = Decimal(str(position.entry_fee or 0)) + current_fee_decimal
+                # A verified cumulative fee for this same entry order repairs
+                # earlier unverified partial-fill fees. Add-on orders must not
+                # certify the original entry order's fee basis.
+                position_entry_trade = (
+                    await db.get(Trade, int(position.entry_trade_id))
+                    if position.entry_trade_id is not None else None
+                )
+                unresolved_lifecycle_fee_order = (
+                    await _position_has_pending_fee_order(
+                        db,
+                        position_entry_trade,
+                        exclude_trade_id=int(trade.id),
+                    )
+                    if position_entry_trade is not None else True
+                )
+                same_entry_order_fee_reconciled = (
+                    current_fill_fee_verified
+                    and not bool(trade.fee_reconciliation_pending)
+                    and not unresolved_lifecycle_fee_order
+                    and int(position.entry_trade_id or 0) == int(trade.id)
+                    and Decimal(str(position.entry_fee or 0)).quantize(
+                        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+                    ) == Decimal(str(trade.fee or 0)).quantize(
+                        Decimal("0.000001"), rounding=ROUND_HALF_EVEN
+                    )
+                )
+                position.entry_fee_basis_known = bool(
+                    same_entry_order_fee_reconciled
+                    or (
+                        position.entry_fee_basis_known
+                        and current_fill_fee_verified
+                        and not unresolved_lifecycle_fee_order
+                    )
+                )
             old_qty_d = Decimal(str(old_qty))
             signed_d = Decimal(str(signed))
             fill_price_d = Decimal(str(fill_price))
@@ -830,7 +1914,6 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                     + Decimal(str(delta)) * Decimal(str(fill_price))
                 )
         else:
-            closing = min(abs(old_qty), abs(signed))
             direction = 1 if old_qty > 0 else -1
             closing_decimal = min(abs(Decimal(str(old_qty))), abs(Decimal(str(signed))))
             realized_decimal = _exact_realized_pnl(
@@ -842,7 +1925,26 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 # exact amount that the ledger credits/debits for this fill.
                 realized_decimal = realized_decimal.quantize(Decimal("0.000001"), rounding=ROUND_HALF_EVEN)
             realized = float(realized_decimal)
+            old_entry_fee_decimal = Decimal(str(position.entry_fee or 0))
+            old_qty_decimal = abs(Decimal(str(old_qty)))
+            closing_order_fee_decimal = (
+                current_fee_decimal * closing_decimal / abs(Decimal(str(signed)))
+                if signed != 0 else Decimal("0")
+            )
+            entry_fee_basis_known = bool(position.entry_fee_basis_known)
+            allocated_entry_fee_decimal = (
+                old_entry_fee_decimal * closing_decimal / old_qty_decimal
+                if old_qty_decimal > 0 and entry_fee_basis_known else Decimal("0")
+            )
             position.quantity = old_qty + signed
+            position_flipped = bool(position.quantity) and (old_qty * position.quantity < 0)
+            if position_flipped:
+                position.entry_fee = current_fee_decimal - closing_order_fee_decimal
+                position.entry_fee_basis_known = current_fill_fee_verified
+            elif abs(float(position.quantity or 0.0)) < 1e-12:
+                position.entry_fee = Decimal("0")
+            else:
+                position.entry_fee = old_entry_fee_decimal - allocated_entry_fee_decimal
             if settings.customer_cash_only_trading and trade.customer_id is not None and trade.mode == "LIVE" and old_qty != 0:
                 old_qty_decimal = abs(Decimal(str(old_qty)))
                 full_allocation_release = closing_decimal >= old_qty_decimal
@@ -892,22 +1994,23 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         episode = (await db.execute(
             select(TradeLearningEpisode).where(TradeLearningEpisode.entry_trade_id == episode_trade_id).with_for_update()
         )).scalar_one_or_none()
-        position_flipped = bool(old_qty if 'old_qty' in locals() else 0) and bool(position.quantity) and (old_qty * position.quantity < 0 if 'old_qty' in locals() else False)
+        # Preserve the old position episode before selecting the opposite leg.
+        closing_episode = episode if position_flipped else None
+        closing_episode_trade_id = episode_trade_id if position_flipped else None
         if position_flipped and episode is not None:
             # The previous position lifecycle has ended even though a new opposite
             # position was opened by the same order. Close the old episode before
             # initializing the new one below.
             episode.status = "COMPLETED"
             episode.closing_trade_id = trade.id
-            completed_outcomes = (await db.execute(
-                select(StrategyOutcome).where(StrategyOutcome.trade_id == episode_trade_id).with_for_update()
-            )).scalars().all()
-            for outcome in completed_outcomes:
-                outcome.lifecycle_status = "CLOSED"
+            # Finalize all partial-fill outcome rows together after this closing
+            # fill has been persisted; individual rows are not completed trades.
             episode.exit_price = float(fill_price)
             episode.exit_at = utcnow()
 
         if position_flipped:
+            # Never fall back to mutating the old closed episode as the new leg.
+            episode = None
             new_episode = (await db.execute(
                 select(TradeLearningEpisode).where(TradeLearningEpisode.entry_trade_id == trade.id).with_for_update()
             )).scalar_one_or_none()
@@ -916,12 +2019,16 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode_trade_id = trade.id
                 if episode.entry_price <= 0:
                     episode.entry_price = float(fill_price)
-                if episode.entry_quantity <= 0:
-                    episode.entry_quantity = abs(float(position.quantity))
+                # The shared accumulator below records the new-leg part of
+                # this fill. Do not pre-add the residual position here: doing so
+                # would count the same crossing fill twice on a single-fill flip.
+                episode.entry_quantity = 0.0
                 episode.status = "OPEN"
                 episode.exit_price = 0.0
                 episode.exit_at = None
                 episode.closing_trade_id = None
+                # Only the unclosed opposite leg's residual fee belongs here.
+                episode.total_fees = Decimal(str(position.entry_fee or 0))
         if episode is not None:
             if old_qty == 0:
                 # A single partially filled reversal order can first close the old
@@ -945,49 +2052,21 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
                 episode.entry_at = utcnow()
             if episode.entry_price <= 0:
                 episode.entry_price = float(fill_price)
-            # For a position-opening fill, accumulate the actual filled quantity.
+            # For a position-opening fill, accumulate only the units that
+            # belong to the new lifecycle. A fill that crosses through zero
+            # contains both an old-position close and a new-position open leg.
+            position_opening_quantity = (
+                abs(float(position.quantity)) if position_flipped
+                else abs(float(delta))
+            )
             if (episode.status == "OPEN" or episode.entry_quantity <= 0) and signed * (1 if episode.side == "buy" else -1) > 0:
                 prior_qty = float(episode.entry_quantity or 0.0)
-                new_qty = prior_qty + abs(float(delta))
+                new_qty = prior_qty + position_opening_quantity
                 if prior_qty > 0 and float(episode.entry_price) > 0:
-                    episode.entry_price = ((prior_qty * float(episode.entry_price)) + (abs(float(delta)) * float(fill_price))) / new_qty
+                    episode.entry_price = ((prior_qty * float(episode.entry_price)) + (position_opening_quantity * float(fill_price))) / new_qty
                 else:
                     episode.entry_price = float(fill_price)
                 episode.entry_quantity = new_qty
-            if realized_decimal != 0:
-                episode.gross_pnl = (
-                    Decimal(str(episode.gross_pnl or 0)) + realized_decimal
-                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
-                episode.exit_price = float(fill_price)
-                episode.closing_trade_id = trade.id
-                episode.exit_at = utcnow()
-                # Fees are recomputed from the immutable entry and closing trades so
-                # cumulative broker fee fields cannot be double-counted.
-                entry_trade = await db.get(Trade, episode_trade_id)
-                close_rows = (await db.execute(
-                    select(Trade).where(Trade.id.in_(
-                        select(StrategyOutcome.closing_trade_id).where(
-                            StrategyOutcome.trade_id == episode_trade_id,
-                            StrategyOutcome.closing_trade_id.is_not(None),
-                        )
-                    ))
-                )).scalars().all()
-                total_fees = Decimal(str(entry_trade.fee or 0)) if entry_trade else Decimal("0")
-                total_fees += sum(
-                    (Decimal(str(row.fee or 0)) for row in close_rows if row.id != trade.id),
-                    Decimal("0"),
-                )
-                total_fees += Decimal(str(trade.fee or 0))
-                episode.total_fees = total_fees
-                episode.net_pnl = (
-                    Decimal(str(episode.gross_pnl or 0)) - total_fees
-                ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
-                notional = abs(
-                    Decimal(str(episode.entry_quantity or 0)) * Decimal(str(episode.entry_price or 0))
-                )
-                episode.return_bps = float(
-                    Decimal(str(episode.net_pnl)) / notional * Decimal("10000")
-                ) if notional > 0 else 0.0
             if abs(float(position.quantity or 0.0)) < 1e-12:
                 episode.status = "COMPLETED"
                 episode.exit_price = float(fill_price)
@@ -995,6 +2074,51 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             elif episode.entry_quantity > 0:
                 episode.status = "OPEN"
             episode.updated_at = utcnow()
+
+        # Attribute realized P&L to the lifecycle that was actually reduced.
+        # On a flip, the active episode variable refers to the newly opened opposite leg.
+        closing_episode_to_update = closing_episode if position_flipped else episode
+        closing_episode_entry_id = (
+            closing_episode_trade_id if position_flipped else episode_trade_id
+        )
+        if closing_decimal > 0 and closing_episode_to_update is not None:
+            closing_episode_to_update.gross_pnl = (
+                Decimal(str(closing_episode_to_update.gross_pnl or 0))
+                + realized_decimal
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+            closing_episode_to_update.exit_price = float(fill_price)
+            closing_episode_to_update.closing_trade_id = trade.id
+            closing_episode_to_update.exit_at = utcnow()
+            entry_trade = await db.get(Trade, closing_episode_entry_id)
+            close_rows = (await db.execute(
+                select(Trade).where(Trade.id.in_(
+                    select(StrategyOutcome.closing_trade_id).where(
+                        StrategyOutcome.trade_id == closing_episode_entry_id,
+                        StrategyOutcome.lifecycle_status == "OPEN",
+                        StrategyOutcome.closing_trade_id.is_not(None),
+                    )
+                ))
+            )).scalars().all()
+            total_fees = Decimal(str(entry_trade.fee or 0)) if entry_trade else Decimal("0")
+            total_fees += sum(
+                (Decimal(str(row.fee or 0)) for row in close_rows if row.id != trade.id),
+                Decimal("0"),
+            )
+            total_fees += Decimal(str(trade.fee or 0))
+            closing_episode_to_update.total_fees = total_fees
+            closing_episode_to_update.net_pnl = (
+                Decimal(str(closing_episode_to_update.gross_pnl or 0)) - total_fees
+            ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+            notional = abs(
+                Decimal(str(closing_episode_to_update.entry_quantity or 0))
+                * Decimal(str(closing_episode_to_update.entry_price or 0))
+            )
+            closing_episode_to_update.return_bps = float(
+                Decimal(str(closing_episode_to_update.net_pnl))
+                / notional * Decimal("10000")
+            ) if notional > 0 else 0.0
+            closing_episode_to_update.updated_at = utcnow()
+
 
         # Orders that add to or close an existing position are not new position
         # lifecycles. Preserve their decision snapshot, but exclude their order-level
@@ -1020,50 +2144,142 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
             # Keep the exact Decimal result through the custodial-ledger boundary;
             # do not round-trip the realized amount through a binary float first.
             await settle_realized_pnl(db, customer_id=trade.customer_id, amount=realized_decimal, reference_id=f"trade:{trade.id}:realized:{_qty_ref(new_filled)}", strict=False)
-        if realized_decimal != 0:
-            # Store observed outcome against the strategy that opened the position.
+        if closing_decimal > 0:
+            # Persist every closing fill, including zero-PnL fills, so weighted
+            # per-trade returns use the full completed notional.
             # This avoids attributing a close to the strategy of the closing order.
             attribution_trade_id = int(entry_trade_id or trade.id)
             existing_count = await db.execute(select(func.count(StrategyOutcome.id)).where(StrategyOutcome.trade_id == attribution_trade_id))
             sequence = int(existing_count.scalar_one() or 0) + 1
-            notional_decimal = abs(Decimal(str(delta)) * Decimal(str(fill_price)))
+            notional_decimal = abs(closing_decimal * Decimal(str(fill_price)))
             return_bps = float(
                 realized_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
-            closing_fee_decimal = Decimal(str(trade.fee or 0))
-            entry_row = await db.get(Trade, attribution_trade_id)
-            entry_fee_decimal = Decimal(str(entry_row.fee or 0)) if entry_row else Decimal("0")
-            episode_entry_qty = Decimal(str(episode.entry_quantity or 0)) if 'episode' in locals() and episode is not None else Decimal("0")
-            allocated_entry_fee_decimal = (
-                entry_fee_decimal * Decimal(str(closing)) / episode_entry_qty
-                if episode_entry_qty > 0 else Decimal("0")
-            )
-            net_pnl_decimal = realized_decimal - closing_fee_decimal - allocated_entry_fee_decimal
-            net_pnl = float(net_pnl_decimal)
+            # Use only this fill's fee delta, allocated to the quantity that
+            # closed the old position (not the cumulative Trade.fee balance).
+            closing_fee_decimal = closing_order_fee_decimal
+            fee_for_completed_trade = closing_fee_decimal + allocated_entry_fee_decimal
+            net_pnl_decimal = realized_decimal - fee_for_completed_trade
             net_return_bps = float(
                 net_pnl_decimal / notional_decimal * Decimal("10000")
             ) if notional_decimal > 0 else 0.0
-            db.add(StrategyOutcome(
+            source_entry_trade = (
+                trade
+                if int(attribution_trade_id) == int(trade.id)
+                else await db.get(Trade, int(attribution_trade_id))
+            )
+            entry_fee_order_verified = bool(
+                source_entry_trade is not None
+                and not bool(source_entry_trade.fee_reconciliation_pending)
+                and (
+                    int(attribution_trade_id) != int(trade.id)
+                    or current_fill_fee_verified
+                )
+            )
+            closing_fee_order_verified = bool(current_fill_fee_verified)
+            outcome_row = StrategyOutcome(
                 trade_id=attribution_trade_id, closing_trade_id=trade.id, customer_id=trade.customer_id,
                 bot_id=int(trade_context.get("bot_id")) if str(trade_context.get("bot_id", "")).isdigit() else None,
                 strategy=realized_strategy, regime=realized_regime, asset=str(trade_context.get("asset") or "crypto"),
                 symbol=trade.symbol, timeframe=trade.timeframe, side=trade.side,
-                realized_pnl=realized_decimal, fee=closing_fee_decimal, return_bps=return_bps,
+                realized_pnl=realized_decimal, fee=fee_for_completed_trade, return_bps=return_bps,
                 net_pnl=net_pnl_decimal, net_return_bps=net_return_bps,
-                lifecycle_status="CLOSED" if abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
+                closing_quantity=closing_decimal,
+                closing_notional=notional_decimal,
+                fee_basis_complete=bool(entry_fee_basis_known and current_fill_fee_verified),
+                lifecycle_status="CLOSED" if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12 else "OPEN",
                 mode=trade.mode, sequence=sequence, model_version=str(trade_context.get("model_version") or ""),
                 metadata_json=json.dumps({
                     "entry_trade_id": attribution_trade_id, "closing_trade_id": trade.id,
-                    "fill_price": str(fill_price), "entry_fee": str(entry_fee_decimal),
-                    "allocated_entry_fee": str(allocated_entry_fee_decimal), "net_pnl": str(net_pnl_decimal),
+                    "fill_price": str(fill_price),
+                    "allocated_entry_fee": str(allocated_entry_fee_decimal),
+                    "closing_fee": str(closing_fee_decimal),
+                    "entry_fee_order_verified": entry_fee_order_verified,
+                    "closing_fee_order_verified": closing_fee_order_verified,
+                    "fee_basis_complete": bool(entry_fee_basis_known and current_fill_fee_verified),
+                    "net_pnl": str(net_pnl_decimal),
                 }, default=str),
-            ))
-            if abs(float(position.quantity or 0.0)) < 1e-12:
+            )
+            db.add(outcome_row)
+            if position_flipped or abs(float(position.quantity or 0.0)) < 1e-12:
+                await db.flush()
                 completed_outcomes = (await db.execute(
-                    select(StrategyOutcome).where(StrategyOutcome.trade_id == attribution_trade_id).with_for_update()
+                    select(StrategyOutcome).where(
+                        StrategyOutcome.trade_id == attribution_trade_id,
+                        or_(
+                            StrategyOutcome.lifecycle_status == "OPEN",
+                            StrategyOutcome.id == outcome_row.id,
+                        ),
+                    ).with_for_update()
                 )).scalars().all()
-                for outcome in completed_outcomes:
-                    outcome.lifecycle_status = "CLOSED"
+                _aggregate_completed_strategy_outcomes(completed_outcomes)
+                await db.flush()
+
+                # A final aggregate row's fee column includes its earlier peers,
+                # but metadata retains one fee allocation per underlying fill.
+                # Recompute the episode from those per-fill components so a
+                # corrected add-on fee cannot be lost by trade-level fee totals.
+                # Reuse the exact current-lifecycle rows selected for aggregation.
+                # A partially filled entry order may be reused after a prior position
+                # closes, so a trade_id-only query would pull old lifecycle fees back
+                # into this episode's net return.
+                fee_rows = [
+                    row for row in completed_outcomes
+                    if row.closing_trade_id is not None
+                ]
+                fee_components: list[Decimal] = []
+                fee_basis_complete = bool(fee_rows)
+                for fee_row in fee_rows:
+                    try:
+                        fee_metadata = json.loads(fee_row.metadata_json or "{}")
+                        allocated_fee = Decimal(str(fee_metadata["allocated_entry_fee"]))
+                        closing_fee = Decimal(str(fee_metadata["closing_fee"]))
+                    except (KeyError, TypeError, ValueError, ArithmeticError):
+                        fee_basis_complete = False
+                        break
+                    if (
+                        not allocated_fee.is_finite() or allocated_fee < 0
+                        or not closing_fee.is_finite() or closing_fee < 0
+                    ):
+                        fee_basis_complete = False
+                        break
+                    fee_components.append(allocated_fee + closing_fee)
+                    fee_basis_complete = fee_basis_complete and bool(fee_row.fee_basis_complete)
+                completed_episode = (await db.execute(
+                    select(TradeLearningEpisode).where(
+                        TradeLearningEpisode.entry_trade_id == attribution_trade_id
+                    ).with_for_update()
+                )).scalar_one_or_none()
+                if completed_episode is not None:
+                    if fee_basis_complete:
+                        total_episode_fees = sum(fee_components, Decimal("0"))
+                        completed_episode.total_fees = total_episode_fees
+                        completed_episode.net_pnl = (
+                            Decimal(str(completed_episode.gross_pnl or 0))
+                            - total_episode_fees
+                        ).quantize(Decimal("0.00000001"), rounding=ROUND_HALF_EVEN)
+                        episode_notional = abs(
+                            Decimal(str(completed_episode.entry_quantity or 0))
+                            * Decimal(str(completed_episode.entry_price or 0))
+                        )
+                        completed_episode.return_bps = (
+                            float(
+                                Decimal(str(completed_episode.net_pnl))
+                                / episode_notional * Decimal("10000")
+                            )
+                            if episode_notional > 0 else 0.0
+                        )
+                        completed_episode.status = "COMPLETED"
+                        completed_episode.replay_status = "PENDING"
+                        completed_episode.replay_version = ""
+                        completed_episode.replay_error = ""
+                        completed_episode.learning_memory_json = "{}"
+                        completed_episode.updated_at = utcnow()
+                    else:
+                        # TradeLearningEpisode is the replay worker's input. Do
+                        # not replay estimated/unknown net results as completed.
+                        completed_episode.status = "FEE_PENDING"
+                        completed_episode.updated_at = utcnow()
         if position.quantity:
             position.unrealized_pnl = (
                 Decimal(str(position.quantity))
@@ -1072,6 +2288,28 @@ async def _apply_fill_to_position(db, trade: Trade, new_filled: float, fill_pric
         else:
             position.unrealized_pnl = Decimal("0")
         position.updated_at = utcnow()
+    # Persist every position lifecycle touched by this fill. The same order can
+    # close one lifecycle and open the opposite side on a reversal, so retain all
+    # anchors observed across its fills rather than treating Trade.id as time.
+    lifecycle_ids = set()
+    prior_lifecycle_ids = trade_context.get(
+        "fee_basis_lifecycle_entry_trade_ids", []
+    )
+    if isinstance(prior_lifecycle_ids, (list, tuple, set)):
+        for lifecycle_id in prior_lifecycle_ids:
+            try:
+                parsed_id = int(lifecycle_id)
+                if parsed_id > 0:
+                    lifecycle_ids.add(parsed_id)
+            except (TypeError, ValueError, OverflowError):
+                continue
+    if position_lifecycle_entry_id is not None and position_lifecycle_entry_id > 0:
+        lifecycle_ids.add(position_lifecycle_entry_id)
+    if position_lifecycle_entry_id is None or position_flipped:
+        lifecycle_ids.add(int(trade.id))
+    if lifecycle_ids:
+        trade_context["fee_basis_lifecycle_entry_trade_ids"] = sorted(lifecycle_ids)
+        trade.reason = json.dumps(trade_context, default=str)
     trade.filled_quantity = new_filled
     trade.remaining_quantity = max(0.0, trade.requested_quantity - new_filled)
     trade.average_fill_price = Decimal(str(fill_price))
@@ -1715,7 +2953,11 @@ async def advance_platform_paper_orders(
                                 fill_quantity * fill_price * Decimal(str(profile.taker_bps))
                                 / Decimal("10000")
                             )
-                            await _apply_fill_to_position(db, trade, float(new_filled), float(fill_price))
+                            await _apply_fill_to_position(
+                                db, trade, float(new_filled), float(fill_price),
+                                current_fill_fee=fee_decimal,
+                                current_fill_fee_verified=True,
+                            )
                             weighted_average = (
                                 (old_filled * old_average + fill_quantity * fill_price) / new_filled
                                 if new_filled > 0 else fill_price
@@ -2235,9 +3477,14 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                 spread_bps = ((ask - bid) / mid) * 10_000 if mid > 0 else None
             elif live:
                 raise RiskBlocked("Broker did not return a usable bid/ask spread for live execution")
+            if (
+                not math.isfinite(float(settings.max_slippage_bps))
+                or float(settings.max_slippage_bps) < 0.0
+            ):
+                raise RiskBlocked("Live slippage limit configuration is invalid")
             if price > 0:
                 slip = abs(quote / price - 1) * 10_000
-                if slip > settings.max_slippage_bps:
+                if not math.isfinite(slip) or slip > settings.max_slippage_bps:
                     raise RiskBlocked("Requested reference price is too far from live market")
 
         if live and settings.require_protective_stop_for_live:
@@ -2264,7 +3511,7 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
                     raise RiskBlocked("OANDA instrument is not tradeable for this account")
             except Exception as exc:
                 raise RiskBlocked(str(exc)) from exc
-        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade)
+        governor = evaluate_trade(side=side, price=quote, quantity=quantity, live=live, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, spread_bps=spread_bps, max_spread_bps=settings.max_spread_bps, equity=risk_equity, risk_per_trade=settings.risk_per_trade, risk_tolerance=bounded_risk_tolerance(settings.discipline_risk_tolerance))
         if governor.action != "ALLOW":
             raise RiskBlocked("Risk Governor blocked order: " + ",".join(governor.reasons))
         await risk_gate(symbol, quote, quantity, live=live, signal_timestamp=signal_timestamp, side=side, customer_id=customer_id, stop_loss_price=stop_loss_price, take_profit_price=take_profit_price, signal=signal or {}, signal_id=signal_id)
@@ -2573,7 +3820,11 @@ async def execute_signal(symbol: str, side: str, quantity: float, price: float, 
             t = await db.get(Trade, trade_id)
             t.broker_order_id = broker_id
             fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(t, order, filled, fill_price, PROFILES.get(asset, PROFILES["crypto"]).taker_bps)
-            await _apply_fill_to_position(db, t, filled, fill_price)
+            await _apply_fill_to_position(
+                db, t, filled, fill_price,
+                current_fill_fee=fee_delta,
+                current_fill_fee_verified=fee_quality_is_verified(fee_quality),
+            )
             await _post_live_fee(db, t, fee_delta, fee_cum, fee_quality, fee_note)
             if customer_id is not None and str(t.mode or "").upper() == "LIVE":
                 await _refresh_live_customer_equity(db, customer_id)
@@ -2639,8 +3890,273 @@ async def _report_snapshot_rejection(trade_id, customer_id, exc: Exception) -> N
             exc_info=True,
         )
 
+def _merge_authoritative_trade_history_fee(
+    order: dict[str, Any],
+    history: list[dict[str, Any]],
+    *,
+    expected_order_id: str,
+    stored_filled_quantity: Any = None,
+) -> dict[str, Any] | None:
+    """Build a fee snapshot only from complete, order-matched exchange fills."""
+    order_id = str(order.get("id") or expected_order_id or "").strip()
+    if not order_id or not isinstance(history, list):
+        return None
+    observed_quantities: list[Decimal] = []
+    for raw_quantity in (order.get("filled"), stored_filled_quantity):
+        if raw_quantity is None:
+            continue
+        try:
+            quantity = Decimal(str(raw_quantity))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not quantity.is_finite() or quantity < 0:
+            return None
+        observed_quantities.append(quantity)
+    if not observed_quantities:
+        return None
+    # The persisted row and this broker snapshot are both lower bounds on the
+    # amount of execution the history must explain. A stale broker snapshot
+    # must not make an already-recorded fill disappear from fee reconciliation.
+    expected_filled = max(observed_quantities)
+    if expected_filled <= 0:
+        return None
 
-async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
+    matched_quantity = Decimal("0")
+    total_fee = Decimal("0")
+    fee_currency = ""
+    seen_fill_ids: set[str] = set()
+    matched_fills = 0
+    for fill in history:
+        if not isinstance(fill, dict):
+            continue
+        info = fill.get("info") if isinstance(fill.get("info"), dict) else {}
+        fill_order_id = str(
+            fill.get("order")
+            or fill.get("orderId")
+            or info.get("orderId")
+            or ""
+        ).strip()
+        if fill_order_id != order_id:
+            continue
+        fill_id = str(fill.get("id") or "")
+        if fill_id and fill_id in seen_fill_ids:
+            continue
+        if fill_id:
+            seen_fill_ids.add(fill_id)
+        try:
+            raw_amount = fill.get("amount")
+            if raw_amount is None:
+                raw_amount = info.get("qty", info.get("executedQty", info.get("quantity")))
+            amount = Decimal(str(raw_amount))
+        except (TypeError, ValueError, ArithmeticError):
+            return None
+        if not amount.is_finite() or amount <= 0:
+            return None
+
+        fee_rows = fill.get("fees")
+        if not isinstance(fee_rows, list) or not fee_rows:
+            fee = fill.get("fee")
+            fee_rows = [fee] if isinstance(fee, dict) else []
+        if not fee_rows and info.get("commission") is not None:
+            fee_rows = [{
+                "cost": info.get("commission"),
+                "currency": info.get("commissionAsset"),
+            }]
+        if not fee_rows:
+            return None
+
+        fill_fee = Decimal("0")
+        fill_currency = ""
+        for fee_row in fee_rows:
+            if not isinstance(fee_row, dict):
+                return None
+            try:
+                cost = Decimal(str(fee_row.get("cost")))
+            except (TypeError, ValueError, ArithmeticError):
+                return None
+            currency = str(fee_row.get("currency") or "").strip().upper()
+            if not cost.is_finite() or not currency:
+                return None
+            if fill_currency and fill_currency != currency:
+                return None
+            fill_currency = currency
+            # Rebates are not customer charges; do not net them against commissions.
+            if cost > 0:
+                fill_fee += cost
+        if fee_currency and fee_currency != fill_currency:
+            return None
+        fee_currency = fill_currency
+        matched_quantity += amount
+        total_fee += fill_fee
+        matched_fills += 1
+
+    if matched_fills == 0 or not fee_currency:
+        return None
+    if abs(matched_quantity - expected_filled) > Decimal("0.000000001"):
+        return None
+    enriched = dict(order)
+    # The fee parser prefers the list form; store the verified sum only once.
+    enriched.pop("fee", None)
+    enriched["fees"] = [{"cost": str(total_fee), "currency": fee_currency}]
+    return enriched
+
+
+async def _order_with_verified_trade_history_fee(
+    broker,
+    order: dict[str, Any],
+    *,
+    symbol: str,
+    expected_order_id: str,
+    stored_filled_quantity: Any = None,
+    created_at: Any = None,
+    page_limit: int = 100,
+    max_pages: int = 10,
+) -> dict[str, Any]:
+    """Use bounded trade-history pages without skipping fills at a timestamp boundary."""
+    if not order:
+        return order
+    fetch_my_trades = getattr(broker, "fetch_my_trades", None)
+    if not callable(fetch_my_trades):
+        return order
+
+    raw_timestamp = order.get("timestamp")
+    try:
+        since = int(raw_timestamp) if raw_timestamp is not None else None
+    except (TypeError, ValueError, OverflowError):
+        since = None
+    if since is None and created_at is not None:
+        try:
+            created = created_at
+            if getattr(created, "tzinfo", None) is None:
+                created = created.replace(tzinfo=timezone.utc)
+            since = int(created.timestamp() * 1000)
+        except (AttributeError, TypeError, ValueError, OverflowError, OSError):
+            since = None
+    if since is not None:
+        since = max(0, since - 60_000)
+
+    order_id = str(expected_order_id or order.get("id") or "").strip()
+    exchange_id = str(
+        getattr(getattr(broker, "cfg", None), "exchange_id", "")
+        or getattr(getattr(broker, "config", None), "exchange_id", "")
+        or ""
+    ).lower()
+    binance_id_pagination = exchange_id == "binance"
+    binance_order_id_filter = binance_id_pagination and bool(order_id)
+    page_limit = max(1, min(int(page_limit), 100))
+    max_pages = max(1, min(int(max_pages), 10))
+    collected: list[dict[str, Any]] = []
+    seen_fill_ids: set[str] = set()
+    cursor = since
+    from_id_cursor: int | None = None
+
+    for _page in range(max_pages):
+        request_params: dict[str, Any] = {}
+        request_since = cursor
+        if binance_id_pagination and from_id_cursor is not None:
+            if order_id:
+                request_params["orderId"] = order_id
+            request_params["fromId"] = str(from_id_cursor)
+            request_since = None
+        elif binance_order_id_filter:
+            request_params["orderId"] = order_id
+            request_since = None
+        try:
+            page = await asyncio.to_thread(
+                fetch_my_trades, symbol, request_since, page_limit, request_params
+            )
+        except Exception:
+            # Binance orderId filters can be unavailable in some adapters.
+            # Retry from the time boundary without mixing since with orderId/fromId.
+            if not binance_order_id_filter or from_id_cursor is not None:
+                return order
+            binance_order_id_filter = False
+            binance_id_pagination = False
+            cursor = since
+            request_since = cursor
+            request_params = {}
+            try:
+                page = await asyncio.to_thread(
+                    fetch_my_trades, symbol, request_since, page_limit, request_params
+                )
+            except Exception:
+                return order
+        if not isinstance(page, list) or not page:
+            break
+
+        page_ids: set[str] = set()
+        new_page_ids: set[str] = set()
+        page_numeric_ids: list[int] = []
+        page_has_missing_id = False
+        for fill in page:
+            if not isinstance(fill, dict):
+                continue
+            raw_id = fill.get("id")
+            fill_id = str(raw_id).strip() if raw_id is not None else ""
+            if not fill_id:
+                page_has_missing_id = True
+                continue
+            page_ids.add(fill_id)
+            if fill_id.isdigit():
+                page_numeric_ids.append(int(fill_id))
+            if fill_id not in seen_fill_ids:
+                collected.append(fill)
+                seen_fill_ids.add(fill_id)
+                new_page_ids.add(fill_id)
+
+        enriched = _merge_authoritative_trade_history_fee(
+            order,
+            collected,
+            expected_order_id=order_id,
+            stored_filled_quantity=stored_filled_quantity,
+        )
+        if enriched is not None:
+            return enriched
+        if len(page) < page_limit:
+            break
+
+        if binance_id_pagination:
+            # Binance trade IDs are monotonically increasing and fetchMyTrades
+            # supports fromId. ID-paginated requests deliberately omit since.
+            if page_has_missing_id or len(page_numeric_ids) != len(page_ids):
+                break
+            next_from_id = max(page_numeric_ids) + 1 if page_numeric_ids else None
+            if next_from_id is None or (
+                from_id_cursor is not None and next_from_id <= from_id_cursor
+            ):
+                break
+            from_id_cursor = next_from_id
+            continue
+
+        # Other adapters may page inclusively by timestamp. Keep the boundary,
+        # deduplicate IDs, and stop safely if a full page repeats without progress.
+        if page_has_missing_id or not page_ids or not new_page_ids:
+            break
+        timestamps = []
+        for fill in page:
+            if not isinstance(fill, dict):
+                continue
+            try:
+                stamp = int(fill.get("timestamp"))
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if stamp >= 0:
+                timestamps.append(stamp)
+        if not timestamps:
+            break
+        next_cursor = max(timestamps)
+        if cursor is not None and next_cursor < cursor:
+            break
+        cursor = next_cursor
+    return order
+
+async def _apply_broker_snapshot(
+    db,
+    trade: Trade,
+    order: dict[str, Any],
+    *,
+    verified_trade_history_fee: bool = False,
+):
     """Apply one broker snapshot without guessing an execution outcome.
 
     Broker state is authoritative, but malformed/incomplete snapshots fail closed.
@@ -2678,6 +4194,63 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"Broker filled quantity exceeds requested quantity for trade {trade.id}: "
             f"filled={filled} requested={requested}"
         )
+
+    previous_filled_quantity = Decimal(str(trade.filled_quantity or 0))
+    if not previous_filled_quantity.is_finite() or previous_filled_quantity < 0:
+        raise ValueError(f"Invalid persisted fill quantity for trade {trade.id}")
+    persisted_terminal_status = str(trade.status or "").strip().upper()
+    terminal_snapshot_statuses = {
+        "FILLED": {"closed", "filled"},
+        "CANCELED": {"canceled", "cancelled", "expired"},
+        "REJECTED": {"rejected"},
+    }
+    if persisted_terminal_status in terminal_snapshot_statuses:
+        snapshot_filled = Decimal(str(filled))
+        stale_status = status not in terminal_snapshot_statuses[persisted_terminal_status]
+        quantity_regressed = (
+            snapshot_filled + Decimal("0.000000001") < previous_filled_quantity
+        )
+        if quantity_regressed and not verified_trade_history_fee:
+            # The broker lookup happened before this row was locked. Do not let
+            # an older snapshot reduce a terminal fill or settle its stale fee.
+            # Refresh the retry cursor so other pending terminal fees progress.
+            trade.updated_at = utcnow()
+            return 0.0
+        if stale_status or quantity_regressed:
+            # A stale status may still carry an authoritative cumulative fee
+            # when it reports the same (or a greater) filled quantity. Preserve
+            # the terminal status and its recorded remainder, but allow that
+            # fee true-up to settle. If quantity regressed, only complete,
+            # order-matched trade history may supply the missing fee basis.
+            status = {
+                "FILLED": "closed",
+                "CANCELED": "canceled",
+                "REJECTED": "rejected",
+            }[persisted_terminal_status]
+            if quantity_regressed:
+                filled = float(previous_filled_quantity)
+            if snapshot_filled <= previous_filled_quantity:
+                stored_remaining = trade.remaining_quantity
+                remaining = (
+                    float(stored_remaining)
+                    if stored_remaining is not None
+                    else max(0.0, requested - filled)
+                )
+                avg = float(trade.average_fill_price or avg)
+            if not all(
+                Decimal(str(value)).is_finite()
+                for value in (filled, requested, remaining, avg)
+            ):
+                raise ValueError(
+                    f"Invalid persisted terminal quantities for trade {trade.id}"
+                )
+            if filled < 0 or remaining < 0 or (
+                requested > 0 and abs((filled + remaining) - requested) > 1e-9
+            ):
+                raise ValueError(
+                    f"Persisted terminal quantity conservation failed for trade {trade.id}"
+                )
+
     # Some venues report a terminal order as "closed" with both filled=0 and
     # remaining=0 when the order never executed. That response is ambiguous:
     # keep the trade UNKNOWN and preserve the full requested remainder.
@@ -2698,8 +4271,31 @@ async def _apply_broker_snapshot(db, trade: Trade, order: dict[str, Any]):
             f"filled={filled} remaining={remaining} requested={requested}"
         )
 
+    fee_was_pending = bool(trade.fee_reconciliation_pending)
     fee_delta, fee_cum, fee_quality, fee_note = _prepare_live_fee(trade, order, filled, avg)
-    realized_delta = await _apply_fill_to_position(db, trade, filled, avg)
+    fee_is_verified = fee_quality_is_verified(fee_quality)
+    reconciled_prior_fee = (
+        fee_was_pending
+        and fee_is_verified
+        and not bool(trade.fee_reconciliation_pending)
+    )
+    # The verified cumulative fee now covers earlier fills as well as this
+    # snapshot. Let the lifecycle allocator distribute that prior basis after
+    # the new fill quantity/outcomes have been recorded; otherwise the same
+    # cumulative amount would be added twice to the open position.
+    fill_fee = Decimal("0") if reconciled_prior_fee else fee_delta
+    realized_delta = await _apply_fill_to_position(
+        db, trade, filled, avg,
+        current_fill_fee=fill_fee,
+        current_fill_fee_verified=fee_is_verified and not reconciled_prior_fee,
+    )
+    if reconciled_prior_fee:
+        await _apply_reconciled_live_fee_basis(
+            db, trade, fee_delta,
+            include_verified_components=(
+                Decimal(str(filled)) == previous_filled_quantity
+            ),
+        )
     await _post_live_fee(db, trade, fee_delta, fee_cum, fee_quality, fee_note)
 
     if status in {"closed", "filled"} and remaining <= 0:
@@ -2801,13 +4397,23 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
     async with SessionLocal() as db:
         query = select(Trade).where(
             Trade.customer_id.is_not(None),
-            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+            or_(
+                Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+                Trade.fee_reconciliation_pending.is_(True),
+            ),
             Trade.exchange.in_(list(requested)),
         )
         trades = (await db.execute(query.order_by(Trade.updated_at).limit(200))).scalars().all()
-        snapshots = [(t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id, t.client_order_id) for t in trades]
+        snapshots = [
+            (
+                t.id, t.customer_id, t.exchange, t.symbol, t.broker_order_id,
+                t.client_order_id, bool(t.fee_reconciliation_pending),
+                t.filled_quantity, t.created_at,
+            )
+            for t in trades
+        ]
     results = []
-    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id in snapshots:
+    for trade_id, customer_id, exchange, symbol, broker_order_id, trade_client_order_id, fee_pending, stored_filled, trade_created_at in snapshots:
         try:
             if str(exchange).lower() != "binance":
                 raise RuntimeError("Customer live reconciliation is only enabled for Binance isolation")
@@ -2841,12 +4447,27 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
                     )
                 results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "order_not_found"})
                 continue
+            verified_trade_history_fee = False
+            if fee_pending:
+                original_order = order
+                order = await _order_with_verified_trade_history_fee(
+                    broker,
+                    order,
+                    symbol=symbol,
+                    expected_order_id=str(broker_order_id or order.get("id") or ""),
+                    stored_filled_quantity=stored_filled,
+                    created_at=trade_created_at,
+                )
+                verified_trade_history_fee = order is not original_order
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
                     results.append({"trade_id": trade_id, "customer_id": customer_id, "resolved": False, "reason": "trade_missing"})
                     continue
-                await _apply_broker_snapshot(db, t, order)
+                await _apply_broker_snapshot(
+                    db, t, order,
+                    verified_trade_history_fee=verified_trade_history_fee,
+                )
                 command_row = (await db.execute(select(OrderCommand).where(OrderCommand.trade_id == t.id).with_for_update())).scalar_one_or_none()
                 if command_row:
                     command_row.status = "RECONCILED"
@@ -2863,6 +4484,9 @@ async def reconcile_customer_live_orders(exchanges: list[str] | None = None) -> 
     return {"results": results, "checked": len(snapshots)}
 
 
+TERMINAL_FEE_RECONCILIATION_BATCH_SIZE = 25
+
+
 async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
     is_oanda = exchange.lower() == "oanda"
     if is_oanda:
@@ -2874,19 +4498,67 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                            password=settings.exchange_password, sandbox=settings.broker_sandbox,
                            market_type=settings.default_market_type, timeout_ms=settings.exchange_timeout_ms)
         broker = Broker.get(cfg)
+    active_statuses = ("PENDING", "OPEN", "PARTIAL", "UNKNOWN")
     async with SessionLocal() as db:
-        # Atlas OANDA executions are practice-only and persist with FOREX_DEMO mode.
-        # Keep PAPER simulator rows out of every external broker lookup.
+        # Active orders retain their ordinary every-cycle reconciliation path.
+        # Terminal fee true-ups use a separate bounded FIFO batch so a growing
+        # population of unresolved historical fees cannot monopolize this pass.
         reconciliation_mode = "FOREX_DEMO" if is_oanda else "LIVE"
-        query = select(Trade).where(
+        active_query = select(Trade).where(
             Trade.exchange == exchange,
             Trade.mode == reconciliation_mode,
-            Trade.status.in_(["PENDING", "OPEN", "PARTIAL", "UNKNOWN"]),
+            Trade.status.in_(active_statuses),
         )
         if symbol:
-            query = query.where(Trade.symbol == symbol)
-        trades = (await db.execute(query)).scalars().all()
-        snapshots = [(t.id, t.broker_order_id, t.symbol, t.client_order_id) for t in trades]
+            active_query = active_query.where(Trade.symbol == symbol)
+        active_trades = (await db.execute(
+            active_query.order_by(Trade.updated_at.asc(), Trade.id.asc())
+        )).scalars().all()
+
+        terminal_fee_query = select(Trade).where(
+            Trade.exchange == exchange,
+            Trade.mode == reconciliation_mode,
+            Trade.status.notin_(active_statuses),
+            Trade.fee_reconciliation_pending.is_(True),
+        )
+        if symbol:
+            terminal_fee_query = terminal_fee_query.where(Trade.symbol == symbol)
+        terminal_fee_trades = (await db.execute(
+            terminal_fee_query
+            .order_by(Trade.updated_at.asc(), Trade.id.asc())
+            .limit(TERMINAL_FEE_RECONCILIATION_BATCH_SIZE)
+        )).scalars().all()
+        terminal_fee_trade_ids = {trade.id for trade in terminal_fee_trades}
+        trades = active_trades + terminal_fee_trades
+        snapshots = [
+            (
+                t.id, t.broker_order_id, t.symbol, t.client_order_id,
+                bool(t.fee_reconciliation_pending), t.filled_quantity, t.created_at,
+            )
+            for t in trades
+        ]
+    async def defer_terminal_fee_retry(trade_id: int) -> None:
+        """Move an unresolved terminal fee to the back of the bounded retry queue."""
+        try:
+            async with SessionLocal() as retry_db:
+                row = await retry_db.get(Trade, trade_id, with_for_update=True)
+                if (
+                    row
+                    and row.fee_reconciliation_pending
+                    and str(row.status or "").upper() not in active_statuses
+                ):
+                    # updated_at is the FIFO retry cursor: successful snapshots
+                    # already refresh it; failed lookups must do the same so one
+                    # unavailable broker order cannot starve the rest of the queue.
+                    row.updated_at = utcnow()
+                    await retry_db.commit()
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "terminal_fee_retry_schedule_update_failed trade_id=%s",
+                trade_id,
+                exc_info=True,
+            )
+
     results = []
     oanda_changes = None
     oanda_previous_transaction_id = ""
@@ -2920,7 +4592,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     cursor.last_sync_at = utcnow()
                     await db.commit()
                     raise
-    for trade_id, broker_order_id, trade_symbol, cid in snapshots:
+    for trade_id, broker_order_id, trade_symbol, cid, fee_pending, stored_filled, trade_created_at in snapshots:
         trade_broker = broker
         try:
             async with SessionLocal() as lookup_db:
@@ -2935,6 +4607,7 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                         select(CustomerBinanceAccount).where(CustomerBinanceAccount.customer_id == trade_customer_id)
                     )).scalar_one_or_none()
                 if customer_binance is None:
+                    await defer_terminal_fee_retry(trade_id)
                     results.append({
                         "trade_id": trade_id,
                         "resolved": False,
@@ -2959,8 +4632,21 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     history = await asyncio.to_thread(trade_broker.fetch_orders, trade_symbol)
                     order = next((o for o in history if str(o.get("clientOrderId") or o.get("info", {}).get("clientOrderId") or "") == cid), None)
             if order is None:
+                await defer_terminal_fee_retry(trade_id)
                 results.append({"trade_id": trade_id, "resolved": False})
                 continue
+            verified_trade_history_fee = False
+            if fee_pending and not is_oanda:
+                original_order = order
+                order = await _order_with_verified_trade_history_fee(
+                    trade_broker,
+                    order,
+                    symbol=trade_symbol,
+                    expected_order_id=str(broker_order_id or order.get("id") or ""),
+                    stored_filled_quantity=stored_filled,
+                    created_at=trade_created_at,
+                )
+                verified_trade_history_fee = order is not original_order
             async with SessionLocal() as db:
                 t = await db.get(Trade, trade_id, with_for_update=True)
                 if not t:
@@ -2968,7 +4654,10 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                     continue
                 if not t.broker_order_id and order.get("id"):
                     t.broker_order_id = str(order["id"])
-                await _apply_broker_snapshot(db, t, order)
+                await _apply_broker_snapshot(
+                    db, t, order,
+                    verified_trade_history_fee=verified_trade_history_fee,
+                )
                 command_row = (await db.execute(select(OrderCommand).where(OrderCommand.trade_id == t.id).with_for_update())).scalar_one_or_none()
                 if command_row:
                     command_row.status = "RECONCILED"
@@ -2979,6 +4668,8 @@ async def reconcile(exchange: str, symbol: str | None = None) -> dict[str, Any]:
                 await db.commit()
                 results.append({"trade_id": t.id, "status": t.status, "resolved": True})
         except Exception as exc:
+            if trade_id in terminal_fee_trade_ids:
+                await defer_terminal_fee_retry(trade_id)
             if isinstance(exc, ValueError):
                 await _report_snapshot_rejection(trade_id, None, exc)
             results.append({"trade_id": trade_id, "resolved": False, "error": str(exc)})

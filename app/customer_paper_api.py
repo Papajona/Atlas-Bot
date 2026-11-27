@@ -37,6 +37,7 @@ from .customer_paper_lifecycle import (
     get_customer_paper_order,
     get_customer_paper_positions,
     list_open_customer_paper_orders,
+    list_customer_paper_order_history,
     record_customer_paper_fill,
     register_customer_paper_market_bar,
     verify_customer_paper_market_bar_provenance,
@@ -51,6 +52,16 @@ _TIMEFRAME_SECONDS = {
     "1h": 3600, "2h": 7200, "4h": 14400, "1d": 86400,
 }
 _PAPER_MARKET_IMPACT_RETURN_LOOKBACK = 20
+
+
+def _manual_customer_paper_fee_bps() -> Decimal:
+    """Use the shared customer spot-paper fee for affordability and fill accounting."""
+    from .customer_paper_flow import _cost_inputs
+
+    fee_bps, _slippage_bps, _status = _cost_inputs()
+    return max(Decimal("0"), fee_bps)
+
+
 
 
 def _paper_market_bar_key(*, venue: str, symbol: str, timeframe: str, bar_at: datetime) -> str:
@@ -644,6 +655,28 @@ def build_customer_paper_router(
         except Exception as exc:
             raise _handle_paper_error(exc) from exc
 
+    @router.get("/history")
+    async def customer_paper_order_history(
+        limit: int = 50,
+        authorization: str | None = Header(default=None),
+    ):
+        profile = await _profile(authorization)
+        await _guard()
+        if limit < 1 or limit > 100:
+            raise HTTPException(422, "Order history limit must be between 1 and 100")
+        try:
+            return {
+                "virtual_only": True,
+                "orders": await list_customer_paper_order_history(
+                    customer_id=profile.id,
+                    limit=limit,
+                ),
+            }
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _handle_paper_error(exc) from exc
+
     @router.post("/orders")
     async def submit_paper_order(
         req: CustomerPaperOrderRequest,
@@ -1021,7 +1054,7 @@ def build_customer_paper_router(
                         raise HTTPException(409, "Paper cost model produced a non-positive fill price")
 
                     price_text = _decimal_text(final_price)
-                    fee_bps = max(Decimal("0"), Decimal(str(execution_profile.taker_bps)))
+                    fee_bps = _manual_customer_paper_fee_bps()
                     if side == "BUY":
                         balances = await get_customer_paper_balances(customer_id=profile.id)
                         cash = sum(
