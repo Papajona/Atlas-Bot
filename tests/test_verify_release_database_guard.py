@@ -96,6 +96,7 @@ def test_live_money_runtime_verifier_requires_loopback_proxy_before_alembic():
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
     normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | python scripts/normalize_asyncpg_database_url.py")
     assert 'python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"' not in script
+    assert "env -u DATABASE_URL python scripts/normalize_asyncpg_database_url.py" in script
     export_url = script.index("export DATABASE_URL")
     guard = script.index("python scripts/verify_release_database_guard.py")
     migration = script.index("python -m alembic upgrade head")
