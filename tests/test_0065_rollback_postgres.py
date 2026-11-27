@@ -252,9 +252,25 @@ def test_0065_downgrade_removes_direct_grants_when_effective_access_came_from_pu
         _run_alembic(env, "downgrade", PREDECESSOR)
         asyncio.run(_run_database_assertions(dsn, "verify-downgrade"))
     finally:
-        # Keep the shared disposable CI database at the repository head even
-        # when an assertion fails, so later integration tests see a valid schema.
+        # Keep the disposable database at the repository head even when an
+        # assertion fails, and remove the temporary PUBLIC grants used to
+        # simulate inherited access. Later startup checks must see the original
+        # locked-down schema ACL state.
         _run_alembic(env, "upgrade", MIGRATION_HEAD)
+
+        async def restore_public_acl_baseline() -> None:
+            connection = await asyncpg.connect(dsn=dsn)
+            try:
+                await connection.execute(
+                    "REVOKE ALL PRIVILEGES ON SCHEMA public FROM PUBLIC, anon, authenticated"
+                )
+                await connection.execute(
+                    f"REVOKE EXECUTE ON FUNCTION {VALIDATE_FUNCTION} FROM PUBLIC, anon, authenticated"
+                )
+            finally:
+                await connection.close()
+
+        asyncio.run(restore_public_acl_baseline())
 
 
 def test_0065_inherited_acl_grantor_without_set_option_is_not_settable():
