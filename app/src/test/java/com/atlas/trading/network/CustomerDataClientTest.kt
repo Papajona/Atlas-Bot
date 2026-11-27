@@ -214,6 +214,90 @@ class CustomerDataClientTest {
     }
 
     @Test
+    fun mobilePaperOrderActionsUseOnlyAuthenticatedVirtualCustomerEndpoints() = runBlocking {
+        val orderJson = """{"client_order_id":"android-paper-test","symbol":"BTC/USDT","side":"BUY","status":"SUBMITTED","order_type":"LIMIT","quantity":"0.001","filled_quantity":"0","remaining_quantity":"0.001","average_fill_price":null}"""
+        val server = MockWebServer()
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"status":"SUBMITTED","virtual_only":true,"fill_note":"Fills require a later completed bar.","order":$orderJson}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"virtual_only":true,"orders":[$orderJson]}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"status":"WAITING_FOR_NEXT_COMPLETED_BAR","virtual_only":true,"order":$orderJson}"""
+        ))
+        server.enqueue(MockResponse().setResponseCode(200).setBody(
+            """{"status":"CANCELLED","virtual_only":true,"order":$orderJson}"""
+        ))
+        server.start()
+        try {
+            val client = CustomerDataClient(server.url("/").toString())
+            val submitted = client.submitPaperOrder(
+                accessToken = "aal2-customer-token",
+                symbol = "BTC/USDT",
+                side = "BUY",
+                quantity = "0.001",
+                orderType = "LIMIT",
+                limitPrice = "65000"
+            )
+            assertEquals("SUBMITTED", submitted.status)
+            assertEquals("android-paper-test", submitted.order?.clientOrderId)
+            assertTrue(submitted.fillNote!!.contains("later completed bar"))
+
+            val submitRequest = server.takeRequest()
+            assertEquals("POST", submitRequest.method)
+            assertEquals("/api/customer/paper/orders", submitRequest.path)
+            assertEquals("Bearer aal2-customer-token", submitRequest.getHeader("Authorization"))
+            val submitBody = JSONObject(submitRequest.body.readUtf8())
+            assertEquals("BTC/USDT", submitBody.getString("symbol"))
+            assertEquals("BUY", submitBody.getString("side"))
+            assertEquals("0.001", submitBody.getString("quantity"))
+            assertEquals("LIMIT", submitBody.getString("order_type"))
+            assertEquals("65000", submitBody.getString("limit_price"))
+            assertTrue(submitBody.getString("client_order_id").startsWith("android-paper-"))
+
+            val openOrders = client.loadOpenPaperOrders("aal2-customer-token")
+            assertEquals(1, openOrders.size)
+            assertEquals("SUBMITTED", openOrders.single().status)
+            assertEquals("/api/customer/paper/orders", server.takeRequest().path)
+
+            val advanced = client.advancePaperOrder("aal2-customer-token", "android-paper-test")
+            assertEquals("WAITING_FOR_NEXT_COMPLETED_BAR", advanced.status)
+            val advanceRequest = server.takeRequest()
+            assertEquals("POST", advanceRequest.method)
+            assertEquals("/api/customer/paper/orders/android-paper-test/advance", advanceRequest.path)
+            assertEquals("Bearer aal2-customer-token", advanceRequest.getHeader("Authorization"))
+
+            val cancelled = client.cancelPaperOrder("aal2-customer-token", "android-paper-test")
+            assertEquals("CANCELLED", cancelled.status)
+            val cancelRequest = server.takeRequest()
+            assertEquals("POST", cancelRequest.method)
+            assertEquals("/api/customer/paper/orders/android-paper-test/cancel", cancelRequest.path)
+            assertTrue(JSONObject(cancelRequest.body.readUtf8()).getString("idempotency_key").isNotBlank())
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun mobilePaperOrderParserRejectsMissingOrInvalidOrderIdentity() {
+        val orders = CustomerDataClient.parsePaperOrders(
+            JSONObject(
+                """{"orders":[
+                    {"client_order_id":"paper-1","symbol":"BTC/USDT","side":"BUY","status":"SUBMITTED","order_type":"MARKET","quantity":"0.01","filled_quantity":"0","remaining_quantity":"0.01"},
+                    {"symbol":"ETH/USDT","side":"BUY","status":"SUBMITTED"},
+                    {"client_order_id":"paper-2","symbol":"ETH/USDT","side":"SELL","status":"PARTIALLY_FILLED","order_type":"LIMIT","quantity":"0.5","filled_quantity":"0.2","remaining_quantity":"0.3","average_fill_price":"3200"}
+                ]}"""
+            )
+        )
+        assertEquals(2, orders.size)
+        assertEquals("paper-1", orders.first().clientOrderId)
+        assertEquals("0.01", orders.first().remainingQuantity)
+        assertEquals("paper-2", orders.last().clientOrderId)
+        assertEquals("3200", orders.last().averageFillPrice)
+    }
+
+    @Test
     fun failedCustomerAndMarketRequestsStayExplicitlyUnavailable() = runBlocking {
         val server = MockWebServer()
         server.enqueue(MockResponse().setResponseCode(401).setBody("""{"detail":"Unauthorized"}"""))
