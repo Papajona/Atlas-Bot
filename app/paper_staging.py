@@ -845,6 +845,29 @@ async def paper_customer_market_scanner(
         "results": results,
     }
 
+async def _record_paper_equity_snapshot_best_effort(
+    *,
+    customer_id: int,
+    equity: Decimal,
+    cash_equity: Decimal,
+    currency: str,
+) -> bool:
+    """Keep the paper portfolio read available when its optional history insert fails."""
+    try:
+        await record_customer_paper_equity_snapshot(
+            customer_id=customer_id,
+            equity=equity,
+            cash_equity=cash_equity,
+            currency=currency,
+        )
+        return True
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Customer paper equity snapshot failed; returning portfolio without a new history point"
+        )
+        return False
+
+
 @app.get("/api/customer/portfolio")
 async def paper_customer_portfolio(authorization: str | None = Header(default=None)):
     # Authenticate first so unauthenticated callers cannot probe preflight or
@@ -874,7 +897,7 @@ async def paper_customer_portfolio(authorization: str | None = Header(default=No
     )
     equity = float(cash) if cash is not None and not positions else None
     if equity is not None:
-        await record_customer_paper_equity_snapshot(
+        await _record_paper_equity_snapshot_best_effort(
             customer_id=int(profile.id),
             equity=cash,
             cash_equity=cash,
