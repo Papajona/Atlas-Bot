@@ -46,9 +46,9 @@ jobs:
         env:
           ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000
         run: gradle --no-daemon :app:testDebugUnitTest
-      - name: Assemble debug APK
+      - name: Assemble debug APK for the verified paper-only staging service
         env:
-          ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000
+          ATLAS_DEV_BACKEND_URL: https://atlas-paper-staging-350896810949.europe-west1.run.app
         run: gradle --no-daemon :app:assembleDebug
       - name: Verify packaged runtime backend resource in debug APK
         shell: bash
@@ -78,7 +78,7 @@ jobs:
           if result.returncode != 0:
               raise SystemExit(f"BLOCKED: aapt could not decode the packaged APK resource table: {result.stderr.strip()}")
           actual = extract_runtime_backend_url_from_resource_dump(result.stdout)
-          expected = "http://10.0.2.2:8000"
+          expected = "https://atlas-paper-staging-350896810949.europe-west1.run.app"
           if actual != expected:
               raise SystemExit(
                   f"BLOCKED: packaged runtime backend resource mismatch: expected {expected!r}, got {actual!r}"
