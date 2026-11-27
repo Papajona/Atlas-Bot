@@ -115,43 +115,35 @@ jobs:
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO anon, authenticated;
           ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO anon, authenticated;
           SQL
-      - name: Apply and verify migration head
+      - name: Apply migrations through 0068 for mandatory rollback regression
+        env:
+          ENVIRONMENT: production
+          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+        run: |
+          python -m alembic upgrade 0068_tron_sweep_txid_casefold_unique
+          python -m alembic current
+          python -m alembic heads
+      - name: Run legacy 0065-0066 rollback regressions against fresh 0068 database (mandatory)
+        env:
+          ENVIRONMENT: development
+          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          REDIS_URL: ""
+        run: |
+          python -m pytest tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-0065-rollback.xml
+          python scripts/assert_no_skips.py postgres-0065-rollback.xml
+      - name: Restore production verification database to current migration head after rollback regression
+        if: always()
+        env:
+          ENVIRONMENT: production
+          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
+          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
         run: |
           python -m alembic upgrade head
           python -m alembic current
           python -m alembic heads
 
-      - name: Prepare production verification database for 0068 rollback regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          # PostgreSQL roles are cluster-wide. Run the rollback test in the
-          # disposable source database so the trigger-owner role has no
-          # artificial dependency from a template-cloned sibling database.
-          PGPASSWORD=verification_password psql -X -v ON_ERROR_STOP=1 \
-            -h 127.0.0.1 -U atlas -d atlas_production_verify <<'SQL'
-          DROP TABLE public.customer_workspace_preferences;
-          DROP TABLE public.customer_equity_snapshots;
-          UPDATE public.alembic_version
-          SET version_num = '0068_tron_sweep_txid_casefold_unique'
-          WHERE version_num = '0069_customer_equity_history_and_workspace_preferences';
-          DO $verify_0068_rollback_fixture$
-          BEGIN
-              IF (SELECT count(*) FROM public.alembic_version
-                  WHERE version_num = '0068_tron_sweep_txid_casefold_unique') <> 1 THEN
-                  RAISE EXCEPTION 'rollback fixture is not at the expected 0068 revision';
-              END IF;
-              IF to_regclass('public.customer_equity_snapshots') IS NOT NULL
-                 OR to_regclass('public.customer_workspace_preferences') IS NOT NULL THEN
-                  RAISE EXCEPTION '0069-only customer tables remain in the 0068 rollback fixture';
-              END IF;
-          END
-          $verify_0068_rollback_fixture$;
-          SQL
-          actual_head="$(PGPASSWORD=verification_password psql -X -A -t -v ON_ERROR_STOP=1 \
-            -h 127.0.0.1 -U atlas -d atlas_production_verify \
-            -c 'SELECT version_num FROM public.alembic_version')"
-          test "$actual_head" = "0068_tron_sweep_txid_casefold_unique"
       - name: Repository secret scan
         run: python scripts/check_no_secrets.py
       - name: Atlas Native AI offline verification (no provider calls)
@@ -216,22 +208,6 @@ jobs:
         run: |
           python -m pytest -m "not postgres" -q -rs --junitxml=full-suite.xml
           python scripts/assert_no_skips.py full-suite.xml
-      - name: Run legacy 0065-0066 rollback regressions against 0068 database (mandatory)
-        env:
-          ENVIRONMENT: development
-          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
-          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
-          REDIS_URL: ""
-        run: |
-          python -m pytest tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-0065-rollback.xml
-          python scripts/assert_no_skips.py postgres-0065-rollback.xml
-      - name: Restore production verification database to current migration head after rollback regression
-        if: always()
-        env:
-          ENVIRONMENT: production
-          DATABASE_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
-          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:verification_password@localhost:5432/atlas_production_verify
-        run: python -m alembic upgrade head
       - name: Run remaining PostgreSQL-marked integration tests at current migration head (mandatory, no skips)
         env:
           ENVIRONMENT: development
