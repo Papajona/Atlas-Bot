@@ -289,3 +289,18 @@ def test_path_specific_limit_does_not_change_other_routes():
     sent = _run(_drive(middleware, chunks=[b"x" * 11], path="/api/customer/profile"))
     assert sent[0]["status"] == 200
     assert sent[1]["body"] == b"11"
+
+
+def test_path_specific_limit_cannot_raise_global_body_cap():
+    middleware = BodySizeLimitMiddleware(
+        _reader_app(),
+        max_bytes=10,
+        path_prefix_limits={"/api/webhooks/": 100},
+    )
+    sent = _run(_drive(
+        middleware,
+        chunks=[b"x" * 11],
+        path="/api/webhooks/123",
+    ))
+    assert sent[0]["status"] == 413
+    assert sent[-1]["body"] == b'{"detail":"Request body too large"}'
