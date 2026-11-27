@@ -96,7 +96,6 @@ fun UserDashboardScreen(
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
     var showPaperTradeDialog by remember { mutableStateOf(false) }
     var paperOrders by remember { mutableStateOf<List<CustomerDataClient.PaperOrder>>(emptyList()) }
-    var paperOrderHistory by remember { mutableStateOf<List<CustomerDataClient.PaperOrder>>(emptyList()) }
     var paperBalances by remember { mutableStateOf<List<CustomerDataClient.PaperBalance>>(emptyList()) }
     var paperOrdersBusy by remember { mutableStateOf(false) }
     var paperOrderBusy by remember { mutableStateOf(false) }
@@ -131,7 +130,6 @@ fun UserDashboardScreen(
         val token = activeCustomerToken?.takeIf { it.isNotBlank() }
         if (token == null || backendUrl.isBlank()) {
             paperOrders = emptyList()
-            paperOrderHistory = emptyList()
             paperBalances = emptyList()
             paperOrdersBusy = false
             paperOrderError = null
@@ -140,15 +138,12 @@ fun UserDashboardScreen(
             val client = CustomerDataClient(backendUrl)
             val balancesResult = runCatching { client.loadPaperBalances(token) }
             val ordersResult = runCatching { client.loadOpenPaperOrders(token) }
-            val historyResult = runCatching { client.loadPaperOrderHistory(token, limit = 20) }
             if (activeCustomerToken == token) {
                 balancesResult.onSuccess { paperBalances = it }
                 ordersResult.onSuccess { paperOrders = it }
-                historyResult.onSuccess { paperOrderHistory = it }
                 val errors = listOfNotNull(
                     balancesResult.exceptionOrNull()?.message,
                     ordersResult.exceptionOrNull()?.message,
-                    historyResult.exceptionOrNull()?.message
                 )
                 paperOrderError = errors.firstOrNull()
                 paperOrdersBusy = false
@@ -673,7 +668,6 @@ fun UserDashboardScreen(
     if (showPaperTradeDialog) {
         PaperTradeDialog(
             orders = paperOrders,
-            orderHistory = paperOrderHistory,
             balances = paperBalances,
             ordersBusy = paperOrdersBusy,
             submittingOrUpdating = paperOrderBusy,
@@ -774,7 +768,6 @@ fun UserDashboardScreen(
 @Composable
 private fun PaperTradeDialog(
     orders: List<CustomerDataClient.PaperOrder>,
-    orderHistory: List<CustomerDataClient.PaperOrder>,
     balances: List<CustomerDataClient.PaperBalance>,
     ordersBusy: Boolean,
     submittingOrUpdating: Boolean,
@@ -964,42 +957,6 @@ private fun PaperTradeDialog(
                                         ) { Text("Cancel order", color = theme.redDanger) }
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-                Text("Recent paper order history", fontWeight = FontWeight.Bold, color = theme.textPrimary)
-                val terminalHistory = orderHistory.filter {
-                    it.status !in setOf("SUBMITTED", "PARTIALLY_FILLED")
-                }.take(8)
-                if (terminalHistory.isEmpty()) {
-                    Text(
-                        "Completed and cancelled paper orders will appear here.",
-                        color = theme.textMuted,
-                        fontSize = 12.sp
-                    )
-                } else {
-                    terminalHistory.forEach { order ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = theme.cardSurface),
-                            border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(theme.cardBorder))
-                        ) {
-                            Column(
-                                modifier = Modifier.padding(10.dp),
-                                verticalArrangement = Arrangement.spacedBy(4.dp)
-                            ) {
-                                Text(
-                                    "${order.side} ${order.quantity} ${order.symbol}",
-                                    color = theme.textPrimary,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Text(
-                                    "${order.status} • Filled ${order.filledQuantity}/${order.quantity}" +
-                                        (order.averageFillPrice?.let { " • Avg $it USDT" } ?: ""),
-                                    color = theme.textMuted,
-                                    fontSize = 11.sp
-                                )
                             }
                         }
                     }
