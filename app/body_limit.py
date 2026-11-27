@@ -58,7 +58,7 @@ class BodySizeLimitMiddleware:
             if path.startswith(prefix)
         ]
         effective_max_bytes = (
-            max(matching_limits, key=lambda item: len(item[0]))[1]
+            min(self.max_bytes, max(matching_limits, key=lambda item: len(item[0]))[1])
             if matching_limits
             else self.max_bytes
         )
