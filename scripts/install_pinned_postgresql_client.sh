@@ -174,7 +174,7 @@ disable_unrelated_microsoft_apt_sources() {
       printf '%s\\t%s\\n' "$disabled_source" "$source_file" >> "$APT_SOURCE_QUARANTINE_MANIFEST"
       echo "Temporarily disabled unrelated Microsoft apt source: $(basename "$source_file")"
     fi
-  done < <(sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \\( -name '*.list' -o -name '*.sources' \\) -print0)
+  done < <(sudo find /etc/apt/sources.list.d -maxdepth 1 -type f \( -name '*.list' -o -name '*.sources' \) -print0)
 }
 
 trap restore_unrelated_apt_sources EXIT
