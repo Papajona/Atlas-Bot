@@ -8,6 +8,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -90,6 +94,13 @@ fun UserDashboardScreen(
     var selectedTimeframeDays by remember { mutableIntStateOf(30) } // 7 or 30 days
     var chartCrosshairEnabled by remember { mutableStateOf(true) }
     var actionDialogMessage by remember { mutableStateOf<String?>(null) }
+    var showPaperTradeDialog by remember { mutableStateOf(false) }
+    var paperOrders by remember { mutableStateOf<List<CustomerDataClient.PaperOrder>>(emptyList()) }
+    var paperOrdersBusy by remember { mutableStateOf(false) }
+    var paperOrderBusy by remember { mutableStateOf(false) }
+    var paperOrderFeedback by remember { mutableStateOf<String?>(null) }
+    var paperOrderError by remember { mutableStateOf<String?>(null) }
+    var paperOrdersRefreshKey by remember { mutableIntStateOf(0) }
     var activeCustomerToken by remember { mutableStateOf(customerAccessToken) }
     var customerSnapshot by remember { mutableStateOf<CustomerDataClient.Snapshot?>(null) }
     var customerSignInError by remember { mutableStateOf<String?>(null) }
@@ -111,6 +122,30 @@ fun UserDashboardScreen(
                     scannerAssetClass = selectedAssetClass.scannerAssetClass
                 )
             }.getOrNull()
+        }
+    }
+
+    LaunchedEffect(backendUrl, activeCustomerToken, paperOrdersRefreshKey) {
+        val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+        if (token == null || backendUrl.isBlank()) {
+            paperOrders = emptyList()
+            paperOrdersBusy = false
+            paperOrderError = null
+        } else {
+            paperOrdersBusy = true
+            runCatching {
+                CustomerDataClient(backendUrl).loadOpenPaperOrders(token)
+            }.onSuccess { orders ->
+                if (activeCustomerToken == token) {
+                    paperOrders = orders
+                    paperOrderError = null
+                }
+            }.onFailure { error ->
+                if (activeCustomerToken == token) {
+                    paperOrderError = error.message ?: "Paper orders are unavailable"
+                }
+            }
+            if (activeCustomerToken == token) paperOrdersBusy = false
         }
     }
 
@@ -393,7 +428,15 @@ fun UserDashboardScreen(
                                 textPrimary = textPrimary,
                                 onAction = { actionName ->
                                     when (actionName) {
-                                        "New Trade" -> actionDialogMessage = "Order entry is not available from this dashboard yet. Market Scanner and Strategy Lab are research views; they do not submit customer orders."
+                                        "New Trade" -> {
+                                            if (activeCustomerToken.isNullOrBlank()) {
+                                                actionDialogMessage = "Sign in and verify your authenticator before opening the customer paper-order ticket."
+                                            } else {
+                                                paperOrderFeedback = null
+                                                paperOrderError = null
+                                                showPaperTradeDialog = true
+                                            }
+                                        }
                                         "Deposit" -> actionDialogMessage = "Customer funding is disabled in this build. No deposit address is provided here. Do not send funds based on this screen."
                                         "Withdraw" -> actionDialogMessage = "Customer withdrawals are disabled in this build. No payout will be submitted from this screen."
                                         "Analytics" -> currentTab = DashboardTab.PORTFOLIO
@@ -620,6 +663,86 @@ fun UserDashboardScreen(
         }
     }
 
+    if (showPaperTradeDialog) {
+        PaperTradeDialog(
+            orders = paperOrders,
+            ordersBusy = paperOrdersBusy,
+            submittingOrUpdating = paperOrderBusy,
+            feedback = paperOrderFeedback,
+            error = paperOrderError,
+            onDismiss = { showPaperTradeDialog = false },
+            onRefresh = { paperOrdersRefreshKey += 1 },
+            onSubmit = { symbol, side, quantity, orderType, limitPrice ->
+                val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+                if (token == null || backendUrl.isBlank()) {
+                    paperOrderError = "Customer sign-in is required to submit a paper order."
+                } else {
+                    paperOrderBusy = true
+                    paperOrderError = null
+                    paperOrderFeedback = null
+                    customerAuthScope.launch {
+                        runCatching {
+                            CustomerDataClient(backendUrl).submitPaperOrder(
+                                accessToken = token,
+                                symbol = symbol,
+                                side = side,
+                                quantity = quantity,
+                                orderType = orderType,
+                                limitPrice = limitPrice,
+                                timeframe = "1h"
+                            )
+                        }.onSuccess { action ->
+                            paperOrderFeedback = "Paper order " + action.status.lowercase().replace('_', ' ') +
+                                (action.order?.let { ". Current status: " + it.status } ?: "") +
+                                (action.fillNote?.let { ". " + it } ?: "")
+                            paperOrdersRefreshKey += 1
+                        }.onFailure { error ->
+                            paperOrderError = error.message ?: "Paper order submission failed"
+                        }
+                        paperOrderBusy = false
+                    }
+                }
+            },
+            onAdvance = { clientOrderId ->
+                val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+                if (token != null && backendUrl.isNotBlank()) {
+                    paperOrderBusy = true
+                    paperOrderError = null
+                    customerAuthScope.launch {
+                        runCatching {
+                            CustomerDataClient(backendUrl).advancePaperOrder(token, clientOrderId)
+                        }.onSuccess { action ->
+                            paperOrderFeedback = "Paper order " + action.status.lowercase().replace('_', ' ') +
+                                (action.order?.let { ". Filled " + it.filledQuantity + " of " + it.quantity + "." } ?: "")
+                            paperOrdersRefreshKey += 1
+                        }.onFailure { error ->
+                            paperOrderError = error.message ?: "Could not refresh paper order"
+                        }
+                        paperOrderBusy = false
+                    }
+                }
+            },
+            onCancel = { clientOrderId ->
+                val token = activeCustomerToken?.takeIf { it.isNotBlank() }
+                if (token != null && backendUrl.isNotBlank()) {
+                    paperOrderBusy = true
+                    paperOrderError = null
+                    customerAuthScope.launch {
+                        runCatching {
+                            CustomerDataClient(backendUrl).cancelPaperOrder(token, clientOrderId)
+                        }.onSuccess { action ->
+                            paperOrderFeedback = "Paper order " + action.status.lowercase().replace('_', ' ') + "."
+                            paperOrdersRefreshKey += 1
+                        }.onFailure { error ->
+                            paperOrderError = error.message ?: "Paper order cancellation failed"
+                        }
+                        paperOrderBusy = false
+                    }
+                }
+            }
+        )
+    }
+
     if (actionDialogMessage != null) {
         AlertDialog(
             onDismissRequest = { actionDialogMessage = null },
@@ -637,6 +760,192 @@ fun UserDashboardScreen(
             containerColor = cardSurface
         )
     }
+}
+
+@Composable
+private fun PaperTradeDialog(
+    orders: List<CustomerDataClient.PaperOrder>,
+    ordersBusy: Boolean,
+    submittingOrUpdating: Boolean,
+    feedback: String?,
+    error: String?,
+    onDismiss: () -> Unit,
+    onRefresh: () -> Unit,
+    onSubmit: (String, String, String, String, String?) -> Unit,
+    onAdvance: (String) -> Unit,
+    onCancel: (String) -> Unit
+) {
+    var symbol by remember { mutableStateOf("BTC/USDT") }
+    var side by remember { mutableStateOf("BUY") }
+    var orderType by remember { mutableStateOf("MARKET") }
+    var quantity by remember { mutableStateOf("0.001") }
+    var limitPrice by remember { mutableStateOf("") }
+    val theme = com.atlas.trading.ui.theme.LocalAtlasColors.current
+    val quantityValid = quantity.toBigDecimalOrNull()?.signum() == 1
+    val limitValid = orderType != "LIMIT" || limitPrice.toBigDecimalOrNull()?.signum() == 1
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("New paper order", fontWeight = FontWeight.Bold, color = theme.textPrimary)
+                Text("Virtual USDT ledger • Crypto spot only", fontSize = 12.sp, color = theme.textMuted)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    "This ticket submits only to Atlas's isolated customer paper ledger. It does not place a broker order, move real funds, or enable live trading. Paper fills require a later verified completed market bar.",
+                    fontSize = 12.sp,
+                    color = theme.textMuted
+                )
+                Text("Market", fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("BTC/USDT", "ETH/USDT").forEach { candidate ->
+                        FilterChip(
+                            selected = symbol == candidate,
+                            onClick = { symbol = candidate },
+                            label = { Text(candidate) },
+                            enabled = !submittingOrUpdating
+                        )
+                    }
+                }
+                Text("Side", fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = side == "BUY",
+                        onClick = { side = "BUY" },
+                        label = { Text("Buy") },
+                        enabled = !submittingOrUpdating
+                    )
+                    FilterChip(
+                        selected = side == "SELL",
+                        onClick = { side = "SELL" },
+                        label = { Text("Sell") },
+                        enabled = !submittingOrUpdating
+                    )
+                }
+                Text("Order type", fontWeight = FontWeight.SemiBold, color = theme.textPrimary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = orderType == "MARKET",
+                        onClick = { orderType = "MARKET"; limitPrice = "" },
+                        label = { Text("Market") },
+                        enabled = !submittingOrUpdating
+                    )
+                    FilterChip(
+                        selected = orderType == "LIMIT",
+                        onClick = { orderType = "LIMIT" },
+                        label = { Text("Limit") },
+                        enabled = !submittingOrUpdating
+                    )
+                }
+                OutlinedTextField(
+                    value = quantity,
+                    onValueChange = { quantity = it.filter { ch -> ch.isDigit() || ch == '.' }.take(24) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Quantity in base asset") },
+                    supportingText = { Text("Example: 0.001 BTC") },
+                    singleLine = true,
+                    enabled = !submittingOrUpdating,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                )
+                if (orderType == "LIMIT") {
+                    OutlinedTextField(
+                        value = limitPrice,
+                        onValueChange = { limitPrice = it.filter { ch -> ch.isDigit() || ch == '.' }.take(24) },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Limit price (USDT)") },
+                        singleLine = true,
+                        enabled = !submittingOrUpdating,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                    )
+                }
+                if (!feedback.isNullOrBlank()) {
+                    Text(feedback, color = theme.emeraldAccent, fontSize = 12.sp)
+                }
+                if (!error.isNullOrBlank()) {
+                    Text(error, color = theme.redDanger, fontSize = 12.sp)
+                }
+                Button(
+                    onClick = {
+                        onSubmit(symbol, side, quantity, orderType, limitPrice.takeIf { orderType == "LIMIT" })
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !submittingOrUpdating && quantityValid && limitValid
+                ) {
+                    if (submittingOrUpdating) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(if (submittingOrUpdating) "Processing…" else "Submit virtual paper order")
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("Open paper orders", fontWeight = FontWeight.Bold, color = theme.textPrimary)
+                    TextButton(onClick = onRefresh, enabled = !ordersBusy && !submittingOrUpdating) {
+                        Text(if (ordersBusy) "Refreshing…" else "Refresh")
+                    }
+                }
+                if (orders.isEmpty()) {
+                    Text(
+                        if (ordersBusy) "Loading open paper orders…" else "No open paper orders.",
+                        color = theme.textMuted,
+                        fontSize = 12.sp
+                    )
+                } else {
+                    orders.forEach { order ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(containerColor = theme.cardSurface),
+                            border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(theme.cardBorder))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    "${order.side} ${order.quantity} ${order.symbol}",
+                                    color = theme.textPrimary,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    "${order.orderType} • ${order.status} • Filled ${order.filledQuantity}/${order.quantity}",
+                                    color = theme.textMuted,
+                                    fontSize = 11.sp
+                                )
+                                if (order.status in setOf("SUBMITTED", "PARTIALLY_FILLED")) {
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        TextButton(
+                                            enabled = !submittingOrUpdating,
+                                            onClick = { onAdvance(order.clientOrderId) }
+                                        ) { Text("Check next bar") }
+                                        TextButton(
+                                            enabled = !submittingOrUpdating,
+                                            onClick = { onCancel(order.clientOrderId) }
+                                        ) { Text("Cancel order", color = theme.redDanger) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("Done", color = theme.brandTeal) }
+        },
+        containerColor = theme.cardSurface
+    )
 }
 
 @Composable
