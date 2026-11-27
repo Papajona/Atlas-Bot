@@ -101,9 +101,11 @@ def test_debug_build_requires_an_explicit_valid_development_backend_origin():
     assert 'resValue("string", "atlas_backend_url", debugBackendUrl)' in GRADLE
 
 
-def test_android_debug_ci_uses_only_the_emulator_development_origin():
+def test_android_debug_ci_uses_safe_backend_origins():
     assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in RELEASE_WORKFLOW
     assert "ATLAS_DEV_BACKEND_URL: http://10.0.2.2:8000" in CI_WORKFLOW
+    assert "ATLAS_DEV_BACKEND_URL: https://atlas-paper-staging-350896810949.europe-west1.run.app" in RELEASE_WORKFLOW
+    assert 'expected = "https://atlas-paper-staging-350896810949.europe-west1.run.app"' in RELEASE_WORKFLOW
 
 def test_debug_network_security_allows_only_the_emulator_http_origin():
     import xml.etree.ElementTree as ET
