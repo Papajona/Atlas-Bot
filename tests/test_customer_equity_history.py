@@ -257,3 +257,27 @@ def test_runtime_provisioning_requires_the_0069_schema_head():
     assert f"WHERE version_num = '{revision}'" in script
     assert f"database must be at {revision} before API role provisioning" in script
     assert "database must be at 0068_tron_sweep_txid_casefold_unique" not in script
+
+
+
+def test_customer_equity_snapshot_failure_is_best_effort_and_rolls_back(monkeypatch):
+    captured = {}
+
+    class Database:
+        async def rollback(self):
+            captured["rolled_back"] = True
+
+    async def fail_snapshot(*_args, **_kwargs):
+        raise RuntimeError("simulated optional history write failure")
+
+    monkeypatch.setattr(main, "_record_customer_equity_snapshot", fail_snapshot)
+    recorded = asyncio.run(
+        main._record_customer_equity_snapshot_best_effort(
+            Database(),
+            customer_id=314,
+            equity=125.75,
+            cash_equity=100.25,
+        )
+    )
+    assert recorded is False
+    assert captured["rolled_back"] is True
