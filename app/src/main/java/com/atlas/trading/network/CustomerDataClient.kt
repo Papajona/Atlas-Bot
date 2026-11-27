@@ -42,6 +42,22 @@ class CustomerDataClient(
         val defaultChartWindowDays: Int,
         val chartCrosshairEnabled: Boolean
     )
+    data class PaperOrder(
+        val clientOrderId: String,
+        val symbol: String,
+        val side: String,
+        val status: String,
+        val orderType: String,
+        val quantity: String,
+        val filledQuantity: String,
+        val remainingQuantity: String,
+        val averageFillPrice: String?
+    )
+    data class PaperOrderActionResult(
+        val status: String,
+        val fillNote: String?,
+        val order: PaperOrder?
+    )
     data class Snapshot(
         val profile: Profile?,
         val portfolio: Portfolio?,
@@ -149,6 +165,137 @@ class CustomerDataClient(
         parseWorkspacePreferences(body)
     }
 
+    suspend fun loadOpenPaperOrders(accessToken: String): List<PaperOrder> =
+        withContext(Dispatchers.IO) {
+            require(accessToken.isNotBlank()) { "Customer sign-in is required to load paper orders" }
+            val result = requestJson("/api/customer/paper/orders", accessToken)
+            val body = result.body ?: throw IllegalStateException(
+                result.error ?: "Paper orders are unavailable"
+            )
+            parsePaperOrders(body)
+        }
+
+    suspend fun submitPaperOrder(
+        accessToken: String,
+        symbol: String,
+        side: String,
+        quantity: String,
+        orderType: String = "MARKET",
+        limitPrice: String? = null,
+        timeframe: String = "1h"
+    ): PaperOrderActionResult = withContext(Dispatchers.IO) {
+        require(accessToken.isNotBlank()) { "Customer sign-in is required to submit a paper order" }
+        require(symbol in setOf("BTC/USDT", "ETH/USDT")) {
+            "The mobile paper order ticket supports BTC/USDT and ETH/USDT only"
+        }
+        require(side in setOf("BUY", "SELL")) { "Paper order side must be BUY or SELL" }
+        val parsedQuantity = quantity.toBigDecimalOrNull()
+        require(parsedQuantity != null && parsedQuantity.signum() > 0) {
+            "Paper order quantity must be a positive decimal"
+        }
+        require(orderType in setOf("MARKET", "LIMIT")) { "Paper order type must be MARKET or LIMIT" }
+        val parsedLimitPrice = limitPrice?.takeIf { it.isNotBlank() }?.toBigDecimalOrNull()
+        if (orderType == "LIMIT") {
+            require(parsedLimitPrice != null && parsedLimitPrice.signum() > 0) {
+                "A positive limit price is required for a LIMIT paper order"
+            }
+        } else {
+            require(limitPrice.isNullOrBlank()) { "A MARKET paper order must not include a limit price" }
+        }
+        require(timeframe in setOf("1m", "5m", "15m", "30m", "1h", "2h", "4h", "1d")) {
+            "Paper order timeframe is not supported"
+        }
+
+        val payload = JSONObject()
+            .put("client_order_id", "android-paper-" + java.util.UUID.randomUUID().toString())
+            .put("symbol", symbol)
+            .put("side", side)
+            .put("quantity", parsedQuantity.stripTrailingZeros().toPlainString())
+            .put("order_type", orderType)
+            .put("timeframe", timeframe)
+        if (orderType == "LIMIT") {
+            payload.put("limit_price", parsedLimitPrice!!.stripTrailingZeros().toPlainString())
+        }
+        val result = requestPostJson("/api/customer/paper/orders", accessToken, payload)
+        val body = result.body ?: throw IllegalStateException(
+            result.error ?: "Paper order submission failed"
+        )
+        if (!body.optBoolean("virtual_only", false)) {
+            throw IllegalStateException("Server did not confirm that this order is virtual-only")
+        }
+        PaperOrderActionResult(
+            status = body.optString("status", "SUBMITTED").takeIf { it.isNotBlank() && it != "null" }
+                ?: "SUBMITTED",
+            fillNote = body.optString("fill_note").takeIf { it.isNotBlank() && it != "null" },
+            order = body.optJSONObject("order")?.let(::parsePaperOrder)
+        )
+    }
+
+    suspend fun advancePaperOrder(accessToken: String, clientOrderId: String): PaperOrderActionResult =
+        withContext(Dispatchers.IO) {
+            require(accessToken.isNotBlank()) { "Customer sign-in is required to advance a paper order" }
+            require(clientOrderId.isNotBlank()) { "Paper order ID is required" }
+            val result = requestPostJson(
+                "/api/customer/paper/orders/${URLEncoder.encode(clientOrderId, Charsets.UTF_8.name())}/advance",
+                accessToken,
+                JSONObject()
+            )
+            parsePaperOrderAction(result, "Paper order status is unavailable")
+        }
+
+    suspend fun cancelPaperOrder(accessToken: String, clientOrderId: String): PaperOrderActionResult =
+        withContext(Dispatchers.IO) {
+            require(accessToken.isNotBlank()) { "Customer sign-in is required to cancel a paper order" }
+            require(clientOrderId.isNotBlank()) { "Paper order ID is required" }
+            val payload = JSONObject().put("idempotency_key", java.util.UUID.randomUUID().toString())
+            val result = requestPostJson(
+                "/api/customer/paper/orders/${URLEncoder.encode(clientOrderId, Charsets.UTF_8.name())}/cancel",
+                accessToken,
+                payload
+            )
+            parsePaperOrderAction(result, "Paper order cancellation failed")
+        }
+
+    private fun parsePaperOrderAction(result: JsonResult, fallback: String): PaperOrderActionResult {
+        val body = result.body ?: throw IllegalStateException(result.error ?: fallback)
+        if (!body.optBoolean("virtual_only", false)) {
+            throw IllegalStateException("Server did not confirm that this order remains virtual-only")
+        }
+        return PaperOrderActionResult(
+            status = body.optString("status", "UNKNOWN"),
+            fillNote = body.optString("fill_note").takeIf { it.isNotBlank() && it != "null" },
+            order = body.optJSONObject("order")?.let(::parsePaperOrder)
+        )
+    }
+
+    private fun requestPostJson(path: String, token: String, payload: JSONObject): JsonResult {
+        return try {
+            val requestBody = payload.toString().toRequestBody(
+                "application/json; charset=utf-8".toMediaType()
+            )
+            val request = Request.Builder()
+                .url(baseUrl.trimEnd('/') + path)
+                .post(requestBody)
+                .header("Accept", "application/json")
+                .header("Authorization", "Bearer $token")
+                .header("Content-Type", "application/json")
+                .build()
+            http.newCall(request).execute().use { response ->
+                val raw = response.body?.string().orEmpty()
+                val json = runCatching { JSONObject(raw) }.getOrNull()
+                if (!response.isSuccessful) {
+                    val detail = json?.optString("detail")?.takeIf { it.isNotBlank() && it != "null" }
+                    JsonResult(null, detail ?: "Unavailable (HTTP ${response.code})")
+                } else {
+                    if (json == null) JsonResult(null, "Unavailable (invalid server response)")
+                    else JsonResult(json, null)
+                }
+            }
+        } catch (_: Exception) {
+            JsonResult(null, "Unavailable (server could not be reached)")
+        }
+    }
+
     private fun requestPatchJson(path: String, token: String, payload: JSONObject): JsonResult {
         return try {
             val requestBody = payload.toString().toRequestBody(
@@ -202,6 +349,36 @@ class CustomerDataClient(
     }
 
     companion object {
+        internal fun parsePaperOrders(json: JSONObject): List<PaperOrder> {
+            val rows = json.optJSONArray("orders") ?: return emptyList()
+            return buildList {
+                for (index in 0 until rows.length()) {
+                    val row = rows.optJSONObject(index) ?: continue
+                    val id = row.optString("client_order_id")
+                        .takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val symbol = row.optString("symbol")
+                        .takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    add(parsePaperOrder(row))
+                }
+            }
+        }
+
+        internal fun parsePaperOrder(json: JSONObject): PaperOrder {
+            fun value(key: String, fallback: String = "0") =
+                json.optString(key, fallback).takeIf { it.isNotBlank() && it != "null" } ?: fallback
+            return PaperOrder(
+                clientOrderId = value("client_order_id", ""),
+                symbol = value("symbol", "—"),
+                side = value("side", "—").uppercase(),
+                status = value("status", "UNKNOWN").uppercase(),
+                orderType = value("order_type", "MARKET").uppercase(),
+                quantity = value("quantity"),
+                filledQuantity = value("filled_quantity"),
+                remainingQuantity = value("remaining_quantity"),
+                averageFillPrice = value("average_fill_price").takeIf { it != "0" }
+            )
+        }
+
         internal fun parseWorkspacePreferences(json: JSONObject): WorkspacePreferences {
             val preferences = json.optJSONObject("preferences")
                 ?: throw IllegalArgumentException("Workspace preferences response is invalid")
