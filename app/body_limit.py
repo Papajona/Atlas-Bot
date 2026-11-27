@@ -57,11 +57,13 @@ class BodySizeLimitMiddleware:
             for prefix, limit in self.path_prefix_limits.items()
             if path.startswith(prefix)
         ]
-        effective_max_bytes = (
-            min(self.max_bytes, max(matching_limits, key=lambda item: len(item[0]))[1])
-            if matching_limits
-            else self.max_bytes
-        )
+        if matching_limits:
+            path_limit = max(matching_limits, key=lambda item: len(item[0]))[1]
+            # A configured route limit may narrow the global cap, never widen it.
+            # Preserve the explicit max_bytes=0/negative opt-out semantics.
+            effective_max_bytes = min(self.max_bytes, path_limit) if self.max_bytes > 0 else path_limit
+        else:
+            effective_max_bytes = self.max_bytes
         if effective_max_bytes <= 0:
             await self.app(scope, receive, send)
             return
