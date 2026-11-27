@@ -71,7 +71,26 @@ async function verifyWithdrawalOtp(){try{const email=document.getElementById('ot
 async function requestWithdrawal(){const amount=Number(document.getElementById('wdAmount').value),destination=document.getElementById('wdDestination').value.trim();if(!amount||!destination){document.getElementById('wdOut').textContent='Enter an amount and TRON address.';return}if(!confirm(`Request ${amount.toFixed(6)} USDT to ${destination.slice(0,8)}…${destination.slice(-6)}?`))return;try{const idemPayload=JSON.stringify({amount,destination}),savedPayload=sessionStorage.getItem('atlas_withdrawal_idem_payload');let idemKey=sessionStorage.getItem('atlas_withdrawal_idem');if(!idemKey||savedPayload!==idemPayload){idemKey=crypto.randomUUID();sessionStorage.setItem('atlas_withdrawal_idem',idemKey);sessionStorage.setItem('atlas_withdrawal_idem_payload',idemPayload);}const d=await api('/api/customer/withdrawals',{method:'POST',headers:{'X-Withdrawal-Step-Up':sessionStorage.getItem('atlas_withdrawal_step_up')||'','Idempotency-Key':idemKey},body:JSON.stringify({amount,destination,network:'TRON'})});document.getElementById('wdOut').textContent=JSON.stringify(d,null,2);document.getElementById('wdAmount').value='';document.getElementById('wdDestination').value='';sessionStorage.removeItem('atlas_withdrawal_step_up');sessionStorage.removeItem('atlas_withdrawal_otp_intent');sessionStorage.removeItem('atlas_withdrawal_idem');sessionStorage.removeItem('atlas_withdrawal_idem_payload');document.getElementById('withdrawalOtp').value='';document.getElementById('otpOut').textContent='Verification consumed. A new OTP is required for another withdrawal.';await loadAccount();}catch(e){document.getElementById('wdOut').textContent=e.message;}}
 async function loadWithdrawals(){try{const rows=await api('/api/customer/withdrawals');const box=document.getElementById('withdrawals');box.replaceChildren();if(!rows.length){const p=document.createElement('p');p.className='muted';p.textContent='No withdrawal requests yet.';box.appendChild(p);return;}for(const w of rows){const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=`${Number(w.amount).toFixed(6)} ${w.currency}`;const n=document.createElement('small');n.textContent=`${w.network} · ${w.destination_masked}`;const st=document.createElement('small');st.textContent=`Status: ${w.status} · Approval ${w.approval_count}/${w.required_approvals}`;card.append(b,n,st);if(w.rejection_reason){const r=document.createElement('small');r.textContent=`Reason: ${w.rejection_reason}`;card.appendChild(r);}box.appendChild(card);}}catch(e){document.getElementById('withdrawals').textContent=e.message;}}
 async function loadAccount(){try{const me=await api('/api/customer/me');document.getElementById('customerEmail').textContent=me.email||'Customer';document.getElementById('customerStatus').textContent=me.status;const wallets=await api('/api/customer/wallets');let total=0;const walletBox=document.getElementById('wallets');walletBox.replaceChildren();if(wallets.length){for(const w of wallets){total+=Number(w.available_balance);const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=w.currency;const st=document.createElement('strong');st.textContent=Number(w.available_balance).toFixed(6);const sm=document.createElement('small');sm.textContent=`${w.wallet_type} · ${w.status} · ${w.network||''}`;card.append(b,st,sm);walletBox.appendChild(card);}}else{const p=document.createElement('p');p.className='muted';p.textContent='No trading wallet yet.';walletBox.appendChild(p);}document.getElementById('walletTotal').textContent=total.toFixed(6);const fs=await api('/api/customer/funding');const fundingBox=document.getElementById('funding');fundingBox.replaceChildren();if(fs.length){for(const f of fs){const card=document.createElement('div');card.className='card';const b=document.createElement('b');b.textContent=`${f.currency} ${Number(f.amount).toFixed(6)}`;const sm=document.createElement('small');sm.textContent=`${f.provider} · ${f.status}`;card.append(b,sm);fundingBox.appendChild(card);}}else{const p=document.createElement('p');p.className='muted';p.textContent='No funding transactions yet.';fundingBox.appendChild(p);}await loadDeposit();await loadWithdrawals();await loadBenchmarkCaptureStatus();}catch(e){sessionStorage.removeItem(tokenKey);document.getElementById('authOut').textContent=e.message;document.getElementById('auth').style.display='block';document.getElementById('account').style.display='none';}}
-async function logout(){try{await api('/api/auth/logout',{method:'POST'});}catch(e){}sessionStorage.removeItem(tokenKey);location.reload();}
+function logout(){
+  const token=sessionStorage.getItem(tokenKey);
+  // Clear this browser's authenticated state immediately. Remote revocation is
+  // best-effort and must never hold the customer on a signed-in screen.
+  sessionStorage.removeItem(tokenKey);
+  window.mfaFactorId=null;
+  window.mfaChallengeId=null;
+  if(token){
+    try{
+      const revocation=fetch('/api/auth/logout',{
+        method:'POST',
+        headers:{'Accept':'application/json','Content-Type':'application/json','Authorization':'Bearer '+token},
+        body:'{}',
+        keepalive:true
+      });
+      void revocation.catch(()=>{});
+    }catch(_error){}
+  }
+  location.reload();
+}
 if(sessionStorage.getItem(tokenKey))continueLoginSecurity();
 
 
