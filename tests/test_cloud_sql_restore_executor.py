@@ -345,6 +345,10 @@ def test_cloud_sql_restore_workflow_stops_after_import_and_keeps_certification_m
     assert "postgresql-pgdg-archive.list" in installer
     assert "find_pinned_package_version" in installer
     assert "both signed PGDG main and archive suites" in installer
+    assert "packages[.]microsoft[.]com" in installer
+    assert "atlas-disabled" in installer
+    assert "trap restore_unrelated_apt_sources EXIT" in installer
+    assert "restore_unrelated_apt_sources" in installer
     assert 'client_package="postgresql-client-${POSTGRES_CLIENT_MAJOR}"' in installer
     assert '"$client_package=${package_version}"' in installer
     assert "dpkg-query -W" in installer
