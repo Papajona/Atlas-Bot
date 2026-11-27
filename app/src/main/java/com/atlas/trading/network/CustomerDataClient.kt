@@ -180,17 +180,6 @@ class CustomerDataClient(
             parsePaperBalances(body)
         }
 
-    suspend fun loadPaperOrderHistory(accessToken: String, limit: Int = 20): List<PaperOrder> =
-        withContext(Dispatchers.IO) {
-            require(accessToken.isNotBlank()) { "Customer sign-in is required to load paper history" }
-            require(limit in 1..100) { "Paper order history limit must be between 1 and 100" }
-            val result = requestJson("/api/customer/paper/history?limit=$limit", accessToken)
-            val body = result.body ?: throw IllegalStateException(
-                result.error ?: "Paper order history is unavailable"
-            )
-            parsePaperOrders(body)
-        }
-
     suspend fun loadOpenPaperOrders(accessToken: String): List<PaperOrder> =
         withContext(Dispatchers.IO) {
             require(accessToken.isNotBlank()) { "Customer sign-in is required to load paper orders" }
