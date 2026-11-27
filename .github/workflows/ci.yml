@@ -498,6 +498,57 @@ jobs:
           # Revision 0051 intentionally preserves the append-only research archive on downgrade.
           # Stopping here verifies 0052/0053 can roll back and reapply without deleting retained history.
           python -m alembic downgrade 0051_research_trial_archive
+          # Create the rollback database from the 0051 baseline before this job's
+          # primary database acquires objects owned by the cluster-global trigger role.
+          PGPASSWORD=test_password dropdb --if-exists -h 127.0.0.1 -U atlas atlas_rollback_0068
+          PGPASSWORD=test_password createdb -h 127.0.0.1 -U atlas -T atlas_test atlas_rollback_0068
+          (
+            set -euo pipefail
+            export ENVIRONMENT=development
+            export DATABASE_URL=postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_rollback_0068
+            export ATLAS_POSTGRES_URL="$DATABASE_URL"
+            cleanup_rollback_database() {
+              PGPASSWORD=test_password dropdb --if-exists -h 127.0.0.1 -U atlas atlas_rollback_0068 || true
+              PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_test \
+                -c 'DROP ROLE IF EXISTS atlas_ledger_trigger_owner' || true
+            }
+            trap cleanup_rollback_database EXIT
+            python -m alembic upgrade 0066_pin_research_trigger_path
+            PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 -h 127.0.0.1 -U atlas -d atlas_rollback_0068 <<'SQL'
+            -- Make the isolated fixture safe for 0067's default-ACL contract.
+            ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON TABLES FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            SET ROLE pg_database_owner;
+            ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON TABLES FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            RESET ROLE;
+            SET ROLE supabase_admin;
+            ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON TABLES FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON TABLES FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL PRIVILEGES ON SEQUENCES FROM service_role;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM service_role;
+            ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+            RESET ROLE;
+            SQL
+            python -m alembic upgrade 0068_tron_sweep_txid_casefold_unique
+            python -m pytest tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-0065-rollback.xml
+            python scripts/assert_no_skips.py postgres-0065-rollback.xml
+          )
           # Seed a delegated EXECUTE grant chain before 0065 is reapplied. The
           # migration must revoke the grant-option holder with CASCADE so its
           # downstream grantee cannot retain execution on an internal function.
@@ -1084,48 +1135,6 @@ jobs:
         run: |
           python -m pytest -m "not postgres" -q -rs --junitxml=full-suite.xml
           python scripts/assert_no_skips.py full-suite.xml
-      - name: Prepare integration database for 0068 rollback regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          # Keep the rollback regression in the same disposable database that
-          # owns atlas_ledger_trigger_owner. PostgreSQL roles are cluster-wide;
-          # cloning this database leaves the original database as a dependency
-          # and correctly prevents DROP ROLE in the clone.
-          PGPASSWORD=test_password psql -X -v ON_ERROR_STOP=1 \
-            -h 127.0.0.1 -U atlas -d atlas_test <<'SQL'
-          DROP TABLE public.customer_workspace_preferences;
-          DROP TABLE public.customer_equity_snapshots;
-          UPDATE public.alembic_version
-          SET version_num = '0068_tron_sweep_txid_casefold_unique'
-          WHERE version_num = '0069_customer_equity_history_and_workspace_preferences';
-          DO $verify_0068_rollback_fixture$
-          BEGIN
-              IF (SELECT count(*) FROM public.alembic_version
-                  WHERE version_num = '0068_tron_sweep_txid_casefold_unique') <> 1 THEN
-                  RAISE EXCEPTION 'rollback fixture is not at the expected 0068 revision';
-              END IF;
-              IF to_regclass('public.customer_equity_snapshots') IS NOT NULL
-                 OR to_regclass('public.customer_workspace_preferences') IS NOT NULL THEN
-                  RAISE EXCEPTION '0069-only customer tables remain in the 0068 rollback fixture';
-              END IF;
-          END
-          $verify_0068_rollback_fixture$;
-          SQL
-          actual_head="$(PGPASSWORD=test_password psql -X -A -t -v ON_ERROR_STOP=1 \
-            -h 127.0.0.1 -U atlas -d atlas_test \
-            -c 'SELECT version_num FROM public.alembic_version')"
-          test "$actual_head" = "0068_tron_sweep_txid_casefold_unique"
-      - name: Run legacy 0065-0066 rollback regressions against 0068 database (mandatory)
-        env:
-          DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
-          ATLAS_POSTGRES_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
-        run: |
-          python -m pytest tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-0065-rollback.xml
-          python scripts/assert_no_skips.py postgres-0065-rollback.xml
-      - name: Restore integration database to current migration head after rollback regression
-        if: always()
-        run: python -m alembic upgrade head
       - name: Run remaining PostgreSQL-marked integration tests at current migration head (mandatory, no skips)
         env:
           DATABASE_URL: postgresql+asyncpg://atlas:test_password@localhost:5432/atlas_test
