@@ -1504,6 +1504,17 @@ private fun RechartsMonotoneAreaCanvas(
         val height = size.height
         val n = points.size
 
+        // A single persisted observation is still useful account history. Show its
+        // exact sample as a point instead of leaving the chart area visually blank;
+        // do not invent a line or interpolate missing observations.
+        if (n == 1) {
+            drawCircle(
+                color = accentColor,
+                radius = 6.dp.toPx(),
+                center = Offset(width / 2f, height / 2f)
+            )
+            return@Canvas
+        }
         if (n < 2) return@Canvas
 
         val stepX = width / (n - 1)
