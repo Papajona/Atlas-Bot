@@ -81,3 +81,11 @@ def test_workspace_preferences_never_import_or_cache_shared_browser_values():
     assert "if(!saved.configured)" not in js
     assert "cached display preferences" not in js
     assert "saved account value will be restored on next load" in js
+def test_customer_logout_clears_local_session_before_best_effort_revocation():
+    _, js = _split()
+    logout = re.search(r"function logout\\(\\)\\s*\\{(?P<body>[\\s\\S]*?)\\n\\}", js)
+    assert logout is not None
+    body = logout.group("body")
+    assert body.index("sessionStorage.removeItem(tokenKey)") < body.index("fetch('/api/auth/logout'")
+    assert "keepalive:true" in body
+    assert "location.reload();" in body
