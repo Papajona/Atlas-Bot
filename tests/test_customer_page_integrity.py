@@ -70,3 +70,14 @@ def test_home_chart_is_ledger_backed():
     assert "TRADE_SETTLEMENT" in js
     assert "TRADING_FEE" in js
     assert 'aria-label="Seven day realised profit and loss chart"' in html
+
+
+
+def test_workspace_preferences_never_import_or_cache_shared_browser_values():
+    _, js = _split()
+    assert "localStorage.getItem('atlas_ui_" not in js
+    assert "localStorage.setItem('atlas_ui_" not in js
+    assert "localStorage.removeItem(`atlas_ui_${setting}`)" in js
+    assert "if(!saved.configured)" not in js
+    assert "cached display preferences" not in js
+    assert "saved account value will be restored on next load" in js
