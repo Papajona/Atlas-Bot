@@ -1994,6 +1994,6 @@ private fun DashboardBottomNavigation(
 }
 
 /**
- * Generates realistic 30-day daily historical equity progression with positive trend.
+ * Synthetic equity history is intentionally never generated; charts use persisted customer observations.
  */
 internal fun generate30DayEquityData(): List<EquityPoint> = emptyList()
