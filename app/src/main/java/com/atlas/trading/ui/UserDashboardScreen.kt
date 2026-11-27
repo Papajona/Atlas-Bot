@@ -35,6 +35,18 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
+ * Parse ISO-8601 server timestamps with either a Z suffix or an explicit UTC offset.
+ *
+ * OffsetDateTime handles Python datetime.isoformat() output such as +00:00 across
+ * Android's supported java.time implementations; Instant.parse is less portable
+ * for that representation on older Android runtimes.
+ */
+internal fun parseEquityObservationEpochMillis(value: String): Long? =
+    runCatching {
+        java.time.OffsetDateTime.parse(value).toInstant().toEpochMilli()
+    }.getOrNull()
+
+/**
  * Historical daily equity and profit data point for 30-day visualization.
  */
 data class EquityPoint(
@@ -144,7 +156,7 @@ fun UserDashboardScreen(
         var previousEquity: Double? = null
         observations.mapIndexedNotNull { index, point ->
             val timestamp = runCatching {
-                java.time.Instant.parse(point.observedAt).toEpochMilli()
+                parseEquityObservationEpochMillis(point.observedAt)
             }.getOrNull() ?: return@mapIndexedNotNull null
             val dailyChange = previousEquity?.let { point.equity - it } ?: 0.0
             previousEquity = point.equity
@@ -575,26 +587,30 @@ fun UserDashboardScreen(
                             saveChartPreferences(crosshairEnabled = it)
                         },
                         onSignOut = {
-                            customerAuthScope.launch {
-                                val token = activeCustomerToken
-                                try {
-                                    if (!token.isNullOrBlank() && backendUrl.isNotBlank()) {
+                            // End the local session immediately. The remote revocation
+                            // request is best-effort and must never keep the signed-in UI usable.
+                            val token = activeCustomerToken
+                            activeCustomerToken = null
+                            customerSnapshot = null
+                            customerMfaSetupSecret = null
+                            customerMfaChallenge = null
+                            pendingCustomerSession = null
+                            customerInfoMessage = "Signed out on this device."
+                            currentTab = DashboardTab.HOME
+
+                            if (!token.isNullOrBlank() && backendUrl.isNotBlank()) {
+                                customerAuthScope.launch {
+                                    runCatching {
                                         CustomerAuthClient(backendUrl).logout(token)
+                                    }.onFailure {
+                                        // Do not overwrite the message or state of a new session
+                                        // if the customer signs in while this request is in flight.
+                                        if (activeCustomerToken == null) {
+                                            customerInfoMessage =
+                                                "Signed out on this device. Remote token revocation could not be confirmed."
+                                        }
                                     }
-                                } catch (_: Exception) {
-                                    // Always clear this device's bearer token even when the
-                                    // best-effort remote revocation endpoint cannot be reached.
-                                    customerInfoMessage = "Signed out on this device. Remote token revocation could not be confirmed."
                                 }
-                                activeCustomerToken = null
-                                customerSnapshot = null
-                                customerMfaSetupSecret = null
-                                customerMfaChallenge = null
-                                pendingCustomerSession = null
-                                if (customerInfoMessage == null) {
-                                    customerInfoMessage = "Signed out on this device."
-                                }
-                                currentTab = DashboardTab.HOME
                             }
                         },
                         modifier = Modifier.padding(innerPadding)
