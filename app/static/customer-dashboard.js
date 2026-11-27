@@ -87,13 +87,22 @@ document.getElementById('menuBtn')?.addEventListener('click',()=>document.getEle
 window.addEventListener('hashchange',()=>setActiveSection(location.hash.replace('#','')||'overview'));
 if(location.hash)setActiveSection(location.hash.replace('#',''));
 const WORKSPACE_SETTING_FIELDS={reduceMotion:'reduce_motion',compactMarkets:'compact_markets',touchFeedback:'touch_feedback'};
+/*
+ * Older builds used origin-wide localStorage keys for account preferences. Those
+ * values are shared by every customer in this browser, so remove them and never
+ * import or cache them. The signed-in account's API row is the only source of truth.
+ */
+try{
+  for(const setting of Object.keys(WORKSPACE_SETTING_FIELDS)){
+    localStorage.removeItem(`atlas_ui_${setting}`);
+  }
+}catch(_storageError){}
 let workspacePreferenceSaveQueue=Promise.resolve();
 function applyWorkspacePreference(el,value){
   el.checked=!!value;
   if(el.id==='reduceMotion')document.body.classList.toggle('reduce-motion',el.checked);
   if(el.id==='compactMarkets')document.body.classList.toggle('compact-markets',el.checked);
   if(el.id==='touchFeedback')document.body.classList.toggle('touch-feedback-enabled',el.checked);
-  localStorage.setItem('atlas_ui_'+el.dataset.setting,el.checked?'1':'0');
 }
 function applyWorkspacePreferences(preferences){
   document.querySelectorAll('[data-setting]').forEach(el=>{
@@ -103,39 +112,27 @@ function applyWorkspacePreferences(preferences){
     }
   });
 }
+const DEFAULT_WORKSPACE_PREFERENCES={
+  reduce_motion:false,
+  compact_markets:false,
+  touch_feedback:true
+};
 async function loadWorkspacePreferences(){
   try{
     const saved=await api('/api/customer/workspace-preferences');
-    let preferences=saved.preferences||{};
-    if(!saved.configured){
-      const legacy={};
-      for(const [setting,field] of Object.entries(WORKSPACE_SETTING_FIELDS)){
-        const value=localStorage.getItem('atlas_ui_'+setting);
-        if(value==='0'||value==='1')legacy[field]=value==='1';
-      }
-      if(Object.keys(legacy).length){
-        const migrated=await api('/api/customer/workspace-preferences',{
-          method:'PATCH',body:JSON.stringify(legacy)
-        });
-        preferences=migrated.preferences||preferences;
-      }
-    }
-    applyWorkspacePreferences(preferences);
+    applyWorkspacePreferences(saved.preferences||DEFAULT_WORKSPACE_PREFERENCES);
     const status=document.getElementById('workspacePreferencesStatus');
-    if(status)status.textContent='Saved to your Atlas account.';
+    if(status)status.textContent=saved.configured
+      ? 'Saved to your Atlas account.'
+      : 'Using your account defaults.';
   }catch(error){
-    // Retain cached display preferences if the account preference endpoint is unavailable.
-    document.querySelectorAll('[data-setting]').forEach(el=>{
-      const value=localStorage.getItem('atlas_ui_'+el.dataset.setting);
-      if(value==='0'||value==='1')applyWorkspacePreference(el,value==='1');
-    });
+    // A failed account read must not reuse the previous customer's browser state.
+    applyWorkspacePreferences(DEFAULT_WORKSPACE_PREFERENCES);
     const status=document.getElementById('workspacePreferencesStatus');
-    if(status)status.textContent='Account sync unavailable; cached display preferences are in use.';
+    if(status)status.textContent='Account preferences could not be loaded; safe defaults are shown.';
   }
 }
 document.querySelectorAll('[data-setting]').forEach(el=>{
-  const cached=localStorage.getItem('atlas_ui_'+el.dataset.setting);
-  if(cached==='0'||cached==='1')applyWorkspacePreference(el,cached==='1');
   el.addEventListener('change',()=>{
     const field=WORKSPACE_SETTING_FIELDS[el.dataset.setting];
     if(!field)return;
@@ -150,7 +147,7 @@ document.querySelectorAll('[data-setting]').forEach(el=>{
       if(status)status.textContent='Saved to your Atlas account.';
     }).catch(()=>{
       const status=document.getElementById('workspacePreferencesStatus');
-      if(status)status.textContent='Could not sync this preference; the local copy is retained.';
+      if(status)status.textContent='Could not sync this preference. The saved account value will be restored on next load.';
     });
   });
 });
