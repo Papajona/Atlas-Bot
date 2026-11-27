@@ -58,6 +58,11 @@ class CustomerDataClient(
         val fillNote: String?,
         val order: PaperOrder?
     )
+    data class PaperBalance(
+        val currency: String,
+        val accountCode: String,
+        val balance: String
+    )
     data class Snapshot(
         val profile: Profile?,
         val portfolio: Portfolio?,
@@ -164,6 +169,27 @@ class CustomerDataClient(
         )
         parseWorkspacePreferences(body)
     }
+
+    suspend fun loadPaperBalances(accessToken: String): List<PaperBalance> =
+        withContext(Dispatchers.IO) {
+            require(accessToken.isNotBlank()) { "Customer sign-in is required to load paper balances" }
+            val result = requestJson("/api/customer/paper/balances", accessToken)
+            val body = result.body ?: throw IllegalStateException(
+                result.error ?: "Paper balances are unavailable"
+            )
+            parsePaperBalances(body)
+        }
+
+    suspend fun loadPaperOrderHistory(accessToken: String, limit: Int = 20): List<PaperOrder> =
+        withContext(Dispatchers.IO) {
+            require(accessToken.isNotBlank()) { "Customer sign-in is required to load paper history" }
+            require(limit in 1..100) { "Paper order history limit must be between 1 and 100" }
+            val result = requestJson("/api/customer/paper/history?limit=$limit", accessToken)
+            val body = result.body ?: throw IllegalStateException(
+                result.error ?: "Paper order history is unavailable"
+            )
+            parsePaperOrders(body)
+        }
 
     suspend fun loadOpenPaperOrders(accessToken: String): List<PaperOrder> =
         withContext(Dispatchers.IO) {
@@ -349,6 +375,21 @@ class CustomerDataClient(
     }
 
     companion object {
+        internal fun parsePaperBalances(json: JSONObject): List<PaperBalance> {
+            val rows = json.optJSONArray("balances") ?: return emptyList()
+            return buildList {
+                for (index in 0 until rows.length()) {
+                    val row = rows.optJSONObject(index) ?: continue
+                    val currency = row.optString("currency").takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val accountCode = row.optString("account_code").takeIf { it.isNotBlank() && it != "null" } ?: continue
+                    val balance = row.optString("balance").takeIf {
+                        it.isNotBlank() && it != "null" && it.toBigDecimalOrNull() != null
+                    } ?: continue
+                    add(PaperBalance(currency, accountCode, balance))
+                }
+            }
+        }
+
         internal fun parsePaperOrders(json: JSONObject): List<PaperOrder> {
             val rows = json.optJSONArray("orders") ?: return emptyList()
             return buildList {
