@@ -30,4 +30,12 @@ class EquityHistoryTimestampParserTest {
         )
         assertNull(parseEquityObservationEpochMillis("not-a-timestamp"))
     }
+    @Test
+    fun clampsStaleCrosshairSelectionWhenChartWindowShrinks() {
+        assertEquals(2, safeEquityChartSelectedIndex(25, 3))
+        assertEquals(0, safeEquityChartSelectedIndex(-2, 3))
+        assertEquals(2, safeEquityChartSelectedIndex(null, 3))
+        assertNull(safeEquityChartSelectedIndex(0, 0))
+    }
+
 }
