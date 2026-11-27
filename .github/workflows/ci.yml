@@ -544,7 +544,7 @@ jobs:
             ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
             ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
             RESET ROLE;
-            SQL
+          SQL
             python -m alembic upgrade 0068_tron_sweep_txid_casefold_unique
             python -m pytest tests/test_0065_rollback_postgres.py -q -rs --junitxml=postgres-0065-rollback.xml
             python scripts/assert_no_skips.py postgres-0065-rollback.xml
