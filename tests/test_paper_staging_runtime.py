@@ -1188,3 +1188,25 @@ def test_paper_customer_commodity_scanner_fails_closed_without_oanda_practice(mo
         headers={"Authorization": "Bearer verified-customer-token"},
     )
     assert response.status_code == 503
+
+
+
+def test_paper_portfolio_equity_snapshot_failure_is_best_effort(monkeypatch, caplog):
+    async def fail_snapshot(**_kwargs):
+        raise RuntimeError("simulated optional paper history write failure")
+
+    monkeypatch.setattr(
+        paper_staging,
+        "record_customer_paper_equity_snapshot",
+        fail_snapshot,
+    )
+    recorded = asyncio.run(
+        paper_staging._record_paper_equity_snapshot_best_effort(
+            customer_id=314,
+            equity=Decimal("100.00"),
+            cash_equity=Decimal("100.00"),
+            currency="USDT",
+        )
+    )
+    assert recorded is False
+    assert "returning portfolio without a new history point" in caplog.text
