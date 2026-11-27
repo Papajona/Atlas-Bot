@@ -260,24 +260,37 @@ def test_runtime_provisioning_requires_the_0069_schema_head():
 
 
 
-def test_customer_equity_snapshot_failure_is_best_effort_and_rolls_back(monkeypatch):
+def test_customer_equity_snapshot_failure_uses_isolated_session(monkeypatch):
     captured = {}
 
-    class Database:
+    class SnapshotDatabase:
         async def rollback(self):
-            captured["rolled_back"] = True
+            captured["snapshot_rolled_back"] = True
 
-    async def fail_snapshot(*_args, **_kwargs):
+    class Session:
+        async def __aenter__(self):
+            captured["opened_snapshot_session"] = True
+            return SnapshotDatabase()
+
+        async def __aexit__(self, *_args):
+            captured["closed_snapshot_session"] = True
+            return False
+
+    async def fail_snapshot(db, **_kwargs):
+        assert isinstance(db, SnapshotDatabase)
         raise RuntimeError("simulated optional history write failure")
 
+    monkeypatch.setattr(main, "SessionLocal", Session)
     monkeypatch.setattr(main, "_record_customer_equity_snapshot", fail_snapshot)
     recorded = asyncio.run(
         main._record_customer_equity_snapshot_best_effort(
-            Database(),
             customer_id=314,
             equity=125.75,
             cash_equity=100.25,
         )
     )
     assert recorded is False
-    assert captured["rolled_back"] is True
+    assert captured == {
+        "opened_snapshot_session": True,
+        "closed_snapshot_session": True,
+    }
