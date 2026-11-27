@@ -94,7 +94,7 @@ def test_live_money_runtime_verifier_requires_loopback_proxy_before_alembic():
 
     root = Path(__file__).resolve().parents[1]
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
-    normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | python scripts/normalize_asyncpg_database_url.py")
+    normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | env -u DATABASE_URL python scripts/normalize_asyncpg_database_url.py")
     assert 'python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"' not in script
     assert "env -u DATABASE_URL python scripts/normalize_asyncpg_database_url.py" in script
     export_url = script.index("export DATABASE_URL")
@@ -112,7 +112,7 @@ def test_live_money_runtime_verifier_normalizes_legacy_postgres_urls_for_async_a
     script = (root / "deploy" / "verify-live-money-runtime.sh").read_text(encoding="utf-8")
     docs = (root / "deploy" / "DEPLOY_WORKFLOW.md").read_text(encoding="utf-8")
 
-    normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | python scripts/normalize_asyncpg_database_url.py")
+    normalize = script.index("printf '%s' " + '"$DATABASE_URL"' + " | env -u DATABASE_URL python scripts/normalize_asyncpg_database_url.py")
     assert 'python scripts/normalize_asyncpg_database_url.py "$DATABASE_URL"' not in script
     export_url = script.index("export DATABASE_URL")
     guard = script.index("python scripts/verify_release_database_guard.py")
